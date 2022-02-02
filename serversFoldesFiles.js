@@ -1,0 +1,12 @@
+aida_server = new Server ("aida");
+servers.push(aida_server); 	
+home_server = new Server("home");
+servers.push(home_server);
+home_server.setKnown();
+home_server.addHome("desktop");
+desktop = home_server.getHome();
+desktop.addDirectory(new Directory("trash"));
+gate_server = new Server ("Gate");
+servers.push(gate_server);
+gate_server.setKnown();
+gate_server.addHome("gate");
