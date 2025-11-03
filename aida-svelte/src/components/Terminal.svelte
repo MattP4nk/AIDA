@@ -2,7 +2,7 @@
   import { onMount, tick } from 'svelte';
   import {
     outputLines,
-    prompt,
+    terminalPrompt,
     addOutput,
     addToHistory,
     navigateHistory
@@ -69,7 +69,7 @@
       const input = inputValue.trim();
 
       // Show command in output
-      addOutput($prompt + inputValue);
+      addOutput($terminalPrompt + inputValue);
 
       if (input) {
         // Add to history
@@ -115,7 +115,7 @@
   </div>
 
   <div class="input-line">
-    <span class="prompt">{$prompt}</span>
+    <span class="prompt">{$terminalPrompt}</span>
     <input
       type="text"
       bind:this={inputElement}

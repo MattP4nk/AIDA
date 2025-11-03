@@ -19,8 +19,8 @@ export const servers = writable<Server[]>([]);
 export const commandHistory = writable<string[]>([]);
 export const historyIndex = writable<number>(-1);
 
-// Derived store for prompt
-export const prompt: Readable<string> = derived(
+// Derived store for terminal prompt
+export const terminalPrompt: Readable<string> = derived(
   [user, currentDirectory],
   ([$user, $currentDirectory]) => {
     const username = $user || 'Guest';
