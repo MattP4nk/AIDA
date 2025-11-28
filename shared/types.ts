@@ -1,6 +1,6 @@
 // Shared types between client and server for AIDA multiplayer
 
-// ==================== USER & AUTHENTICATION ====================
+// ==================== AUTHENTICATION (From original shared) ====================
 
 export interface User {
   id: string;
@@ -26,288 +26,312 @@ export interface AuthResponse {
   message?: string;
 }
 
-// ==================== PLAYER PROGRESS & SKILLS ====================
+export interface ApiResponse<T = any> {
+  success: boolean;
+  data?: T;
+  message?: string;
+  error?: string;
+  timestamp: Date;
+}
+
+// ==================== GAME TYPES (From server/src/types/game.ts) ====================
+
+export interface PlayerSession {
+  userId: string;
+  socketId: string;
+  connectedAt: Date;
+  lastActivity: Date;
+  currentServerId?: string;
+  homeServerId?: string; // Player's home system server ID
+  currentDirectory: string; // Current working directory path
+  isActive: boolean;
+  ipAddress: string;
+  commandQueue: Command[];
+}
+
+export interface Command {
+  id: string;
+  userId: string;
+  command: string;
+  args: string[];
+  timestamp: Date;
+  serverId?: string;
+  rawInput?: string;
+}
+
+export interface ParsedCommand {
+  command: string;
+  args: string[];
+  rawInput: string;
+  isValid: boolean;
+  error?: string;
+}
+
+export interface CommandResult {
+  success: boolean;
+  output: string | string[]; // Support both single string and array for terminal output
+  exitCode?: number; // 0 = success, non-zero = error (terminal convention)
+  data?: any;
+  error?: string;
+  timestamp: Date;
+  executionTime?: number;
+  openDialog?: "mail" | "chat" | "forum"; // Trigger ASCII dialog overlay
+}
+
+export interface ValidationResult {
+  valid: boolean;
+  error?: string;
+  details?: any;
+}
+
+export interface ServerState {
+  serverId: string;
+  connectedPlayers: string[];
+  isOnline: boolean;
+  lastUpdate: Date;
+  activeConnections: number;
+}
+
+export interface GameState {
+  player: PlayerInfo;
+  currentServer?: CurrentServerInfo;
+  inventory: InventoryItem[];
+  missions: MissionInfo[];
+  notifications: Notification[];
+  stats: PlayerStats;
+}
+
+export interface PlayerInfo {
+  id: string;
+  username: string;
+  ip: string;
+  level: number;
+  experience: number;
+  credits: number;
+  skills: PlayerSkills;
+  reputation: FactionReputation;
+}
 
 export interface PlayerSkills {
   hacking: number;
   networking: number;
   cryptography: number;
   stealth: number;
-  socialEngineering: number;
+  socialEng: number;
   forensics: number;
 }
 
-export interface PlayerProgress {
-  userId: string;
-  discoveryLevel: DiscoveryLevel;
-  skills: PlayerSkills;
-  credits: number;
-  level: number;
-  experience: number;
-  reputation: FactionReputation;
-  missionProgress: Record<string, any>;
-  achievements: string[];
-}
-
-export enum DiscoveryLevel {
-  NONE = 0,
-  STRANGE_ACTIVITY = 1,
-  AI_SUSPECTED = 2,
-  FACTION_WAR = 3,
-  TARGET_IDENTIFIED = 4,
-  AIDA_REVEALED = 5,
-}
-
-// ==================== FACTIONS ====================
-
-export type FactionId = "military" | "sword_corp" | "anons" | "neutral";
-
 export interface FactionReputation {
   military: number;
-  sword_corp: number;
+  swordCorp: number;
   anons: number;
   neutral: number;
 }
 
-export interface Faction {
-  id: FactionId;
+export interface CurrentServerInfo {
+  id: string;
   name: string;
-  fullName: string;
+  ip: string;
+  type: string;
+  accessLevel: number;
+  ownerId?: string;
+  encryptionLevel: number;
+  securityLevel: number; // 1-10, affects hack difficulty
+  firewallLevel: number; // 1-10, affects detection
+  discoveryLevel: number; // Required skill level to discover
+  isPlayerHome: boolean; // Flag for player home systems
+}
+
+export interface InventoryItem {
+  id: string;
+  name: string;
+  type: string;
   description: string;
-  objective: string;
-  hostilityLevel: number;
-  resources: number;
-  knownServers: string[];
-  activeMembers: number;
+  quantity: number;
+  metadata?: any;
 }
 
-// ==================== SERVERS & FILE SYSTEM ====================
-
-export interface GameServer {
-  id: string;
-  name: string;
-  ipAddress: string;
-  type: ServerType;
-  ownerId?: string; // null for system servers
-  encryptionLevel: number;
-  accessRules: AccessRule[];
-  isOnline: boolean;
-  maxConnections: number;
-  currentConnections: number;
-}
-
-export enum ServerType {
-  SYSTEM = "system",
-  PLAYER_HOME = "player_home",
-  CORPORATE = "corporate",
-  UNDERGROUND = "underground",
-  MILITARY = "military",
-  FACTION_BASE = "faction_base",
-}
-
-export interface AccessRule {
-  type: "allow" | "deny";
-  target: "user" | "faction" | "skill_level";
-  value: string | number;
-  condition?: string;
-}
-
-export interface FileSystemNode {
-  id: string;
-  serverId: string;
-  parentId?: string;
-  name: string;
-  type: "file" | "directory";
-  content?: string;
-  permissions: FilePermissions;
-  createdBy: string;
-  createdAt: Date;
-  modifiedAt: Date;
-  size: number;
-  isEncrypted: boolean;
-  encryptionKey?: string;
-  isHidden: boolean;
-  isProtected: boolean; // Can't be deleted/modified by other players
-}
-
-export interface FilePermissions {
-  owner: PermissionLevel;
-  faction: PermissionLevel;
-  others: PermissionLevel;
-  specialAccess?: SpecialAccess[];
-}
-
-export enum PermissionLevel {
-  NONE = 0,
-  READ = 1,
-  WRITE = 2,
-  EXECUTE = 4,
-  DELETE = 8,
-  FULL = 15,
-}
-
-export interface SpecialAccess {
-  userId: string;
-  permissions: PermissionLevel;
-  expiresAt?: Date;
-}
-
-// ==================== MESSAGING SYSTEM ====================
-
-export interface Message {
-  id: string;
-  senderId: string;
-  recipientId: string;
-  subject: string;
-  content: string;
-  timestamp: Date;
-  isRead: boolean;
-  isEncrypted: boolean;
-  encryptionLevel?: number;
-  requiredSkill?: {
-    skill: keyof PlayerSkills;
-    level: number;
-  };
-  triggerEvent?: string;
-  messageType: MessageType;
-}
-
-export enum MessageType {
-  PRIVATE = "private",
-  SYSTEM = "system",
-  FACTION = "faction",
-  MISSION = "mission",
-  ALERT = "alert",
-}
-
-export interface Contact {
-  id: string;
-  userId: string; // Owner of this contact list
-  contactUserId: string;
-  handle: string;
-  name?: string;
-  status: ContactStatus;
-  lastSeen: Date;
-  encryptionLevel: number;
-  notes?: string;
-  faction?: FactionId;
-}
-
-export enum ContactStatus {
-  UNKNOWN = "unknown",
-  SUSPICIOUS = "suspicious",
-  FRIENDLY = "friendly",
-  TRUSTED = "trusted",
-  HOSTILE = "hostile",
-  BLOCKED = "blocked",
-}
-
-// ==================== FORUM SYSTEM ====================
-
-export interface ForumPost {
-  id: string;
-  authorId: string;
-  title: string;
-  content: string;
-  forumSection: ForumSection;
-  timestamp: Date;
-  isHoneypot: boolean;
-  factionAlignment?: FactionId;
-  replies: ForumReply[];
-  votes: number;
-  tags: string[];
-  isSticky: boolean;
-  isLocked: boolean;
-}
-
-export interface ForumReply {
-  id: string;
-  postId: string;
-  authorId: string;
-  content: string;
-  timestamp: Date;
-  votes: number;
-  isHidden: boolean;
-}
-
-export enum ForumSection {
-  GENERAL = "general",
-  TRADING = "trading",
-  EXPLOITS = "exploits",
-  INTEL = "intel",
-  RECRUITMENT = "recruitment",
-  UNDERGROUND = "underground",
-}
-
-// ==================== MISSIONS & EVENTS ====================
-
-export interface Mission {
+export interface MissionInfo {
   id: string;
   title: string;
   description: string;
-  type: MissionType;
-  difficulty: number;
-  requiredSkills: Partial<PlayerSkills>;
-  reward: MissionReward;
-  timeLimit?: number; // in minutes
-  targetServerId?: string;
-  targetUserId?: string;
-  objectives: MissionObjective[];
+  type: string;
   status: MissionStatus;
-  assignedTo?: string;
-  createdBy: string; // "system" or userId
-  createdAt: Date;
+  difficulty: number;
+  objectives: MissionObjective[];
+  reward: MissionReward;
+  timeLimit?: number;
   expiresAt?: Date;
 }
 
-export enum MissionType {
-  INFILTRATION = "infiltration",
-  DATA_THEFT = "data_theft",
-  SABOTAGE = "sabotage",
-  RECONNAISSANCE = "reconnaissance",
-  PROTECTION = "protection",
-  ASSASSINATION = "assassination", // Digital assassination
-  DELIVERY = "delivery",
+export enum MissionStatus {
+  AVAILABLE = "available",
+  ASSIGNED = "assigned",
+  IN_PROGRESS = "in_progress",
+  COMPLETED = "completed",
+  FAILED = "failed",
+  EXPIRED = "expired",
 }
 
 export interface MissionObjective {
   id: string;
   description: string;
-  type: ObjectiveType;
-  target: string;
-  isCompleted: boolean;
-  isOptional: boolean;
-  progress: number; // 0-100
+  type: string;
+  target?: string;
+  progress: number;
+  required: number;
+  completed: boolean;
+  metadata?: MissionObjectiveMetadata;
 }
 
-export enum ObjectiveType {
-  ACCESS_SERVER = "access_server",
-  STEAL_FILE = "steal_file",
-  PLANT_FILE = "plant_file",
-  DELETE_FILE = "delete_file",
-  DECRYPT_DATA = "decrypt_data",
-  MAINTAIN_STEALTH = "maintain_stealth",
-  AVOID_DETECTION = "avoid_detection",
-  CONTACT_PLAYER = "contact_player",
+export interface MissionObjectiveMetadata {
+  fileId?: string;
+  serverId?: string;
+  requiredAccessLevel?: number;
+  requiredFiles?: string[];
+  targetUsers?: string[];
+  timeLimit?: number;
+  stealthRequired?: boolean;
 }
 
 export interface MissionReward {
   credits: number;
   experience: number;
-  skillBonus?: Partial<PlayerSkills>;
   items?: string[];
-  factionReputation?: Partial<FactionReputation>;
+  reputation?: Partial<FactionReputation>;
+  unlocks?: string[];
 }
 
-export enum MissionStatus {
-  AVAILABLE = "available",
-  ACTIVE = "active",
-  COMPLETED = "completed",
-  FAILED = "failed",
-  EXPIRED = "expired",
-  CANCELLED = "cancelled",
+export interface Notification {
+  id: string;
+  type: NotificationType;
+  title: string;
+  message: string;
+  timestamp: Date;
+  read: boolean;
+  priority: NotificationPriority;
+  data?: any;
 }
 
+export enum NotificationType {
+  INFO = "info",
+  SUCCESS = "success",
+  WARNING = "warning",
+  ERROR = "error",
+  HACK_ALERT = "hack_alert",
+  MISSION = "mission",
+  MESSAGE = "message",
+  SYSTEM = "system",
+}
+
+export enum NotificationPriority {
+  LOW = "low",
+  NORMAL = "normal",
+  HIGH = "high",
+  CRITICAL = "critical",
+}
+
+export interface PlayerStats {
+  totalPlayTime: number; // seconds
+  commandsExecuted: number;
+  successfulHacks: number;
+  failedHacks: number;
+  missionsCompleted: number;
+  serversDiscovered: number;
+  filesAccessed: number;
+  messagesSent: number;
+}
+
+// IP Service Types
+export interface IPRange {
+  start: string;
+  end: string;
+  zone: IPZone;
+  description: string;
+}
+
+export enum IPZone {
+  PLAYER = "player",
+  CORPORATE = "corporate",
+  GOVERNMENT = "government",
+  UNDERGROUND = "underground",
+}
+
+export interface IPOwner {
+  type: "user" | "server" | "npc";
+  id: string;
+  name: string;
+  ip: string;
+  isOnline: boolean;
+  zone: IPZone;
+  metadata?: any;
+}
+
+export interface DiscoveryResult {
+  success: boolean;
+  discovered: boolean;
+  target?: IPOwner;
+  message: string;
+  partialInfo?: boolean;
+}
+
+export interface TraceRouteHop {
+  hopNumber: number;
+  ip: string;
+  name?: string;
+  latency: number;
+  hidden: boolean;
+}
+
+export interface TraceRouteResult {
+  success: boolean;
+  route: TraceRouteHop[];
+  totalHops: number;
+  reachable: boolean;
+}
+
+// Hack Service Types
+export interface HackAttempt {
+  attackerId: string;
+  targetId: string;
+  targetServerId: string;
+  targetIp: string;
+  method: HackMethod;
+  tools: string[];
+  stealthLevel: number;
+  timestamp: Date;
+}
+
+export enum HackMethod {
+  BRUTEFORCE = "bruteforce",
+  EXPLOIT = "exploit",
+  SOCIAL = "social",
+  BACKDOOR = "backdoor",
+  SQL_INJECTION = "sql_injection",
+  PHISHING = "phishing",
+  ROOTKIT = "rootkit",
+}
+
+export interface HackResult {
+  success: boolean;
+  detected: boolean;
+  accessLevel: number;
+  discoveredFiles: string[];
+  evidenceLeft: number;
+  counterMeasures: string[];
+  message: string;
+  traceInitiated: boolean;
+}
+
+export interface HackCalculation {
+  successRate: number;
+  detectionRate: number;
+  evidenceAmount: number;
+  accessLevel: number;
+  baseTime: number;
+}
+
+// Event System Types
 export interface GameEvent {
   id: string;
   type: EventType;
@@ -315,12 +339,25 @@ export interface GameEvent {
   description: string;
   timestamp: Date;
   affectedUsers: string[];
-  metadata: Record<string, any>;
+  metadata: any;
   isGlobal: boolean;
   severity: EventSeverity;
 }
 
+export type FactionId = "military" | "sword_corp" | "anons" | "neutral";
+
 export enum EventType {
+  HACK_ATTEMPT = "hack_attempt",
+  HACK_SUCCESS = "hack_success",
+  HACK_DETECTED = "hack_detected",
+  MISSION_ASSIGNED = "mission_assigned",
+  MISSION_COMPLETED = "mission_completed",
+  SERVER_DISCOVERED = "server_discovered",
+  PLAYER_LEVEL_UP = "player_level_up",
+  FACTION_CHANGE = "faction_change",
+  SYSTEM_ANNOUNCEMENT = "system_announcement",
+  WORLD_EVENT = "world_event",
+  // Merged from old shared types
   PLAYER_HACK = "player_hack",
   FACTION_WAR = "faction_war",
   SERVER_BREACH = "server_breach",
@@ -334,152 +371,356 @@ export enum EventSeverity {
   INFO = "info",
   WARNING = "warning",
   CRITICAL = "critical",
-  EMERGENCY = "emergency",
 }
 
-// ==================== REAL-TIME COMMUNICATION ====================
-
-export interface SocketEvent {
-  type: SocketEventType;
-  data: any;
-  timestamp: Date;
-  userId?: string;
-  serverId?: string;
-}
-
-export enum SocketEventType {
-  // Connection events
-  USER_CONNECTED = "user_connected",
-  USER_DISCONNECTED = "user_disconnected",
-
-  // Game state events
-  SERVER_ACCESSED = "server_accessed",
-  FILE_MODIFIED = "file_modified",
-  DIRECTORY_CHANGED = "directory_changed",
-
-  // Communication events
-  MESSAGE_RECEIVED = "message_received",
-  FORUM_POST_CREATED = "forum_post_created",
-
-  // PvP events
-  HACK_ATTEMPTED = "hack_attempted",
-  HACK_SUCCESSFUL = "hack_successful",
-  HACK_BLOCKED = "hack_blocked",
-
-  // System events
-  MISSION_ASSIGNED = "mission_assigned",
-  FACTION_EVENT = "faction_event",
-  DISCOVERY_MADE = "discovery_made",
-  SYSTEM_ANNOUNCEMENT = "system_announcement",
-}
-
-// ==================== API REQUESTS & RESPONSES ====================
-
-export interface ApiResponse<T = any> {
-  success: boolean;
-  data?: T;
-  message?: string;
-  error?: string;
-  timestamp: Date;
-}
-
-export interface PaginatedResponse<T> extends ApiResponse<T[]> {
-  pagination: {
-    page: number;
-    limit: number;
-    total: number;
-    totalPages: number;
-    hasNext: boolean;
-    hasPrev: boolean;
-  };
-}
-
-// File system operations
-export interface FileOperation {
-  type: "create" | "read" | "update" | "delete" | "move" | "copy";
+export interface EventSubscription {
+  id: string;
+  userId: string;
+  eventType: EventType;
   targetId?: string;
+  method: SubscriptionMethod;
+  quality: number; // 0-100
+  expiresAt?: Date;
+  isActive: boolean;
+}
+
+export enum SubscriptionMethod {
+  BUG = "bug",
+  HACK = "hack",
+  SURVEILLANCE = "surveillance",
+  INSIDER = "insider",
+  INTERCEPT = "intercept",
+}
+
+// File System Types
+export interface FileSystemNode {
+  id: string;
+  serverId: string;
+  parentId?: string;
+  name: string;
+  type: "file" | "directory";
+  content?: string;
+  permissions: FilePermissions;
+  size: number;
+  isEncrypted: boolean;
+  isHidden: boolean;
+  isProtected: boolean;
+  createdAt: Date;
+  modifiedAt: Date;
+  lastAccessedAt?: Date; // Track when file was last read
+  lastAccessedBy?: string; // Track who last accessed it
+}
+
+export interface FilePermissions {
+  owner: string;
+  read: boolean;
+  write: boolean;
+  execute: boolean;
+  delete: boolean;
+}
+
+export interface FileOperation {
+  type: FileOperationType;
+  fileId?: string;
+  serverId: string;
   parentId?: string;
   name?: string;
   content?: string;
-  permissions?: FilePermissions;
+  newName?: string;
+  targetPath?: string;
 }
 
-export interface FileOperationResult {
+export enum FileOperationType {
+  READ = "read",
+  WRITE = "write",
+  CREATE = "create",
+  DELETE = "delete",
+  RENAME = "rename",
+  MOVE = "move",
+  COPY = "copy",
+  CHMOD = "chmod",
+  ACCESS = "access",
+}
+
+// Session Types
+export interface SessionInfo {
+  id: string;
+  userId: string;
+  token: string;
+  expiresAt: Date;
+  createdAt: Date;
+  isActive: boolean;
+  ipAddress?: string;
+  userAgent?: string;
+  currentDirectory: string; // Persisted working directory
+  lastServerId?: string; // Last connected server for resume
+}
+
+// File Access Tracking
+export interface FileAccessRecord {
+  fileId: string;
+  userId: string;
+  serverId: string;
+  action: FileOperationType;
+  timestamp: Date;
   success: boolean;
-  node?: FileSystemNode;
-  message?: string;
-  requiredPermission?: PermissionLevel;
-  blockReason?: string;
 }
 
-// Hacking operations
-export interface HackAttempt {
-  targetUserId: string;
-  targetServerId: string;
-  method: HackMethod;
-  tools: string[];
-  stealthLevel: number;
+export interface FileAccessSummary {
+  fileId: string;
+  fileName: string;
+  totalAccesses: number;
+  lastAccessedAt?: Date;
+  lastAccessedBy?: string;
+  accessedByUsers: string[];
 }
 
-export enum HackMethod {
-  BRUTE_FORCE = "brute_force",
-  SOCIAL_ENGINEERING = "social_engineering",
-  EXPLOIT = "exploit",
-  BACKDOOR = "backdoor",
-  PHISHING = "phishing",
-  PRIVILEGE_ESCALATION = "privilege_escalation",
+// Server Connection Types
+export interface ServerConnectionInfo {
+  id: string;
+  userId: string;
+  serverId: string;
+  connectedAt: Date;
+  disconnectedAt?: Date;
+  isActive: boolean;
+  workingDirectory: string; // Current directory on this server
+  accessLevel: number; // 0-10, achieved access level
+  sessionData?: any;
 }
 
-export interface HackResult {
-  success: boolean;
-  detected: boolean;
-  accessLevel: PermissionLevel;
-  discoveredFiles: string[];
-  evidenceLeft: number; // 0-100, how much evidence the hack left
-  counterMeasures: string[]; // What defenses were triggered
+// Game Server Types
+export interface GameServerInfo {
+  id: string;
+  name: string;
+  ipAddress: string;
+  type: string;
+  ownerId?: string;
+  securityLevel: number; // 1-10, hack difficulty
+  firewallLevel: number; // 1-10, detection chance
+  encryptionLevel: number;
+  discoveryLevel: number; // Required skill to discover
+  isPlayerHome: boolean;
+  isOnline: boolean;
+  maxConnections: number;
+  currentConnections: number;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
-// ==================== SECURITY & SANDBOXING ====================
-
-export interface ScriptExecution {
-  code: string;
-  environment: "player_terminal" | "target_system" | "neutral_zone";
-  allowedOperations: ScriptOperation[];
-  timeLimit: number; // in milliseconds
-  memoryLimit: number; // in bytes
+// Progress Service Types
+export interface SaveTrigger {
+  userId: string;
+  reason: string;
+  timestamp: Date;
+  priority: SavePriority;
 }
 
-export enum ScriptOperation {
-  FILE_READ = "file_read",
-  FILE_WRITE = "file_write",
-  NETWORK_SCAN = "network_scan",
-  DECRYPT = "decrypt",
-  ENCRYPT = "encrypt",
-  SYSTEM_INFO = "system_info",
-  PROCESS_LIST = "process_list",
+export enum SavePriority {
+  LOW = "low",
+  NORMAL = "normal",
+  HIGH = "high",
+  IMMEDIATE = "immediate",
 }
 
-export interface ScriptResult {
-  success: boolean;
-  output: string;
-  executionTime: number;
-  memoryUsed: number;
-  operations: string[];
-  warnings: string[];
-  errors: string[];
+export interface ProgressBackup {
+  id: string;
+  userId: string;
+  data: any;
+  createdAt: Date;
+  reason: string;
+  checksum?: string;
 }
 
-// ==================== CONFIGURATION ====================
+// AI System Types (Future)
+export interface NPCAgent {
+  id: string;
+  type: NPCType;
+  name: string;
+  faction?: string;
+  behaviorTree?: any;
+  state: NPCState;
+  personality: NPCPersonality;
+  objectives: string[];
+}
 
-export interface GameConfig {
-  maxPlayersPerServer: number;
-  hackingCooldown: number; // in seconds
-  missionTimeout: number; // in minutes
-  maxMessagesPerMinute: number;
-  skillGainMultipliers: PlayerSkills;
-  economySettings: {
-    startingCredits: number;
-    missionBaseReward: number;
-    hackingBaseReward: number;
-  };
+export enum NPCType {
+  CONTACT = "contact",
+  VENDOR = "vendor",
+  SECURITY = "security",
+  HACKER = "hacker",
+  CORPORATE = "corporate",
+  GOVERNMENT = "government",
+}
+
+export interface NPCState {
+  location: string;
+  mood: string;
+  awareness: number;
+  hostility: number;
+  lastInteraction?: Date;
+}
+
+export interface NPCPersonality {
+  aggression: number;
+  helpfulness: number;
+  greed: number;
+  loyalty: number;
+  paranoia: number;
+}
+
+// WebSocket Event Types
+export interface SocketEventData {
+  userId?: string;
+  timestamp: Date;
+  data: any;
+}
+
+export interface StateUpdateEvent extends SocketEventData {
+  fullState?: GameState;
+  delta?: StateDelta;
+}
+
+export interface StateDelta {
+  path: string;
+  value: any;
+  operation: "set" | "push" | "remove" | "update";
+}
+
+export interface CommandExecuteEvent extends SocketEventData {
+  command: string;
+  args: string[];
+  serverId?: string;
+}
+
+export interface BroadcastMessage {
+  type: string;
+  target: BroadcastTarget;
+  data: any;
+  priority: NotificationPriority;
+}
+
+export enum BroadcastTarget {
+  USER = "user",
+  SERVER = "server",
+  FACTION = "faction",
+  ZONE = "zone",
+  GLOBAL = "global",
+}
+
+// Error Types
+export class GameError extends Error {
+  constructor(
+    message: string,
+    public code: string,
+    public statusCode: number = 400,
+    public details?: any,
+  ) {
+    super(message);
+    this.name = "GameError";
+  }
+}
+
+export class ValidationError extends GameError {
+  constructor(message: string, details?: any) {
+    super(message, "VALIDATION_ERROR", 400, details);
+    this.name = "ValidationError";
+  }
+}
+
+export class AuthorizationError extends GameError {
+  constructor(message: string, details?: any) {
+    super(message, "AUTHORIZATION_ERROR", 403, details);
+    this.name = "AuthorizationError";
+  }
+}
+
+export class NotFoundError extends GameError {
+  constructor(message: string, details?: any) {
+    super(message, "NOT_FOUND", 404, details);
+    this.name = "NotFoundError";
+  }
+}
+
+export class RateLimitError extends GameError {
+  constructor(message: string, details?: any) {
+    super(message, "RATE_LIMIT_EXCEEDED", 429, details);
+    this.name = "RateLimitError";
+  }
+}
+
+// Server Discovery Types
+export interface ServerDiscoveryResult {
+  servers: GameServerInfo[];
+  newDiscoveries: number;
+  requiresHigherSkills: string[];
+  playerSkillLevel: number;
+}
+
+export interface ServerScanOptions {
+  includeOffline?: boolean;
+  maxSecurityLevel?: number;
+  serverType?: string;
+  zone?: IPZone;
+}
+
+// Hack Difficulty Calculation
+export interface HackDifficultyFactors {
+  securityLevel: number; // From server.securityLevel
+  firewallLevel: number; // From server.firewallLevel
+  encryptionLevel: number; // From server.encryptionLevel
+  playerHackingSkill: number;
+  playerStealthSkill: number;
+  toolBonuses: number;
+  finalDifficulty: number; // Calculated value
+  successChance: number; // 0-100%
+  detectionChance: number; // 0-100%
+}
+
+// Mission Tracking Types
+export interface MissionProgress {
+  missionId: string;
+  userId: string;
+  objectives: ObjectiveProgress[];
+  filesAccessed: string[];
+  serversCompromised: string[];
+  startedAt: Date;
+  lastUpdated: Date;
+}
+
+export interface ObjectiveProgress {
+  objectiveId: string;
+  type: MissionObjectiveType;
+  current: number;
+  required: number;
+  completed: boolean;
+  completedAt?: Date;
+}
+
+export enum MissionObjectiveType {
+  ACCESS_FILE = "access_file",
+  HACK_SERVER = "hack_server",
+  STEAL_DATA = "steal_data",
+  INSTALL_BACKDOOR = "install_backdoor",
+  DISCOVER_SERVERS = "discover_servers",
+  REACH_ACCESS_LEVEL = "reach_access_level",
+  EARN_CREDITS = "earn_credits",
+  COMPLETE_HACKS = "complete_hacks",
+  AVOID_DETECTION = "avoid_detection",
+}
+
+// Player Home System
+export interface PlayerHomeSystem {
+  serverId: string;
+  userId: string;
+  initialized: boolean;
+  starterFilesCreated: boolean;
+  currentDirectory: string;
+  customizations?: HomeCustomization;
+}
+
+export interface HomeCustomization {
+  theme?: string;
+  aliases?: Record<string, string>;
+  environmentVars?: Record<string, string>;
+  customPrompt?: string;
 }

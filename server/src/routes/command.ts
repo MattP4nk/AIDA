@@ -131,6 +131,7 @@ router.post(
         output: output,
         exitCode: exitCode,
         data: result.data, // Optional additional data for client
+        openDialog: result.openDialog, // Optional dialog trigger for social features
         timestamp: new Date(),
       });
     } catch (error) {

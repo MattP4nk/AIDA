@@ -1,8 +1,14 @@
 <script lang="ts">
     import { onMount, tick } from "svelte";
+    import { get } from "svelte/store";
     import { terminalService } from "../services/terminal";
     import type { CommandResult } from "../services/terminal";
     import { apiClient } from "../services/api";
+    // New ASCII Dialog system
+    import MailDialog from "./MailDialog.svelte";
+    import ChatDialog from "./ChatDialog.svelte";
+    // Socket service for real-time notifications
+    import { liveMessages, socketService } from "../services/socket";
 
     // ==================== STATE ====================
 
@@ -28,11 +34,19 @@
     let currentServer = "local";
     let currentDir = "~";
 
+    // Dialog state
+    let activeDialog: "none" | "mail" | "chat" | "forum" = "none";
+    let dialogData: any = null;
+
+    // Notification state
+    let unreadCount = 0;
+    let unreadChatCount = 0;
+    let unreadMailCount = 0;
+
     // UI enhancements
     let currentTime = new Date().toLocaleTimeString();
     let connectionQuality = 100;
     let systemLoad = 0;
-    let unreadNotifications = 0;
     let scanlineEffect = true;
     let glowEffect = true;
 
@@ -51,6 +65,27 @@
         // Set up keyboard shortcuts
         document.addEventListener("keydown", handleGlobalKeydown);
 
+        // Subscribe to live messages for notifications
+        const unsubscribe = liveMessages.subscribe((messages) => {
+            unreadCount = messages.length;
+
+            // Count chat vs mail messages
+            unreadChatCount = messages.filter(
+                (msg) => !msg.subject || msg.subject.trim() === "",
+            ).length;
+            unreadMailCount = messages.filter(
+                (msg) => msg.subject && msg.subject.trim() !== "",
+            ).length;
+
+            // Play notification sound or show visual feedback
+            if (messages.length > 0) {
+                playNotificationSound();
+            }
+        });
+
+        // Request notification permission
+        socketService.requestNotificationPermission();
+
         // Update clock every second
         const clockInterval = setInterval(() => {
             currentTime = new Date().toLocaleTimeString();
@@ -63,6 +98,7 @@
 
         return () => {
             document.removeEventListener("keydown", handleGlobalKeydown);
+            unsubscribe();
             clearInterval(clockInterval);
             clearInterval(loadInterval);
         };
@@ -225,9 +261,15 @@
         isExecuting = true;
 
         try {
+            // Execute the command on the server
             const result = await terminalService.executeCommand(command);
 
-            // Display output
+            // Check if command wants to open a dialog
+            if (result && result.openDialog) {
+                openDialog(result.openDialog, result.data);
+            }
+
+            // Display command result
             addCommandOutput(result);
 
             // Update context from server data if available
@@ -296,7 +338,7 @@
     function updateContextFromData(data: any) {
         // Update terminal context from server response data
         if (data.user) {
-            username = data.user.username || username;
+            username = data.user.username || data.user.name || username;
         }
 
         if (data.server) {
@@ -307,6 +349,75 @@
             currentDir =
                 data.directory.path || data.directory.name || currentDir;
         }
+    }
+
+    // ==================== DIALOG MANAGEMENT ====================
+
+    function openDialog(type: "mail" | "chat" | "forum", data?: any) {
+        activeDialog = type;
+        dialogData = data;
+        // Blur terminal background
+        if (terminalElement) {
+            terminalElement.classList.add("dialog-active");
+        }
+    }
+
+    function closeDialog() {
+        activeDialog = "none";
+        dialogData = null;
+        if (terminalElement) {
+            terminalElement.classList.remove("dialog-active");
+        }
+        // Return focus to terminal input
+        focusInput();
+    }
+
+    // ==================== NOTIFICATION SYSTEM ====================
+
+    function playNotificationSound() {
+        // Optional: Play a beep sound for new messages
+        // You can add an audio element or use Web Audio API
+        try {
+            const beep = new Audio(
+                "data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVgodDbq2EcBj+a2/LDciUFLIHO8tiJNwgZaLvt559NEAxQp+PwtmMcBjiR1/LMeSwFJHfH8N2QQAoUXrTp66hVFApGn+DyvmwhBTGH0fPTgjMGHm7A7+OZQQ0PV6vl8bFgHAU+kdvy0H0pBSh+zPLaizsIGGS56+mhUhELTKXh8bllHAU2jdXyz38qBSl+zPLaj",
+            );
+            beep.volume = 0.1;
+            beep.play().catch(() => {
+                // Ignore errors if audio can't play
+            });
+        } catch (e) {
+            // Silently fail if audio not supported
+        }
+    }
+
+    function handleNotificationClick() {
+        // Get the most recent message to determine type
+        const currentMessages = get(liveMessages);
+
+        if (currentMessages.length > 0) {
+            const latestMessage = currentMessages[0];
+            // Chat messages have no subject or empty subject
+            const isChat =
+                !latestMessage.subject || latestMessage.subject.trim() === "";
+
+            if (isChat) {
+                openDialog("chat", null);
+            } else {
+                openDialog("mail", null);
+            }
+        } else {
+            // Default to mail if no messages
+            openDialog("mail", null);
+        }
+
+        clearNotifications();
+    }
+
+    function clearNotifications() {
+        liveMessages.set([]);
+        unreadCount = 0;
+        unreadChatCount = 0;
+        unreadMailCount = 0;
     }
 
     // ==================== HISTORY NAVIGATION ====================
@@ -389,6 +500,11 @@
     }
 
     function handleGlobalKeydown(event: KeyboardEvent) {
+        // Don't steal focus if a dialog is open
+        if (activeDialog !== "none") {
+            return;
+        }
+
         // Any key focuses the input (for better UX)
         if (
             !event.ctrlKey &&
@@ -407,6 +523,10 @@
     }
 
     function focusInput() {
+        // Don't focus if a dialog is open
+        if (activeDialog !== "none") {
+            return;
+        }
         if (inputElement && !isExecuting) {
             inputElement.focus();
         }
@@ -425,7 +545,10 @@
     // ==================== CLICK HANDLERS ====================
 
     function handleTerminalClick() {
-        focusInput();
+        // Don't focus if a dialog is open
+        if (activeDialog === "none") {
+            focusInput();
+        }
     }
 </script>
 
@@ -462,11 +585,21 @@
                 <span class="status-icon">⚡</span>
                 <span class="status-label">Load: {systemLoad}%</span>
             </span>
-            {#if unreadNotifications > 0}
-                <span class="status-item notification">
-                    <span class="status-icon">🔔</span>
-                    <span class="status-label">{unreadNotifications}</span>
-                </span>
+            {#if unreadCount > 0}
+                <button
+                    class="status-item notification"
+                    on:click={handleNotificationClick}
+                    title={unreadChatCount > 0 && unreadMailCount > 0
+                        ? `${unreadChatCount} chat, ${unreadMailCount} mail`
+                        : unreadChatCount > 0
+                          ? `${unreadChatCount} chat message${unreadChatCount > 1 ? "s" : ""}`
+                          : `${unreadMailCount} mail message${unreadMailCount > 1 ? "s" : ""}`}
+                >
+                    <span class="status-icon"
+                        >{unreadChatCount > 0 ? "💬" : "📧"}</span
+                    >
+                    <span class="status-label">{unreadCount}</span>
+                </button>
             {/if}
             <span class="status-item">
                 <span class="status-icon">🕐</span>
@@ -514,6 +647,23 @@
     </div>
 </div>
 
+<!-- ASCII Dialogs -->
+{#if activeDialog === "mail"}
+    <MailDialog
+        visible={true}
+        initialData={dialogData}
+        on:close={closeDialog}
+    />
+{:else if activeDialog === "chat"}
+    <ChatDialog
+        visible={true}
+        initialData={dialogData}
+        on:close={closeDialog}
+    />
+{/if}
+
+<!-- TODO: Add ForumDialog here -->
+
 <!-- ==================== STYLES ==================== -->
 
 <style>
@@ -535,6 +685,13 @@
         max-width: 1800px;
         margin: 0 auto;
         box-shadow: 0 0 50px rgba(0, 255, 65, 0.1);
+    }
+
+    /* Dialog active state - blur terminal */
+    .terminal.dialog-active {
+        filter: blur(2px);
+        opacity: 0.6;
+        pointer-events: none;
     }
 
     /* Optional CRT scanline effect */
@@ -638,6 +795,32 @@
         font-weight: 500;
         text-transform: uppercase;
         letter-spacing: 0.5px;
+    }
+
+    /* Notification button styling */
+    .status-item.notification {
+        background: none;
+        border: 1px solid rgba(255, 255, 0, 0.5);
+        padding: 4px 12px;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        animation: pulse 2s ease-in-out infinite;
+    }
+
+    .status-item.notification:hover {
+        background: rgba(255, 255, 0, 0.1);
+        border-color: rgba(255, 255, 0, 0.8);
+        transform: scale(1.05);
+    }
+
+    .status-item.notification .status-icon {
+        color: #ffff00;
+        filter: drop-shadow(0 0 5px rgba(255, 255, 0, 0.7));
+    }
+
+    .status-item.notification .status-label {
+        color: #ffff00;
+        font-weight: bold;
     }
 
     /* ==================== OUTPUT AREA ==================== */

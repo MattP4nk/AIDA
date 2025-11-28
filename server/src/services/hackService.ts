@@ -31,6 +31,7 @@ class HackService extends EventEmitter {
     [HackMethod.BACKDOOR]: 2.0,
     [HackMethod.SQL_INJECTION]: 1.3,
     [HackMethod.PHISHING]: 1.1,
+    [HackMethod.ROOTKIT]: 2.5,
   };
 
   // Tool effectiveness ratings

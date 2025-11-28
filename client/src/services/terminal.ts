@@ -11,17 +11,9 @@
  */
 
 import { apiClient } from "./api";
+import type { CommandResult } from "../../../shared/types";
 
 // ==================== TYPES ====================
-
-export interface CommandResult {
-  success: boolean;
-  output: string | string[];
-  exitCode?: number;
-  data?: any;
-  timestamp: string;
-  error?: string;
-}
 
 export interface CommandRequest {
   command: string;
@@ -63,7 +55,7 @@ export class TerminalService {
           success: false,
           output: ["Error: Empty command"],
           exitCode: 1,
-          timestamp: new Date().toISOString(),
+          timestamp: new Date(),
           error: "Empty command",
         };
       }
@@ -84,15 +76,17 @@ export class TerminalService {
       );
 
       // The response is the CommandResult directly (not wrapped in ApiResponse)
-      const result = response as unknown as CommandResult;
+      // But timestamp comes as string over JSON, so we need to handle it
+      const rawResult = response as unknown as any;
 
       // Normalize output to array for consistent handling
-      const normalizedOutput = this.normalizeOutput(result.output);
+      const normalizedOutput = this.normalizeOutput(rawResult.output);
 
       return {
-        ...result,
+        ...rawResult,
         output: normalizedOutput,
-        exitCode: result.exitCode ?? (result.success ? 0 : 1),
+        timestamp: rawResult.timestamp ? new Date(rawResult.timestamp) : new Date(),
+        exitCode: rawResult.exitCode ?? (rawResult.success ? 0 : 1),
       };
     } catch (error: any) {
       // Handle API errors
@@ -102,7 +96,7 @@ export class TerminalService {
         success: false,
         output: ["Command execution failed", errorMessage],
         exitCode: error.status || 1,
-        timestamp: new Date().toISOString(),
+        timestamp: new Date(),
         error: errorMessage,
       };
     }

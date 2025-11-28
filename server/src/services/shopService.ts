@@ -306,7 +306,7 @@ const SHOP_CATALOG: ShopItem[] = [
   {
     id: "stealth_boost",
     name: "Stealth Boost",
-    description: "Temporary increase to stealth rating. Single-use consumable.",
+    description: "Temporary increase to stealth rating. Single-call script.",
     category: ItemCategory.CONSUMABLE,
     price: 300,
     requiredLevel: 3,
@@ -585,7 +585,7 @@ class ShopService extends EventEmitter {
       this.emit("item:removed", { userId, itemId, quantity });
       return true;
     } catch (error) {
-      console.error("Error removing item from inventory:", error);
+      console.error("Error removing script from scripts folder:", error);
       return false;
     }
   }
@@ -606,7 +606,7 @@ class ShopService extends EventEmitter {
       if (!item) {
         return {
           success: false,
-          message: "Item not found in shop catalog",
+          message: "Script not found in store catalog",
         };
       }
 
@@ -821,7 +821,7 @@ class ShopService extends EventEmitter {
       };
     } catch (error) {
       console.error("Error using item:", error);
-      return { success: false, message: "Failed to use item" };
+      return { success: false, message: "Failed to call script" };
     }
   }
 

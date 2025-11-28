@@ -30,7 +30,7 @@ class ProgressService {
       return;
     }
 
-    const intervalMs = (config.AUTO_SAVE_INTERVAL_SECONDS || 60) * 1000;
+    const intervalMs = (config.AUTO_SAVE_INTERVAL_SECONDS || 180) * 1000;
 
     this.saveInterval = setInterval(() => {
       this.processAutoSave();

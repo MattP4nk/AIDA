@@ -15,9 +15,30 @@ class DatabaseClient {
       },
       log:
         config.NODE_ENV === "development"
-          ? ["query", "info", "warn", "error"]
+          ? ["info", "warn", "error"]
           : ["error"],
       errorFormat: "pretty",
+    });
+
+    // Prisma middleware: log only create, update, delete actions
+    this.prisma.$use(async (params, next) => {
+      const start = Date.now();
+      const result = await next(params);
+      const duration = Date.now() - start;
+
+      // Only log writes (create, update, delete)
+      if (
+        params.action === "create" ||
+        params.action === "update" ||
+        params.action === "delete"
+      ) {
+        console.log(
+          `[Prisma] ${params.model}.${params.action} (${duration}ms)`,
+          JSON.stringify(params.args, null, 2),
+        );
+      }
+
+      return result;
     });
 
     // Handle graceful shutdown

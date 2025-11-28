@@ -41,7 +41,7 @@ export type MessageType =
   | "faction";
 
 export interface SendMessageOptions {
-  subject: string;
+  subject?: string;
   content: string;
   encrypt?: boolean;
   encryptionLevel?: number;
@@ -155,7 +155,7 @@ export class MessageService {
         data: {
           senderId,
           recipientId,
-          subject: options.subject,
+          subject: options.subject || "", // Empty string for chat messages
           content: finalContent,
           isRead: false,
           isEncrypted,
@@ -192,6 +192,18 @@ export class MessageService {
           delivered,
           isEncrypted,
           encryptionLevel: isEncrypted ? encryptionLevel : undefined,
+          message: {
+            id: message.id,
+            senderId: message.senderId,
+            senderUsername: sender.username,
+            recipientId: message.recipientId,
+            recipientUsername: recipient.username,
+            subject: message.subject,
+            content: finalContent,
+            timestamp: message.timestamp,
+            isRead: message.isRead,
+            isEncrypted: message.isEncrypted,
+          },
         },
       };
     } catch (error: any) {
@@ -293,7 +305,11 @@ export class MessageService {
     filter: MessageFilter = {},
   ): Promise<MessageOperationResult> {
     try {
-      const where: any = { recipientId: userId };
+      const where: any = {
+        recipientId: userId,
+        subject: { not: { equals: "" } },
+        NOT: { subject: null },
+      };
 
       if (filter.type) {
         where.messageType = filter.type;
@@ -356,7 +372,11 @@ export class MessageService {
     filter: MessageFilter = {},
   ): Promise<MessageOperationResult> {
     try {
-      const where: any = { senderId: userId };
+      const where: any = {
+        senderId: userId,
+        subject: { not: { equals: "" } },
+        NOT: { subject: null },
+      };
 
       if (filter.type) {
         where.messageType = filter.type;
@@ -815,13 +835,20 @@ export class MessageService {
       if (!message) return false;
 
       // Emit to recipient's room
-      this.io.to(`user:${recipientId}`).emit("message:new", {
+      this.io.to(`user:${recipientId}`).emit("message:received", {
+        id: message.id,
         messageId: message.id,
-        from: message.sender.username,
+        senderId: message.senderId,
+        senderUsername: message.sender.username,
+        recipientId: message.recipientId,
+        recipientUsername: null, // Recipient already knows their own username
         subject: message.subject,
+        content: message.isEncrypted ? "[ENCRYPTED]" : message.content,
         timestamp: message.timestamp,
         isEncrypted: message.isEncrypted,
         messageType: message.messageType,
+        isRead: message.isRead,
+        from: message.sender.username,
         preview: message.isEncrypted
           ? "[ENCRYPTED]"
           : message.content.substring(0, 50),

@@ -351,26 +351,13 @@ export class FileService {
 
       await this.logFileAccess(userId, serverId, file.id, "create");
 
-      return {
-        success: true,
-        message: `Created file: ${path}`,
-        data: {
-          id: file.id,
-          path,
-          size: file.size,
-          isEncrypted: encrypt,
-          encryptionKey: encrypt ? finalEncryptionKey : undefined,
-        },
-      };
-
       // Log file operation for mission tracking (future integration)
       console.log(
         `File operation logged: create ${path} on server ${serverId} by ${userId}`,
       );
-
       return {
         success: true,
-        message: `File created: ${path}`,
+        message: `Created file: ${path}`,
         data: {
           id: file.id,
           path,
@@ -384,6 +371,99 @@ export class FileService {
       return {
         success: false,
         message: "Failed to create file",
+        error: error.message,
+      };
+    }
+  }
+
+  /**
+   * Update file content (write/append)
+   */
+  async updateFileContent(
+    serverId: string,
+    userId: string,
+    path: string,
+    content: string,
+    append: boolean = false,
+  ): Promise<FileOperationResult> {
+    try {
+      const resolution = await this.resolvePath(serverId, path);
+
+      if (!resolution.exists || !resolution.node) {
+        return {
+          success: false,
+          message: `File not found: ${path}`,
+          error: "NOT_FOUND",
+        };
+      }
+
+      const file = resolution.node;
+      const accessLevel = await this.getUserAccessLevel(userId, serverId);
+
+      // Check write permission
+      if (!(await this.canWrite(userId, file.id, accessLevel))) {
+        return {
+          success: false,
+          message: `Permission denied: ${path}`,
+          error: "PERMISSION_DENIED",
+        };
+      }
+
+      if (file.type === "directory") {
+        return {
+          success: false,
+          message: `${path} is a directory`,
+          error: "IS_DIRECTORY",
+        };
+      }
+
+      let newContent = content;
+      if (append && file.content) {
+        // If encrypted, we'd need to decrypt first, append, then re-encrypt
+        // For now, assume simple append for non-encrypted or raw append
+        if (file.isEncrypted) {
+           return {
+            success: false,
+            message: "Cannot append to encrypted file directly",
+            error: "ENCRYPTED_APPEND_NOT_SUPPORTED",
+          };
+        }
+        newContent = file.content + "\n" + content;
+      } else if (file.isEncrypted) {
+         // Overwriting encrypted file - re-encrypt if needed or keep as is?
+         // For simplicity, let's say we just update the content and keep encryption status if we had the key,
+         // but here we are just writing raw string.
+         // If the file was encrypted, we should probably reset encryption unless we handle it.
+         // Let's just update content and set isEncrypted to false for now as we are writing plain text.
+         // Realistically we should ask for encryption key or flag.
+      }
+
+      await prisma.fileSystemNode.update({
+        where: { id: file.id },
+        data: {
+          content: newContent,
+          size: newContent.length,
+          modifiedAt: new Date(),
+          isEncrypted: false, // Reset encryption on overwrite/append for now
+          encryptionKey: null,
+        },
+      });
+
+      await this.logFileAccess(userId, serverId, file.id, "write");
+
+      return {
+        success: true,
+        message: `Updated file: ${path}`,
+        data: {
+          path,
+          size: newContent.length,
+        },
+      };
+    } catch (error: any) {
+      console.error("Update file error:", error);
+      return {
+        success: false,
+        message: "Failed to update file",
         error: error.message,
       };
     }
