@@ -18,6 +18,8 @@ import { HelpCommandsModule } from "./commandModules/helpCommands";
 import { ProcessCommandsModule } from "./commandModules/processCommands";
 import { MathCommandsModule } from "./commandModules/mathCommands";
 import { CommandModule, CommandContext } from "./commandModules/interface";
+import { memoryService } from "./memoryService";
+import { processStateService } from "./processStateService";
 
 /**
  * CommandProcessor - Server-side command processing and execution
@@ -106,6 +108,8 @@ class CommandProcessor extends EventEmitter {
         missionService: MissionService?.getInstance(),
         playerPresenceService,
         serverService: ServerService?.getInstance(),
+        memoryService,
+        processStateService,
       },
     };
   }

@@ -125,7 +125,10 @@
         successMessage = "";
 
         try {
-            const command = `msg ${composeRecipient} ${composeBody}`;
+            // Use 'mail' command if subject is provided, otherwise 'msg'
+            const command = composeSubject.trim()
+                ? `mail ${composeRecipient} ${composeSubject} ${composeBody}`
+                : `msg ${composeRecipient} ${composeBody}`;
             const response = await terminalService.executeCommand(command);
 
             if (response.success) {
@@ -197,7 +200,8 @@
         mode = "compose";
         if (replyTo) {
             composeRecipient = replyTo.senderUsername || "";
-            composeSubject = `RE: ${replyTo.subject}`;
+            // Use "RE:" without space to avoid parsing issues with multi-word subjects
+            composeSubject = `RE:${replyTo.subject}`;
         }
         // Auto-focus recipient field after a brief delay
         setTimeout(() => {

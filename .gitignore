@@ -26,6 +26,7 @@ pids/
 # Documentation
 *.md
 !README.md
+!DOCUMENTATION.md
 
 # SCripts
 *.sh

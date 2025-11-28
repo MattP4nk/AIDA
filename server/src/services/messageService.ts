@@ -308,7 +308,6 @@ export class MessageService {
       const where: any = {
         recipientId: userId,
         subject: { not: { equals: "" } },
-        NOT: { subject: null },
       };
 
       if (filter.type) {
@@ -375,7 +374,6 @@ export class MessageService {
       const where: any = {
         senderId: userId,
         subject: { not: { equals: "" } },
-        NOT: { subject: null },
       };
 
       if (filter.type) {

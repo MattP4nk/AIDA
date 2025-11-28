@@ -25,6 +25,17 @@ export interface Process {
   user: string;
   parent?: number; // Parent PID
   children: number[]; // Child PIDs
+  
+  // Command process tracking
+  isCommand?: boolean; // True if this is a user command process
+  commandMetadata?: {
+    originalCommand: string;
+    args: string[];
+    targetInfo?: string;
+    progress?: number;
+    estimatedDuration?: number;
+    onCancel?: () => Promise<void>;
+  };
 }
 
 export interface MemoryInfo {

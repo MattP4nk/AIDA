@@ -11,6 +11,8 @@ export interface CommandContext {
   commandHistory: Map<string, Command[]>;
   gameStateManager?: any; // Typed as any for now to avoid circular imports, or use a shared interface if available
   services: {
+    memoryService?: typeof import("../memoryService").memoryService;
+    processStateService?: typeof import("../processStateService").processStateService;
     [key: string]: any; // For other services like shopService, missionService, etc.
   };
   modules: import("./interface").CommandModule[];

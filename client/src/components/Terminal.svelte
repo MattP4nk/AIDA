@@ -7,6 +7,7 @@
     // New ASCII Dialog system
     import MailDialog from "./MailDialog.svelte";
     import ChatDialog from "./ChatDialog.svelte";
+    import ForumDialog from "./ForumDialog.svelte";
     // Socket service for real-time notifications
     import { liveMessages, socketService } from "../services/socket";
 
@@ -660,9 +661,14 @@
         initialData={dialogData}
         on:close={closeDialog}
     />
+{:else if activeDialog === "forum"}
+    <ForumDialog
+        visible={true}
+        initialData={dialogData}
+        on:close={closeDialog}
+    />
 {/if}
 
-<!-- TODO: Add ForumDialog here -->
 
 <!-- ==================== STYLES ==================== -->
 

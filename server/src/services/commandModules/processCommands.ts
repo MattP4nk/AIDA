@@ -14,6 +14,17 @@ export class ProcessCommandsModule implements CommandModule {
     "renice",
   ]);
 
+  /**
+   * Helper to safely get memoryService
+   */
+  private getMemoryService(context: CommandContext) {
+    const memService = context.services.memoryService;
+    if (!memService) {
+      throw new Error("Memory service not available");
+    }
+    return memService;
+  }
+
   public async execute(
     command: Command,
     context: CommandContext,
@@ -146,7 +157,16 @@ export class ProcessCommandsModule implements CommandModule {
     context: CommandContext,
     sessionId: string,
   ): Promise<CommandResult> {
-    const processes = context.services.memoryService.getProcesses(sessionId);
+    if (!context.services.memoryService) {
+      return {
+        success: false,
+        output: "Memory service not available",
+        timestamp: new Date(),
+      };
+    }
+
+    const memoryService = this.getMemoryService(context);
+    const processes = memoryService.getProcesses(sessionId);
 
     if (processes.length === 0) {
       return {
@@ -157,8 +177,8 @@ export class ProcessCommandsModule implements CommandModule {
     }
 
     let output = "📋 Process List\\n\\n";
-    output += "PID    NAME              USER      CPU%   MEM(KB) STATUS    TIME\\n";
-    output += "─".repeat(70) + "\\n";
+    output += "PID    NAME              USER      CPU%   MEM(KB) STATUS    TIME     PROGRESS\\n";
+    output += "─".repeat(80) + "\\n";
 
     for (const proc of processes) {
       const runtime = Math.floor((Date.now() - proc.startTime) / 1000);
@@ -173,7 +193,20 @@ export class ProcessCommandsModule implements CommandModule {
       output += `${proc.cpu.toFixed(1).padStart(5)}  `;
       output += `${proc.memory.toString().padStart(7)} `;
       output += `${proc.status.padEnd(9)} `;
-      output += `${time}\\n`;
+      output += `${time}  `;
+
+      // Show progress for command processes
+      if (proc.isCommand && proc.commandMetadata) {
+        const progress = proc.commandMetadata.progress || 0;
+        const progressBar = this.renderProgressBar(progress, 10);
+        output += `${progressBar} ${progress.toFixed(0)}%`;
+        
+        if (proc.commandMetadata.targetInfo) {
+          output += ` → ${proc.commandMetadata.targetInfo}`;
+        }
+      }
+
+      output += "\\n";
     }
 
     return {
@@ -183,14 +216,24 @@ export class ProcessCommandsModule implements CommandModule {
     };
   }
 
+  /**
+   * Render a simple ASCII progress bar
+   */
+  private renderProgressBar(progress: number, width: number): string {
+    const filled = Math.floor((progress / 100) * width);
+    const empty = width - filled;
+    return `[${"█".repeat(filled)}${"░".repeat(empty)}]`;
+  }
+
   private async handleTop(
     _command: Command,
     context: CommandContext,
     sessionId: string,
   ): Promise<CommandResult> {
-    const processes = context.services.memoryService.getProcesses(sessionId);
-    const memInfo = context.services.memoryService.getMemoryInfo(sessionId);
-    const loadAvg = context.services.memoryService.getLoadAverage(sessionId);
+    const memoryService = this.getMemoryService(context);
+    const processes = memoryService.getProcesses(sessionId);
+    const memInfo = memoryService.getMemoryInfo(sessionId);
+    const loadAvg = memoryService.getLoadAverage(sessionId);
 
     const cpuTotal = processes.reduce((sum: number, p: {cpu: number}) => sum + p.cpu, 0);
     const runningCount = processes.filter((p: {status: string}) => p.status === "running").length;
@@ -263,7 +306,8 @@ export class ProcessCommandsModule implements CommandModule {
     }
 
     try {
-      const killed = await context.services.memoryService.killProcess(
+      const memoryService = this.getMemoryService(context);
+      const killed = await memoryService.killProcess(
         sessionId,
         pid,
         signal,
@@ -296,7 +340,8 @@ export class ProcessCommandsModule implements CommandModule {
     context: CommandContext,
     sessionId: string,
   ): Promise<CommandResult> {
-    const memInfo = context.services.memoryService.getMemoryInfo(sessionId);
+    const memoryService = this.getMemoryService(context);
+    const memInfo = memoryService.getMemoryInfo(sessionId);
 
     let output = "💾 Memory Usage\\n\\n";
     output += "              TOTAL      USED      FREE   BUFFERS    CACHED\\n";
@@ -329,8 +374,9 @@ export class ProcessCommandsModule implements CommandModule {
     context: CommandContext,
     sessionId: string,
   ): Promise<CommandResult> {
-    const loadAvg = context.services.memoryService.getLoadAverage(sessionId);
-    const processes = context.services.memoryService.getProcesses(sessionId);
+    const memoryService = this.getMemoryService(context);
+    const loadAvg = memoryService.getLoadAverage(sessionId);
+    const processes = memoryService.getProcesses(sessionId);
 
     // Find the init process to get session start time
     const initProc = processes.find((p: {pid: number}) => p.pid === 1);
@@ -380,7 +426,8 @@ export class ProcessCommandsModule implements CommandModule {
     }
 
     const processName = args[0];
-    const processes = context.services.memoryService.getProcesses(sessionId);
+    const memoryService = this.getMemoryService(context);
+    const processes = memoryService.getProcesses(sessionId);
     const matches = processes.filter((p: {name: string}) => p.name.includes(processName || ""));
 
     if (matches.length === 0) {
@@ -398,7 +445,7 @@ export class ProcessCommandsModule implements CommandModule {
       try {
         if (proc.pid > 3) {
           // Don't kill critical system processes
-          await context.services.memoryService.killProcess(sessionId, proc.pid, "TERM");
+          await memoryService.killProcess(sessionId, proc.pid, "TERM");
           killed++;
         }
       } catch (error) {
@@ -433,7 +480,8 @@ export class ProcessCommandsModule implements CommandModule {
     }
 
     const processName = args[0];
-    const processes = context.services.memoryService.getProcesses(sessionId);
+    const memoryService = this.getMemoryService(context);
+    const processes = memoryService.getProcesses(sessionId);
     const matches = processes.filter((p: {name: string}) => p.name.includes(processName || ""));
 
     if (matches.length === 0) {
@@ -504,14 +552,15 @@ export class ProcessCommandsModule implements CommandModule {
 
     // Spawn process with specific priority
     try {
-      const pid = await context.services.memoryService.spawnProcess(
+      const memoryService = this.getMemoryService(context);
+      const pid = await memoryService.spawnProcess(
         sessionId,
         commandToRun,
         args.slice(args[0] === "-n" ? 3 : 1).join(" "),
         context.userId,
       );
 
-      await context.services.memoryService.setProcessPriority(sessionId, pid, priority);
+      await memoryService.setProcessPriority(sessionId, pid, priority);
 
       return {
         success: true,
@@ -561,7 +610,8 @@ export class ProcessCommandsModule implements CommandModule {
     }
 
     try {
-      const success = await context.services.memoryService.setProcessPriority(
+      const memoryService = this.getMemoryService(context);
+      const success = await memoryService.setProcessPriority(
         sessionId,
         pid,
         priority,
