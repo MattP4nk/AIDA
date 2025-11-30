@@ -1,5 +1,6 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
+import { validateIPAddress, isValidUUID } from "../../utils/validators";
 
 export class NetworkCommandsModule implements CommandModule {
   public commands: Set<string> = new Set([
@@ -171,6 +172,18 @@ export class NetworkCommandsModule implements CommandModule {
       return {
         success: false,
         output: "Invalid server ID",
+        timestamp: new Date(),
+      };
+    }
+
+    // Validate server ID or IP address format
+    const isIP = validateIPAddress(serverId);
+    const isUUID = isValidUUID(serverId);
+    
+    if (!isIP && !isUUID) {
+      return {
+        success: false,
+        output: "Invalid server ID or IP address format",
         timestamp: new Date(),
       };
     }

@@ -20,6 +20,9 @@ import { MathCommandsModule } from "./commandModules/mathCommands";
 import { CommandModule, CommandContext } from "./commandModules/interface";
 import { memoryService } from "./memoryService";
 import { processStateService } from "./processStateService";
+import { injectable, inject } from "tsyringe";
+import { SOCKET_IO } from "../di/tokens";
+import { validateCommand, validateArgs, validateUserId } from "../utils/validators";
 
 /**
  * CommandProcessor - Server-side command processing and execution
@@ -32,6 +35,7 @@ import { processStateService } from "./processStateService";
  * - Result formatting
  * - Audit logging
  */
+@injectable()
 class CommandProcessor extends EventEmitter {
   private commandHistory: Map<string, Command[]>;
   private rateLimitMap: Map<string, number[]>; // userId -> timestamps[]
@@ -43,48 +47,53 @@ class CommandProcessor extends EventEmitter {
   // Modular architecture properties
   private modules: CommandModule[] = [];
   private commandMap: Map<string, CommandModule> = new Map();
-  private io: SocketIOServer | undefined;
 
-  constructor() {
+  constructor(@inject(SOCKET_IO) private io: SocketIOServer) {
     super();
     this.commandHistory = new Map();
     this.rateLimitMap = new Map();
 
-    this.initializeModules();
-    console.log("⚡ CommandProcessor initialized");
+    // Initialize command modules
+    this.modules = [
+      new SystemCommandsModule(),
+      new NetworkCommandsModule(),
+      new HackCommandsModule(),
+      new FileCommandsModule(),
+      new SocialCommandsModule(),
+      new GameCommandsModule(),
+      new HelpCommandsModule(),
+      new ProcessCommandsModule(),
+      new MathCommandsModule(),
+    ];
+
+    // Build command map from modules
+    this.buildCommandMap();
+    console.log("⚙️ Command Processor initialized");
   }
 
-  public setIO(io: SocketIOServer) {
-    this.io = io;
+  /**
+   * Initialize with Socket.IO (kept for backward compatibility)
+   */
+  public initialize(_io: SocketIOServer): void {
+    // Now handled by DI injection
   }
 
-  private initializeModules() {
-    this.registerModule(new SystemCommandsModule());
-    this.registerModule(new NetworkCommandsModule());
-    this.registerModule(new HackCommandsModule());
-    this.registerModule(new FileCommandsModule());
-    this.registerModule(new SocialCommandsModule());
-    this.registerModule(new GameCommandsModule());
-    this.registerModule(new HelpCommandsModule());
-    this.registerModule(new ProcessCommandsModule());
-    this.registerModule(new MathCommandsModule());
-    console.log(`🧩 Initialized ${this.modules.length} command modules`);
-  }
-
-  private registerModule(module: CommandModule) {
-    this.modules.push(module);
-    for (const cmd of module.commands) {
-      this.commandMap.set(cmd, module);
+  private buildCommandMap() {
+    for (const module of this.modules) {
+      for (const cmd of module.commands) {
+        this.commandMap.set(cmd, module);
+      }
     }
+    console.log(`🧩 Initialized ${this.modules.length} command modules`);
   }
 
   private async buildCommandContext(userId: string): Promise<CommandContext> {
     const { gameStateManager } = await import("../index");
     const { fileService } = await import("./fileService");
-    const { default: shopService } = await import("./shopService");
-    const { default: MissionService } = await import("./missionService");
+    const { shopService } = await import("./shopService");
+    const { missionService } = await import("./missionService");
+    const { serverService } = await import("./serverService");
     const { getPresenceService } = await import("./playerPresenceService");
-    const { default: ServerService } = await import("./serverService");
 
     // Safely get presence service
     let playerPresenceService;
@@ -105,9 +114,9 @@ class CommandProcessor extends EventEmitter {
       modules: this.modules,
       services: {
         shopService,
-        missionService: MissionService?.getInstance(),
+        missionService,
         playerPresenceService,
-        serverService: ServerService?.getInstance(),
+        serverService,
         memoryService,
         processStateService,
       },
@@ -134,6 +143,18 @@ class CommandProcessor extends EventEmitter {
         rawInput,
         isValid: false,
         error: "Empty command",
+      };
+    }
+
+    // Validate command for security (injection attacks)
+    const commandValidation = validateCommand(trimmed);
+    if (!commandValidation.isValid) {
+      return {
+        command: "",
+        args: [],
+        rawInput,
+        isValid: false,
+        error: commandValidation.error || "Invalid command",
       };
     }
 
@@ -174,6 +195,18 @@ class CommandProcessor extends EventEmitter {
       };
     }
 
+    // Validate arguments for security
+    const argsValidation = validateArgs(args);
+    if (!argsValidation.isValid) {
+      return {
+        command,
+        args,
+        rawInput,
+        isValid: false,
+        error: argsValidation.error || "Invalid arguments",
+      };
+    }
+
     return {
       command,
       args,
@@ -190,9 +223,14 @@ class CommandProcessor extends EventEmitter {
   public async validateCommand(
     userId: string,
     parsedCommand: ParsedCommand,
-    _serverId?: string,
+    serverId?: string,
   ): Promise<ValidationResult> {
     try {
+      // Validate userId format
+      if (!validateUserId(userId)) {
+        return { valid: false, error: "Invalid user ID format" };
+      }
+      
       // Check rate limiting
       const rateLimitCheck = this.checkRateLimit(userId);
       if (!rateLimitCheck.valid) {
@@ -214,29 +252,29 @@ class CommandProcessor extends EventEmitter {
       }
 
       // Check if user is online (has active session)
-      // TODO: Implement session check when GameStateManager is properly exported
-      // const session = gameStateManager.getSession(userId);
-      // if (!session) {
-      if (false) {
+      const { gameStateManager } = await import("../index");
+      const session = gameStateManager?.getSession(userId);
+      if (!session) {
         return { valid: false, error: "No active session" };
       }
 
       // Validate command requirements based on category
       const command = parsedCommand.command;
 
+      // Get module for command
+      const module = this.commandMap.get(command);
+
       // Network commands require network access (being connected to a server)
-      // TODO: Re-enable when session management is fixed
-      // if (this.NETWORK_COMMANDS.has(command)) {
-      //   if (!session.currentServerId && command !== 'connect') {
-      //     return {
-      //       valid: false,
-      //       error: 'Network access required. Connect to a server first.'
-      //     };
-      //   }
-      // }
+      if (module instanceof NetworkCommandsModule) {
+        if (!session.currentServerId && command !== 'connect') {
+          return {
+            valid: false,
+            error: 'Network access required. Connect to a server first.'
+          };
+        }
+      }
 
       // Hack commands require specific skills and tools
-      const module = this.commandMap.get(command);
       if (module instanceof HackCommandsModule) {
         const validation = await this.validateHackCommand(
           userId,
@@ -249,13 +287,12 @@ class CommandProcessor extends EventEmitter {
       }
 
       // Server-specific commands require being connected
-      // TODO: Re-enable when session management is fixed
-      // if (serverId && !session.currentServerId) {
-      //   return {
-      //     valid: false,
-      //     error: 'Must be connected to a server to execute this command'
-      //   };
-      // }
+      if (serverId && !session.currentServerId) {
+        return {
+          valid: false,
+          error: 'Must be connected to a server to execute this command'
+        };
+      }
 
       return { valid: true };
     } catch (error) {
@@ -709,6 +746,14 @@ class CommandProcessor extends EventEmitter {
   }
 }
 
-// Export singleton instance
-export const commandProcessor = new CommandProcessor();
-export default commandProcessor;
+export default CommandProcessor;
+
+// Backward compatibility
+import { container } from "../di/container";
+import { COMMAND_PROCESSOR } from "../di/tokens";
+export const commandProcessor = new Proxy({} as CommandProcessor, {
+  get(_target, prop) {
+    const instance = container.resolve(COMMAND_PROCESSOR as any);
+    return (instance as any)[prop];
+  }
+});

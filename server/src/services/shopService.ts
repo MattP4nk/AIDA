@@ -363,9 +363,12 @@ const SHOP_CATALOG: ShopItem[] = [
   },
 ];
 
+import { injectable } from "tsyringe";
+
 /**
  * ShopService - Manages shop, inventory, and economy
  */
+@injectable()
 class ShopService extends EventEmitter {
   private catalog: Map<string, ShopItem>;
 
@@ -861,5 +864,14 @@ class ShopService extends EventEmitter {
   }
 }
 
-export const shopService = new ShopService();
-export default shopService;
+export default ShopService;
+
+// Backward compatibility
+import { container } from "../di/container";
+import { SHOP_SERVICE } from "../di/tokens";
+export const shopService = new Proxy({} as ShopService, {
+  get(_target, prop) {
+    const instance = container.resolve(SHOP_SERVICE as any);
+    return (instance as any)[prop];
+  }
+});

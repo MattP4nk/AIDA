@@ -1,6 +1,8 @@
 import { EventEmitter } from "events";
 import { Server as SocketIOServer } from "socket.io";
 import { prisma } from "../database/client";
+import { injectable, inject } from "tsyringe";
+import { SOCKET_IO } from "../di/tokens";
 
 /**
  * Online player information
@@ -72,16 +74,15 @@ export type PresenceEvent =
  * - Activity tracking
  * - Presence broadcasting via Socket.IO
  */
+@injectable()
 export class PlayerPresenceService extends EventEmitter {
-  private io: SocketIOServer;
   private onlinePlayers: Map<string, OnlinePlayer>;
   private playersByServer: Map<string, Set<string>>;
   private activityTimeouts: Map<string, NodeJS.Timeout>;
   private readonly ACTIVITY_TIMEOUT = 5 * 60 * 1000; // 5 minutes
 
-  constructor(io: SocketIOServer) {
+  constructor(@inject(SOCKET_IO) private io: SocketIOServer) {
     super();
-    this.io = io;
     this.onlinePlayers = new Map();
     this.playersByServer = new Map();
     this.activityTimeouts = new Map();
@@ -591,21 +592,23 @@ export class PlayerPresenceService extends EventEmitter {
   }
 }
 
-// Singleton instance (initialized by server)
-let presenceService: PlayerPresenceService | null = null;
+export default PlayerPresenceService;
 
-export function initializePresenceService(
-  io: SocketIOServer,
-): PlayerPresenceService {
-  presenceService = new PlayerPresenceService(io);
-  return presenceService;
+// Backward compatibility
+import { container } from "../di/container";
+import { PLAYER_PRESENCE_SERVICE } from "../di/tokens";
+export const presenceService = new Proxy({} as PlayerPresenceService, {
+  get(_target, prop) {
+    const instance = container.resolve(PLAYER_PRESENCE_SERVICE as any);
+    return (instance as any)[prop];
+  }
+});
+
+// Keep old initialization function for compatibility during transition
+export function initializePresenceService(_io: SocketIOServer): PlayerPresenceService {
+  return container.resolve(PLAYER_PRESENCE_SERVICE as any);
 }
 
 export function getPresenceService(): PlayerPresenceService {
-  if (!presenceService) {
-    throw new Error("PlayerPresenceService not initialized");
-  }
-  return presenceService;
+  return container.resolve(PLAYER_PRESENCE_SERVICE as any);
 }
-
-export { presenceService };

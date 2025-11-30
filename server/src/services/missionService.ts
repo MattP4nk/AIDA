@@ -1,4 +1,8 @@
-import { PrismaClient, Mission } from "@prisma/client";
+import { Mission } from "@prisma/client";
+import { db } from "../database/client";
+import { injectable, inject } from "tsyringe";
+import { CACHE_SERVICE } from "../di/tokens";
+import type { CacheService } from "./cacheService";
 import { Server as SocketIOServer } from "socket.io";
 
 /**
@@ -93,29 +97,15 @@ interface PlayerMission {
  * - Reward calculation and distribution
  * - Mission expiry handling
  */
+@injectable()
 class MissionService {
-  private static instance: MissionService;
-  private prisma: PrismaClient;
-  private io: SocketIOServer;
+  private prisma = db.client;
+  private io: SocketIOServer | null = null; // Initialize as null
 
-  /**
-   * Private constructor for singleton pattern
-   */
-  private constructor() {
-    this.prisma = new PrismaClient();
-    // Socket.IO will be initialized via setSocketIO
-    this.io = null as any;
-  }
-
-  /**
-   * Get singleton instance
-   * @returns MissionService instance
-   */
-  public static getInstance(): MissionService {
-    if (!MissionService.instance) {
-      MissionService.instance = new MissionService();
-    }
-    return MissionService.instance;
+  constructor(
+    @inject(CACHE_SERVICE) private cacheService: CacheService
+  ) {
+    console.log("🎯 MissionService initialized");
   }
 
   /**
@@ -175,9 +165,20 @@ class MissionService {
    */
   public async getMission(missionId: string): Promise<Mission | null> {
     try {
+      // Check cache
+      const cached = this.cacheService.get<Mission>(`mission:${missionId}`);
+      if (cached) {
+        return cached;
+      }
+
       const mission = await this.prisma.mission.findUnique({
         where: { id: missionId },
       });
+
+      if (mission) {
+        // Cache mission (TTL 5 minutes)
+        this.cacheService.set(`mission:${missionId}`, mission, 300);
+      }
 
       return mission;
     } catch (error) {
@@ -220,6 +221,9 @@ class MissionService {
         data: updateData,
       });
 
+      // Invalidate cache
+      this.cacheService.del(`mission:${missionId}`);
+
       // Audit log
       await this.auditLog("system", "MISSION_UPDATED", {
         missionId: mission.id,
@@ -244,6 +248,9 @@ class MissionService {
       await this.prisma.mission.delete({
         where: { id: missionId },
       });
+
+      // Invalidate cache
+      this.cacheService.del(`mission:${missionId}`);
 
       // Audit log
       await this.auditLog("system", "MISSION_DELETED", {
@@ -377,7 +384,52 @@ class MissionService {
         playerMissions = playerMissions.filter((m) => m.status === status);
       }
 
-      return playerMissions;
+      // Enrich with mission details
+      // Enrich with mission details using batch fetch
+      const missionIds = playerMissions.map(pm => pm.missionId);
+      
+      // Check cache for all missions first
+      const cachedMissions = new Map<string, Mission>();
+      const missingIds: string[] = [];
+
+      for (const id of missionIds) {
+        const cached = this.cacheService.get<Mission>(`mission:${id}`);
+        if (cached) {
+          cachedMissions.set(id, cached);
+        } else {
+          missingIds.push(id);
+        }
+      }
+
+      // Fetch missing missions from DB
+      if (missingIds.length > 0) {
+        const dbMissions = await this.prisma.mission.findMany({
+          where: { id: { in: missingIds } },
+        });
+
+        for (const mission of dbMissions) {
+          cachedMissions.set(mission.id, mission);
+          // Cache fetched missions
+          this.cacheService.set(`mission:${mission.id}`, mission, 300);
+        }
+      }
+
+      const enrichedMissions = playerMissions.map((pm) => {
+        const mission = cachedMissions.get(pm.missionId);
+        if (!mission) return pm;
+        
+        return {
+          ...pm,
+          title: mission.title,
+          description: mission.description,
+          type: mission.type,
+          difficulty: mission.difficulty,
+          reward: mission.reward,
+          timeLimit: mission.timeLimit,
+        };
+      });
+
+      return enrichedMissions;
     } catch (error) {
       console.error("[MissionService] Error getting player missions:", error);
       throw new Error(
@@ -1077,3 +1129,13 @@ class MissionService {
 }
 
 export default MissionService;
+
+// Backward compatibility
+import { container } from "../di/container";
+import { MISSION_SERVICE } from "../di/tokens";
+export const missionService = new Proxy({} as MissionService, {
+  get(_target, prop) {
+    const instance = container.resolve(MISSION_SERVICE as any);
+    return (instance as any)[prop];
+  }
+});

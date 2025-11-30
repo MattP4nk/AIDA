@@ -15,6 +15,8 @@
 import { prisma } from "../database/client";
 import { Server as SocketIOServer } from "socket.io";
 import crypto from "crypto";
+import { injectable, inject } from "tsyringe";
+import { SOCKET_IO } from "../di/tokens";
 
 // ==================== TYPES ====================
 
@@ -71,14 +73,14 @@ export interface EncryptionResult {
 
 // ==================== MESSAGE SERVICE CLASS ====================
 
+@injectable()
 export class MessageService {
-  private io: SocketIOServer;
   private encryptionAlgorithm = "aes-256-cbc";
   private deliveryQueue: Map<string, QueuedMessage[]> = new Map();
 
-  constructor(io: SocketIOServer) {
-    this.io = io;
+  constructor(@inject(SOCKET_IO) private io: SocketIOServer) {
     this.startDeliveryProcessor();
+    console.log("💬 MessageService initialized");
   }
 
   // ==================== SEND MESSAGES ====================
@@ -203,6 +205,8 @@ export class MessageService {
             timestamp: message.timestamp,
             isRead: message.isRead,
             isEncrypted: message.isEncrypted,
+            encryptionLevel: message.encryptionLevel,
+            messageType: message.messageType as MessageType,
           },
         },
       };
@@ -951,7 +955,7 @@ export class MessageService {
       isRead: message.isRead,
       isEncrypted: message.isEncrypted,
       encryptionLevel: message.encryptionLevel,
-      messageType: message.messageType,
+      messageType: message.messageType as MessageType,
     };
   }
 
@@ -1064,12 +1068,14 @@ interface QueuedMessage {
   timestamp: Date;
 }
 
-// Export singleton instance (will be initialized with io in server setup)
-export let messageService: MessageService;
+export default MessageService;
 
-export const initializeMessageService = (
-  io: SocketIOServer,
-): MessageService => {
-  messageService = new MessageService(io);
-  return messageService;
-};
+// Backward compatibility
+import { container } from "../di/container";
+import { MESSAGE_SERVICE } from "../di/tokens";
+export const messageService = new Proxy({} as MessageService, {
+  get(_target, prop) {
+    const instance = container.resolve(MESSAGE_SERVICE as any);
+    return (instance as any)[prop];
+  }
+});

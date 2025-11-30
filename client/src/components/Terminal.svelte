@@ -208,7 +208,7 @@
             ? result.output
             : [result.output];
 
-        lines.forEach((line) => {
+        lines.forEach((line: any) => {
             if (result.success) {
                 addOutputLine(line, "output");
             } else {
@@ -669,7 +669,6 @@
     />
 {/if}
 
-
 <!-- ==================== STYLES ==================== -->
 
 <style>
@@ -688,7 +687,6 @@
         overflow: hidden;
         cursor: text;
         position: relative;
-        max-width: 1800px;
         margin: 0 auto;
         box-shadow: 0 0 50px rgba(0, 255, 65, 0.1);
     }

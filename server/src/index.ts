@@ -9,16 +9,16 @@ import rateLimit from "express-rate-limit";
 
 import { config, validateConfig } from "./config/environment";
 import { db } from "./database/client";
+import { initializeContainer, getService } from "./di/container";
+import { GAME_STATE_MANAGER, PROGRESS_SERVICE, IP_SERVICE, EVENT_SERVICE } from "./di/tokens";
 
 // Import new multiplayer services
 import GameStateManager from "./services/gameStateManager";
-import { ipService } from "./services/ipService";
+import ProgressService from "./services/progressService";
+import IPService from "./services/ipService";
+import EventService from "./services/eventService";
 import { progressService } from "./services/progressService";
-import { initializeFileService } from "./services/fileService";
-import { initializeMessageService } from "./services/messageService";
-import { forumService } from "./services/forumService";
-import { initializePresenceService } from "./services/playerPresenceService";
-
+import { ipService } from "./services/ipService";
 // Track connected users
 const connectedUsers = new Map<string, string>(); // socketId -> userId
 
@@ -56,36 +56,35 @@ class AidaServer {
       await db.connect();
       console.log("✅ Database connection established");
 
-      // Initialize Game State Manager
-      gameStateManager = new GameStateManager(io);
+      // Initialize DI Container
+      initializeContainer(io, db.client);
+      console.log("✅ DI Container initialized");
+
+      // Initialize Game State Manager from DI container
+      gameStateManager = getService<GameStateManager>(GAME_STATE_MANAGER);
       console.log("✅ Game State Manager initialized");
 
       // Initialize IP Service and load allocated IPs
+      const ipService = getService<IPService>(IP_SERVICE);
       await ipService.loadAllocatedIPs();
       console.log("✅ IP Service initialized");
 
       // Start Progress Service (auto-save)
+      const progressService = getService<ProgressService>(PROGRESS_SERVICE);
       progressService.start();
       console.log("✅ Progress Service started");
 
       // Load event subscriptions
-      const { eventService } = await import("./services/eventService");
+      const eventService = getService<EventService>(EVENT_SERVICE);
       await eventService.loadSubscriptionsFromDatabase();
       console.log("✅ Event subscriptions loaded");
 
-      // Initialize FileService with Socket.IO
-      initializeFileService(io);
-      console.log("✅ File Service initialized");
+      // Note: FileService, MessageService, ForumService are now initialized via DI container
+      // They are automatically instantiated when first resolved
+      console.log("✅ All services initialized via DI");
 
-      // Initialize MessageService with Socket.IO
-      initializeMessageService(io);
-      console.log("✅ Message Service initialized");
-
-      // Initialize ForumService with Socket.IO
-      forumService.initialize(io);
-      console.log("✅ Forum Service initialized");
-
-      // Initialize PlayerPresenceService with Socket.IO
+      // Initialize PlayerPresenceService (TODO: migrate to DI)
+      const { initializePresenceService } = await import("./services/playerPresenceService");
       initializePresenceService(io);
       console.log("✅ Player Presence Service initialized");
 

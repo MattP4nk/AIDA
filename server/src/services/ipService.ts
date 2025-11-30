@@ -7,7 +7,9 @@ import type {
   TraceRouteHop,
 } from "../types/game";
 import { IPZone } from "../types/game";
+import { injectable } from "tsyringe";
 
+@injectable()
 class IPService {
   private allocatedIPs: Set<string>;
   private ipRanges: Map<IPZone, IPRange>;
@@ -661,6 +663,14 @@ class IPService {
   }
 }
 
-// Export singleton instance
-export const ipService = new IPService();
-export default ipService;
+export default IPService;
+
+// Backward compatibility - lazy singleton that resolves from DI
+import { container } from "../di/container";
+import { IP_SERVICE } from "../di/tokens";
+export const ipService = new Proxy({} as IPService, {
+  get(_target, prop) {
+    const instance = container.resolve(IP_SERVICE as any);
+    return (instance as any)[prop];
+  }
+});

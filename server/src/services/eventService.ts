@@ -17,6 +17,9 @@ interface EventSubscription {
 // In-memory subscription store (could be moved to Redis for scale)
 const activeSubscriptions = new Map<string, EventSubscription>();
 
+import { injectable } from "tsyringe";
+
+@injectable()
 export class EventService {
   // ==================== EVENT CREATION ====================
 
@@ -518,13 +521,14 @@ export class EventService {
   }
 }
 
-// Singleton instance
-export const eventService = new EventService();
+export default EventService;
 
-// Cleanup expired subscriptions every 5 minutes
-setInterval(
-  () => {
-    eventService.cleanupExpiredSubscriptions();
-  },
-  5 * 60 * 1000,
-);
+// Backward compatibility - lazy singleton that resolves from DI
+import { container } from "../di/container";
+import { EVENT_SERVICE } from "../di/tokens";
+export const eventService = new Proxy({} as EventService, {
+  get(_target, prop) {
+    const instance = container.resolve(EVENT_SERVICE as any);
+    return (instance as any)[prop];
+  }
+});

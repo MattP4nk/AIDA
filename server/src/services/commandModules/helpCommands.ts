@@ -73,23 +73,76 @@ export class HelpCommandsModule implements CommandModule {
     context: CommandContext,
   ): Promise<CommandResult> {
     const category = command.args?.[0]?.toLowerCase();
-    const commands = await this.getAvailableCommands(context, category);
+    const commands = await this.getAvailableCommands(context);
 
-    if (category && commands.length === 0) {
-      return {
-        success: false,
-        output: `Unknown category: ${category}\\nAvailable categories: system, file, process, math, network, social, game, hack, help`,
-        timestamp: new Date(),
-      };
-    }
-
-    const output: string[] = ["📚 AVAILABLE COMMANDS\\n"];
-    if (category) {
-      output.push(`Category: ${category.toUpperCase()}\\n`);
-    }
-
+    // If no category specified, show only categories
     if (!category) {
-      const categories = [
+      return this.showCategories(commands);
+    }
+
+    // Show commands for the specific category
+    return this.showCategoryCommands(commands, category);
+  }
+
+  /**
+   * Show available command categories (no commands listed)
+   */
+  private showCategories(
+    commands: Array<{ command: string; category: string; description: string }>,
+  ): CommandResult {
+    const categories = [
+      { name: "system", desc: "File operations and navigation" },
+      { name: "file", desc: "Advanced file operations" },
+      { name: "process", desc: "Process and resource management" },
+      { name: "math", desc: "Mathematics and calculations" },
+      { name: "network", desc: "Network operations and scanning" },
+      { name: "social", desc: "Communication and social features" },
+      { name: "game", desc: "Game commands and player info" },
+      { name: "hack", desc: "Hacking and exploitation tools" },
+      { name: "help", desc: "Help and documentation" },
+    ];
+
+    // Count commands per category
+    const categoryCounts: Record<string, number> = {};
+    commands.forEach((cmd) => {
+      categoryCounts[cmd.category] = (categoryCounts[cmd.category] || 0) + 1;
+    });
+
+    let output = "=== COMMAND CATEGORIES ===\\n\\n";
+    output += "Usage: help <category>\\n\\n";
+
+    categories.forEach(({ name, desc }) => {
+      const count = categoryCounts[name] || 0;
+      if (count > 0) {
+        output += `📁 ${name.toUpperCase()}\\n`;
+        output += `   ${desc}\\n`;
+        output += `   ${count} command${count !== 1 ? "s" : ""}\\n\\n`;
+      }
+    });
+
+    output += "\\nType 'help <category>' to see commands in that category.\\n";
+    output += "Example: help system\\n";
+
+    return {
+      success: true,
+      output,
+      timestamp: new Date(),
+    };
+  }
+
+  /**
+   * Show commands for a specific category
+   */
+  private showCategoryCommands(
+    commands: Array<{ command: string; category: string; description: string; usage: string; examples: string[] }>,
+    category: string,
+  ): CommandResult {
+    const categoryCommands = commands.filter(
+      (cmd) => cmd.category === category,
+    );
+
+    if (categoryCommands.length === 0) {
+      const validCategories = [
         "system",
         "file",
         "process",
@@ -100,33 +153,34 @@ export class HelpCommandsModule implements CommandModule {
         "hack",
         "help",
       ];
-      categories.forEach((cat) => {
-        const catCommands = commands.filter((cmd) => cmd.category === cat);
-        if (catCommands.length > 0) {
-          output.push(`\\n[${cat.toUpperCase()}]`);
-          catCommands.forEach((cmd) => {
-            output.push(`  ${cmd.command.padEnd(15)} - ${cmd.description}`);
-          });
-        }
-      });
-    } else {
-      commands.forEach((cmd) => {
-        output.push(`${cmd.command.padEnd(15)} - ${cmd.description}`);
-        output.push(`  Usage: ${cmd.usage}`);
-        if (cmd.examples && cmd.examples.length > 0) {
-          output.push(`  Example: ${cmd.examples[0]}`);
-        }
-        output.push("");
-      });
+      return {
+        success: false,
+        output:
+          `Unknown category: ${category}\\n\\n` +
+          `Available categories: ${validCategories.join(", ")}\\n\\n` +
+          "Type 'help' to see all categories.",
+        timestamp: new Date(),
+      };
     }
 
-    output.push("\\nType 'help <category>' for category-specific commands");
-    output.push("Type 'man <command>' for detailed command information");
+    let output = `=== ${category.toUpperCase()} COMMANDS ===\\n\\n`;
+
+    categoryCommands.forEach((cmd) => {
+      output += `${cmd.command.padEnd(15)} - ${cmd.description}\\n`;
+      output += `  Usage: ${cmd.usage}\\n`;
+      if (cmd.examples && cmd.examples.length > 0) {
+        output += `  Example: ${cmd.examples[0]}\\n`;
+      }
+      output += "\\n";
+    });
+
+    output += "Type 'help' to see all categories.\\n";
+    output += "Type 'man <command>' for detailed command information.\\n";
 
     return {
       success: true,
-      output: output.join("\\n"),
-      data: { commands },
+      output,
+      data: { commands: categoryCommands },
       timestamp: new Date(),
     };
   }

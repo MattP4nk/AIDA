@@ -52,6 +52,7 @@ model User {
   factionStandings FactionStanding[]
   factionEvents    FactionEvent[]
   posts            Post[]
+  progressBackups  ProgressBackup[]
 
   @@map("users")
 }
@@ -107,6 +108,21 @@ model PlayerProgress {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("player_progress")
+}
+
+model ProgressBackup {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  data      Json     // Complete snapshot of user + progress + servers
+  reason    String   // Why backup was created
+  checksum  String?  // Data integrity verification
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([createdAt])
+  @@map("progress_backups")
 }
 
 // ==================== SERVERS & FILE SYSTEM ====================

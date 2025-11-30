@@ -1,27 +1,47 @@
 import { EventEmitter } from "events";
 import { Server as SocketIOServer } from "socket.io";
 import { db } from "../database/client";
-import type {
+import {
   PlayerSession,
   ServerState,
   GameState,
-  ValidationResult,
   PlayerInfo,
+  ValidationResult,
   StateDelta,
+  NotificationType,
+  NotificationPriority,
+  MissionStatus,
 } from "../types/game";
+import { shopService } from "./shopService";
+import { missionService } from "./missionService";
+import { SESSION_TIMEOUT_MS } from "../config/constants";
 
+import { injectable, inject } from "tsyringe";
+import { SOCKET_IO, EVENT_SERVICE, COMMAND_PROCESSOR } from "../di/tokens";
+import type EventService from "./eventService";
+import type CommandProcessor from "./commandProcessor";
+
+@injectable()
 class GameStateManager extends EventEmitter {
   private playerSessions: Map<string, PlayerSession>;
   private activeConnections: Map<string, string>; // socketId -> userId
   private serverStates: Map<string, ServerState>;
   private io: SocketIOServer;
+  private eventService: EventService;
+  private commandProcessor: CommandProcessor;
 
-  constructor(io: SocketIOServer) {
+  constructor(
+    @inject(SOCKET_IO) io: SocketIOServer,
+    @inject(EVENT_SERVICE) eventService: EventService,
+    @inject(COMMAND_PROCESSOR) commandProcessor: CommandProcessor
+  ) {
     super();
+    this.io = io;
+    this.eventService = eventService;
+    this.commandProcessor = commandProcessor;
     this.playerSessions = new Map();
     this.activeConnections = new Map();
     this.serverStates = new Map();
-    this.io = io;
 
     console.log("🎮 GameStateManager initialized");
   }
@@ -133,6 +153,9 @@ class GameStateManager extends EventEmitter {
       // Remove from maps
       this.activeConnections.delete(session.socketId);
       this.playerSessions.delete(userId);
+
+      // Clear command history to prevent memory leaks
+      this.commandProcessor.clearHistory(userId);
 
       // Update database
       await db.client.user.update({
@@ -257,14 +280,53 @@ class GameStateManager extends EventEmitter {
       }
 
       // Build complete game state
+      const inventoryItems = await shopService.getPlayerInventory(userId);
+      const playerMissions = await missionService.getPlayerMissions(userId);
+      const userEvents = await this.eventService.getUserEvents(userId, 10);
+
       const gameState: GameState = {
         player: playerInfo,
         currentServer,
-        inventory: [], // TODO: Implement inventory system
-        missions: [], // TODO: Fetch active missions
-        notifications: [], // TODO: Fetch unread notifications
+        inventory: inventoryItems.map((item) => ({
+          id: item.itemId,
+          name: item.item.name,
+          type: item.item.category,
+          description: item.item.description,
+          quantity: item.quantity,
+          metadata: item.item.effects,
+        })),
+        missions: playerMissions.map((m) => ({
+          id: m.missionId,
+          title: (m as any).title || "Unknown Mission",
+          description: (m as any).description || "Loading...",
+          type: (m as any).type || "hack",
+          status: m.status as MissionStatus,
+          difficulty: (m as any).difficulty || 1,
+          objectives: m.objectives.map((o) => ({
+            ...o,
+            progress: typeof o.current === "number" ? o.current : 0,
+            required: typeof o.target === "number" ? o.target : 1,
+            target: o.target?.toString(),
+          })),
+          reward: (m as any).reward || { credits: 0, experience: 0 },
+          timeLimit: (m as any).timeLimit,
+          ...(m.expiresAt ? { expiresAt: m.expiresAt } : {}),
+        })),
+        notifications: userEvents.map((e) => ({
+          id: e.id,
+          type: e.type as unknown as NotificationType,
+          title: e.title,
+          message: e.description,
+          timestamp: e.timestamp,
+          read: false,
+          priority:
+            e.severity === "critical"
+              ? NotificationPriority.CRITICAL
+              : NotificationPriority.NORMAL,
+          data: e.metadata,
+        })),
         stats: {
-          totalPlayTime: 0, // TODO: Calculate from sessions
+          totalPlayTime: 0,
           commandsExecuted: 0,
           successfulHacks: 0,
           failedHacks: 0,
@@ -487,7 +549,7 @@ class GameStateManager extends EventEmitter {
     // Check session timeout
     const now = new Date();
     const inactiveTime = now.getTime() - session.lastActivity.getTime();
-    const timeoutMs = 60 * 60 * 1000; // 60 minutes (TODO: Use config)
+    const timeoutMs = SESSION_TIMEOUT_MS;
 
     if (inactiveTime > timeoutMs) {
       await this.destroySession(userId);

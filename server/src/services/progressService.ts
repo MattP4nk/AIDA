@@ -2,7 +2,9 @@ import { db } from "../database/client";
 import { config } from "../config/environment";
 import type { SaveTrigger, ProgressBackup } from "../types/game";
 import { SavePriority } from "../types/game";
+import { injectable } from "tsyringe";
 
+@injectable()
 class ProgressService {
   private saveQueue: Map<string, SaveTrigger>;
   private saveInterval: NodeJS.Timeout | null;
@@ -281,8 +283,18 @@ class ProgressService {
         checksum,
       };
 
-      // TODO: Store backup in database when ProgressBackup model is added to schema
-      // For now, just return the backup object
+      // Store backup in database
+      await db.client.progressBackup.create({
+        data: {
+          userId,
+          data: backupData,
+          reason,
+          checksum,
+        },
+      });
+
+      // Clean up old backups to maintain retention policy
+      await this.deleteOldBackups(userId, 5);
 
       console.log(`📦 Created backup for user ${userId} (${reason})`);
       return backup;
@@ -297,14 +309,117 @@ class ProgressService {
     backupId: string,
   ): Promise<boolean> {
     try {
-      // TODO: Implement backup restoration when ProgressBackup model is added
-      console.log(
-        `🔄 Restore backup ${backupId} for user ${userId} (not implemented yet)`,
+      // Fetch backup from database
+      const backup = await db.client.progressBackup.findUnique({
+        where: { id: backupId },
+      });
+
+      if (!backup) {
+        console.error(`⚠️  Backup ${backupId} not found`);
+        return false;
+      }
+
+      if (backup.userId !== userId) {
+        console.error(
+          `⚠️  Backup ${backupId} does not belong to user ${userId}`,
+        );
+        return false;
+      }
+
+      // Verify checksum
+      const currentChecksum = this.calculateChecksum(
+        JSON.stringify(backup.data),
       );
-      return false;
+      if (backup.checksum && currentChecksum !== backup.checksum) {
+        console.error(
+          `⚠️  Checksum mismatch for backup ${backupId} - data may be corrupted`,
+        );
+        return false;
+      }
+
+      const backupData = backup.data as any;
+
+      // Restore progress data
+      if (backupData.progress) {
+        await db.client.playerProgress.update({
+          where: { userId },
+          data: {
+            ...backupData.progress,
+            userId, // Ensure userId is preserved
+            updatedAt: new Date(),
+          },
+        });
+      }
+
+      console.log(
+        `🔄 Successfully restored backup ${backupId} for user ${userId}`,
+      );
+      return true;
     } catch (error) {
       console.error(`❌ Error restoring backup ${backupId}:`, error);
       return false;
+    }
+  }
+
+  /**
+   * Get all backups for a user
+   */
+  public async getBackups(
+    userId: string,
+    limit: number = 10,
+  ): Promise<ProgressBackup[]> {
+    try {
+      const backups = await db.client.progressBackup.findMany({
+        where: { userId },
+        orderBy: { createdAt: "desc" },
+        take: limit,
+      });
+
+      return backups as ProgressBackup[];
+    } catch (error) {
+      console.error(`❌ Error fetching backups for user ${userId}:`, error);
+      return [];
+    }
+  }
+
+  /**
+   * Delete old backups to maintain retention policy
+   */
+  public async deleteOldBackups(
+    userId: string,
+    keepCount: number = 5,
+  ): Promise<number> {
+    try {
+      // Get all backups for user
+      const backups = await db.client.progressBackup.findMany({
+        where: { userId },
+        orderBy: { createdAt: "desc" },
+      });
+
+      // If we have more than keepCount, delete the oldest ones
+      if (backups.length <= keepCount) {
+        return 0;
+      }
+
+      const backupsToDelete = backups.slice(keepCount);
+      const idsToDelete = backupsToDelete.map((b) => b.id);
+
+      const result = await db.client.progressBackup.deleteMany({
+        where: {
+          id: { in: idsToDelete },
+        },
+      });
+
+      console.log(
+        `🧹 Deleted ${result.count} old backups for user ${userId}`,
+      );
+      return result.count;
+    } catch (error) {
+      console.error(
+        `❌ Error deleting old backups for user ${userId}:`,
+        error,
+      );
+      return 0;
     }
   }
 
@@ -515,6 +630,14 @@ class ProgressService {
   }
 }
 
-// Export singleton instance
-export const progressService = new ProgressService();
-export default progressService;
+export default ProgressService;
+
+// Backward compatibility - lazy singleton that resolves from DI
+import { container } from "../di/container";
+import { PROGRESS_SERVICE } from "../di/tokens";
+export const progressService = new Proxy({} as ProgressService, {
+  get(_target, prop) {
+    const instance = container.resolve(PROGRESS_SERVICE as any);
+    return (instance as any)[prop];
+  }
+});

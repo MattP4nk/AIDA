@@ -14,6 +14,10 @@
 import { prisma } from "../database/client";
 import { Server as SocketIOServer } from "socket.io";
 import crypto from "crypto";
+import { injectable, inject } from "tsyringe";
+import { SOCKET_IO, CACHE_SERVICE } from "../di/tokens";
+import type { CacheService } from "./cacheService";
+import { isPathSafe, isValidFilename } from "../utils/pathSanitizer";
 
 // ==================== TYPES ====================
 
@@ -81,11 +85,16 @@ export interface PathResolution {
 
 // ==================== FILE SERVICE CLASS ====================
 
+@injectable()
 export class FileService {
   private encryptionAlgorithm = "aes-256-cbc";
 
-  constructor(_io: SocketIOServer) {
-    // io parameter kept for future real-time features
+  constructor(
+    @inject(SOCKET_IO) _io: SocketIOServer,
+    @inject(CACHE_SERVICE) private cacheService: CacheService
+  ) {
+    // io parameter kept for DI initialization, will be used for future real-time features  
+    console.log("📁 FileService initialized");
   }
 
   // ==================== FILE OPERATIONS ====================
@@ -100,6 +109,14 @@ export class FileService {
     showHidden: boolean = false,
   ): Promise<FileOperationResult> {
     try {
+      // Validate path for security
+      if (!isPathSafe(path)) {
+        return {
+          success: false,
+          message: `Invalid path: ${path}`,
+          error: "INVALID_PATH",
+        };
+      }
       const resolution = await this.resolvePath(serverId, path);
 
       if (!resolution.exists) {
@@ -181,6 +198,14 @@ export class FileService {
     decryptionKey?: string,
   ): Promise<FileOperationResult> {
     try {
+      // Validate path for security
+      if (!isPathSafe(path)) {
+        return {
+          success: false,
+          message: `Invalid path: ${path}`,
+          error: "INVALID_PATH",
+        };
+      }
       const resolution = await this.resolvePath(serverId, path);
 
       if (!resolution.exists || !resolution.node) {
@@ -203,7 +228,7 @@ export class FileService {
       const accessLevel = await this.getUserAccessLevel(userId, serverId);
 
       // Check read permission
-      if (!(await this.canRead(userId, file.id, accessLevel))) {
+      if (!(await this.canRead(userId, file as unknown as FileNode, accessLevel))) {
         return {
           success: false,
           message: `Permission denied: ${path}`,
@@ -283,7 +308,25 @@ export class FileService {
     encryptionKey?: string,
   ): Promise<FileOperationResult> {
     try {
+      // Validate path for security
+      if (!isPathSafe(path)) {
+        return {
+          success: false,
+          message: `Invalid path: ${path}`,
+          error: "INVALID_PATH",
+        };
+      }
+      
       const { directory, filename } = this.splitPath(path);
+      
+      // Validate filename
+      if (!isValidFilename(filename)) {
+        return {
+          success: false,
+          message: `Invalid filename: ${filename}`,
+          error: "INVALID_FILENAME",
+        };
+      }
       const dirResolution = await this.resolvePath(serverId, directory);
 
       if (!dirResolution.exists) {
@@ -297,7 +340,10 @@ export class FileService {
       const accessLevel = await this.getUserAccessLevel(userId, serverId);
 
       // Check write permission on parent directory
-      if (!(await this.canWrite(userId, dirResolution.nodeId!, accessLevel))) {
+      // We need to fetch parent node to pass it, or just pass ID and let it fetch
+      // Since we have dirResolution.nodeId, but not the full node object with permissions in resolution (it has node property but type is FileNode | undefined)
+      // resolvePath returns node property.
+      if (!(await this.canWrite(userId, dirResolution.node as unknown as FileNode, accessLevel))) {
         return {
           success: false,
           message: `Permission denied: cannot create file in ${directory}`,
@@ -387,6 +433,14 @@ export class FileService {
     append: boolean = false,
   ): Promise<FileOperationResult> {
     try {
+      // Validate path for security
+      if (!isPathSafe(path)) {
+        return {
+          success: false,
+          message: `Invalid path: ${path}`,
+          error: "INVALID_PATH",
+        };
+      }
       const resolution = await this.resolvePath(serverId, path);
 
       if (!resolution.exists || !resolution.node) {
@@ -401,7 +455,7 @@ export class FileService {
       const accessLevel = await this.getUserAccessLevel(userId, serverId);
 
       // Check write permission
-      if (!(await this.canWrite(userId, file.id, accessLevel))) {
+      if (!(await this.canWrite(userId, file as unknown as FileNode, accessLevel))) {
         return {
           success: false,
           message: `Permission denied: ${path}`,
@@ -478,7 +532,25 @@ export class FileService {
     path: string,
   ): Promise<FileOperationResult> {
     try {
+      // Validate path for security
+      if (!isPathSafe(path)) {
+        return {
+          success: false,
+          message: `Invalid path: ${path}`,
+          error: "INVALID_PATH",
+        };
+      }
+      
       const { directory, filename: dirName } = this.splitPath(path);
+      
+      // Validate directory name
+      if (!isValidFilename(dirName)) {
+        return {
+          success: false,
+          message: `Invalid directory name: ${dirName}`,
+          error: "INVALID_DIRNAME",
+        };
+      }
       const parentResolution = await this.resolvePath(serverId, directory);
 
       if (!parentResolution.exists) {
@@ -493,7 +565,7 @@ export class FileService {
 
       // Check write permission
       if (
-        !(await this.canWrite(userId, parentResolution.nodeId!, accessLevel))
+        !(await this.canWrite(userId, parentResolution.node as unknown as FileNode, accessLevel))
       ) {
         return {
           success: false,
@@ -567,6 +639,14 @@ export class FileService {
     recursive: boolean = false,
   ): Promise<FileOperationResult> {
     try {
+      // Validate path for security
+      if (!isPathSafe(path)) {
+        return {
+          success: false,
+          message: `Invalid path: ${path}`,
+          error: "INVALID_PATH",
+        };
+      }
       const resolution = await this.resolvePath(serverId, path);
 
       if (!resolution.exists || !resolution.node) {
@@ -590,7 +670,7 @@ export class FileService {
       }
 
       // Check write permission
-      if (!(await this.canWrite(userId, node.id, accessLevel))) {
+      if (!(await this.canWrite(userId, node as unknown as FileNode, accessLevel))) {
         return {
           success: false,
           message: `Permission denied: ${path}`,
@@ -650,6 +730,14 @@ export class FileService {
     destPath: string,
   ): Promise<FileOperationResult> {
     try {
+      // Validate paths for security
+      if (!isPathSafe(sourcePath) || !isPathSafe(destPath)) {
+        return {
+          success: false,
+          message: `Invalid path`,
+          error: "INVALID_PATH",
+        };
+      }
       const sourceResolution = await this.resolvePath(serverId, sourcePath);
 
       if (!sourceResolution.exists || !sourceResolution.node) {
@@ -664,7 +752,7 @@ export class FileService {
 
       // Check read permission on source
       if (
-        !(await this.canRead(userId, sourceResolution.node.id, accessLevel))
+        !(await this.canRead(userId, sourceResolution.node as unknown as FileNode, accessLevel))
       ) {
         return {
           success: false,
@@ -687,7 +775,7 @@ export class FileService {
 
       // Check write permission on destination
       if (
-        !(await this.canWrite(userId, destDirResolution.nodeId!, accessLevel))
+        !(await this.canWrite(userId, destDirResolution.node as unknown as FileNode, accessLevel))
       ) {
         return {
           success: false,
@@ -735,6 +823,14 @@ export class FileService {
     destPath: string,
   ): Promise<FileOperationResult> {
     try {
+      // Validate paths for security
+      if (!isPathSafe(sourcePath) || !isPathSafe(destPath)) {
+        return {
+          success: false,
+          message: `Invalid path`,
+          error: "INVALID_PATH",
+        };
+      }
       const sourceResolution = await this.resolvePath(serverId, sourcePath);
 
       if (!sourceResolution.exists || !sourceResolution.node) {
@@ -758,7 +854,7 @@ export class FileService {
       }
 
       // Check write permission on source
-      if (!(await this.canWrite(userId, sourceNode.id, accessLevel))) {
+      if (!(await this.canWrite(userId, sourceNode as unknown as FileNode, accessLevel))) {
         return {
           success: false,
           message: `Permission denied: ${sourcePath}`,
@@ -780,7 +876,7 @@ export class FileService {
 
       // Check write permission on destination
       if (
-        !(await this.canWrite(userId, destDirResolution.nodeId!, accessLevel))
+        !(await this.canWrite(userId, destDirResolution.node as unknown as FileNode, accessLevel))
       ) {
         return {
           success: false,
@@ -826,12 +922,19 @@ export class FileService {
    */
   private async canRead(
     userId: string,
-    nodeId: string,
+    nodeOrId: string | FileNode,
     accessLevel: number,
   ): Promise<boolean> {
-    const node = await prisma.fileSystemNode.findUnique({
-      where: { id: nodeId },
-    });
+    let node: FileNode | null = null;
+    
+    if (typeof nodeOrId === 'string') {
+      const fetched = await prisma.fileSystemNode.findUnique({
+        where: { id: nodeOrId },
+      });
+      node = fetched as unknown as FileNode;
+    } else {
+      node = nodeOrId;
+    }
 
     if (!node) return false;
 
@@ -859,12 +962,19 @@ export class FileService {
    */
   private async canWrite(
     userId: string,
-    nodeId: string,
+    nodeOrId: string | FileNode,
     accessLevel: number,
   ): Promise<boolean> {
-    const node = await prisma.fileSystemNode.findUnique({
-      where: { id: nodeId },
-    });
+    let node: FileNode | null = null;
+    
+    if (typeof nodeOrId === 'string') {
+      const fetched = await prisma.fileSystemNode.findUnique({
+        where: { id: nodeOrId },
+      });
+      node = fetched as unknown as FileNode;
+    } else {
+      node = nodeOrId;
+    }
 
     if (!node) return false;
     if (node.isProtected) return false;
@@ -895,6 +1005,12 @@ export class FileService {
     userId: string,
     serverId: string,
   ): Promise<number> {
+    // Check cache
+    const cacheKey = `access_level:${userId}:${serverId}`;
+    const cached = this.cacheService.get<number>(cacheKey);
+    if (cached !== undefined) {
+      return cached;
+    }
     // Check if user owns the server
     const server = await prisma.gameServer.findUnique({
       where: { id: serverId },
@@ -914,7 +1030,12 @@ export class FileService {
       orderBy: { timestamp: "desc" },
     });
 
-    return latestHack?.accessLevel || 0;
+    const level = latestHack?.accessLevel || 0;
+    
+    // Cache result (short TTL as access level can change)
+    this.cacheService.set(cacheKey, level, 60);
+    
+    return level;
   }
 
   // ==================== PATH RESOLUTION ====================
@@ -1025,18 +1146,9 @@ export class FileService {
    * Normalize a path (remove .., ., multiple slashes)
    */
   private normalizePath(path: string): string {
-    const parts = path.split("/").filter((p) => p.length > 0 && p !== ".");
-    const normalized: string[] = [];
-
-    for (const part of parts) {
-      if (part === "..") {
-        normalized.pop();
-      } else {
-        normalized.push(part);
-      }
-    }
-
-    return "/" + normalized.join("/");
+    // Use the central path sanitizer for security
+    const { sanitizePath } = require('../utils/pathSanitizer');
+    return sanitizePath(path);
   }
 
   /**
@@ -1342,10 +1454,14 @@ export class FileService {
   }
 }
 
-// Export singleton instance (will be initialized with io in server setup)
-export let fileService: FileService;
+export default FileService;
 
-export const initializeFileService = (io: SocketIOServer): FileService => {
-  fileService = new FileService(io);
-  return fileService;
-};
+// Backward compatibility
+import { container } from "../di/container";
+import { FILE_SERVICE } from "../di/tokens";
+export const fileService = new Proxy({} as FileService, {
+  get(_target, prop) {
+    const instance = container.resolve(FILE_SERVICE as any);
+    return (instance as any)[prop];
+  }
+});

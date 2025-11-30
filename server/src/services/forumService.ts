@@ -2,6 +2,8 @@ import { EventEmitter } from "events";
 import { prisma } from "../database/client";
 import type { Forum, Post, ForumMember, ProxyConnection } from "@prisma/client";
 import type { Server as SocketIOServer } from "socket.io";
+import { injectable, inject } from "tsyringe";
+import { SOCKET_IO } from "../di/tokens";
 
 /**
  * ForumService - Underground forum networks and darkweb system
@@ -48,9 +50,9 @@ interface ScanResult {
   requiresHigherSkills: string[];
 }
 
+@injectable()
 export class ForumService extends EventEmitter {
-  private static instance: ForumService;
-  private io: SocketIOServer | null = null;
+  private io: SocketIOServer;
 
   // Available proxy servers
   private readonly PROXY_SERVERS: ProxyServer[] = [
@@ -96,21 +98,10 @@ export class ForumService extends EventEmitter {
     },
   ];
 
-  private constructor() {
+  constructor(@inject(SOCKET_IO) io: SocketIOServer) {
     super();
-    console.log("⚡ ForumService initialized");
-  }
-
-  public static getInstance(): ForumService {
-    if (!ForumService.instance) {
-      ForumService.instance = new ForumService();
-    }
-    return ForumService.instance;
-  }
-
-  public initialize(io: SocketIOServer): void {
     this.io = io;
-    console.log("✅ ForumService initialized with Socket.IO");
+    console.log("⚡ ForumService initialized");
   }
 
   // ==================== FORUM DISCOVERY ====================
@@ -987,4 +978,14 @@ export class ForumService extends EventEmitter {
   }
 }
 
-export const forumService = ForumService.getInstance();
+export default ForumService;
+
+// Backward compatibility
+import { container } from "../di/container";
+import { FORUM_SERVICE } from "../di/tokens";
+export const forumService = new Proxy({} as ForumService, {
+  get(_target, prop) {
+    const instance = container.resolve(FORUM_SERVICE as any);
+    return (instance as any)[prop];
+  }
+});

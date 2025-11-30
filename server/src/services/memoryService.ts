@@ -1,4 +1,5 @@
 import { EventEmitter } from "events";
+import { injectable } from "tsyringe";
 
 /**
  * Memory Management Service - Backend process and memory tracking
@@ -70,6 +71,7 @@ export interface SessionMemoryStats {
   lastActivity: number;
 }
 
+@injectable()
 class MemoryService extends EventEmitter {
   private processes: Map<string, Map<number, Process>> = new Map(); // sessionId -> pid -> Process
   private allocations: Map<string, MemoryAllocation[]> = new Map(); // sessionId -> allocations
@@ -84,6 +86,7 @@ class MemoryService extends EventEmitter {
   constructor() {
     super();
     this.startBackgroundTasks();
+    console.log("🧠 Memory Service initialized");
   }
 
   /**
@@ -752,5 +755,14 @@ class MemoryService extends EventEmitter {
   }
 }
 
-export const memoryService = new MemoryService();
-export { MemoryService };
+export default MemoryService;
+
+// Backward compatibility
+import { container } from "../di/container";
+import { MEMORY_SERVICE } from "../di/tokens";
+export const memoryService = new Proxy({} as MemoryService, {
+  get(_target, prop) {
+    const instance = container.resolve(MEMORY_SERVICE as any);
+    return (instance as any)[prop];
+  }
+});

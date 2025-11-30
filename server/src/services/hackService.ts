@@ -3,6 +3,7 @@ import { db } from "../database/client";
 import type { HackAttempt, HackResult, HackCalculation } from "../types/game";
 import { HackMethod } from "../types/game";
 import { progressService } from "./progressService";
+import { injectable } from "tsyringe";
 
 /**
  * Enhanced HackService - Complete PvP hacking mechanics
@@ -16,6 +17,7 @@ import { progressService } from "./progressService";
  * - Cooldown management
  * - Real-time event broadcasting
  */
+@injectable()
 class HackService extends EventEmitter {
   private cooldowns: Map<string, Date>;
   private activeHacks: Map<string, HackAttempt>;
@@ -258,8 +260,7 @@ class HackService extends EventEmitter {
       // 1. Trigger security alert on target server (HackService → ServerService)
       if (detected) {
         try {
-          const ServerService = (await import("./serverService")).default;
-          const serverService = ServerService.getInstance();
+          const { serverService } = await import("./serverService");
           await serverService.triggerSecurityAlert(
             targetServerId,
             attackerId,
@@ -950,6 +951,14 @@ class HackService extends EventEmitter {
   }
 }
 
-// Export singleton instance
-export const hackService = new HackService();
-export default hackService;
+export default HackService;
+
+// Backward compatibility
+import { container } from "../di/container";
+import { HACK_SERVICE } from "../di/tokens";
+export const hackService = new Proxy({} as HackService, {
+  get(_target, prop) {
+    const instance = container.resolve(HACK_SERVICE as any);
+    return (instance as any)[prop];
+  }
+});

@@ -1,5 +1,9 @@
-import { PrismaClient, GameServer, ServerConnection } from "@prisma/client";
+import { GameServer, ServerConnection } from "@prisma/client";
 import { Server as SocketIOServer } from "socket.io";
+import { db } from "../database/client";
+import { injectable, inject } from "tsyringe";
+import { CACHE_SERVICE } from "../di/tokens";
+import type { CacheService } from "./cacheService";
 
 /**
  * Server state interface
@@ -85,29 +89,15 @@ interface AccessCheck {
  * - Server state management
  * - Network topology
  */
+@injectable()
 class ServerService {
-  private static instance: ServerService;
-  private prisma: PrismaClient;
-  private io: SocketIOServer;
+  private prisma = db.client;
+  private io: SocketIOServer | null = null;
 
-  /**
-   * Private constructor for singleton pattern
-   */
-  private constructor() {
-    this.prisma = new PrismaClient();
-    // Socket.IO will be initialized via setSocketIO
-    this.io = null as any;
-  }
-
-  /**
-   * Get singleton instance
-   * @returns ServerService instance
-   */
-  public static getInstance(): ServerService {
-    if (!ServerService.instance) {
-      ServerService.instance = new ServerService();
-    }
-    return ServerService.instance;
+  constructor(
+    @inject(CACHE_SERVICE) private cacheService: CacheService
+  ) {
+    console.log("🖥️  ServerService initialized");
   }
 
   /**
@@ -185,6 +175,12 @@ class ServerService {
    */
   public async getServer(serverId: string): Promise<ServerDetails | null> {
     try {
+      // Check cache first
+      const cached = this.cacheService.get<ServerDetails>(`server:${serverId}`);
+      if (cached) {
+        return cached;
+      }
+
       const server = await this.prisma.gameServer.findUnique({
         where: { id: serverId },
       });
@@ -205,15 +201,70 @@ class ServerService {
         alerts: 0,
       };
 
-      return {
+      const result = {
         ...server,
         state,
       };
+
+      // Cache result (TTL 30 seconds)
+      this.cacheService.set(`server:${serverId}`, result, 30);
+
+      return result;
     } catch (error) {
       console.error("[ServerService] Error getting server:", error);
       throw new Error(
         `Failed to get server: ${error instanceof Error ? error.message : "Unknown error"}`,
       );
+    }
+  }
+
+  /**
+   * Get server by IP
+   * @param ipAddress - Server IP
+   * @returns Server details
+   */
+  public async getServerByIp(ipAddress: string): Promise<ServerDetails | null> {
+    try {
+      // Check cache first
+      const cached = this.cacheService.get<ServerDetails>(`server_ip:${ipAddress}`);
+      if (cached) {
+        return cached;
+      }
+
+      const server = await this.prisma.gameServer.findUnique({
+        where: { ipAddress },
+      });
+
+      if (!server) {
+        return null;
+      }
+
+      // Generate current state
+      const state: ServerState = {
+        online: server.isOnline,
+        load: Math.min(
+          100,
+          (server.currentConnections / server.maxConnections) * 100,
+        ),
+        connections: await this.getActiveConnectionCount(server.id),
+        lastActivity: server.updatedAt,
+        alerts: 0,
+      };
+
+      const result = {
+        ...server,
+        state,
+      };
+
+      // Cache result
+      this.cacheService.set(`server_ip:${ipAddress}`, result, 30);
+      // Also cache by ID
+      this.cacheService.set(`server:${server.id}`, result, 30);
+
+      return result;
+    } catch (error) {
+      console.error("[ServerService] Error getting server by IP:", error);
+      return null;
     }
   }
 
@@ -251,6 +302,9 @@ class ServerService {
         where: { id: serverId },
         data: updateData,
       });
+
+      // Invalidate cache
+      this.cacheService.del(`server:${serverId}`);
 
       // Audit log
       await this.auditLog(
@@ -302,6 +356,9 @@ class ServerService {
       await this.prisma.gameServer.delete({
         where: { id: serverId },
       });
+
+      // Invalidate cache
+      this.cacheService.del(`server:${serverId}`);
 
       // Audit log
       await this.auditLog(server.ownerId ?? "system", "SERVER_DELETED", {
@@ -403,25 +460,30 @@ class ServerService {
    */
   public async connectToServer(
     userId: string,
-    serverId: string,
+    idOrIp: string,
   ): Promise<ConnectionResult> {
     try {
-      const server = await this.getServer(serverId);
+      let server = await this.getServer(idOrIp);
+      if (!server) {
+        // Try by IP
+        server = await this.getServerByIp(idOrIp);
+      }
+
       if (!server) {
         return {
           success: false,
-          serverId,
+          serverId: idOrIp,
           accessLevel: 0,
           message: "Server not found",
         };
       }
 
       // Check if player can access server
-      const accessCheck = await this.canAccessServer(userId, serverId);
+      const accessCheck = await this.canAccessServer(userId, server.id);
       if (!accessCheck.canAccess) {
         return {
           success: false,
-          serverId,
+          serverId: server.id,
           accessLevel: 0,
           message: accessCheck.reason,
         };
@@ -431,7 +493,7 @@ class ServerService {
       const existingConnection = await this.prisma.serverConnection.findFirst({
         where: {
           userId,
-          serverId,
+          serverId: server.id,
           isActive: true,
         },
       });
@@ -441,8 +503,8 @@ class ServerService {
         await this.prisma.serverConnection.update({
           where: { id: existingConnection.id },
           data: {
-            connectedAt: new Date(),
-            sessionData: { accessLevel: accessCheck.accessLevel } as any,
+            // connectedAt: new Date(), // Keep original connectedAt
+            // sessionData: { accessLevel: accessCheck.accessLevel } as any, // Update session data if needed
           },
         });
       } else {
@@ -450,51 +512,51 @@ class ServerService {
         await this.prisma.serverConnection.create({
           data: {
             userId,
-            serverId,
-            connectedAt: new Date(),
+            serverId: server.id,
             isActive: true,
+            accessLevel: accessCheck.accessLevel,
             sessionData: { accessLevel: accessCheck.accessLevel } as any,
-          },
-        });
-
-        // Increment server connections
-        await this.prisma.gameServer.update({
-          where: { id: serverId },
-          data: {
-            currentConnections: {
-              increment: 1,
-            },
           },
         });
       }
 
+      // Update server connection count
+      await this.prisma.gameServer.update({
+        where: { id: server.id },
+        data: {
+          currentConnections: {
+            increment: 1,
+          },
+        },
+      });
+
+      // Invalidate cache
+      this.cacheService.del(`server:${server.id}`);
+      if (server.ipAddress) {
+        this.cacheService.del(`server_ip:${server.ipAddress}`);
+      }
+
       // Audit log
-      await this.auditLog(userId, "SERVER_CONNECTED", {
-        serverId,
+      await this.auditLog(userId, "SERVER_CONNECT", {
+        serverId: server.id,
         serverName: server.name,
         accessLevel: accessCheck.accessLevel,
       });
 
-      // Emit Socket.IO event
-      if (this.io) {
-        this.io.to(`player:${userId}`).emit("server:connected", {
-          serverId,
-          serverName: server.name,
-          accessLevel: accessCheck.accessLevel,
-        });
-      }
-
       return {
         success: true,
-        serverId,
+        serverId: server.id,
         accessLevel: accessCheck.accessLevel,
-        message: `Connected to ${server.name} with access level ${accessCheck.accessLevel}`,
+        message: `Connected to ${server.name}`,
       };
     } catch (error) {
       console.error("[ServerService] Error connecting to server:", error);
-      throw new Error(
-        `Failed to connect to server: ${error instanceof Error ? error.message : "Unknown error"}`,
-      );
+      return {
+        success: false,
+        serverId: idOrIp,
+        accessLevel: 0,
+        message: "Connection failed",
+      };
     }
   }
 
@@ -949,3 +1011,13 @@ class ServerService {
 }
 
 export default ServerService;
+
+// Backward compatibility
+import { container } from "../di/container";
+import { SERVER_SERVICE } from "../di/tokens";
+export const serverService = new Proxy({} as ServerService, {
+  get(_target, prop) {
+    const instance = container.resolve(SERVER_SERVICE as any);
+    return (instance as any)[prop];
+  }
+});

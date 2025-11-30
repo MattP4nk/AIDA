@@ -1,5 +1,6 @@
 import { EventEmitter } from "events";
 import { CommandResult } from "../../../shared/types";
+import { injectable } from "tsyringe";
 
 /**
  * ProcessStateService - Manages command execution state and process lifecycle
@@ -44,8 +45,14 @@ export interface ProcessRegistrationOptions {
   metadata?: Record<string, any>;
 }
 
+@injectable()
 class ProcessStateService extends EventEmitter {
   private processes: Map<number, CommandProcess> = new Map();
+
+  constructor() {
+    super();
+    console.log("⚙️ Process State Service initialized");
+  }
 
   /**
    * Register a new command process
@@ -274,5 +281,14 @@ class ProcessStateService extends EventEmitter {
   }
 }
 
-export const processStateService = new ProcessStateService();
-export { ProcessStateService };
+export default ProcessStateService;
+
+// Backward compatibility
+import { container } from "../di/container";
+import { PROCESS_STATE_SERVICE } from "../di/tokens";
+export const processStateService = new Proxy({} as ProcessStateService, {
+  get(_target, prop) {
+    const instance = container.resolve(PROCESS_STATE_SERVICE as any);
+    return (instance as any)[prop];
+  }
+});

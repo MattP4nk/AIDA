@@ -1,5 +1,6 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
+import { sanitizeMessageContent, validateMessageContent } from "../../utils/validators";
 
 export class SocialCommandsModule implements CommandModule {
   public commands: Set<string> = new Set([
@@ -117,6 +118,18 @@ export class SocialCommandsModule implements CommandModule {
       };
     }
 
+    // Validate and sanitize content
+    const contentValidation = validateMessageContent(content);
+    if (!contentValidation.isValid) {
+      return {
+        success: false,
+        output: contentValidation.error || "Invalid message content",
+        timestamp: new Date(),
+      };
+    }
+    
+    const sanitizedContent = sanitizeMessageContent(content);
+
     const { db } = context;
     const recipient = await db.client.user.findFirst({
       where: { username: recipientUsername },
@@ -135,7 +148,7 @@ export class SocialCommandsModule implements CommandModule {
       userId,
       recipient.id,
       {
-        content,
+        content: sanitizedContent,
         subject: "", // Empty subject for chat/msg
         messageType: "private",
       },
@@ -250,6 +263,19 @@ export class SocialCommandsModule implements CommandModule {
       };
     }
 
+    // Validate and sanitize content
+    const contentValidation = validateMessageContent(content);
+    if (!contentValidation.isValid) {
+      return {
+        success: false,
+        output: contentValidation.error || "Invalid message content",
+        timestamp: new Date(),
+      };
+    }
+    
+    const sanitizedContent = sanitizeMessageContent(content);
+    const sanitizedSubject = sanitizeMessageContent(subject);
+
     const { db } = context;
     const recipient = await db.client.user.findFirst({
       where: { username: recipientUsername },
@@ -268,8 +294,8 @@ export class SocialCommandsModule implements CommandModule {
       userId,
       recipient.id,
       {
-        content,
-        subject,
+        content: sanitizedContent,
+        subject: sanitizedSubject,
         messageType: "private",
       },
     );

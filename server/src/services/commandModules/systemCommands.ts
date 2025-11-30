@@ -20,10 +20,8 @@ export class SystemCommandsModule implements CommandModule {
     command: Command,
     context: CommandContext,
   ): Promise<CommandResult> {
-    // TODO: Re-enable session check when GameStateManager is properly exported/injected
-    // const session = this.getSession(context);
-    // if (!session) {
-    if (false) {
+    const session = this.getSession(context);
+    if (!session) {
       return {
         success: false,
         output: "No active session",
