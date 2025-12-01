@@ -21,21 +21,37 @@ export function isValidUUID(id: string): boolean {
 }
 
 /**
- * Validate a server ID
+ * Validate a CUID (Collision-resistant Unique Identifier)
+ * Prisma uses CUIDs by default in this project
+ * @param id - The ID to validate
+ * @returns True if valid CUID
+ */
+export function isValidCUID(id: string): boolean {
+  if (!id || typeof id !== 'string') {
+    return false;
+  }
+  
+  // CUIDs start with 'c' and are alphanumeric, usually 25 chars
+  // We'll be slightly permissive to allow for different versions/lengths
+  return /^c[a-z0-9]{20,30}$/.test(id);
+}
+
+/**
+ * Validate a server ID (supports UUID or CUID)
  * @param serverId - The server ID to validate
  * @returns True if valid
  */
 export function validateServerId(serverId: string): boolean {
-  return isValidUUID(serverId);
+  return isValidUUID(serverId) || isValidCUID(serverId);
 }
 
 /**
- * Validate a user ID
+ * Validate a user ID (supports UUID or CUID)
  * @param userId - The user ID to validate
  * @returns True if valid
  */
 export function validateUserId(userId: string): boolean {
-  return isValidUUID(userId);
+  return isValidUUID(userId) || isValidCUID(userId);
 }
 
 /**

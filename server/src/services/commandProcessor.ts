@@ -19,7 +19,6 @@ import { ProcessCommandsModule } from "./commandModules/processCommands";
 import { MathCommandsModule } from "./commandModules/mathCommands";
 import { CommandModule, CommandContext } from "./commandModules/interface";
 import { memoryService } from "./memoryService";
-import { processStateService } from "./processStateService";
 import { injectable, inject } from "tsyringe";
 import { SOCKET_IO } from "../di/tokens";
 import { validateCommand, validateArgs, validateUserId } from "../utils/validators";
@@ -88,17 +87,18 @@ class CommandProcessor extends EventEmitter {
   }
 
   private async buildCommandContext(userId: string): Promise<CommandContext> {
-    const { gameStateManager } = await import("../index");
-    const { fileService } = await import("./fileService");
-    const { shopService } = await import("./shopService");
-    const { missionService } = await import("./missionService");
-    const { serverService } = await import("./serverService");
-    const { getPresenceService } = await import("./playerPresenceService");
+    // Get services via Registry
+    const gameStateManager = ServiceRegistry.gameStateManager;
+    const fileService = ServiceRegistry.fileService;
+    const processStateService = ServiceRegistry.processStateService;
+    const shopService = ServiceRegistry.shopService;
+    const missionService = ServiceRegistry.missionService;
+    const serverService = ServiceRegistry.serverService;
 
     // Safely get presence service
     let playerPresenceService;
     try {
-      playerPresenceService = getPresenceService();
+      playerPresenceService = ServiceRegistry.playerPresenceService;
     } catch (e) {
       // Service might not be initialized yet
       console.warn("PlayerPresenceService not initialized for command context");
@@ -751,6 +751,7 @@ export default CommandProcessor;
 // Backward compatibility
 import { container } from "../di/container";
 import { COMMAND_PROCESSOR } from "../di/tokens";
+import { ServiceRegistry } from "../di/serviceRegistry";
 export const commandProcessor = new Proxy({} as CommandProcessor, {
   get(_target, prop) {
     const instance = container.resolve(COMMAND_PROCESSOR as any);

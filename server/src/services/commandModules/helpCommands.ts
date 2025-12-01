@@ -108,20 +108,20 @@ export class HelpCommandsModule implements CommandModule {
       categoryCounts[cmd.category] = (categoryCounts[cmd.category] || 0) + 1;
     });
 
-    let output = "=== COMMAND CATEGORIES ===\\n\\n";
-    output += "Usage: help <category>\\n\\n";
+    let output = "=== COMMAND CATEGORIES ===\n\n";
+    output += "Usage: help <category>\n\n";
 
     categories.forEach(({ name, desc }) => {
       const count = categoryCounts[name] || 0;
       if (count > 0) {
-        output += `📁 ${name.toUpperCase()}\\n`;
-        output += `   ${desc}\\n`;
-        output += `   ${count} command${count !== 1 ? "s" : ""}\\n\\n`;
+        output += `📁 ${name.toUpperCase()}\n`;
+        output += `   ${desc}\n`;
+        output += `   ${count} command${count !== 1 ? "s" : ""}\n\n`;
       }
     });
 
-    output += "\\nType 'help <category>' to see commands in that category.\\n";
-    output += "Example: help system\\n";
+    output += "\nType 'help <category>' to see commands in that category.\n";
+    output += "Example: help system\n";
 
     return {
       success: true,
@@ -156,26 +156,26 @@ export class HelpCommandsModule implements CommandModule {
       return {
         success: false,
         output:
-          `Unknown category: ${category}\\n\\n` +
-          `Available categories: ${validCategories.join(", ")}\\n\\n` +
+          `Unknown category: ${category}\n\n` +
+          `Available categories: ${validCategories.join(", ")}\n\n` +
           "Type 'help' to see all categories.",
         timestamp: new Date(),
       };
     }
 
-    let output = `=== ${category.toUpperCase()} COMMANDS ===\\n\\n`;
+    let output = `=== ${category.toUpperCase()} COMMANDS ===\n\n`;
 
     categoryCommands.forEach((cmd) => {
-      output += `${cmd.command.padEnd(15)} - ${cmd.description}\\n`;
-      output += `  Usage: ${cmd.usage}\\n`;
+      output += `${cmd.command.padEnd(15)} - ${cmd.description}\n`;
+      output += `  Usage: ${cmd.usage}\n`;
       if (cmd.examples && cmd.examples.length > 0) {
-        output += `  Example: ${cmd.examples[0]}\\n`;
+        output += `  Example: ${cmd.examples[0]}\n`;
       }
-      output += "\\n";
+      output += "\n";
     });
 
-    output += "Type 'help' to see all categories.\\n";
-    output += "Type 'man <command>' for detailed command information.\\n";
+    output += "Type 'help' to see all categories.\n";
+    output += "Type 'man <command>' for detailed command information.\n";
 
     return {
       success: true,
@@ -193,7 +193,7 @@ export class HelpCommandsModule implements CommandModule {
     if (!commandName) {
       return {
         success: false,
-        output: "Usage: man <command>\\nExample: man scan",
+        output: "Usage: man <command>\nExample: man scan",
         timestamp: new Date(),
       };
     }
@@ -202,7 +202,7 @@ export class HelpCommandsModule implements CommandModule {
     if (!cmdInfo) {
       return {
         success: false,
-        output: `No manual entry for '${commandName}'\\nType 'help' to see available commands`,
+        output: `No manual entry for '${commandName}'\nType 'help' to see available commands`,
         timestamp: new Date(),
       };
     }
@@ -230,7 +230,7 @@ export class HelpCommandsModule implements CommandModule {
     output.push(`  ${cmdInfo.category}`);
     return {
       success: true,
-      output: output.join("\\n"),
+      output: output.join("\n"),
       data: { command: cmdInfo },
       timestamp: new Date(),
     };
@@ -260,14 +260,14 @@ export class HelpCommandsModule implements CommandModule {
         timestamp: new Date(),
       };
     }
-    const output = ["📜 COMMAND HISTORY\\n"];
+    const output = ["📜 COMMAND HISTORY\n"];
     history.forEach((cmd: Command, index: number) => {
       const timeStr = new Date(cmd.timestamp).toLocaleTimeString();
       const args = cmd.args as string[];
       const cmdStr = `${cmd.command} ${args.join(" ")}`.trim();
       output.push(`${String(index + 1).padStart(4)}  ${timeStr}  ${cmdStr}`);
     });
-    output.push(`\\nTotal: ${history.length} command${history.length !== 1 ? "s" : ""}`);
+    output.push(`\nTotal: ${history.length} command${history.length !== 1 ? "s" : ""}`);
     output.push(`Use 'history <n>' to limit results (max 200)`);
     return {
       success: true,
