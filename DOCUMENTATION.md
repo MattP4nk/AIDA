@@ -198,7 +198,7 @@ interface PlayerSession {
 - ✅ No legacy REST endpoints
 - ✅ Architecture: Backend IS the console
 
-**Services:** ✅ Complete (17 services)
+**Services:** ✅ Complete (20 services)
 - ✅ `commandProcessor.ts` - Refactored & Optimized
 - ✅ `memoryService.ts` - Process management
 - ✅ `hackService.ts` - Hacking mechanics
@@ -213,11 +213,14 @@ interface PlayerSession {
 - ✅ `gameStateManager.ts` - Game state
 - ✅ `ipService.ts` - IP generation
 - ✅ `playerPresenceService.ts` - Online tracking
-- ✅ `cacheService.ts` - **NEW** In-memory caching
-- ✅ `processStateService.ts` - **NEW** Process lifecycle
+- ✅ `cacheService.ts` - In-memory caching
+- ✅ `processStateService.ts` - Process lifecycle
 - ✅ `processCommands.ts` - Process commands
+- ✅ `factionService.ts` - **PHASE 5** Faction management
+- ✅ `aiService.ts` - **PHASE 5** Ollama AI integration
+- ✅ `personaService.ts` - **PHASE 5** AI personas & decisions
 
-**Command Modules:** ✅ **ALL 9 MODULES COMPLETE**
+**Command Modules:** ✅ **ALL 10 MODULES COMPLETE**
 - ✅ `systemCommands.ts`
 - ✅ `fileCommands.ts`
 - ✅ `socialCommands.ts`
@@ -227,6 +230,7 @@ interface PlayerSession {
 - ✅ `hackCommands.ts`
 - ✅ `gameCommands.ts`
 - ✅ `helpCommands.ts`
+- ✅ `factionCommands.ts` - **PHASE 5**
 
 **Modularization Progress:** ✅ **100% - ALL COMMANDS MODULAR**
 
@@ -701,9 +705,32 @@ totalPlayTime: calculatePlayTime(sessionData),
 - Security: Hardened (9 attack vectors mitigated)
 - Architecture: **A+** (World-class)
 
-### Phase 5: AI/NPC Implementation (🚀 READY TO START)
+### Phase 5: AI/NPC Implementation (⚙️ IN PROGRESS - Week 2/5 Complete)
 
+**Status:** Week 1 ✅ Complete | Week 2 ✅ Complete  
 **Goal:** Autonomous AI personas driving game narrative through missions, messages, and forum posts.
+
+**Completed (Week 1):**
+- ✅ Database schema migration (Faction, AIPersona, AIKnowledge, AIAction, AidaClue)
+- ✅ FactionService implementation (join/leave, reputation, queries)
+- ✅ Faction commands (`faction join/leave/status/missions/reputation`)
+- ✅ DI registration for all new services
+
+**Completed (Week 2):**
+- ✅ AIService: Ollama integration with retry logic (3x exponential backoff)
+- ✅ AIService: Response caching (5min TTL, MD5 keys, metrics tracking)
+- ✅ AIService: Request timeout (30s) and error handling
+- ✅ PersonaService: Knowledge management (add, query, expire)
+- ✅ PersonaService: AI-driven decision-making (replaces random logic)
+- ✅ PersonaService: Dynamic mission creation (AI-generated content)
+- ✅ PersonaService: AI output storage for auditability
+- ✅ Seeded personas: Game Master, 3 Faction Leaders, AIDA
+- ✅ System prompts for each personality type
+
+**In Progress (Week 3):**
+- 🔄 MessageService integration (AI direct messages)
+- 🔄 ForumService integration (AI forum posts)
+- 🔄 Event-triggered AI actions
 
 ---
 

@@ -7,10 +7,11 @@
 
 import "reflect-metadata";
 import { container } from "tsyringe";
-import type { Server as SocketIOServer } from "socket.io";
-import type { PrismaClient } from "@prisma/client";
+import { PrismaClient } from "@prisma/client";
+import { Server as SocketIOServer } from "socket.io";
+import { Logger } from "pino";
 
-import * as TOKENS from "./tokens";
+// Import all services
 import GameStateManager from "../services/gameStateManager";
 import ProgressService from "../services/progressService";
 import EventService from "../services/eventService";
@@ -30,26 +31,31 @@ import CommandProcessor from "../services/commandProcessor";
 import { FactionService } from "../services/factionService";
 import { AIService } from "../services/aiService";
 import { PersonaService } from "../services/personaService";
+import AISchedulerService from "../services/aiSchedulerService";
+
+import * as TOKENS from "./tokens";
 
 /**
- * Initialize the DI container with all service registrations
+ * Initialize and configure the DI container
  */
-export function initializeContainer(
+export function setupContainer(
   io: SocketIOServer,
-  prismaClient: PrismaClient
+  prismaClient: PrismaClient,
+  logger: Logger
 ): void {
   // Register external dependencies
+  container.registerInstance("Logger", logger);
   container.registerInstance(TOKENS.SOCKET_IO, io);
   container.registerInstance(TOKENS.PRISMA_CLIENT, prismaClient);
 
-  // Register core services as singletons
+  // Core Services
   container.registerSingleton(TOKENS.GAME_STATE_MANAGER, GameStateManager);
   container.registerSingleton(TOKENS.PROGRESS_SERVICE, ProgressService);
   container.registerSingleton(TOKENS.EVENT_SERVICE, EventService);
   container.registerSingleton(TOKENS.IP_SERVICE, IPService);
   container.registerSingleton(TOKENS.CACHE_SERVICE, CacheService);
-  
-  // Register feature services as singletons
+
+  // Feature Services
   container.registerSingleton(TOKENS.SHOP_SERVICE, ShopService);
   container.registerSingleton(TOKENS.MISSION_SERVICE, MissionService);
   container.registerSingleton(TOKENS.SERVER_SERVICE, ServerService);
@@ -64,14 +70,18 @@ export function initializeContainer(
   container.registerSingleton(TOKENS.FACTION_SERVICE, FactionService);
   container.registerSingleton(TOKENS.AI_SERVICE, AIService);
   container.registerSingleton(TOKENS.PERSONA_SERVICE, PersonaService);
+  container.registerSingleton(TOKENS.AI_SCHEDULER_SERVICE, AISchedulerService);
 
-  console.log("✅ DI Container initialized");
+  console.log("✅ DI Container initialized with all services");
 }
+
+// Alias for backward compatibility
+export const initializeContainer = setupContainer;
 
 /**
  * Get a service from the container
  */
-export function getService<T>(token: symbol): T {
+export function getService<T>(token: string | symbol): T {
   return container.resolve<T>(token as any);
 }
 

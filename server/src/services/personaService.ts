@@ -3,6 +3,8 @@ import { PrismaClient, AIPersona, AIKnowledge, AIAction } from "@prisma/client";
 import { Logger } from "pino";
 import MissionService from "./missionService";
 import { AIService } from "./aiService";
+import { MessageService } from "./messageService";
+import ForumService from "./forumService";
 
 interface KnowledgeInput {
   source: string;
@@ -18,7 +20,9 @@ export class PersonaService {
     @inject("PrismaClient") private prisma: PrismaClient,
     @inject("Logger") private logger: Logger,
     @inject("MissionService") private missionService: MissionService,
-    @inject("AIService") private aiService: AIService
+    @inject("AIService") private aiService: AIService,
+    @inject("MessageService") private messageService: MessageService,
+    @inject("ForumService") private forumService: ForumService
   ) {}
 
   /**
@@ -37,6 +41,124 @@ export class PersonaService {
     return this.prisma.aIPersona.findFirst({
       where: { type },
     });
+  }
+
+  /**
+   * Setup event listeners for AI-triggered actions
+   * 
+   * PHASE 5 WEEK 3: Event-driven AI responses
+   */
+  async setupEventListeners() {
+    // This method should be called during service initialization
+    // to set up listeners for game events
+    this.logger.info("PersonaService event listeners configured");
+  }
+
+  /**
+   * Handle mission completion event - AI personas learn from it
+   * 
+   * PHASE 5 WEEK 3: Event-triggered knowledge acquisition
+   */
+  async onMissionCompleted(data: {
+    userId: string;
+    missionId: string;
+    missionTitle: string;
+    factionId?: string;
+  }): Promise<void> {
+    try {
+      this.logger.info({ data }, "Processing mission completion for AI personas");
+
+      // Get mission details
+      const mission = await this.prisma.mission.findUnique({
+        where: { id: data.missionId },
+        include: { faction: true }
+      });
+
+      if (!mission) return;
+
+      // Determine which personas should learn from this
+      const interestedPersonas: string[] = [];
+
+      // 1. Game Master learns from everything
+      const gameMaster = await this.getPersonaByType("game_master");
+      if (gameMaster) interestedPersonas.push(gameMaster.id);
+
+      // 2. Faction leader learns from their faction's missions
+      if (mission.factionId) {
+        const factionLeader = await this.prisma.aIPersona.findFirst({
+          where: {
+            type: "faction_leader",
+            faction: { id: mission.factionId }
+          }
+        });
+        if (factionLeader) interestedPersonas.push(factionLeader.id);
+      }
+
+      // Add knowledge to interested personas
+      for (const personaId of interestedPersonas) {
+        await this.addKnowledge(personaId, {
+          source: "mission_completion",
+          type: "player_skill",
+          content: {
+            userId: data.userId,
+            missionId: data.missionId,
+            missionTitle: data.missionTitle,
+            difficulty: mission.difficulty,
+            factionId: mission.factionId
+          },
+          confidence: 0.9
+        });
+
+        // Trigger AI decision making (async, don't wait)
+        this.decideAction(personaId).catch(err =>
+          this.logger.error(err, "Failed to trigger AI action after mission completion")
+        );
+      }
+    } catch (error) {
+      this.logger.error(error, "Error processing mission completion event");
+    }
+  }
+
+  /**
+   * Handle server hack event - AI personas learn about player capabilities
+   * 
+   * PHASE 5 WEEK 3: Event-triggered knowledge acquisition
+   */
+  async onServerHacked(data: {
+    userId: string;
+    serverId: string;
+    serverName: string;
+    difficulty: number;
+  }): Promise<void> {
+    try {
+      this.logger.info({ data }, "Processing server hack for AI personas");
+
+      // Game Master learns from all hacks
+      const gameMaster = await this.getPersonaByType("game_master");
+      if (gameMaster) {
+        await this.addKnowledge(gameMaster.id, {
+          source: "server_hack",
+          type: "server_location",
+          content: {
+            userId: data.userId,
+            serverId: data.serverId,
+            serverName: data.serverName,
+            difficulty: data.difficulty,
+            hackedAt: new Date()
+          },
+          confidence: 1.0
+        });
+
+        // High-difficulty hacks might trigger GM action
+        if (data.difficulty >= 7) {
+          this.decideAction(gameMaster.id).catch(err =>
+            this.logger.error(err, "Failed to trigger GM action after high-difficulty hack")
+          );
+        }
+      }
+    } catch (error) {
+      this.logger.error(error, "Error processing server hack event");
+    }
   }
 
   /**
@@ -239,15 +361,133 @@ Generate a realistic hacking mission. Respond ONLY with JSON:
           }
           break;
         case "send_message":
-          // Placeholder: await this.messageService.sendMessage(...)
-          this.logger.info({ actionId }, "Simulating sending message");
-          output = { simulated: true, type: "message" };
+          // Use AI to generate message content
+          const messageTarget = (action.input as any).target;
+          if (!messageTarget) {
+            this.logger.warn("No message recipient in action input");
+            output = { simulated: true, type: "message", error: "No recipient" };
+            break;
+          }
+
+          const messagePrompt = `You are ${action.persona.name}. Create a direct message to player.
+
+Context: ${JSON.stringify(action.input)}
+
+Generate a  message to recruit, warn, or inform the player. Respond ONLY with JSON:
+{
+  "subject": "message subject (max 50 chars)",
+  "content": "message body (2-3 sentences, stay in character)"
+}`;
+
+          try {
+            const { response: msgResponse } = await this.aiService.generateResponse(
+              messagePrompt,
+              action.persona.systemPrompt
+            );
+
+            const msgMatch = msgResponse.match(/\{[\s\S]*\}/);
+            let messageData = {
+              subject: "Message from " + action.persona.name,
+              content: "Greetings. We should talk."
+            };
+
+            if (msgMatch) {
+              try {
+                const parsed = JSON.parse(msgMatch[0]);
+                messageData = { ...messageData, ...parsed };
+              } catch (e) {
+                this.logger.warn("Failed to parse AI message data");
+              }
+            }
+
+            // Send message via MessageService
+            const result = await this.messageService.sendAIMessage(
+              action.persona.id,
+              messageTarget,
+              messageData.subject,
+              messageData.content
+            );
+
+            output = {
+              type: "message",
+              success: result.success,
+              messageData,
+              recipientId: messageTarget,
+              dailyCount: result.data?.count
+            };
+          } catch (error) {
+            this.logger.error(error, "Failed to send AI message");
+            output = { type: "message", error: "Failed to generate/send" };
+          }
           break;
         case "forum_post":
-          // Placeholder: await this.forumService.createPost(...)
-          this.logger.info({ actionId }, "Simulating forum post");
-          output = { simulated: true, type: "forum_post" };
-          break;
+          // Use AI to generate forum post content
+          const forumContext = (action.input as any);
+          
+          const forumPrompt = `You are ${action.persona.name}. Create a forum post.
+
+Context: ${JSON.stringify(forumContext)}
+
+Generate a post for underground hacking forums. Stay in character. Respond ONLY with JSON:
+{
+  "title": "post title (max 80 chars, catchy)",
+  "content": "post body (2-4 sentences, cryptic or informative depending on character)"
+}`;
+
+          try {
+            const { response: forumResponse } = await this.aiService.generateResponse(
+              forumPrompt,
+              action.persona.systemPrompt
+            );
+
+            const forumMatch = forumResponse.match(/\{[\s\S]*\}/);
+            let postData = {
+              title: `Message from ${action.persona.name}`,
+              content: "Something interesting is happening..."
+            };
+
+            if (forumMatch) {
+              try {
+                const parsed = JSON.parse(forumMatch[0]);
+                postData = { ...postData, ...parsed };
+              } catch (e) {
+                this.logger.warn("Failed to parse AI forum post data");
+              }
+            }
+
+            // Determine target forum based on faction or use neutral forum
+            let targetForumId = "neutral_forum"; // Default
+
+            if (action.persona.faction) {
+              // Post to faction's forum if they have one
+              const factionForum = await this.prisma.forum.findFirst({
+                where: { factionId: action.persona.faction.id }
+              });
+              if (factionForum) {
+                targetForumId = factionForum.id;
+              }
+            }
+
+            // Create AI post
+            const post = await this.forumService.createAIPost(
+              action.persona.id,
+              targetForumId,
+              postData.title,
+              postData.content
+            );
+
+            output = {
+              type: "forum_post",
+              success: true,
+              postData,
+              postId: post.id,
+              forumId: targetForumId
+            };
+          } catch (error) {
+            this.logger.error(error, "Failed to create AI forum post");
+            output = { type: "forum_post", error: "Failed to generate/post" };
+          }
+         break;
       }
 
       await this.prisma.aIAction.update({

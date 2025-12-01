@@ -1,9 +1,13 @@
+import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
 import { AIService } from "../services/aiService";
 import { PersonaService } from "../services/personaService";
+import { MessageService } from "../services/messageService";
 import pino from "pino";
 import { CacheService } from "../services/cacheService";
 import MissionService from "../services/missionService";
+import { Server as SocketIOServer } from "socket.io";
+import http from "http";
 
 const prisma = new PrismaClient();
 const logger = pino({ level: "info" });
@@ -45,7 +49,14 @@ async function testAIIntegration() {
   // 2. Test PersonaService with real persona
   console.log("\n2️⃣ Testing PersonaService...");
   const missionService = new MissionService(cacheService);
-  const personaService = new PersonaService(prisma, logger, missionService, aiService);
+  
+  // Create minimal SocketIO instance for MessageService and ForumService
+  const httpServer = http.createServer();
+  const io = new SocketIOServer(httpServer);
+  const messageService = new MessageService(io);
+  const forumService = new (await import("../services/forumService")).default(io);
+  
+  const personaService = new PersonaService(prisma, logger, missionService, aiService, messageService, forumService);
 
   try {
     // Get Game Master persona

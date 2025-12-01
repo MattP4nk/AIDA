@@ -264,6 +264,72 @@ export class MessageService {
   }
 
   /**
+   * Send a message from an AI persona to a player
+   * 
+   * PHASE 5: AI-driven messaging with rate limiting
+   */
+  async sendAIMessage(
+    personaId: string,
+    recipientId: string,
+    subject: string,
+    content: string,
+  ): Promise<MessageOperationResult> {
+    try {
+      // Check daily AI message limit (5 total across all personas)
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+
+      const todayCount = await prisma.message.count({
+        where: {
+          messageType: "faction",
+          timestamp: { gte: today },
+          sender: {
+            id: { startsWith: "ai_" } // AI persona IDs
+          }
+        }
+      });
+
+      if (todayCount >= 5) {
+        return {
+          success: false,
+          message: "Daily AI message limit reached (5/day total)",
+        };
+      }
+
+      // Get or create AI system user for this persona
+      const aiUserId = await this.getAIUserId(personaId);
+
+      const message = await prisma.message.create({
+        data: {
+          senderId: aiUserId,
+          recipientId,
+          subject,
+          content,
+          isRead: false,
+          isEncrypted: false,
+          messageType: "faction", // AI messages tagged as faction messages
+        },
+      });
+
+      // Deliver immediately
+      await this.deliverMessageRealtime(message.id, recipientId);
+
+      return {
+        success: true,
+        message: "AI message sent",
+        data: { messageId: message.id, count: todayCount + 1 },
+      };
+    } catch (error: any) {
+      console.error("Send AI message error:", error);
+      return {
+        success: false,
+        message: "Failed to send AI message",
+        error: error.message,
+      };
+    }
+  }
+
+  /**
    * Broadcast message to multiple recipients
    */
   async broadcastMessage(
@@ -982,6 +1048,41 @@ export class MessageService {
     });
 
     return newSystemUser.id;
+  }
+
+  /**
+   * Get or create AI user ID for a persona
+   * 
+   * PHASE 5: Creates user accounts for AI personas to send messages
+   */
+  private async getAIUserId(personaId: string): Promise<string> {
+    const aiUsername = `AI_${personaId.substring(0, 8)}`;
+    
+    const aiUser = await prisma.user.findFirst({
+      where: { username: aiUsername },
+    });
+
+    if (aiUser) {
+      return aiUser.id;
+    }
+
+    // Get persona info for better naming
+    const persona = await prisma.aIPersona.findUnique({
+      where: { id: personaId },
+    });
+
+    // Create AI user account
+    const newAIUser = await prisma.user.create({
+      data: {
+        id: `ai_${personaId}`,
+        username: persona?.name || aiUsername,
+        email: `${personaId}@ai.aida.internal`,
+        password: crypto.randomBytes(32).toString("hex"),
+        homeIp: "127.0.0.1",
+      },
+    });
+
+    return newAIUser.id;
   }
 
   /**

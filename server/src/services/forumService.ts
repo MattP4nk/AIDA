@@ -613,6 +613,108 @@ export class ForumService extends EventEmitter {
   }
 
   /**
+   * Create a forum post from an AI persona
+   * 
+   * PHASE 5: AI forum posting (bypasses membership requirements)
+   */
+  public async createAIPost(
+    personaId: string,
+    forumId: string,
+    title: string,
+    content: string,
+  ): Promise<Post> {
+    try {
+      // Get AI persona info
+      const persona = await prisma.aIPersona.findUnique({
+        where: { id: personaId },
+        include: { faction: true }
+      });
+
+      if (!persona) {
+        throw new Error("AI Persona not found");
+      }
+
+      // Get or create AI user ID
+      const aiUserId = `ai_${personaId}`;
+      let aiUser = await prisma.user.findUnique({ where: { id: aiUserId } });
+
+      if (!aiUser) {
+        // Create AI user account
+        const crypto = await import("crypto");
+        aiUser = await prisma.user.create({
+          data: {
+            id: aiUserId,
+            username: persona.name,
+            email: `${personaId}@ai.aida.internal`,
+            password: crypto.randomBytes(32).toString("hex"),
+            homeIp: "127.0.0.1",
+          },
+        });
+      }
+
+      // Auto-register as forum member if not already
+      const memberKey = {
+        userId: aiUserId,
+        forumId,
+      };
+
+      let member = await prisma.forumMember.findUnique({
+        where: { userId_forumId: memberKey },
+      });
+
+      if (!member) {
+        member = await prisma.forumMember.create({
+          data: {
+            ...memberKey,
+            handle: persona.name,
+            reputation: 100, // AI starts with high rep
+            postCount: 0,
+          },
+        });
+      }
+
+      // Create post
+      const post = await prisma.post.create({
+        data: {
+          forumId,
+          authorId: aiUserId,
+          authorHandle: persona.name,
+          title,
+          content,
+          isSticky: false,
+          isPinned: false,
+          storyRelevant: false, // Can be set later if GM posts clues
+        },
+      });
+
+      // Update member post count
+      await prisma.forumMember.update({
+        where: { userId_forumId: memberKey },
+        data: {
+          postCount: {
+            increment: 1,
+          },
+        },
+      });
+
+      // Emit event
+      if (this.io) {
+        this.io.to(`forum:${forumId}`).emit("forum:new-post", {
+          postId: post.id,
+          title: post.title,
+          author: persona.name,
+          isAI: true,
+        });
+      }
+
+      return post;
+    } catch (error) {
+      console.error("Error creating AI post:", error);
+      throw error;
+    }
+  }
+
+  /**
    * Search posts in a forum
    */
   public async searchPosts(

@@ -6,6 +6,7 @@ import helmet from "helmet";
 import compression from "compression";
 import morgan from "morgan";
 import rateLimit from "express-rate-limit";
+import pino from "pino";
 
 import { config, validateConfig } from "./config/environment";
 import { db } from "./database/client";
@@ -24,6 +25,10 @@ import IPService from "./services/ipService";
 import EventService from "./services/eventService";
 import { progressService } from "./services/progressService";
 import { ipService } from "./services/ipService";
+
+// Initialize logger
+const logger = pino({ level: process.env.LOG_LEVEL || "info" });
+
 // Track connected users
 const connectedUsers = new Map<string, string>(); // socketId -> userId
 
@@ -62,7 +67,7 @@ class AidaServer {
       console.log("✅ Database connection established");
 
       // Initialize DI Container
-      initializeContainer(io, db.client);
+      initializeContainer(io, db.client, logger);
       console.log("✅ DI Container initialized");
 
       // Initialize Game State Manager from DI container
