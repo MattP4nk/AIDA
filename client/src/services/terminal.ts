@@ -85,7 +85,9 @@ export class TerminalService {
       return {
         ...rawResult,
         output: normalizedOutput,
-        timestamp: rawResult.timestamp ? new Date(rawResult.timestamp) : new Date(),
+        timestamp: rawResult.timestamp
+          ? new Date(rawResult.timestamp)
+          : new Date(),
         exitCode: rawResult.exitCode ?? (rawResult.success ? 0 : 1),
       };
     } catch (error: any) {

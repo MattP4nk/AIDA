@@ -21,7 +21,11 @@ import { CommandModule, CommandContext } from "./commandModules/interface";
 import { memoryService } from "./memoryService";
 import { injectable, inject } from "tsyringe";
 import { SOCKET_IO } from "../di/tokens";
-import { validateCommand, validateArgs, validateUserId } from "../utils/validators";
+import {
+  validateCommand,
+  validateArgs,
+  validateUserId,
+} from "../utils/validators";
 
 /**
  * CommandProcessor - Server-side command processing and execution
@@ -122,7 +126,6 @@ class CommandProcessor extends EventEmitter {
       },
     };
   }
-
 
   // ==================== COMMAND PARSING ====================
 
@@ -230,7 +233,7 @@ class CommandProcessor extends EventEmitter {
       if (!validateUserId(userId)) {
         return { valid: false, error: "Invalid user ID format" };
       }
-      
+
       // Check rate limiting
       const rateLimitCheck = this.checkRateLimit(userId);
       if (!rateLimitCheck.valid) {
@@ -266,10 +269,10 @@ class CommandProcessor extends EventEmitter {
 
       // Network commands require network access (being connected to a server)
       if (module instanceof NetworkCommandsModule) {
-        if (!session.currentServerId && command !== 'connect') {
+        if (!session.currentServerId && command !== "connect") {
           return {
             valid: false,
-            error: 'Network access required. Connect to a server first.'
+            error: "Network access required. Connect to a server first.",
           };
         }
       }
@@ -290,7 +293,7 @@ class CommandProcessor extends EventEmitter {
       if (serverId && !session.currentServerId) {
         return {
           valid: false,
-          error: 'Must be connected to a server to execute this command'
+          error: "Must be connected to a server to execute this command",
         };
       }
 
@@ -380,6 +383,7 @@ class CommandProcessor extends EventEmitter {
     userId: string,
     parsedCommand: ParsedCommand,
     serverId?: string,
+    terminalId?: string,
   ): Promise<CommandResult> {
     const startTime = Date.now();
 
@@ -409,6 +413,7 @@ class CommandProcessor extends EventEmitter {
         timestamp: new Date(),
         rawInput: parsedCommand.rawInput,
         ...(serverId ? { serverId } : {}),
+        ...(terminalId ? { terminalId } : {}),
       };
 
       // Add to history
@@ -430,8 +435,11 @@ class CommandProcessor extends EventEmitter {
         };
       }
 
-      // Add execution time
+      // Add execution time and terminal ID to result
       result.executionTime = Date.now() - startTime;
+      if (terminalId !== undefined) {
+        result.terminalId = terminalId;
+      }
 
       // Emit event for logging/monitoring
       this.emit("command:executed", { userId, command, result });
@@ -622,7 +630,9 @@ class CommandProcessor extends EventEmitter {
         continue;
       }
 
-      const moduleCommands = module.getCommandInfo ? module.getCommandInfo() : [];
+      const moduleCommands = module.getCommandInfo
+        ? module.getCommandInfo()
+        : [];
       commands.push(...moduleCommands);
     }
 
@@ -705,7 +715,7 @@ class CommandProcessor extends EventEmitter {
       // Count by category
       const module = this.commandMap.get(cmd.command);
       const category = this.getCategoryFromModule(module);
-      
+
       if (commandsByCategory[category] !== undefined) {
         commandsByCategory[category]!++;
       } else {
@@ -756,5 +766,5 @@ export const commandProcessor = new Proxy({} as CommandProcessor, {
   get(_target, prop) {
     const instance = container.resolve(COMMAND_PROCESSOR as any);
     return (instance as any)[prop];
-  }
+  },
 });

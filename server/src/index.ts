@@ -10,7 +10,12 @@ import rateLimit from "express-rate-limit";
 import { config, validateConfig } from "./config/environment";
 import { db } from "./database/client";
 import { initializeContainer, getService } from "./di/container";
-import { GAME_STATE_MANAGER, PROGRESS_SERVICE, IP_SERVICE, EVENT_SERVICE } from "./di/tokens";
+import {
+  GAME_STATE_MANAGER,
+  PROGRESS_SERVICE,
+  IP_SERVICE,
+  EVENT_SERVICE,
+} from "./di/tokens";
 
 // Import new multiplayer services
 import GameStateManager from "./services/gameStateManager";
@@ -84,7 +89,8 @@ class AidaServer {
       console.log("✅ All services initialized via DI");
 
       // Initialize PlayerPresenceService (TODO: migrate to DI)
-      const { initializePresenceService } = await import("./services/playerPresenceService");
+      const { initializePresenceService } =
+        await import("./services/playerPresenceService");
       initializePresenceService(io);
       console.log("✅ Player Presence Service initialized");
 
@@ -249,7 +255,16 @@ class AidaServer {
       // Handle connection after authentication
       socket.on("authenticated", async () => {
         const userId = socket.data.user?.id;
-        if (!userId) return;
+        const username = socket.data.user?.username;
+
+        console.log(
+          `🔐 Received 'authenticated' event from user ${username} (${userId})`,
+        );
+
+        if (!userId) {
+          console.error("❌ No userId in authenticated event");
+          return;
+        }
 
         // Join user-specific room
         socket.join(`user:${userId}`);
@@ -257,17 +272,18 @@ class AidaServer {
         // Create session in GameStateManager
         try {
           if (gameStateManager) {
+            console.log(`📋 Creating session for user ${username}...`);
             await gameStateManager.createSession(
               userId,
               socket.id,
               socket.handshake.address,
             );
+            console.log(`✅ Session created for user ${username}`);
           }
 
           // Mark player as online in presence service
-          const { getPresenceService } = await import(
-            "./services/playerPresenceService"
-          );
+          const { getPresenceService } =
+            await import("./services/playerPresenceService");
           const presenceService = getPresenceService();
           await presenceService.playerConnected(userId, socket.id);
 
@@ -286,11 +302,22 @@ class AidaServer {
             timestamp: new Date(),
           });
 
+          // Confirm authentication to client
+          socket.emit("authentication:complete", {
+            success: true,
+            userId,
+            username,
+          });
+
           console.log(
-            `👤 User ${socket.data.user.username} authenticated via socket`,
+            `👤 User ${username} authenticated via socket and session created`,
           );
         } catch (error) {
-          console.error("Error during authentication:", error);
+          console.error("❌ Error during authentication:", error);
+          socket.emit("authentication:complete", {
+            success: false,
+            error: error instanceof Error ? error.message : "Unknown error",
+          });
         }
       });
 
@@ -307,9 +334,8 @@ class AidaServer {
         }
 
         // Update presence service
-        const { getPresenceService } = await import(
-          "./services/playerPresenceService"
-        );
+        const { getPresenceService } =
+          await import("./services/playerPresenceService");
         const presenceService = getPresenceService();
         await presenceService.playerJoinedServer(userId, serverId);
 
@@ -327,9 +353,8 @@ class AidaServer {
         }
 
         // Update presence service
-        const { getPresenceService } = await import(
-          "./services/playerPresenceService"
-        );
+        const { getPresenceService } =
+          await import("./services/playerPresenceService");
         const presenceService = getPresenceService();
         const session = gameStateManager?.getPlayerSession(userId);
         if (session?.currentServerId) {
@@ -411,7 +436,7 @@ class AidaServer {
         }
 
         try {
-          const { command, args, serverId } = data;
+          const { command, args, serverId, terminalId } = data;
 
           // Validate input
           if (!command || typeof command !== "string") {
@@ -420,9 +445,8 @@ class AidaServer {
           }
 
           // Import CommandProcessor
-          const { commandProcessor } = await import(
-            "./services/commandProcessor"
-          );
+          const { commandProcessor } =
+            await import("./services/commandProcessor");
 
           // Construct command string
           const commandString =
@@ -450,6 +474,7 @@ class AidaServer {
             userId,
             parsed,
             serverId,
+            terminalId,
           );
 
           // Send result back to client
@@ -470,6 +495,148 @@ class AidaServer {
         }
       });
 
+      // Terminal tab management
+      socket.on("terminal:create", async (data) => {
+        const userId = socket.data.user?.id;
+        if (!userId) {
+          socket.emit("terminal:error", { message: "Not authenticated" });
+          return;
+        }
+
+        if (!gameStateManager) {
+          socket.emit("terminal:error", {
+            message: "Game state not available",
+          });
+          return;
+        }
+
+        try {
+          const { label } = data;
+          const terminal = gameStateManager.createTerminal(userId, label);
+
+          if (terminal) {
+            socket.emit("terminal:created", terminal);
+            io.to(`user:${userId}`).emit("terminal:created", terminal);
+          } else {
+            socket.emit("terminal:error", {
+              message: "Failed to create terminal",
+            });
+          }
+        } catch (error) {
+          console.error("Terminal creation error:", error);
+          socket.emit("terminal:error", {
+            message:
+              error instanceof Error
+                ? error.message
+                : "Terminal creation failed",
+          });
+        }
+      });
+
+      socket.on("terminal:close", async (data) => {
+        const userId = socket.data.user?.id;
+        if (!userId) {
+          socket.emit("terminal:error", { message: "Not authenticated" });
+          return;
+        }
+
+        if (!gameStateManager) {
+          socket.emit("terminal:error", {
+            message: "Game state not available",
+          });
+          return;
+        }
+
+        try {
+          const { terminalId } = data;
+          const success = gameStateManager.closeTerminal(userId, terminalId);
+
+          if (success) {
+            socket.emit("terminal:closed", { terminalId });
+            io.to(`user:${userId}`).emit("terminal:closed", { terminalId });
+          } else {
+            socket.emit("terminal:error", {
+              message: "Failed to close terminal",
+            });
+          }
+        } catch (error) {
+          console.error("Terminal close error:", error);
+          socket.emit("terminal:error", {
+            message:
+              error instanceof Error ? error.message : "Terminal close failed",
+          });
+        }
+      });
+
+      socket.on("terminal:switch", async (data) => {
+        const userId = socket.data.user?.id;
+        if (!userId) {
+          socket.emit("terminal:error", { message: "Not authenticated" });
+          return;
+        }
+
+        if (!gameStateManager) {
+          socket.emit("terminal:error", {
+            message: "Game state not available",
+          });
+          return;
+        }
+
+        try {
+          const { terminalId } = data;
+          const success = gameStateManager.switchTerminal(userId, terminalId);
+
+          if (success) {
+            socket.emit("terminal:switched", { terminalId });
+          } else {
+            socket.emit("terminal:error", {
+              message: "Failed to switch terminal",
+            });
+          }
+        } catch (error) {
+          console.error("Terminal switch error:", error);
+          socket.emit("terminal:error", {
+            message:
+              error instanceof Error ? error.message : "Terminal switch failed",
+          });
+        }
+      });
+
+      socket.on("terminal:list", async () => {
+        const userId = socket.data.user?.id;
+        if (!userId) {
+          socket.emit("terminal:error", { message: "Not authenticated" });
+          return;
+        }
+
+        if (!gameStateManager) {
+          socket.emit("terminal:error", {
+            message: "Game state not available",
+          });
+          return;
+        }
+
+        try {
+          const session = gameStateManager.getPlayerSession(userId);
+          if (session) {
+            socket.emit("terminal:list", {
+              terminals: session.terminals,
+              activeTerminalId: session.activeTerminalId,
+            });
+          } else {
+            socket.emit("terminal:error", { message: "No active session" });
+          }
+        } catch (error) {
+          console.error("Terminal list error:", error);
+          socket.emit("terminal:error", {
+            message:
+              error instanceof Error
+                ? error.message
+                : "Failed to get terminals",
+          });
+        }
+      });
+
       // Handle disconnection
       socket.on("disconnect", async () => {
         const userId = socket.data.user?.id;
@@ -477,9 +644,8 @@ class AidaServer {
         if (userId && gameStateManager) {
           try {
             // Mark player as offline in presence service
-            const { getPresenceService } = await import(
-              "./services/playerPresenceService"
-            );
+            const { getPresenceService } =
+              await import("./services/playerPresenceService");
             const presenceService = getPresenceService();
             await presenceService.playerDisconnected(userId);
 

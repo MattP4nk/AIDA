@@ -11,6 +11,7 @@ import {
   NotificationType,
   NotificationPriority,
   MissionStatus,
+  TerminalTab,
 } from "../types/game";
 import { shopService } from "./shopService";
 import { missionService } from "./missionService";
@@ -33,7 +34,7 @@ class GameStateManager extends EventEmitter {
   constructor(
     @inject(SOCKET_IO) io: SocketIOServer,
     @inject(EVENT_SERVICE) eventService: EventService,
-    @inject(COMMAND_PROCESSOR) commandProcessor: CommandProcessor
+    @inject(COMMAND_PROCESSOR) commandProcessor: CommandProcessor,
   ) {
     super();
     this.io = io;
@@ -97,6 +98,21 @@ class GameStateManager extends EventEmitter {
         },
       });
 
+      // Create default terminal tab (home terminal)
+      const defaultTerminal: TerminalTab = {
+        id: `term_${Date.now()}_0`,
+        label: `${user.username}@${user.homeIp}`,
+        serverId: homeServerId,
+        currentDirectory: this.getValidHomeDirectory(
+          lastSession?.currentDirectory,
+          user.username,
+        ),
+        commandHistory: [],
+        createdAt: new Date(),
+        lastActivity: new Date(),
+        isProcessing: false,
+      };
+
       const session: PlayerSession = {
         userId,
         socketId,
@@ -105,11 +121,10 @@ class GameStateManager extends EventEmitter {
         isActive: true,
         ipAddress,
         homeServerId,
-        currentDirectory: this.getValidHomeDirectory(
-          lastSession?.currentDirectory,
-          user.username,
-        ), // Resume from last session or default
+        currentDirectory: defaultTerminal.currentDirectory, // For backwards compatibility
         commandQueue: [],
+        terminals: [defaultTerminal],
+        activeTerminalId: defaultTerminal.id,
       };
 
       // Initialize home file system if it doesn't exist
@@ -770,6 +785,135 @@ Tips:
       return null;
     }
   }
+
+  // ==================== TERMINAL TAB MANAGEMENT ====================
+
+  public createTerminal(userId: string, label?: string): TerminalTab | null {
+    const session = this.playerSessions.get(userId);
+    if (!session) {
+      console.error(`❌ No session found for user ${userId}`);
+      return null;
+    }
+
+    const terminalNumber = session.terminals.length + 1;
+    const newTerminal: TerminalTab = {
+      id: `term_${Date.now()}_${terminalNumber}`,
+      label: label || `Terminal ${terminalNumber}`,
+      currentDirectory: `/home/${userId}`,
+      commandHistory: [],
+      createdAt: new Date(),
+      lastActivity: new Date(),
+      isProcessing: false,
+    };
+
+    // Set serverId if homeServerId exists
+    if (session.homeServerId) {
+      newTerminal.serverId = session.homeServerId;
+    }
+
+    session.terminals.push(newTerminal);
+    console.log(`✅ Created terminal ${newTerminal.id} for user ${userId}`);
+
+    return newTerminal;
+  }
+
+  public closeTerminal(userId: string, terminalId: string): boolean {
+    const session = this.playerSessions.get(userId);
+    if (!session) {
+      console.error(`❌ No session found for user ${userId}`);
+      return false;
+    }
+
+    // Don't allow closing the last terminal
+    if (session.terminals.length <= 1) {
+      console.warn(`⚠️  Cannot close the last terminal for user ${userId}`);
+      return false;
+    }
+
+    const terminalIndex = session.terminals.findIndex(
+      (t) => t.id === terminalId,
+    );
+    if (terminalIndex === -1) {
+      console.error(`❌ Terminal ${terminalId} not found for user ${userId}`);
+      return false;
+    }
+
+    // Don't allow closing the home terminal (first terminal, index 0)
+    if (terminalIndex === 0) {
+      console.warn(`⚠️  Cannot close the home terminal for user ${userId}`);
+      return false;
+    }
+
+    session.terminals.splice(terminalIndex, 1);
+
+    // If we closed the active terminal, switch to the first one (home)
+    if (session.activeTerminalId === terminalId) {
+      session.activeTerminalId = session.terminals[0]!.id;
+    }
+
+    console.log(`✅ Closed terminal ${terminalId} for user ${userId}`);
+    return true;
+  }
+
+  public switchTerminal(userId: string, terminalId: string): boolean {
+    const session = this.playerSessions.get(userId);
+    if (!session) {
+      console.error(`❌ No session found for user ${userId}`);
+      return false;
+    }
+
+    const terminal = session.terminals.find((t) => t.id === terminalId);
+    if (!terminal) {
+      console.error(`❌ Terminal ${terminalId} not found for user ${userId}`);
+      return false;
+    }
+
+    session.activeTerminalId = terminalId;
+    terminal.lastActivity = new Date();
+    console.log(`✅ Switched to terminal ${terminalId} for user ${userId}`);
+
+    return true;
+  }
+
+  public getActiveTerminal(userId: string): TerminalTab | null {
+    const session = this.playerSessions.get(userId);
+    if (!session) {
+      return null;
+    }
+
+    return (
+      session.terminals.find((t) => t.id === session.activeTerminalId) ||
+      session.terminals[0] ||
+      null
+    );
+  }
+
+  public getTerminal(userId: string, terminalId: string): TerminalTab | null {
+    const session = this.playerSessions.get(userId);
+    if (!session) {
+      return null;
+    }
+
+    return session.terminals.find((t) => t.id === terminalId) || null;
+  }
+
+  public updateTerminalProcessing(
+    userId: string,
+    terminalId: string,
+    isProcessing: boolean,
+    command?: string,
+  ): void {
+    const terminal = this.getTerminal(userId, terminalId);
+    if (terminal) {
+      terminal.isProcessing = isProcessing;
+      if (command !== undefined) {
+        terminal.processingCommand = command;
+      }
+      terminal.lastActivity = new Date();
+    }
+  }
+
+  // ==================== CLEANUP ====================
 
   public async cleanup(): Promise<void> {
     console.log("🧹 Cleaning up GameStateManager...");

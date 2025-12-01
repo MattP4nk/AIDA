@@ -47,6 +47,20 @@ export interface PlayerSession {
   isActive: boolean;
   ipAddress: string;
   commandQueue: Command[];
+  terminals: TerminalTab[]; // Multi-terminal support
+  activeTerminalId: string; // Currently active terminal tab ID
+}
+
+export interface TerminalTab {
+  id: string; // Unique identifier for the tab
+  label: string; // Display name for the tab
+  serverId?: string; // Server this terminal is connected to
+  currentDirectory: string; // Current working directory for this tab
+  commandHistory: Command[]; // Command history specific to this tab
+  createdAt: Date;
+  lastActivity: Date;
+  isProcessing: boolean; // True if a command is currently executing
+  processingCommand?: string; // Current command being processed
 }
 
 export interface Command {
@@ -57,6 +71,7 @@ export interface Command {
   timestamp: Date;
   serverId?: string;
   rawInput?: string;
+  terminalId?: string; // ID of the terminal tab this command is executed in
 }
 
 export interface ParsedCommand {
@@ -76,6 +91,7 @@ export interface CommandResult {
   timestamp: Date;
   executionTime?: number;
   openDialog?: "mail" | "chat" | "forum"; // Trigger ASCII dialog overlay
+  terminalId?: string; // ID of the terminal tab this result belongs to
 }
 
 export interface ValidationResult {

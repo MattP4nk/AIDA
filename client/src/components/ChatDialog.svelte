@@ -510,7 +510,7 @@
     .chat-container {
         min-height: 400px;
         font-family: "IBM Plex Mono", "Courier New", monospace;
-        color: #00ff00;
+        color: #00bcd4;
     }
 
     /* ==================== LOADING / ERROR ==================== */
@@ -523,7 +523,7 @@
 
     .loading pre,
     .error-message pre {
-        color: #00ff00;
+        color: #00bcd4;
         font-size: 0.9em;
         margin: 0;
     }
@@ -537,14 +537,14 @@
     .chat-layout {
         display: flex;
         height: 500px;
-        border: 1px solid #00ff00;
+        border: 1px solid #00bcd4;
     }
 
     /* ==================== CONTACTS SIDEBAR ==================== */
 
     .contacts-sidebar {
         width: 220px;
-        border-right: 1px solid #00ff00;
+        border-right: 1px solid #00bcd4;
         display: flex;
         flex-direction: column;
         background: #000;
@@ -569,7 +569,7 @@
         flex: 1;
         overflow-y: auto;
         scrollbar-width: thin;
-        scrollbar-color: #00ff00 #002200;
+        scrollbar-color: #00bcd4 #001a2b;
     }
 
     .contacts-list::-webkit-scrollbar {
@@ -577,11 +577,11 @@
     }
 
     .contacts-list::-webkit-scrollbar-track {
-        background: #002200;
+        background: #001a2b;
     }
 
     .contacts-list::-webkit-scrollbar-thumb {
-        background: #00ff00;
+        background: #00bcd4;
         border-radius: 3px;
     }
 
@@ -608,7 +608,7 @@
 
     .contact-item:hover {
         background: rgba(0, 255, 0, 0.1);
-        color: #00ff00;
+        color: #00bcd4;
     }
 
     .contact-item.selected {
@@ -623,7 +623,7 @@
     }
 
     .contact-item.online .contact-status {
-        color: #00ff00;
+        color: #00bcd4;
         animation: pulse 2s ease-in-out infinite;
     }
 
@@ -689,7 +689,7 @@
     }
 
     .chat-recipient {
-        color: #00ff00;
+        color: #00bcd4;
         font-weight: bold;
     }
 
@@ -710,7 +710,7 @@
         overflow-y: auto;
         padding: 1em;
         scrollbar-width: thin;
-        scrollbar-color: #00ff00 #002200;
+        scrollbar-color: #00bcd4 #001a2b;
         max-height: 350px;
     }
 
@@ -719,11 +719,11 @@
     }
 
     .chat-messages::-webkit-scrollbar-track {
-        background: #002200;
+        background: #001a2b;
     }
 
     .chat-messages::-webkit-scrollbar-thumb {
-        background: #00ff00;
+        background: #00bcd4;
         border-radius: 4px;
     }
 
@@ -742,7 +742,7 @@
     }
 
     .chat-message.outgoing {
-        color: #00ff00;
+        color: #00bcd4;
     }
 
     .chat-message.incoming {
@@ -796,14 +796,14 @@
     }
 
     .input-prompt {
-        color: #00ff00;
+        color: #00bcd4;
         font-weight: bold;
     }
 
     .chat-input {
         flex: 1;
         background: #000;
-        color: #00ff00;
+        color: #00bcd4;
         border: none;
         border-bottom: 1px solid #004400;
         padding: 0.3em 0.5em;
@@ -813,7 +813,7 @@
 
     .chat-input:focus {
         outline: none;
-        border-bottom-color: #00ff00;
+        border-bottom-color: #00bcd4;
         background: rgba(0, 255, 0, 0.05);
     }
 
@@ -824,7 +824,7 @@
     /* ==================== FOOTER ==================== */
 
     .chat-footer {
-        color: #00ff00;
+        color: #00bcd4;
         font-size: 1em;
         padding: 0;
     }
@@ -846,7 +846,7 @@
         .contacts-sidebar {
             width: 100%;
             border-right: none;
-            border-bottom: 1px solid #00ff00;
+            border-bottom: 1px solid #00bcd4;
             max-height: 150px;
         }
 

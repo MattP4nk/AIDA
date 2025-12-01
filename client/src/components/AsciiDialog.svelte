@@ -185,7 +185,7 @@
     left: 0;
     width: 100vw;
     height: 100vh;
-    background: rgba(0, 20, 0, 0.85);
+    background: rgba(0, 14, 39, 0.90);
     backdrop-filter: blur(3px);
     display: flex;
     align-items: center;
@@ -210,10 +210,10 @@
     font-family: "IBM Plex Mono", "Courier New", monospace;
     font-size: 14px;
     line-height: 1.5;
-    color: #00ff00;
-    background: #000000;
-    border: 2px solid #00ff00;
-    box-shadow: 0 0 30px rgba(0, 255, 0, 0.6), inset 0 0 20px rgba(0, 255, 0, 0.1);
+    color: #00bcd4;
+    background: #0a0e27;
+    border: 2px solid #00bcd4;
+    box-shadow: 0 0 30px rgba(0, 188, 212, 0.6), inset 0 0 20px rgba(0, 188, 212, 0.1);
     max-width: 95vw;
     max-height: 90vh;
     width: var(--dialog-width, 80ch);
@@ -238,7 +238,7 @@
   .ascii-border-line {
     font-family: "IBM Plex Mono", "Courier New", monospace;
     white-space: pre;
-    color: #00ff00;
+    color: #00bcd4;
     user-select: none;
     letter-spacing: 0;
   }
@@ -246,7 +246,7 @@
   /* ==================== HEADER ==================== */
 
   .ascii-header {
-    background: rgba(0, 51, 0, 0.3);
+    background: rgba(0, 39, 67, 0.3);
   }
 
   #dialog-title {
@@ -262,7 +262,7 @@
     overflow-x: hidden;
     max-height: calc(90vh - 200px);
     scrollbar-width: thin;
-    scrollbar-color: #00ff00 #002200;
+    scrollbar-color: #00bcd4 #001a2b;
   }
 
   .ascii-content::-webkit-scrollbar {
@@ -270,22 +270,22 @@
   }
 
   .ascii-content::-webkit-scrollbar-track {
-    background: #002200;
+    background: #001a2b;
   }
 
   .ascii-content::-webkit-scrollbar-thumb {
-    background: #00ff00;
+    background: #00bcd4;
     border-radius: 4px;
   }
 
   .ascii-content::-webkit-scrollbar-thumb:hover {
-    background: #00ff00;
+    background: #00bcd4;
   }
 
   /* ==================== FOOTER ==================== */
 
   .ascii-footer {
-    background: rgba(0, 51, 0, 0.2);
+    background: rgba(0, 39, 67, 0.2);
   }
 
   .ascii-footer-content {
@@ -302,8 +302,8 @@
     height: 100%;
     background: repeating-linear-gradient(
       0deg,
-      rgba(0, 255, 0, 0.03),
-      rgba(0, 255, 0, 0.03) 1px,
+      rgba(0, 188, 212, 0.03),
+      rgba(0, 188, 212, 0.03) 1px,
       transparent 1px,
       transparent 2px
     );
@@ -328,7 +328,7 @@
   /* ==================== ACCESSIBILITY ==================== */
 
   .ascii-dialog:focus {
-    outline: 2px solid #00ff00;
+    outline: 2px solid #00bcd4;
     outline-offset: 4px;
   }
 
@@ -337,12 +337,12 @@
   @keyframes glow {
     0%,
     100% {
-      box-shadow: 0 0 30px rgba(0, 255, 0, 0.6),
-        inset 0 0 20px rgba(0, 255, 0, 0.1);
+      box-shadow: 0 0 30px rgba(0, 188, 212, 0.6),
+        inset 0 0 20px rgba(0, 188, 212, 0.1);
     }
     50% {
-      box-shadow: 0 0 40px rgba(0, 255, 0, 0.8),
-        inset 0 0 25px rgba(0, 255, 0, 0.15);
+      box-shadow: 0 0 40px rgba(0, 188, 212, 0.8),
+        inset 0 0 25px rgba(0, 188, 212, 0.15);
     }
   }
 

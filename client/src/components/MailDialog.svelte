@@ -622,7 +622,7 @@
         min-height: 300px;
         font-family: "IBM Plex Mono", "Courier New", monospace;
         padding: 1em;
-        color: #00ff00;
+        color: #00bcd4;
     }
 
     /* ==================== LOADING / ERROR / SUCCESS ==================== */
@@ -637,7 +637,7 @@
     .loading pre,
     .error-message pre,
     .success-message pre {
-        color: #00ff00;
+        color: #00bcd4;
         font-size: 0.9em;
         margin: 0;
     }
@@ -647,7 +647,7 @@
     }
 
     .success-message pre {
-        color: #00ff00;
+        color: #00bcd4;
         animation: pulse 1s ease-in-out;
     }
 
@@ -673,11 +673,11 @@
         align-items: center;
         padding: 0.5em 1em;
         margin-bottom: 1em;
-        border-bottom: 1px solid #00ff00;
+        border-bottom: 1px solid #00bcd4;
     }
 
     .mailbox-type {
-        color: #00ff00;
+        color: #00bcd4;
         font-weight: bold;
         font-size: 1.1em;
     }
@@ -699,7 +699,7 @@
         font-family: "IBM Plex Mono", monospace;
         letter-spacing: 0;
         gap: 0;
-        border: 1px solid #00ff00;
+        border: 1px solid #00bcd4;
         border-bottom: none;
     }
 
@@ -718,8 +718,8 @@
 
     .message-item:hover {
         background: rgba(0, 255, 0, 0.1);
-        color: #00ff00;
-        border-bottom-color: #00ff00;
+        color: #00bcd4;
+        border-bottom-color: #00bcd4;
     }
 
     .message-item.selected {
@@ -729,7 +729,7 @@
     }
 
     .message-item.unread {
-        color: #00ff00;
+        color: #00bcd4;
         font-weight: bold;
     }
 
@@ -774,7 +774,7 @@
     .list-footer {
         margin-top: 0;
         padding: 0.5em;
-        border: 1px solid #00ff00;
+        border: 1px solid #00bcd4;
         border-top: none;
         color: #008800;
         font-size: 0.9em;
@@ -788,7 +788,7 @@
     }
 
     .read-header {
-        border: 1px solid #00ff00;
+        border: 1px solid #00bcd4;
         padding: 0.5em;
         margin-bottom: 0.5em;
     }
@@ -807,7 +807,7 @@
     }
 
     .read-value {
-        color: #00ff00;
+        color: #00bcd4;
         flex: 1;
     }
 
@@ -825,14 +825,14 @@
     .message-body {
         background: #000;
         padding: 1em;
-        border: 1px solid #00ff00;
+        border: 1px solid #00bcd4;
         min-height: 200px;
         max-height: 400px;
         overflow-y: auto;
     }
 
     .message-body pre {
-        color: #00ff00;
+        color: #00bcd4;
         white-space: pre-wrap;
         word-wrap: break-word;
         margin: 0;
@@ -850,7 +850,7 @@
         display: flex;
         flex-direction: column;
         gap: 0;
-        border: 1px solid #00ff00;
+        border: 1px solid #00bcd4;
         padding: 0.5em;
     }
 
@@ -871,7 +871,7 @@
     .compose-input {
         flex: 1;
         background: #000;
-        color: #00ff00;
+        color: #00bcd4;
         border: none;
         border-bottom: 1px solid #004400;
         padding: 0.3em 0.5em;
@@ -881,7 +881,7 @@
 
     .compose-input:focus {
         outline: none;
-        border-bottom-color: #00ff00;
+        border-bottom-color: #00bcd4;
         background: rgba(0, 255, 0, 0.05);
     }
 
@@ -904,7 +904,7 @@
     .compose-textarea {
         width: 100%;
         background: #000;
-        color: #00ff00;
+        color: #00bcd4;
         border: 1px solid #004400;
         padding: 0.5em;
         font-family: inherit;
@@ -917,7 +917,7 @@
 
     .compose-textarea:focus {
         outline: none;
-        border-color: #00ff00;
+        border-color: #00bcd4;
         background: rgba(0, 255, 0, 0.02);
     }
 
@@ -926,7 +926,7 @@
     }
 
     .encrypt-label {
-        color: #00ff00;
+        color: #00bcd4;
         display: inline-flex;
         align-items: center;
         gap: 0.5ch;
@@ -946,7 +946,7 @@
     /* ==================== FOOTER ==================== */
 
     .mail-footer {
-        color: #00ff00;
+        color: #00bcd4;
         font-size: 1em;
         padding: 0;
     }

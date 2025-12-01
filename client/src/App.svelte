@@ -4,10 +4,12 @@
     import AuthDialog from "./components/AuthDialog.svelte";
     import { apiClient } from "./services/api";
     import { socketService } from "./services/socket";
+    import { terminalTabsStore } from "./services/terminalTabs";
 
     let isAuthenticated = false;
     let isCheckingAuth = true;
     let user: any = null;
+    let isTerminalReady = false;
 
     onMount(async () => {
         await checkAuthentication();
@@ -24,8 +26,8 @@
                 if (response.success) {
                     isAuthenticated = true;
                     user = response.user;
-                    // Initialize socket connection after successful authentication
-                    socketService.connect();
+                    // Initialize socket connection and wait for it to be ready
+                    await initializeSocketAndTerminals();
                 } else {
                     isAuthenticated = false;
                 }
@@ -40,11 +42,66 @@
         }
     }
 
+    async function initializeSocketAndTerminals() {
+        try {
+            console.log("🔄 Starting socket and terminal initialization...");
+
+            // Ensure we have a fresh socket connection with auth token
+            socketService.reconnect();
+
+            // Wait for authentication to complete on the server
+            const socket = (socketService as any).socket;
+            if (socket) {
+                await new Promise<void>((resolve, reject) => {
+                    const timeout = setTimeout(() => {
+                        reject(new Error("Authentication timeout (10s)"));
+                    }, 10000);
+
+                    // Listen for authentication complete
+                    socket.once("authentication:complete", (data: any) => {
+                        clearTimeout(timeout);
+                        console.log("✅ Authentication complete:", data);
+                        if (data.success) {
+                            resolve();
+                        } else {
+                            reject(
+                                new Error(
+                                    `Authentication failed: ${data.error}`,
+                                ),
+                            );
+                        }
+                    });
+
+                    // Also handle connection errors
+                    socket.once("connect_error", (error: any) => {
+                        clearTimeout(timeout);
+                        reject(error);
+                    });
+                });
+            }
+
+            // Now initialize terminal tabs (server session is ready)
+            console.log("🔄 Initializing terminal tabs...");
+            await terminalTabsStore.initialize();
+
+            isTerminalReady = true;
+            console.log("✅ Socket and terminals fully initialized");
+        } catch (error) {
+            console.error(
+                "❌ Failed to initialize socket and terminals:",
+                error,
+            );
+            // Still show terminal even if tabs failed to load
+            console.error("Continuing with terminal in degraded mode...");
+            isTerminalReady = true;
+        }
+    }
+
     function handleAuthenticated(event: CustomEvent) {
         user = event.detail;
         isAuthenticated = true;
-        // Initialize socket connection after successful authentication
-        socketService.connect();
+        // Initialize socket connection and terminals after successful authentication
+        initializeSocketAndTerminals();
     }
 </script>
 
@@ -57,8 +114,15 @@
     </div>
 {:else if !isAuthenticated}
     <AuthDialog on:authenticated={handleAuthenticated} />
+{:else if !isTerminalReady}
+    <div class="loading-screen">
+        <div class="loading-content">
+            <div class="spinner"></div>
+            <p>Connecting to terminal...</p>
+        </div>
+    </div>
 {:else}
-    <Terminal />
+    <Terminal {user} />
 {/if}
 
 <style>

@@ -8,10 +8,13 @@ body {
   margin: 0;
   padding: 0;
   overflow: hidden;
-  font-family: 'Courier New', Courier, monospace;
+  font-family: 'IBM Plex Mono', 'Courier New', Courier, monospace;
+  background: #0a0e27;
+  color: #00bcd4;
 }
 
 #app {
   width: 100vw;
   height: 100vh;
+  background: #0a0e27;
 }

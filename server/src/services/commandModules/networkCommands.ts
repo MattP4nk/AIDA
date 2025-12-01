@@ -119,14 +119,16 @@ export class NetworkCommandsModule implements CommandModule {
       if (servers.length === 0) {
         return {
           success: true,
-          output: "No servers found. Try increasing your scan level with 'scan -l<level>'.",
+          output:
+            "No servers found. Try increasing your scan level with 'scan -l<level>'.",
           timestamp: new Date(),
         };
       }
 
-      let output = `🔍 Network Scan Results (Level ${scanLevel})\\n\\n`;
-      output += "ID                IP ADDRESS      TYPE         SECURITY  STATUS\\n";
-      output += "─".repeat(70) + "\\n";
+      let output = `🔍 Network Scan Results (Level ${scanLevel})\n\n`;
+      output +=
+        "ID                IP ADDRESS      TYPE         SECURITY  STATUS\n";
+      output += "─".repeat(70) + "\n";
 
       for (const server of servers) {
         const id = server.id.substring(0, 16).padEnd(18);
@@ -135,10 +137,10 @@ export class NetworkCommandsModule implements CommandModule {
         const security = `Level ${server.encryptionLevel}`.padEnd(10);
         const status = server.isOnline ? "🟢 Online" : "🔴 Offline";
 
-        output += `${id}${ip}${type}${security}${status}\\n`;
+        output += `${id}${ip}${type}${security}${status}\n`;
       }
 
-      output += `\\nFound ${servers.length} server${servers.length !== 1 ? "s" : ""}. Use 'connect <server_id>' to connect.`;
+      output += `\nFound ${servers.length} server${servers.length !== 1 ? "s" : ""}. Use 'connect <server_id>' to connect.`;
 
       return {
         success: true,
@@ -162,7 +164,7 @@ export class NetworkCommandsModule implements CommandModule {
     if (args.length === 0) {
       return {
         success: false,
-        output: "Usage: connect <server_id>\\nExample: connect 192.168.1.1",
+        output: "Usage: connect <server_id>\nExample: connect 192.168.1.1",
         timestamp: new Date(),
       };
     }
@@ -179,7 +181,7 @@ export class NetworkCommandsModule implements CommandModule {
     // Validate server ID or IP address format
     const isIP = validateIPAddress(serverId);
     const isValidId = validateServerId(serverId);
-    
+
     if (!isIP && !isValidId) {
       return {
         success: false,
@@ -219,7 +221,7 @@ export class NetworkCommandsModule implements CommandModule {
 
       return {
         success: true,
-        output: `✅ ${result.message}\\nAccess Level: ${result.accessLevel}`,
+        output: `✅ ${result.message}\nAccess Level: ${result.accessLevel}`,
         timestamp: new Date(),
       };
     } catch (error) {
@@ -278,7 +280,7 @@ export class NetworkCommandsModule implements CommandModule {
     if (args.length === 0) {
       return {
         success: false,
-        output: "Usage: probe <server_id>\\nExample: probe 192.168.1.1",
+        output: "Usage: probe <server_id>\nExample: probe 192.168.1.1",
         timestamp: new Date(),
       };
     }
@@ -309,13 +311,13 @@ export class NetworkCommandsModule implements CommandModule {
         serverId,
       );
 
-      let output = `🔎 Probe Results for ${server.name}\\n\\n`;
-      output += `IP Address: ${server.ipAddress}\\n`;
-      output += `Type: ${server.type}\\n`;
-      output += `Security Level: ${server.encryptionLevel}\\n`;
-      output += `Status: ${server.isOnline ? "🟢 Online" : "🔴 Offline"}\\n`;
-      output += `Connections: ${server.currentConnections}/${server.maxConnections}\\n`;
-      output += `\\nAccess: ${accessCheck.canAccess ? `✅ Granted (Level ${accessCheck.accessLevel})` : "❌ Denied"}\\n`;
+      let output = `🔎 Probe Results for ${server.name}\n\n`;
+      output += `IP Address: ${server.ipAddress}\n`;
+      output += `Type: ${server.type}\n`;
+      output += `Security Level: ${server.encryptionLevel}\n`;
+      output += `Status: ${server.isOnline ? "🟢 Online" : "🔴 Offline"}\n`;
+      output += `Connections: ${server.currentConnections}/${server.maxConnections}\n`;
+      output += `\nAccess: ${accessCheck.canAccess ? `✅ Granted (Level ${accessCheck.accessLevel})` : "❌ Denied"}\n`;
 
       if (!accessCheck.canAccess && accessCheck.reason) {
         output += `Reason: ${accessCheck.reason}`;
@@ -343,7 +345,8 @@ export class NetworkCommandsModule implements CommandModule {
     if (args.length === 0) {
       return {
         success: false,
-        output: "Usage: traceroute <server_id>\\nExample: traceroute 192.168.1.1",
+        output:
+          "Usage: traceroute <server_id>\nExample: traceroute 192.168.1.1",
         timestamp: new Date(),
       };
     }
@@ -353,20 +356,20 @@ export class NetworkCommandsModule implements CommandModule {
     // Generate a simulated traceroute
     const hops = this.generateTraceroute(target);
 
-    let output = `🌐 Traceroute to ${target}\\n\\n`;
-    output += "HOP  IP ADDRESS        LATENCY   STATUS\\n";
-    output += "─".repeat(50) + "\\n";
+    let output = `🌐 Traceroute to ${target}\n\n`;
+    output += "HOP  IP ADDRESS        LATENCY   STATUS\n";
+    output += "─".repeat(50) + "\n";
 
     for (let i = 0; i < hops.length; i++) {
       const hop = hops[i];
       if (!hop) continue;
-      
+
       const hopNum = (i + 1).toString().padEnd(5);
       const ip = hop.ip.padEnd(18);
       const latency = `${hop.latency}ms`.padEnd(10);
       const status = hop.timeout ? "* * *" : "✓";
 
-      output += `${hopNum}${ip}${latency}${status}\\n`;
+      output += `${hopNum}${ip}${latency}${status}\n`;
     }
 
     return {

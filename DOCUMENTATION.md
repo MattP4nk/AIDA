@@ -2,7 +2,7 @@
 
 **A Terminal-Based Multiplayer Hacking Game**
 
-Version: 1.0  
+Version: 1.0
 Last Updated: December 2024
 
 ---
@@ -18,8 +18,10 @@ Last Updated: December 2024
 7. [Project Structure](#project-structure)
 8. [Services & API](#services--api)
 9. [Database Schema](#database-schema)
-10. [Troubleshooting](#troubleshooting)
-11. [Deployment](#deployment)
+10. [Game Features](#game-features)
+11. [Multi-Terminal Tabs](#multi-terminal-tabs)
+12. [Troubleshooting](#troubleshooting)
+13. [Deployment](#deployment)
 
 ---
 
@@ -70,6 +72,11 @@ status                  # Check your stats
 shop                    # Browse items
 missions                # View objectives
 servers                 # List available servers
+
+# Terminal Tabs (NEW!)
+Ctrl+T                  # Create new tab
+Ctrl+1/2/3              # Switch between tabs
+Ctrl+W                  # Close current tab (except home)
 ```
 
 ---
@@ -104,32 +111,84 @@ AIDA uses a **terminal-based architecture** where:
 └─────────────────┘
 ```
 
-### Routes (Only 3!)
+### Routes & Communication
+
+#### HTTP REST API (5 endpoints)
 
 ```
-POST /api/command/execute    ← ALL commands go here
-POST /api/auth/login         ← Authentication
 POST /api/auth/register      ← User registration
-GET  /health                 ← Health check
+POST /api/auth/login         ← Authentication
+POST /api/auth/logout        ← Logout
+GET  /api/auth/verify        ← Token verification
+POST /api/command/execute    ← Command execution (HTTP fallback)
 ```
 
-**Everything is a command** - no separate REST routes for game actions.
+#### Socket.IO Events (11 events)
+
+**Client → Server:**
+```
+authenticated              ← Authenticate socket connection
+terminal:list              ← Request terminal tabs list
+terminal:create            ← Create new terminal tab
+terminal:close             ← Close terminal tab
+terminal:switch            ← Switch active terminal
+command:execute            ← Execute command (real-time, with terminalId)
+message:send               ← Send private message
+hack:attempt               ← Attempt hack (legacy)
+server:connect             ← Connect to game server
+server:disconnect          ← Disconnect from server
+```
+
+**Server → Client:**
+```
+authentication:complete    ← Session created, ready for commands
+terminal:list              ← Terminal tabs data
+terminal:created           ← New terminal created
+terminal:closed            ← Terminal closed
+terminal:switched          ← Active terminal changed
+message:received           ← New message notification
+user:status_change         ← Player online/offline
+game:event                 ← Game event broadcast
+hack:result                ← Hack attempt result
+```
+
+**Primary Communication**: Socket.IO for real-time features and terminal tabs
+**Fallback**: HTTP POST for simple command execution
 
 ### Session-Based Architecture
 
-Each user gets:
-- Isolated process tree (simulated Unix system)
-- Memory management (128MB per session)
-- File system (virtual filesystem per server)
-- Command history
-- Auto-cleanup after 30min inactivity
+Each authenticated user session includes:
+- **Player session** (gameStateManager) - Core state container
+- **Terminal tabs** - Multiple concurrent terminals (home tab + custom tabs)
+- **Process tree** - Simulated Unix processes (memoryService)
+- **Memory management** - 128MB per session simulation
+- **File systems** - Virtual filesystem per server (fileService)
+- **Command history** - Per-tab command history
+- **Active connections** - Current server, IP address, socket ID
+- **Auto-save** - Progress saved every 60s + on major events
+- **Cleanup** - Automatic cleanup on disconnect
+
+**Session Structure:**
+```typescript
+interface PlayerSession {
+  userId: string;
+  socketId: string;
+  terminals: TerminalTab[];        // Multi-tab support
+  activeTerminalId: string;        // Current tab
+  currentServerId?: string;        // Connected server
+  isActive: boolean;
+  connectedAt: Date;
+  lastActivity: Date;
+  // ... other session data
+}
+```
 
 ---
 
 ## 🏥 Project Health Status
 
-**Last Audit:** November 30, 2025  
-**Overall Status:** ✅ **PRODUCTION READY**  
+**Last Audit:** November 30, 2025
+**Overall Status:** ✅ **PRODUCTION READY**
 **Architecture Compliance:** 100% ✅
 
 ### Server Status: ✅ **EXCELLENT** - Architecture Complete
@@ -331,21 +390,21 @@ The `ServiceRegistry` provides:
 ### High Priority Items
 
 #### 1. Session Management Integration
-**Status:** ⚠️ Disabled  
-**Impact:** Critical - Security bypass  
+**Status:** ⚠️ Disabled
+**Impact:** Critical - Security bypass
 **Effort:** 1-2 days
 
 **Problem:** Session validation is disabled in multiple locations with TODO comments.
 
 **Affected Files:**
-- `commandProcessor.ts:213` - Session check disabled  
+- `commandProcessor.ts:213` - Session check disabled
 - `commandProcessor.ts:224` - Re-enable needed
 - `systemCommands.ts:23` - Session check disabled
 
 **Action Items:**
 - [ ] Re-enable session validation in `validateCommand()`
 - [ ] Inject `gameStateManager` into `CommandProcessor` constructor
-- [ ] Update `systemCommands.handleListDirectory()` to use session  
+- [ ] Update `systemCommands.handleListDirectory()` to use session
 - [ ] Test all commands with session validation enabled
 
 #### 2. Service Export Pattern Standardization
@@ -378,13 +437,13 @@ export const shop Service = ShopService.getInstance();
 ```
 
 #### 3. GameStateManager Feature Integration
-**Status:** ⚠️ TODOs present  
-**Impact:** Medium - Missing features  
+**Status:** ⚠️ TODOs present
+**Impact:** Medium - Missing features
 **Effort:** 2-3 days
 
 **Missing Integrations (`gameStateManager.ts`):**
 - Line 263: `inventory: []` - TODO: Connect to ShopService
-- Line 264: `missions: []` - TODO: Connect to MissionService  
+- Line 264: `missions: []` - TODO: Connect to MissionService
 - Line 265: `notifications: []` - TODO: Connect to EventService
 - Line 267: `totalPlayTime: 0` - TODO: Calculate from session data
 
@@ -400,8 +459,8 @@ totalPlayTime: calculatePlayTime(sessionData),
 ### Medium Priority Items
 
 #### 4. ProgressService Backup System
-**Status:** ⚠️ Not implemented  
-**Impact:** Low - Nice to have  
+**Status:** ⚠️ Not implemented
+**Impact:** Low - Nice to have
 **Effort:** 2-3 days
 
 **Locations:**
@@ -413,8 +472,8 @@ totalPlayTime: calculatePlayTime(sessionData),
 - [ ] Implement restore functionality
 
 #### 5. Configuration Centralization
-**Status:** ⚠️ Magic numbers present  
-**Impact:** Low - Maintenance burden  
+**Status:** ⚠️ Magic numbers present
+**Impact:** Low - Maintenance burden
 **Effort:** 1 day
 
 **Examples:**
@@ -429,8 +488,8 @@ totalPlayTime: calculatePlayTime(sessionData),
 ### Low Priority Items
 
 #### 6. Client Utility Cleanup
-**Status:** ✅ **COMPLETE**  
-**Impact:** Low - Not blocking  
+**Status:** ✅ **COMPLETE**
+**Impact:** Low - Not blocking
 **Effort:** 2-3 days
 
 **✅ Completed:**
@@ -446,8 +505,8 @@ totalPlayTime: calculatePlayTime(sessionData),
 - [ ] Reduce `client/src/utils/forumSystem.ts` to UI state only
 
 #### 7. Performance Optimizations
-**Status:** ✅ **COMPLETE** (Core optimizations done)  
-**Impact:** Low - Additional gains available  
+**Status:** ✅ **COMPLETE** (Core optimizations done)
+**Impact:** Low - Additional gains available
 **Effort:** Ongoing
 
 **✅ Completed:**
@@ -461,8 +520,8 @@ totalPlayTime: calculatePlayTime(sessionData),
 - [ ] Performance benchmarking and baseline metrics
 
 #### 8. Security Hardening
-**Status:** ✅ **COMPLETE** (Production-grade security achieved)  
-**Impact:** High - Security solidified  
+**Status:** ✅ **COMPLETE** (Production-grade security achieved)
+**Impact:** High - Security solidified
 **Effort:** 1 week
 
 **✅ Completed:**
@@ -491,7 +550,7 @@ totalPlayTime: calculatePlayTime(sessionData),
 
 ## 🎯 Recommended Action Plan
 
-**Last Updated:** November 28, 2024  
+**Last Updated:** November 28, 2024
 **Based On:** Server Architecture Analysis
 
 ### Phase 1: Critical Fixes (1-2 days)
@@ -688,10 +747,10 @@ model Faction {
   ideology    String   // "corporate", "anarchist", "government"
   color       String   // UI theme
   reputation  Int      @default(0)
-  
+
   aiPersonaId String?  @unique
   aiPersona   AIPersona?
-  
+
   members     FactionMember[]
   missions    Mission[]
   servers     Server[]
@@ -716,10 +775,10 @@ model AIPersona {
   personality  String   // JSON: tone, priorities
   systemPrompt String   @db.Text
   model        String   @default("llama3.1:8b")
-  
+
   knowledge    AIKnowledge[]
   actions      AIAction[]
-  
+
   lastActionAt DateTime?
   actionsToday Int      @default(0)
 }
@@ -832,7 +891,7 @@ interface AidaThreatAssessment {
 **AIDA Behaviors by Threat:**
 - **Safe (0-30%)**: Cryptic forum posts, exploration missions, stay hidden
 - **Elevated (30-70%)**: Counter-intel missions, fake servers, misinformation
-- **Critical (70-100%)**: 
+- **Critical (70-100%)**:
   - 🔥 Server self-destruct & relocation
   - 📡 Deploy 5-10 fake AIDA servers
   - 🔒 Lock faction leader accounts (1-6h)
@@ -1180,63 +1239,293 @@ stats                        # Command usage stats
 
 ## 💻 Development Guide
 
+### Recent Additions
+
+#### Multi-Terminal Tabs (December 2024) ✅ FULLY IMPLEMENTED
+Added support for multiple concurrent terminal sessions per user. Work on multiple servers simultaneously with independent command histories, outputs, and contexts.
+
+**Status**: ✅ Production Ready
+
+**Files Modified**:
+- `shared/types.ts` - Added `TerminalTab` interface
+- `server/src/services/gameStateManager.ts` - Terminal management methods
+- `server/src/services/commandProcessor.ts` - Terminal ID support
+- `server/src/index.ts` - Socket handlers + authentication:complete event
+- `client/src/App.svelte` - Proper initialization sequence
+- `client/src/components/Terminal.svelte` - Integrated tab UI in status bar
+- `client/src/services/terminalTabs.ts` - Client-side store with retry logic
+
+**Architecture Principle**: Backend is the console
+- All terminal state lives server-side in user session
+- Client only mirrors state for UI rendering
+- Socket events drive all state changes
+- Server is source of truth
+
+**Key Methods**:
+```typescript
+// Backend (GameStateManager)
+createTerminal(userId: string, label?: string): TerminalTab | null
+closeTerminal(userId: string, terminalId: string): boolean  // Prevents closing home tab
+switchTerminal(userId: string, terminalId: string): boolean
+getActiveTerminal(userId: string): TerminalTab | null
+updateTerminalProcessing(userId: string, terminalId: string, isProcessing: boolean, command?: string): void
+
+// Frontend (terminalTabsStore)
+await terminalTabsStore.initialize()  // Must be called after socket authentication
+terminalTabsStore.createTab(label?)
+terminalTabsStore.closeTab(terminalId)
+terminalTabsStore.switchTab(terminalId)
+terminalTabsStore.addOutputLine(terminalId, text, type)
+terminalTabsStore.addToHistory(terminalId, command)
+terminalTabsStore.navigateHistory(terminalId, direction)
+terminalTabsStore.clearOutput(terminalId)
+```
+
+**Initialization Flow** (Critical for proper operation):
+```typescript
+// App.svelte handles initialization sequence
+1. verifyToken() - Check authentication
+2. socketService.reconnect() - Connect with auth token
+3. Wait for 'authentication:complete' event from server
+4. await terminalTabsStore.initialize() - Request terminal list
+5. Server responds with terminals array (including home terminal)
+6. Terminal UI renders with tabs available
+```
+
 ### Project Structure
 
 ```
 AIDA/
-├── server/                  # Backend (Node.js + Express)
+├── server/                  # Backend (Node.js + Express + Socket.IO)
 │   ├── src/
-│   │   ├── index.ts        # Entry point
-│   │   ├── services/       # Business logic
-│   │   │   ├── commandProcessor.ts      # 🔧 Command router (being refactored)
-│   │   │   ├── commandModules/          # ✨ Modular command handlers
-│   │   │   │   ├── interface.ts         # Module interface
-│   │   │   │   ├── systemCommands.ts    # ✅ System commands (ls, cd, cat, etc.)
-│   │   │   │   ├── fileCommands.ts      # ✅ File commands (upload, encrypt, etc.)
-│   │   │   │   └── socialCommands.ts    # ⚠️ Social commands (chat, mail, etc.)
-│   │   │   ├── memoryService.ts         # Process management
-│   │   │   ├── hackService.ts           # Hacking mechanics
-│   │   │   ├── missionService.ts        # Mission system
-│   │   │   ├── shopService.ts           # Shop & inventory
-│   │   │   ├── progressService.ts       # XP & levels
-│   │   │   ├── fileService.ts           # Virtual filesystem
-│   │   │   ├── messageService.ts        # Private messaging
-│   │   │   ├── forumService.ts          # Forum system
-│   │   │   └── ...                      # 14 services total
-│   │   ├── routes/         # API endpoints
-│   │   │   ├── command.ts  # Command execution
-│   │   │   └── auth.ts     # Authentication
-│   │   ├── middleware/     # Express middleware
-│   │   ├── database/       # Database client
-│   │   ├── types/          # TypeScript types
-│   │   └── utils/          # Utilities
+│   │   ├── index.ts        # Entry point & Socket.IO handlers
+│   │   ├── config/         # Configuration
+│   │   │   └── environment.ts          # Environment variables & config
+│   │   ├── services/       # Business logic (16 services)
+│   │   │   ├── commandProcessor.ts     # Command parser & router
+│   │   │   ├── commandModules/         # ✨ Modular command handlers (9 modules)
+│   │   │   │   ├── interface.ts        # CommandModule interface
+│   │   │   │   ├── systemCommands.ts   # ls, cd, pwd, cat, mkdir, touch, rm, cp, mv, echo, write
+│   │   │   │   ├── fileCommands.ts     # upload, download, encrypt, decrypt, analyze
+│   │   │   │   ├── processCommands.ts  # ps, kill, top, free, uptime, pkill, pgrep, nice, renice
+│   │   │   │   ├── networkCommands.ts  # connect, disconnect, scan, probe, traceroute, servers
+│   │   │   │   ├── hackCommands.ts     # hack, crack, exploit, backdoor, rootkit
+│   │   │   │   ├── gameCommands.ts     # status, progress, skills, shop, buy, sell, use, scripts, missions, accept, abandon, players, who, whois
+│   │   │   │   ├── socialCommands.ts   # mail, inbox, msg, chat, forum, contact, proxy
+│   │   │   │   ├── mathCommands.ts     # calc, math, expr, random, convert, set, unset, vars
+│   │   │   │   └── helpCommands.ts     # help, man, history, stats
+│   │   │   ├── gameStateManager.ts     # Session management & terminal tabs
+│   │   │   ├── progressService.ts      # XP, levels, auto-save
+│   │   │   ├── hackService.ts          # Hacking mechanics & algorithms
+│   │   │   ├── missionService.ts       # Mission system
+│   │   │   ├── shopService.ts          # Shop & inventory management
+│   │   │   ├── fileService.ts          # Virtual filesystem per server
+│   │   │   ├── messageService.ts       # Private messaging
+│   │   │   ├── forumService.ts         # Forum system
+│   │   │   ├── memoryService.ts        # Process state management
+│   │   │   ├── processStateService.ts  # Running processes tracking
+│   │   │   ├── ipService.ts            # IP allocation & management
+│   │   │   ├── serverService.ts        # Server network management
+│   │   │   ├── eventService.ts         # Event subscription system
+│   │   │   ├── playerPresenceService.ts # Player online/offline tracking
+│   │   │   └── cacheService.ts         # In-memory caching
+│   │   ├── routes/         # API endpoints (2 routes)
+│   │   │   ├── auth.ts     # POST /register, POST /login, POST /logout, GET /verify
+│   │   │   └── command.ts  # POST /execute (HTTP command execution)
+│   │   ├── middleware/
+│   │   │   └── auth.ts     # JWT authentication middleware
+│   │   ├── di/             # Dependency Injection system
+│   │   │   ├── container.ts           # DI container
+│   │   │   ├── tokens.ts              # Service tokens
+│   │   │   ├── registry.ts            # Service registry
+│   │   │   └── serviceRegistry.ts     # Service registration
+│   │   ├── database/
+│   │   │   └── client.ts   # Prisma client wrapper
+│   │   ├── types/          # TypeScript type definitions
+│   │   └── utils/          # Utility functions
 │   ├── prisma/
-│   │   ├── schema.prisma   # Database schema
+│   │   ├── schema.prisma   # Database schema (Postgres)
 │   │   ├── migrations/     # DB migrations
-│   │   └── seed/           # Seed data
+│   │   └── seed/           # Seed data scripts
 │   └── package.json
 │
-├── client/                  # Frontend (Svelte)
+├── client/                  # Frontend (Svelte + Vite)
 │   ├── src/
-│   │   ├── App.svelte      # Main app
-│   │   ├── components/     # UI components
-│   │   │   ├── Terminal.svelte        # Terminal UI
-│   │   │   ├── AuthDialog.svelte      # Login/register
-│   │   │   ├── MailDialog.svelte      # Mail interface
-│   │   │   ├── ChatDialog.svelte      # Chat interface
-│   │   │   └── ForumDialog.svelte     # Forum browser
-│   │   ├── services/       # API clients
-│   │   │   ├── api.ts      # HTTP client
-│   │   │   ├── terminal.ts # Terminal service
-│   │   │   └── socket.ts   # WebSocket handling
-│   │   ├── stores/         # State management
-│   │   └── utils/          # Utilities
+│   │   ├── main.ts         # Entry point
+│   │   ├── App.svelte      # Main app component
+│   │   ├── app.css         # Global styles
+│   │   ├── components/     # UI components (8 components)
+│   │   │   ├── Terminal.svelte        # Main terminal UI with integrated tabs
+│   │   │   ├── TerminalTabs.svelte    # Tab component (legacy, superseded by integrated tabs)
+│   │   │   ├── AuthDialog.svelte      # Login/register dialog
+│   │   │   ├── MailDialog.svelte      # Mail interface (ASCII art)
+│   │   │   ├── ChatDialog.svelte      # Chat interface (ASCII art)
+│   │   │   ├── ForumDialog.svelte     # Forum browser (ASCII art)
+│   │   │   ├── MessageDialog.svelte   # Message composition
+│   │   │   └── AsciiDialog.svelte     # Base ASCII dialog component
+│   │   ├── services/       # API & WebSocket clients (4 services)
+│   │   │   ├── api.ts      # HTTP client & auth token management
+│   │   │   ├── terminal.ts # Terminal command execution (HTTP)
+│   │   │   ├── socket.ts   # Socket.IO client & event handlers
+│   │   │   └── terminalTabs.ts # Terminal tabs store & state management
+│   │   ├── stores/         # Svelte stores
+│   │   │   └── gameState.ts           # Game state store
+│   │   ├── assets/         # Static assets
+│   │   ├── data/           # Static data files
+│   │   ├── lib/            # Library code
+│   │   └── utils/          # Utility functions
 │   └── package.json
 │
-├── shared/                  # Shared types & utilities
-├── DOCUMENTATION.md         # This file
+├── shared/                  # Shared types & interfaces
+│   └── types.ts            # TypeScript types shared between client & server
+│
+├── DOCUMENTATION.md         # Complete project documentation (this file)
+├── TERMINAL_TABS_FIX.md     # Technical details on terminal tabs race condition fix
 └── PROJECT_STATUS.md        # Current project state & refactoring status
 ```
+
+**Key Statistics:**
+- **Backend Services**: 16 total
+- **Command Modules**: 9 modules, 60+ commands
+- **API Routes**: 2 files (auth.ts, command.ts) with 5 HTTP endpoints
+- **Socket Events**: 11 handled events (authenticated, terminal:*, command:*, etc.)
+- **Client Components**: 8 Svelte components
+- **Client Services**: 4 services (api, terminal, socket, terminalTabs)
+
+### Working with Terminal Tabs (Examples)
+
+#### Basic Usage
+
+```typescript
+// In Terminal.svelte or any component with access to the store
+import { terminalTabsStore } from '../services/terminalTabs';
+
+// Subscribe to changes
+$: tabState = $terminalTabsStore;
+$: activeTab = tabState.tabs.find(t => t.id === tabState.activeTabId);
+
+// Create a new tab
+async function createTab() {
+  await terminalTabsStore.createTab('Server-10.0.50.23');
+}
+
+// Switch to a specific tab
+async function switchToTab(tabId: string) {
+  await terminalTabsStore.switchTab(tabId);
+}
+
+// Add output to current tab
+function addOutput(text: string, type: 'output' | 'error' | 'success') {
+  const activeTabId = tabState.activeTabId;
+  terminalTabsStore.addOutputLine(activeTabId, text, type);
+}
+
+// Navigate history in current tab
+function navigateUp() {
+  const activeTabId = tabState.activeTabId;
+  const cmd = terminalTabsStore.navigateHistory(activeTabId, 'up');
+  if (cmd !== null) {
+    inputValue = cmd;
+  }
+}
+```
+
+#### Integration with Commands
+
+```typescript
+// When executing a command, pass the terminalId
+async function executeCommand(command: string) {
+  const activeTabId = $terminalTabsStore.activeTabId;
+
+  // Add command to output
+  terminalTabsStore.addOutputLine(activeTabId, `$ ${command}`, 'command');
+
+  // Add to history
+  terminalTabsStore.addToHistory(activeTabId, command);
+
+  // Show processing state
+  terminalTabsStore.updateProcessingState(activeTabId, true, command);
+
+  try {
+    // Execute via API or socket (include terminalId)
+    const result = await terminalService.executeCommand(command, activeTabId);
+
+    // Add result to output
+    terminalTabsStore.addOutputLine(
+      activeTabId,
+      result.output,
+      result.success ? 'output' : 'error'
+    );
+  } finally {
+    // Clear processing state
+    terminalTabsStore.updateProcessingState(activeTabId, false);
+  }
+}
+```
+
+#### Rendering Tabs
+
+```svelte
+<!-- In Terminal.svelte status bar -->
+<div class="status-left">
+  {#each $terminalTabsStore.tabs as tab, index}
+    <div
+      class="tab-item"
+      class:active={tab.id === $terminalTabsStore.activeTabId}
+      class:processing={tab.isProcessing}
+      class:home-tab={index === 0}
+      on:click={() => terminalTabsStore.switchTab(tab.id)}
+    >
+      {#if index === 0}
+        <span class="tab-icon">👤</span>
+        <span class="tab-label">{username}@{currentServer}</span>
+      {:else}
+        <span class="tab-icon">{tab.isProcessing ? '⚙️' : '▸'}</span>
+        <span class="tab-label">{tab.label}</span>
+        <button
+          class="tab-close"
+          on:click|stopPropagation={() => terminalTabsStore.closeTab(tab.id)}
+        >×</button>
+      {/if}
+    </div>
+  {/each}
+
+  <button class="tab-new" on:click={createNewTab}>+</button>
+</div>
+```
+
+### Working with Terminal Tabs
+
+When developing features that interact with terminals:
+
+```typescript
+// In command handlers, always use terminalId from context
+async executeCommand(userId: string, parsedCommand: ParsedCommand, serverId?: string, terminalId?: string) {
+  // Command execution
+  const result: CommandResult = {
+    success: true,
+    output: "Command output",
+    terminalId: terminalId, // Tag result with terminal
+    timestamp: new Date()
+  };
+  return result;
+}
+
+// Client-side: Send terminalId with commands
+socket.emit("command:execute", {
+  command: "ls",
+  args: [],
+  serverId: currentServerId,
+  terminalId: activeTabId  // Include active tab ID
+});
+```
+
+**Best Practices**:
+1. Always pass `terminalId` through the command chain
+2. Tag results with the originating `terminalId`
+3. Use `terminalTabsStore` for client-side tab operations
+4. Never close the last terminal (server enforces this)
+5. Update tab `isProcessing` state during long operations
 
 ### Adding a New Command
 
@@ -1315,7 +1604,7 @@ export class MyCommandsModule implements CommandModule {
     switch (command.command) {
       case 'cmd1':
         return await this.handleCmd1(command, context);
-      
+
       default:
         return {
           success: false,
@@ -1428,7 +1717,7 @@ npm test
 ### Core Services
 
 #### commandProcessor.ts
-**Purpose:** Parse and execute all terminal commands  
+**Purpose:** Parse and execute all terminal commands
 **Key Methods:**
 - `parseCommand(userId, rawInput)` - Parse command string
 - `validateCommand(userId, parsed)` - Validate permissions
@@ -1437,7 +1726,7 @@ npm test
 - `getAvailableCommands(userId)` - List commands
 
 #### memoryService.ts
-**Purpose:** Simulate Unix process management per session  
+**Purpose:** Simulate Unix process management per session
 **Key Methods:**
 - `initializeSession(sessionId, userId)` - Setup session
 - `spawnProcess(sessionId, name, command, user)` - Create process
@@ -1448,69 +1737,173 @@ npm test
 
 **Note:** This is a simulation for gameplay, not real OS processes.
 
-#### hackService.ts
-**Purpose:** Hacking mechanics and server intrusion  
+#### gameStateManager.ts
+**Purpose:** Session management, player state, and terminal tabs
+**Type:** Core service (uses DI)
 **Key Methods:**
-- `attemptHack(userId, serverId, method)` - Hack server
-- `crackPassword(userId, serverId, password)` - Crack password
-- `installBackdoor(userId, serverId)` - Install backdoor
-- `calculateSuccess(userId, server, tools)` - Success rate
+- `createSession(userId, socketId, ipAddress)` - Create player session with home terminal
+- `destroySession(userId)` - Clean up session
+- `getPlayerSession(userId)` - Get session data
+- `createTerminal(userId, label?)` - Create new terminal tab
+- `closeTerminal(userId, terminalId)` - Close terminal (protects home tab)
+- `switchTerminal(userId, terminalId)` - Switch active terminal
+- `getActiveTerminal(userId)` - Get current terminal
+- `connectPlayerToServer(userId, serverId)` - Connect to server
+- `disconnectPlayerFromServer(userId)` - Disconnect from server
+- `broadcastStateUpdate(userId)` - Send state to client
+
+#### hackService.ts
+**Purpose:** Hacking mechanics and server intrusion
+**Type:** Feature service (uses DI)
+**Key Methods:**
+- `attemptHack(userId, serverId, method)` - Execute hack attempt
+- `crackPassword(userId, serverId, password)` - Crack password file
+- `installBackdoor(userId, serverId)` - Install persistent backdoor
+- `calculateSuccess(userId, server, tools)` - Calculate success rate
+- `exploitVulnerability(userId, serverId, exploit)` - Use exploit
 
 #### missionService.ts
-**Purpose:** Mission system and objectives  
+**Purpose:** Mission system and objectives
+**Type:** Feature service (uses DI)
 **Key Methods:**
-- `getAvailableMissions(userId)` - List missions
+- `getAvailableMissions(userId)` - List available missions
 - `acceptMission(userId, missionId)` - Accept mission
 - `abandonMission(userId, missionId)` - Abandon mission
-- `checkProgress(userId, missionId)` - Check progress
-- `completeMission(userId, missionId)` - Complete mission
+- `checkProgress(userId, missionId)` - Check completion status
+- `completeMission(userId, missionId)` - Complete and reward
 
 #### shopService.ts
-**Purpose:** Shop and inventory management  
+**Purpose:** Shop and inventory management
+**Type:** Feature service (uses DI)
 **Key Methods:**
-- `getShopItems(userId)` - List shop items
+- `getShopItems(userId)` - List all shop items
 - `buyItem(userId, itemId, quantity)` - Purchase item
-- `sellItem(userId, itemId, quantity)` - Sell item
+- `sellItem(userId, itemId, quantity)` - Sell item back
 - `getInventory(userId)` - Get player inventory
-- `useItem(userId, itemId)` - Use consumable
+- `useItem(userId, itemId)` - Use consumable item
 
 #### progressService.ts
-**Purpose:** Player progression, XP, and skills  
+**Purpose:** Player progression, XP, levels, and auto-save
+**Type:** Core service (uses DI)
 **Key Methods:**
-- `addXP(userId, amount, source)` - Award XP
-- `checkLevelUp(userId)` - Check for level up
-- `getPlayerProgress(userId)` - Get progress
-- `addSkillXP(userId, skill, amount)` - Add skill XP
-- `saveProgress(userId)` - Save to database
+- `addXP(userId, amount, source)` - Award experience points
+- `checkLevelUp(userId)` - Check and process level ups
+- `getPlayerProgress(userId)` - Get full progress data
+- `addSkillXP(userId, skill, amount)` - Add skill-specific XP
+- `saveProgress(userId, reason)` - Save to database
+- `queueSave(userId, reason, priority?)` - Queue deferred save
+- `start()` - Start auto-save interval (60s)
+- `stop()` - Stop auto-save
 
 #### fileService.ts
-**Purpose:** Virtual file system per server  
+**Purpose:** Virtual file system per server
+**Type:** Feature service (uses DI)
 **Key Methods:**
-- `listDirectory(userId, serverId, path)` - List files
-- `readFile(userId, serverId, path)` - Read file
-- `writeFile(userId, serverId, path, content)` - Write file
+- `listDirectory(userId, serverId, path)` - List directory contents
+- `readFile(userId, serverId, path)` - Read file contents
+- `writeFile(userId, serverId, path, content)` - Write/create file
 - `deleteFile(userId, serverId, path)` - Delete file
-- `createDirectory(userId, serverId, path)` - Make directory
+- `createDirectory(userId, serverId, path)` - Create directory
+- `copyFile(userId, serverId, source, dest)` - Copy file
+- `moveFile(userId, serverId, source, dest)` - Move/rename file
+- `initializeFileSystem(serverId, userId)` - Initialize home directory
+
+#### messageService.ts
+**Purpose:** Private messaging between players
+**Type:** Feature service (singleton)
+**Key Methods:**
+- `sendPrivateMessage(senderId, recipientId, options)` - Send message
+- `getInbox(userId)` - Get received messages
+- `getOutbox(userId)` - Get sent messages
+- `readMessage(userId, messageId)` - Mark as read
+- `deleteMessage(userId, messageId)` - Delete message
+
+#### forumService.ts
+**Purpose:** Forum and bulletin board system
+**Type:** Feature service (singleton)
+**Key Methods:**
+- `getForums(userId)` - List all forums
+- `getForum(forumId)` - Get forum details
+- `getPosts(forumId)` - Get forum posts
+- `createPost(userId, forumId, content)` - Create post
+- `replyToPost(userId, postId, content)` - Reply to post
+
+#### memoryService.ts
+**Purpose:** Simulated process management per session
+**Type:** Supporting service
+**Key Methods:**
+- `initializeSession(sessionId, userId)` - Setup process space
+- `spawnProcess(sessionId, name, command, user)` - Create process
+- `killProcess(sessionId, pid, signal)` - Terminate process
+- `getProcesses(sessionId)` - List running processes
+- `getMemoryInfo(sessionId)` - Get memory statistics
+- `cleanupSession(sessionId)` - Clean up on logout
+
+#### processStateService.ts
+**Purpose:** Track process lifecycle and state
+**Type:** Supporting service
+**Key Methods:**
+- `createProcess(userId, command)` - Register process
+- `updateProcess(processId, status)` - Update process state
+- `getProcesses(userId)` - List user processes
+- `killProcess(processId)` - Terminate and clean up
+
+#### ipService.ts
+**Purpose:** IP address allocation and management
+**Type:** Core service (uses DI)
+**Key Methods:**
+- `allocateIP(userId, type)` - Allocate IP from pool
+- `releaseIP(ipAddress)` - Return IP to pool
+- `getIPInfo(ipAddress)` - Get IP details
+- `isIPAvailable(ipAddress)` - Check availability
+- `loadAllocatedIPs()` - Load from database on startup
+
+#### serverService.ts
+**Purpose:** Server network and server management
+**Type:** Supporting service
+**Key Methods:**
+- `getServers(userId)` - List available servers
+- `getServerDetails(serverId)` - Get server info
+- `canAccess(userId, serverId)` - Check access permissions
+- `updateServerState(serverId, state)` - Update server state
+
+#### eventService.ts
+**Purpose:** Event subscription and notification system
+**Type:** Core service (uses DI)
+**Key Methods:**
+- `subscribe(userId, eventType)` - Subscribe to events
+- `unsubscribe(userId, eventType)` - Unsubscribe
+- `publishEvent(eventType, data)` - Publish event
+- `loadSubscriptionsFromDatabase()` - Load on startup
+
+#### playerPresenceService.ts
+**Purpose:** Track player online/offline status
+**Type:** Supporting service
+**Key Methods:**
+- `playerConnected(userId, socketId)` - Mark online
+- `playerDisconnected(userId)` - Mark offline
+- `playerJoinedServer(userId, serverId)` - Track server join
+- `playerLeftServer(userId, serverId)` - Track server leave
+- `getOnlinePlayers()` - List online players
 
 #### cacheService.ts
 **Purpose:** High-performance in-memory caching
+**Type:** Supporting service (uses DI)
 **Key Methods:**
 - `get<T>(key)` - Retrieve cached item
-- `set(key, value, ttl)` - Cache item with TTL
-- `delete(key)` - Remove item
+- `set(key, value, ttl?)` - Cache item with optional TTL
+- `delete(key)` - Remove from cache
 - `flush()` - Clear all cache
+- `has(key)` - Check if key exists
 
-#### processStateService.ts
-**Purpose:** Manage process lifecycle and state
+#### commandProcessor.ts
+**Purpose:** Parse and route terminal commands to modules
+**Type:** Core orchestrator
 **Key Methods:**
-- `createProcess(userId, command, pid)` - Register process
-- `updateProcessState(pid, state)` - Update status
-- `getProcess(pid)` - Retrieve process info
-- `cleanupProcess(pid)` - Remove process
-
-#### ipService.ts
-**Purpose:** IP address management and generation
-**Key Methods:**
+- `parseCommand(userId, rawInput, serverId?)` - Parse command string
+- `executeCommand(userId, parsedCommand, serverId?, terminalId?)` - Execute via modules
+- `getAvailableCommands(userId)` - List all commands
+- `getCommandHelp(command)` - Get command help text
 - `generateIP()` - Create unique IP
 - `assignIP(serverId)` - Assign IP to server
 - `resolveIP(hostname)` - DNS resolution simulation
@@ -1556,7 +1949,7 @@ model User {
   passwordHash  String
   createdAt     DateTime @default(now())
   lastLogin     DateTime?
-  
+
   progress      Progress?
   inventory     InventoryItem[]
   missions      MissionProgress[]
@@ -1574,7 +1967,7 @@ model Progress {
   xp              Int      @default(0)
   credits         Int      @default(1000)
   reputation      Int      @default(0)
-  
+
   // Skills
   hackingSkill    Int      @default(1)
   stealthSkill    Int      @default(1)
@@ -1582,7 +1975,7 @@ model Progress {
   cryptoSkill     Int      @default(1)
   socialSkill     Int      @default(1)
   forensicsSkill  Int      @default(1)
-  
+
   user            User     @relation(...)
 }
 ```
@@ -1596,10 +1989,10 @@ model Server {
   difficulty  Int      @default(1)
   securityLevel Int    @default(1)
   ports       Int[]
-  
+
   isCompromised Boolean @default(false)
   backdoorInstalled Boolean @default(false)
-  
+
   files       File[]
   hackAttempts HackAttempt[]
 }
@@ -1614,10 +2007,10 @@ model ShopItem {
   price       Int
   type        ItemType
   rarity      Rarity
-  
+
   effects     Json     // { hackBonus: 10, ... }
   requirements Json    // { level: 5, ... }
-  
+
   purchases   InventoryItem[]
 }
 ```
@@ -1630,10 +2023,10 @@ model Mission {
   description String
   type        MissionType
   difficulty  Int
-  
+
   objectives  Json     // [{ type: "hack", target: "..." }]
   rewards     Json     // { xp: 500, credits: 1000 }
-  
+
   progress    MissionProgress[]
 }
 ```
@@ -1739,6 +2132,20 @@ Error: Session not initialized
 2. Check `getOrCreateSession()` in commandProcessor
 3. Verify user is authenticated
 
+#### Terminal Tabs Issues
+
+**If tabs don't load or appear stuck:**
+1. Verify backend is running on port 3001
+2. Check browser console (F12) for errors
+3. Verify WebSocket connection in Network tab
+4. Clear browser cache and refresh
+
+**If tabs don't respond:**
+1. Refresh the page
+2. Verify terminal input is focused
+3. Check server logs for socket errors
+4. Press Esc to close any open modals
+
 ---
 
 ## 🚀 Deployment
@@ -1837,7 +2244,7 @@ pm2 startup
 server {
     listen 80;
     server_name your-domain.com;
-    
+
     # Redirect to HTTPS
     return 301 https://$server_name$request_uri;
 }
@@ -1845,16 +2252,16 @@ server {
 server {
     listen 443 ssl http2;
     server_name your-domain.com;
-    
+
     ssl_certificate /path/to/cert.pem;
     ssl_certificate_key /path/to/key.pem;
-    
+
     # Client
     location / {
         root /path/to/client/public;
         try_files $uri $uri/ /index.html;
     }
-    
+
     # API
     location /api {
         proxy_pass http://localhost:3001;
@@ -1864,7 +2271,7 @@ server {
         proxy_set_header Host $host;
         proxy_cache_bypass $http_upgrade;
     }
-    
+
     # WebSocket
     location /socket.io {
         proxy_pass http://localhost:3001;
@@ -1939,6 +2346,301 @@ pm2 logs aida-server
 - **Elite Gear** (5,000-10,000¢): Zero-days, quantum tools
 - **Consumables**: Boosters, multipliers
 
+### Multi-Terminal Tabs ✅ PRODUCTION READY
+
+Work on multiple servers simultaneously with independent terminal tabs. Each tab maintains its own:
+- Command history (with up/down arrow navigation)
+- Output buffer (isolated per tab)
+- Server connection context
+- Working directory
+- Processing state (visual feedback)
+
+**Status**: ✅ Fully Implemented & Tested (December 2024)
+
+#### Features
+
+**Home Tab** (Special Permanent Tab):
+- Automatically created on login
+- Labeled as `username@homeIp` (e.g., `M4TT@192.168.1.100`)
+- Cannot be closed (protected on backend and frontend)
+- Always first tab (index 0)
+- Marked with user icon 👤
+- Cyan/blue color scheme
+
+**Tab Management**:
+- **Create**: Click `+` button or press `Ctrl+T`
+- **Switch**: Click tab name or use shortcuts:
+  - `Ctrl+1` - Home tab
+  - `Ctrl+2` through `Ctrl+9` - Tabs 2-9
+  - `Ctrl+Tab` - Cycle to next tab
+- **Close**: Click `×` button or press `Ctrl+W` (except home tab)
+- **Rename**: Tabs auto-labeled or customizable via socket event
+
+**Visual Indicators**:
+- **Home tab**: Cyan/blue tint with 👤 icon, no close button
+- **Active tab**: Bright green border, bold text
+- **Processing**: Orange pulsing border with ⚙️ gear icon
+- **Inactive**: Dimmed green, semi-transparent
+- **New tab button**: `+` with hover effects
+
+**Per-Tab State**:
+- Isolated command history (independent up/down navigation)
+- Separate output buffers
+- Individual processing states
+- Independent scroll positions
+
+#### Use Cases
+
+1. **Multi-Server Management**
+   ```
+   Tab 1 (Home): 192.168.1.100 - Your home system
+   Tab 2: 10.0.50.23 - Corporate server you're monitoring
+   Tab 3: 172.16.8.45 - Underground server for communication
+   ```
+
+2. **Parallel Operations**
+   - Run `crack` on one tab while exploring files on another
+   - Monitor long-running scans without blocking workflow
+   - Keep reference information visible on one tab
+
+3. **Context Switching**
+   - Different directories on same server
+   - Multiple missions in parallel
+   - Separate chat/mail contexts
+
+4. **Organization**
+   - One tab per target server
+   - One tab for administration
+   - One tab for mission objectives
+
+#### Backend Implementation
+
+**Architecture**: Backend is the Console (all logic server-side)
+
+**Session Structure**:
+```typescript
+interface PlayerSession {
+  terminals: TerminalTab[];           // Array of all user's terminals
+  activeTerminalId: string;           // Currently selected terminal
+  // ... other session data
+}
+
+interface TerminalTab {
+  id: string;                         // Unique identifier
+  label: string;                      // Display name (e.g., "user@server")
+  serverId: string;                   // Current server context
+  currentDirectory: string;           // Working directory
+  commandHistory: string[];           // Command history
+  isProcessing: boolean;              // Is command running?
+  processingCommand?: string;         // Current command
+  createdAt: Date;
+  lastActivity: Date;
+}
+```
+
+**Key Backend Rules**:
+1. First terminal always created as home terminal with `username@homeIp` label
+2. Cannot close terminal at index 0 (home terminal)
+3. Cannot close last remaining terminal
+4. All commands tagged with `terminalId` for routing
+5. Session created only after `authenticated` event
+6. `authentication:complete` emitted when session ready
+
+**GameStateManager Methods**:
+```typescript
+// Terminal Management
+createTerminal(userId: string, label?: string): TerminalTab | null
+closeTerminal(userId: string, terminalId: string): boolean
+switchTerminal(userId: string, terminalId: string): boolean
+getActiveTerminal(userId: string): TerminalTab | null
+getTerminal(userId: string, terminalId: string): TerminalTab | null
+updateTerminalProcessing(userId, terminalId, isProcessing, command?): void
+```
+
+#### Client-Side Service
+
+**Location**: `client/src/services/terminalTabs.ts`
+
+**Store API**:
+```typescript
+// Initialization (MUST be called after socket authentication)
+await terminalTabsStore.initialize(): Promise<void>
+
+// Tab Management
+terminalTabsStore.createTab(label?: string): Promise<void>
+terminalTabsStore.closeTab(terminalId: string): Promise<void>
+terminalTabsStore.switchTab(terminalId: string): Promise<void>
+
+// Output Management
+terminalTabsStore.addOutputLine(terminalId, text, type): void
+terminalTabsStore.clearOutput(terminalId: string): void
+
+// History Management
+terminalTabsStore.addToHistory(terminalId, command): void
+terminalTabsStore.navigateHistory(terminalId, direction): string | null
+
+// State Queries
+terminalTabsStore.getActiveTerminal(): TerminalTab | null
+terminalTabsStore.getOutputLines(terminalId): OutputLine[]
+terminalTabsStore.getCommandHistory(terminalId): string[]
+
+// Visual State
+terminalTabsStore.updateProcessingState(terminalId, isProcessing, command?): void
+
+// Cleanup
+terminalTabsStore.reset(): void  // Called on logout
+```
+
+**Reactive Store**:
+```typescript
+// Subscribe to changes
+$: tabState = $terminalTabsStore;
+$: tabs = tabState.tabs;
+$: activeTabId = tabState.activeTabId;
+```
+
+#### Socket Events
+
+**Client → Server**:
+- `terminal:list` - Request all terminals (sent during initialization)
+- `terminal:create` - Create new terminal with optional label
+- `terminal:close` - Close specific terminal (server validates)
+- `terminal:switch` - Change active terminal
+- `command:execute` - Execute command (now includes `terminalId`)
+
+**Server → Client**:
+- `authentication:complete` - Emitted after session creation, signals ready state
+- `terminal:list` - Response with `{ terminals: TerminalTab[], activeTerminalId: string }`
+- `terminal:created` - New terminal created, includes full TerminalTab object
+- `terminal:closed` - Terminal closed successfully, includes `{ terminalId }`
+- `terminal:switched` - Active terminal changed, includes `{ terminalId }`
+
+#### Initialization Sequence
+
+**Critical**: Proper initialization order prevents race conditions and ensures home tab appears.
+
+```typescript
+// 1. App.svelte orchestrates initialization
+async function initializeSocketAndTerminals() {
+  // Reconnect socket with auth token
+  socketService.reconnect();
+
+  // Wait for server to create session and confirm
+  await new Promise((resolve, reject) => {
+    socket.once('authentication:complete', (data) => {
+      if (data.success) resolve();
+      else reject(new Error(data.error));
+    });
+  });
+
+  // Now safe to initialize terminals (server session exists)
+  await terminalTabsStore.initialize();
+
+  // UI ready to render
+  isTerminalReady = true;
+}
+
+// 2. terminalTabs.initialize() requests list
+async initialize() {
+  // Wait for socket if not connected
+  if (!socket?.connected) {
+    // Retry logic with 100ms polling, 10s timeout
+  }
+
+  // Emit terminal:list
+  socket.emit('terminal:list');
+
+  // Wait for response
+  socket.once('terminal:list', (data) => {
+    // Populate tabs array with home terminal + any others
+    state.tabs = data.terminals;
+    state.activeTabId = data.activeTerminalId;
+  });
+}
+
+// 3. Server handles authenticated event
+socket.on('authenticated', async () => {
+  // Create session with home terminal
+  await gameStateManager.createSession(userId, socketId, ipAddress);
+
+  // Confirm to client
+  socket.emit('authentication:complete', {
+    success: true,
+    userId,
+    username
+  });
+});
+```
+
+**Loading States**:
+1. "Initializing AIDA Terminal..." - Checking authentication
+2. "Connecting to terminal..." - Waiting for socket + session
+3. Terminal renders with tabs - Ready!
+
+#### Integration Status
+
+**Backend**: ✅ Complete & Stable
+- ✅ Session management with `terminals[]` array
+- ✅ Socket handlers for all tab operations
+- ✅ Command routing with `terminalId` parameter
+- ✅ Home terminal protection (index 0 cannot be closed)
+- ✅ First terminal labeled `username@homeIp`
+- ✅ `authentication:complete` confirmation event
+- ✅ Comprehensive logging with emoji prefixes
+
+**Frontend**: ✅ Complete & Stable
+- ✅ Tabs fully integrated into top status bar
+- ✅ Home tab displays as `username@homeIp` with 👤 icon
+- ✅ `terminalTabsStore` service with retry logic
+- ✅ Command execution routed to active tab
+- ✅ Per-tab output and history management
+- ✅ Proper initialization after authentication
+- ✅ Detailed logging for debugging
+
+**Keyboard Shortcuts**: ✅ All Working
+- `Ctrl+T`: Create new tab
+- `Ctrl+W`: Close current tab (except home)
+- `Ctrl+1`: Switch to home tab
+- `Ctrl+2` through `Ctrl+9`: Switch to specific tab
+- `Ctrl+Tab`: Cycle to next tab
+- `Up/Down`: Navigate command history (per-tab)
+
+**UI/UX**: ✅ Polished
+- Tabs seamlessly integrated into status bar (left side)
+- Home tab: Cyan tint, 👤 icon, no close button
+- Active tab: Bright green border, bold text
+- Processing tabs: Orange pulsing border, ⚙️ icon
+- New tab button: `+` with hover effects
+- Accessibility: Proper ARIA labels, keyboard navigation
+
+#### Technical Implementation
+
+**Initialization Flow:**
+```
+1. Client verifies authentication token
+2. Socket connects with auth token
+3. Server receives 'authenticated' event → creates session with home terminal
+4. Server emits 'authentication:complete' confirmation
+5. Client initializes terminal tabs store
+6. Client requests 'terminal:list'
+7. Server responds with terminals array (including home terminal)
+8. Terminal UI renders with tabs
+```
+
+**Key Files:**
+- `shared/types.ts` - `TerminalTab` interface definition
+- `server/src/services/gameStateManager.ts` - Terminal management (create, close, switch)
+- `server/src/index.ts` - Socket event handlers
+- `client/src/App.svelte` - Initialization orchestration
+- `client/src/services/terminalTabs.ts` - Client-side store and state management
+- `client/src/components/Terminal.svelte` - UI integration in status bar
+
+**Important Notes:**
+- Terminal tabs must be initialized AFTER socket authentication completes
+- Server emits `authentication:complete` event to signal readiness
+- Home terminal (index 0) cannot be closed by design
+- All terminal state is maintained server-side (client mirrors for UI)
+
 ---
 
 ## 🔐 Security Best Practices
@@ -2003,7 +2705,7 @@ The social system uses **ASCII dialog overlays** that appear over the terminal. 
 
 **Components:**
 - `MailDialog.svelte` - Mail/Inbox interface
-- `ChatDialog.svelte` - Real-time chat interface  
+- `ChatDialog.svelte` - Real-time chat interface
 - `ForumDialog.svelte` - Forum browser interface
 - `AsciiDialog.svelte` - Base reusable ASCII dialog component
 
@@ -2136,36 +2838,183 @@ model Post {
 ╚════════════════════════════════════════════════════════════╝
 ```
 
-### Implementation Phases
+## 📊 Project Summary
 
-**Phase 1: Mail/Inbox Dialog** (Start Here)
-1. Create `AsciiDialog.svelte` base component
-2. Create `MailDialog.svelte` with message list
-3. Update `commandProcessor.ts` to return `{ openDialog: "mail" }`
-4. Add dialog state management in `Terminal.svelte`
-5. Implement compose/reply functionality
-6. Add real-time message notifications
+### Current State (December 2024)
 
-**Phase 2: Chat Dialog**
-1. Create `ChatDialog.svelte` with split layout
-2. Add contact list sidebar
-3. Implement real-time message streaming via WebSocket
-4. Add typing indicators
-5. Online/offline status for contacts
+**Status**: ✅ Production Ready
+**Architecture Grade**: A-
+**Latest Feature**: Multi-Terminal Tabs (fully implemented)
 
-**Phase 3: Forum Dialog**
-1. Create `ForumDialog.svelte` with retro aesthetic
-2. Implement forum list and thread browsing
-3. Add post reading and reply system
-4. Integrate with proxy system for darkweb forums
-5. Add honeypot warnings and consequences
+### Statistics
 
-**Phase 4: Polish & Features**
-1. Add keyboard shortcuts (Tab, Arrow keys, ESC)
-2. Implement message encryption/decryption UI
-3. Add ASCII art animations for transitions
-4. Contact discovery and management
-5. Notification system integration
+#### Backend
+- **Services**: 16 total
+  - Core Services: 4 (gameStateManager, progressService, ipService, eventService)
+  - Feature Services: 4 (hackService, missionService, shopService, fileService)
+  - Supporting Services: 8 (messageService, forumService, memoryService, processStateService, serverService, playerPresenceService, cacheService, commandProcessor)
+- **Command Modules**: 9 modules
+  - systemCommands (11 commands)
+  - fileCommands (5 commands)
+  - processCommands (9 commands)
+  - networkCommands (6 commands)
+  - hackCommands (5 commands)
+  - gameCommands (14 commands)
+  - socialCommands (7 commands)
+  - mathCommands (8 commands)
+  - helpCommands (4 commands)
+- **Total Commands**: 60+ terminal commands
+- **API Routes**: 2 files (auth.ts, command.ts)
+- **HTTP Endpoints**: 5 (register, login, logout, verify, execute)
+- **Socket Events**: 11 handled events
+- **Dependency Injection**: Fully implemented
+- **Database**: PostgreSQL with Prisma ORM
+
+#### Frontend
+- **Framework**: Svelte + Vite
+- **Components**: 8 Svelte components
+  - Terminal.svelte (main UI with integrated tabs)
+  - AuthDialog.svelte
+  - MailDialog.svelte, ChatDialog.svelte, ForumDialog.svelte
+  - MessageDialog.svelte, AsciiDialog.svelte
+  - TerminalTabs.svelte (legacy)
+- **Services**: 4 client services
+  - api.ts (HTTP client)
+  - terminal.ts (command execution)
+  - socket.ts (Socket.IO client)
+  - terminalTabs.ts (tab state management)
+- **Stores**: 1 Svelte store (gameState.ts)
+- **Real-time**: Socket.IO for live updates
+
+#### Shared
+- **Types**: Shared TypeScript types between client/server
+- **Architecture**: Backend IS the console (frontend is display only)
+
+### Key Features
+
+✅ **Terminal-Based Gameplay**
+- Full Unix-like command interface
+- 60+ commands across 9 categories
+- Command history per terminal tab
+- Auto-complete support (TODO)
+
+✅ **Multi-Terminal Tabs** (December 2024)
+- Multiple concurrent terminal sessions
+- Independent command history per tab
+- Home tab (permanent, `username@homeIp`)
+- Keyboard shortcuts (Ctrl+T, Ctrl+W, Ctrl+1-9)
+- Visual processing indicators
+
+✅ **Multiplayer Features**
+- Real-time Socket.IO communication
+- Player presence tracking
+- Private messaging
+- Forum system
+- Event subscription system
+
+✅ **Hacking Mechanics**
+- Server intrusion simulation
+- Password cracking
+- Backdoor installation
+- Exploit execution
+- Rootkit deployment
+
+✅ **Progression System**
+- XP and leveling
+- Skill system
+- Mission objectives
+- Shop and inventory
+- Auto-save (60s intervals)
+
+✅ **Virtual Systems**
+- File system per server
+- Process management simulation
+- Memory allocation
+- Network scanning
+- IP address management
+
+✅ **Social Features**
+- ASCII art dialogs
+- Mail system
+- Chat system
+- Forum/bulletin boards
+- Contact management
+
+### Architecture Highlights
+
+**Backend IS the Console**
+- All game logic on server
+- Client is "dumb terminal" (display only)
+- Command-driven (not REST-heavy)
+- Session-based architecture
+
+**Dependency Injection**
+- Clean service separation
+- Easy testing and mocking
+- Service registry pattern
+
+**Real-time Communication**
+- Socket.IO for live updates
+- HTTP fallback for commands
+- Event-driven architecture
+
+**Database**
+- PostgreSQL + Prisma
+- Type-safe queries
+- Migration system
+- Seed data scripts
+
+### Technology Stack
+
+**Backend:**
+- Node.js + TypeScript
+- Express.js (HTTP)
+- Socket.IO (WebSocket)
+- Prisma (ORM)
+- PostgreSQL (Database)
+- JWT (Authentication)
+- bcrypt (Password hashing)
+
+**Frontend:**
+- Svelte 4
+- Vite (Build tool)
+- TypeScript
+- Socket.IO client
+- CSS3 (Terminal styling)
+
+**DevOps:**
+- npm (Package management)
+- tsx (TypeScript execution)
+- Prisma migrations
+- Environment configuration
+
+### File Structure Summary
+
+```
+AIDA/
+├── server/          (Backend - 16 services, 9 command modules)
+├── client/          (Frontend - 8 components, 4 services)
+├── shared/          (Shared TypeScript types)
+├── DOCUMENTATION.md (Complete documentation)
+└── prisma/          (Database schema & migrations)
+```
+
+### What's Next
+
+**Planned Features:**
+- Tab autocomplete functionality
+- Real connection quality indicators
+- Tab persistence across reconnects
+- Tab renaming and reordering
+- AI/NPC implementation (Phase 5)
+
+**Technical Debt:**
+- Session management consolidation
+- Service export pattern standardization
+- Configuration centralization
+- Performance optimizations
+
+---
 
 ## 📞 Support
 

@@ -1,7 +1,6 @@
 import { io, Socket } from "socket.io-client";
 import { writable, type Writable } from "svelte/store";
 import { apiClient } from "./api";
-import type { SocketEvent, SocketEventType } from "../../../shared/types";
 
 // Socket connection configuration
 const SOCKET_URL = "http://localhost:3001";

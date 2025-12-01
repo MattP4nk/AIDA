@@ -183,7 +183,7 @@ export class MathCommandsModule implements CommandModule {
       };
     }
 
-    let output = "📊 Variables:\\n\\n";
+    let output = "📊 Variables:\n\n";
     const vars: string[] = [];
     for (const [name, variable] of variables) {
       const formattedValue =
@@ -193,7 +193,7 @@ export class MathCommandsModule implements CommandModule {
       vars.push(`${name} = ${formattedValue} (${variable.type})`);
     }
 
-    output += vars.join("\\n");
+    output += vars.join("\n");
 
     return {
       success: true,
@@ -210,7 +210,7 @@ export class MathCommandsModule implements CommandModule {
     if (args.length < 2) {
       return {
         success: false,
-        output: "Usage: set <variable> <value>\\nExample: set x 10",
+        output: "Usage: set <variable> <value>\nExample: set x 10",
         timestamp: new Date(),
       };
     }
@@ -222,7 +222,8 @@ export class MathCommandsModule implements CommandModule {
     if (!varName || !/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(varName)) {
       return {
         success: false,
-        output: "Invalid variable name. Use letters, numbers, and underscores only.",
+        output:
+          "Invalid variable name. Use letters, numbers, and underscores only.",
         timestamp: new Date(),
       };
     }
@@ -268,7 +269,7 @@ export class MathCommandsModule implements CommandModule {
     if (args.length === 0) {
       return {
         success: false,
-        output: "Usage: unset <variable>\\nExample: unset x",
+        output: "Usage: unset <variable>\nExample: unset x",
         timestamp: new Date(),
       };
     }
@@ -287,7 +288,9 @@ export class MathCommandsModule implements CommandModule {
     const result = engine.evaluate(`delete ${varName}`);
     return {
       success: result.success,
-      output: result.success ? result.result : (result.error || "Failed to delete variable"),
+      output: result.success
+        ? result.result
+        : result.error || "Failed to delete variable",
       timestamp: new Date(),
     };
   }
@@ -301,7 +304,7 @@ export class MathCommandsModule implements CommandModule {
       return {
         success: false,
         output:
-          "Usage: convert <value> <from_unit> <to_unit>\\nExample: convert 10 km mi",
+          "Usage: convert <value> <from_unit> <to_unit>\nExample: convert 10 km mi",
         timestamp: new Date(),
       };
     }
@@ -340,9 +343,9 @@ export class MathCommandsModule implements CommandModule {
     from: string,
     to: string,
   ): number | null {
- // Temperature units (special handling)
+    // Temperature units (special handling)
     const tempUnits = ["c", "f", "k"];
-    
+
     // Conversion factors to base units
     const conversions: Record<string, Record<string, number>> = {
       // Distance (base: meters)
@@ -384,11 +387,7 @@ export class MathCommandsModule implements CommandModule {
     return null;
   }
 
-  private convertTemperature(
-    value: number,
-    from: string,
-    to: string,
-  ): number {
+  private convertTemperature(value: number, from: string, to: string): number {
     // Convert to Celsius first
     let celsius: number;
     if (from === "c") celsius = value;

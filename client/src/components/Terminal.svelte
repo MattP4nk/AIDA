@@ -2,7 +2,7 @@
     import { onMount, tick } from "svelte";
     import { get } from "svelte/store";
     import { terminalService } from "../services/terminal";
-    import type { CommandResult } from "../services/terminal";
+    import type { CommandResult } from "../../../shared/types";
     import { apiClient } from "../services/api";
     // New ASCII Dialog system
     import MailDialog from "./MailDialog.svelte";
@@ -10,6 +10,16 @@
     import ForumDialog from "./ForumDialog.svelte";
     // Socket service for real-time notifications
     import { liveMessages, socketService } from "../services/socket";
+    // Terminal tabs service
+    import {
+        terminalTabsStore,
+        type OutputLine as TabOutputLine,
+    } from "../services/terminalTabs";
+    import type { TerminalTab } from "../../../shared/types";
+
+    // ==================== PROPS ====================
+
+    export let user: any = null;
 
     // ==================== STATE ====================
 
@@ -25,14 +35,23 @@
     let terminalElement: HTMLDivElement;
     let outputElement: HTMLDivElement;
 
+    // Multi-terminal tab support - reactive
+    $: tabState = $terminalTabsStore;
+    $: tabs = tabState.tabs;
+    $: activeTabId = tabState.activeTabId;
+    $: currentTabOutputLines =
+        activeTabId && tabState.outputLines.has(activeTabId)
+            ? tabState.outputLines.get(activeTabId) || []
+            : outputLines;
+
     let outputLines: OutputLine[] = [];
     let commandHistory: string[] = [];
     let historyIndex = -1;
     let isExecuting = false;
     let lineIdCounter = 0;
 
-    let username = "guest";
-    let currentServer = "local";
+    let username = user?.username || "guest";
+    let currentServer = user?.homeIp || "local";
     let currentDir = "~";
 
     // Dialog state
@@ -54,14 +73,17 @@
     // ==================== LIFECYCLE ====================
 
     onMount(() => {
+        // Initialize everything in proper sequence
+        (async () => {
+            // Check authentication and load user info first
+            await checkAuth();
+
+            // Now show welcome with correct username
+            showWelcome();
+        })();
+
         // Focus input
         focusInput();
-
-        // Check authentication and load user info
-        checkAuth();
-
-        // Show welcome message after a brief delay to allow auth check
-        setTimeout(showWelcome, 100);
 
         // Set up keyboard shortcuts
         document.addEventListener("keydown", handleGlobalKeydown);
@@ -97,6 +119,7 @@
             systemLoad = Math.floor(Math.random() * 30) + 10; // 10-40%
         }, 3000);
 
+        // Return cleanup function synchronously
         return () => {
             document.removeEventListener("keydown", handleGlobalKeydown);
             unsubscribe();
@@ -126,57 +149,62 @@
     }
 
     // ==================== WELCOME MESSAGE ====================
+    // Format username for display (reactive)
+    $: displayUser = username.toUpperCase().padEnd(30);
+    $: displayServer = currentServer.toUpperCase().padEnd(28);
+    $: welcomeLines = [
+        "",
+        "╔════════════════════════════════════════════════════════════════════════════════════════════╗",
+        "║                                                                                            ║",
+        "║      ███╗   ██╗███████╗██╗   ██╗██████╗  █████╗ ██╗         ██╗     ██╗███╗   ██╗██╗  ██╗║",
+        "║      ████╗  ██║██╔════╝██║   ██║██╔══██╗██╔══██╗██║         ██║     ██║████╗  ██║██║ ██╔╝║",
+        "║      ██╔██╗ ██║█████╗  ██║   ██║██████╔╝███████║██║         ██║     ██║██╔██╗ ██║█████╔╝ ║",
+        "║      ██║╚██╗██║██╔══╝  ██║   ██║██╔══██╗██╔══██║██║         ██║     ██║██║╚██╗██║██╔═██╗ ║",
+        "║      ██║ ╚████║███████╗╚██████╔╝██║  ██║██║  ██║███████╗    ███████╗██║██║ ╚████║██║  ██╗║",
+        "║      ╚═╝  ╚═══╝╚══════╝ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝    ╚══════╝╚═╝╚═╝  ╚═══╝╚═╝  ╚═╝║",
+        "║                                                                                            ║",
+        "║      ████████╗███████╗██████╗ ███╗   ███╗██╗███╗   ██╗ █████╗ ██╗                        ║",
+        "║      ╚══██╔══╝██╔════╝██╔══██╗████╗ ████║██║████╗  ██║██╔══██╗██║                        ║",
+        "║         ██║   █████╗  ██████╔╝██╔████╔██║██║██╔██╗ ██║███████║██║                        ║",
+        "║         ██║   ██╔══╝  ██╔══██╗██║╚██╔╝██║██║██║╚██╗██║██╔══██║██║                      ║",
+        "║         ██║   ███████╗██║  ██║██║ ╚═╝ ██║██║██║ ╚████║██║  ██║███████╗                  ║",
+        "║         ╚═╝   ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝╚═╝  ╚═══╝╚═╝  ╚═╝╚══════╝                   ║",
+        "║                                                                                            ║",
+        "║                    ▓▓▓  Advanced Interactive Data Access  ▓▓▓                            ║",
+        "║                              [ Version 2.0 ]                                              ║",
+        "║                                                                                            ║",
+        "╚════════════════════════════════════════════════════════════════════════════════════════════╝",
+        "",
+        "┌────────────────────────────────────────────────────────────────────────────────────────────┐",
+        "│  🔐 SECURE NEURAL CONNECTION ESTABLISHED                                                   │",
+        `│  👤 User: ${displayUser} │ Status: ACTIVE                                                 │`,
+        `│  🖥️  Server: ${displayServer} │ Uptime: 99.9%                                             │`,
+        "└────────────────────────────────────────────────────────────────────────────────────────────┘",
+        "",
+        `Welcome, ${username}! Your neural link to the AIDA network is active.`,
+        "All activities are monitored and logged for security purposes.",
+        "",
+        "┌─ Quick Start ──────────────────────────────────────────────────────────────────────────────┐",
+        "│  • Type 'help' for available commands                                                     │",
+        "│  • Type 'ls' to list files and directories                                                │",
+        "│  • Type 'status' to view your player information                                          │",
+        "│  • Use ↑/↓ arrows to navigate command history                                             │",
+        "│  • Type 'clear' to clear the terminal screen                                              │",
+        "└────────────────────────────────────────────────────────────────────────────────────────────┘",
+        "",
+    ];
 
     function showWelcome() {
-        // Format username for display
-        const displayUser = username.toUpperCase().padEnd(30);
-        const displayServer = currentServer.toUpperCase().padEnd(28);
-
-        const welcomeLines = [
-            "",
-            "╔════════════════════════════════════════════════════════════════════════════════════════════╗",
-            "║                                                                                            ║",
-            "║      ███╗   ██╗███████╗██╗   ██╗██████╗  █████╗ ██╗         ██╗     ██╗███╗   ██╗██╗  ██╗║",
-            "║      ████╗  ██║██╔════╝██║   ██║██╔══██╗██╔══██╗██║         ██║     ██║████╗  ██║██║ ██╔╝║",
-            "║      ██╔██╗ ██║█████╗  ██║   ██║██████╔╝███████║██║         ██║     ██║██╔██╗ ██║█████╔╝ ║",
-            "║      ██║╚██╗██║██╔══╝  ██║   ██║██╔══██╗██╔══██║██║         ██║     ██║██║╚██╗██║██╔═██╗ ║",
-            "║      ██║ ╚████║███████╗╚██████╔╝██║  ██║██║  ██║███████╗    ███████╗██║██║ ╚████║██║  ██╗║",
-            "║      ╚═╝  ╚═══╝╚══════╝ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝    ╚══════╝╚═╝╚═╝  ╚═══╝╚═╝  ╚═╝║",
-            "║                                                                                            ║",
-            "║      ████████╗███████╗██████╗ ███╗   ███╗██╗███╗   ██╗ █████╗ ██╗                        ║",
-            "║      ╚══██╔══╝██╔════╝██╔══██╗████╗ ████║██║████╗  ██║██╔══██╗██║                        ║",
-            "║         ██║   █████╗  ██████╔╝██╔████╔██║██║██╔██╗ ██║███████║██║                        ║",
-            "║         ██║   ██╔══╝  ██╔══██╗██║╚██╔╝██║██║██║╚██╗██║██╔══██║██║                        ║",
-            "║         ██║   ███████╗██║  ██║██║ ╚═╝ ██║██║██║ ╚████║██║  ██║███████╗                   ║",
-            "║         ╚═╝   ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝╚═╝  ╚═══╝╚═╝  ╚═╝╚══════╝                   ║",
-            "║                                                                                            ║",
-            "║                    ▓▓▓  Advanced Interactive Data Access  ▓▓▓                            ║",
-            "║                              [ Version 2.0 ]                                              ║",
-            "║                                                                                            ║",
-            "╚════════════════════════════════════════════════════════════════════════════════════════════╝",
-            "",
-            "┌────────────────────────────────────────────────────────────────────────────────────────────┐",
-            "│  🔐 SECURE NEURAL CONNECTION ESTABLISHED                                                   │",
-            `│  👤 User: ${displayUser} │ Status: ACTIVE                           │`,
-            `│  🖥️  Server: ${displayServer} │ Uptime: 99.9%                          │`,
-            "└────────────────────────────────────────────────────────────────────────────────────────────┘",
-            "",
-            `Welcome, ${username}! Your neural link to the AIDA network is active.`,
-            "All activities are monitored and logged for security purposes.",
-            "",
-            "┌─ Quick Start ──────────────────────────────────────────────────────────────────────────────┐",
-            "│  • Type 'help' for available commands                                                     │",
-            "│  • Type 'ls' to list files and directories                                                │",
-            "│  • Type 'status' to view your player information                                          │",
-            "│  • Use ↑/↓ arrows to navigate command history                                             │",
-            "│  • Type 'clear' to clear the terminal screen                                              │",
-            "└────────────────────────────────────────────────────────────────────────────────────────────┘",
-            "",
-        ];
-
-        welcomeLines.forEach((line) => {
-            addOutputLine(line, "system");
-        });
+        // Add welcome lines to current active tab or fallback to local
+        if (activeTabId) {
+            welcomeLines.forEach((line) => {
+                terminalTabsStore.addOutputLine(activeTabId, line, "system");
+            });
+        } else {
+            welcomeLines.forEach((line) => {
+                addOutputLine(line, "system");
+            });
+        }
     }
 
     // ==================== OUTPUT MANAGEMENT ====================
@@ -229,6 +257,9 @@
 
     function clearScreen() {
         outputLines = [];
+        welcomeLines.forEach((line) => {
+            addOutputLine(line, "system");
+        });
     }
 
     // ==================== COMMAND EXECUTION ====================
@@ -241,20 +272,41 @@
             return;
         }
 
-        // Add command to display
-        addCommandLine(command);
+        // Use tab store if tabs are active, otherwise use local state
+        if (activeTabId) {
+            // Add command to tab output
+            terminalTabsStore.addOutputLine(
+                activeTabId,
+                `${getPrompt()} ${command}`,
+                "command",
+            );
 
-        // Add to history
-        if (commandHistory[commandHistory.length - 1] !== command) {
-            commandHistory = [...commandHistory, command];
+            // Add to tab history
+            terminalTabsStore.addToHistory(activeTabId, command);
+
+            // Mark terminal as processing
+            terminalTabsStore.updateProcessingState(
+                activeTabId,
+                true,
+                command.split(" ")[0],
+            );
+        } else {
+            // Fallback to local state
+            addCommandLine(command);
+            if (commandHistory[commandHistory.length - 1] !== command) {
+                commandHistory = [...commandHistory, command];
+            }
+            historyIndex = commandHistory.length;
         }
-        historyIndex = commandHistory.length;
 
         // Clear input immediately for better UX
         inputValue = "";
 
         // Handle client-side commands
         if (handleClientCommand(command)) {
+            if (activeTabId) {
+                terminalTabsStore.updateProcessingState(activeTabId, false);
+            }
             return;
         }
 
@@ -271,7 +323,20 @@
             }
 
             // Display command result
-            addCommandOutput(result);
+            if (activeTabId) {
+                // Add output to tab
+                const output = Array.isArray(result.output)
+                    ? result.output.join("\n")
+                    : result.output;
+                terminalTabsStore.addOutputLine(
+                    activeTabId,
+                    output,
+                    result.success ? "output" : "error",
+                );
+            } else {
+                // Fallback to local state
+                addCommandOutput(result);
+            }
 
             // Update context from server data if available
             if (result.data) {
@@ -279,10 +344,18 @@
             }
         } catch (error: any) {
             // Show detailed error information
-            addOutputLine(
-                `Command execution failed: ${error.message || "Unknown error"}`,
-                "error",
-            );
+            if (activeTabId) {
+                terminalTabsStore.addOutputLine(
+                    activeTabId,
+                    `Command execution failed: ${error.message || "Unknown error"}`,
+                    "error",
+                );
+            } else {
+                addOutputLine(
+                    `Command execution failed: ${error.message || "Unknown error"}`,
+                    "error",
+                );
+            }
 
             // Add additional error details if available
             if (error.details) {
@@ -298,6 +371,11 @@
             }
         } finally {
             isExecuting = false;
+            if (activeTabId) {
+                terminalTabsStore.updateProcessingState(activeTabId, false);
+            }
+            await tick();
+            scrollToBottom();
             focusInput();
         }
     }
@@ -309,7 +387,11 @@
 
         // Clear command
         if (cmd === "clear" || cmd === "cls") {
-            clearScreen();
+            if (activeTabId) {
+                terminalTabsStore.clearOutput(activeTabId);
+            } else {
+                clearScreen();
+            }
             return true;
         }
 
@@ -424,24 +506,35 @@
     // ==================== HISTORY NAVIGATION ====================
 
     function navigateHistory(direction: "up" | "down") {
-        if (commandHistory.length === 0) {
-            return;
-        }
-
-        if (direction === "up") {
-            if (historyIndex > 0) {
-                historyIndex--;
-                inputValue = commandHistory[historyIndex];
-            } else if (historyIndex === 0) {
-                inputValue = commandHistory[0];
+        // Use tab store history if tabs are active
+        if (activeTabId) {
+            const historyCommand = terminalTabsStore.navigateHistory(
+                activeTabId,
+                direction,
+            );
+            if (historyCommand !== null) {
+                inputValue = historyCommand;
             }
         } else {
-            if (historyIndex < commandHistory.length - 1) {
-                historyIndex++;
-                inputValue = commandHistory[historyIndex];
+            // Fallback to local history
+            if (commandHistory.length === 0) {
+                return;
+            }
+
+            if (direction === "up") {
+                if (historyIndex > 0) {
+                    historyIndex--;
+                    inputValue = commandHistory[historyIndex] || "";
+                }
             } else {
-                historyIndex = commandHistory.length;
-                inputValue = "";
+                // down
+                if (historyIndex < commandHistory.length - 1) {
+                    historyIndex++;
+                    inputValue = commandHistory[historyIndex] || "";
+                } else {
+                    historyIndex = commandHistory.length;
+                    inputValue = "";
+                }
             }
         }
     }
@@ -500,9 +593,76 @@
         }
     }
 
+    async function handleTabSwitch(event: CustomEvent) {
+        await terminalTabsStore.switchTab(event.detail.tabId);
+        await tick();
+        scrollToBottom();
+        focusInput();
+    }
+
+    async function handleTabClose(event: CustomEvent) {
+        if (tabs.length > 1) {
+            await terminalTabsStore.closeTab(event.detail.tabId);
+            await tick();
+            focusInput();
+        }
+    }
+
+    async function handleTabCreate() {
+        const tabNumber = tabs.length + 1;
+        await terminalTabsStore.createTab(`Terminal ${tabNumber}`);
+        await tick();
+        focusInput();
+    }
+
     function handleGlobalKeydown(event: KeyboardEvent) {
-        // Don't steal focus if a dialog is open
+        // Prevent interference when dialog is active
         if (activeDialog !== "none") {
+            return;
+        }
+
+        // Ctrl+T: New tab
+        if (event.ctrlKey && event.key === "t") {
+            event.preventDefault();
+            handleTabCreate();
+            return;
+        }
+
+        // Ctrl+W: Close tab
+        if (event.ctrlKey && event.key === "w") {
+            event.preventDefault();
+            if (tabs.length > 1) {
+                handleTabClose({
+                    detail: { tabId: activeTabId },
+                } as CustomEvent);
+            }
+            return;
+        }
+
+        // Ctrl+1-9: Switch to tab N
+        if (event.ctrlKey && event.key >= "1" && event.key <= "9") {
+            event.preventDefault();
+            const index = parseInt(event.key) - 1;
+            if (tabs[index]) {
+                handleTabSwitch({
+                    detail: { tabId: tabs[index].id },
+                } as CustomEvent);
+            }
+            return;
+        }
+
+        // Ctrl+Tab: Next tab
+        if (event.ctrlKey && event.key === "Tab") {
+            event.preventDefault();
+            const currentIndex = tabs.findIndex(
+                (t: TerminalTab) => t.id === activeTabId,
+            );
+            const nextIndex = (currentIndex + 1) % tabs.length;
+            if (tabs[nextIndex]) {
+                handleTabSwitch({
+                    detail: { tabId: tabs[nextIndex].id },
+                } as CustomEvent);
+            }
             return;
         }
 
@@ -568,14 +728,80 @@
     <!-- Status Bar -->
     <div class="status-bar">
         <div class="status-left">
-            <span class="status-item">
-                <span class="status-icon">🖥️</span>
-                <span class="status-label">AIDA Terminal</span>
-            </span>
-            <span class="status-item">
-                <span class="status-icon">👤</span>
-                <span class="status-label">{username}@{currentServer}</span>
-            </span>
+            <!-- Terminal Tabs integrated into status bar -->
+            {#if tabs.length === 0}
+                <!-- Loading state - show placeholder home tab -->
+                <div
+                    class="status-item tab-item home-tab active"
+                    title="Loading terminal..."
+                >
+                    <span class="tab-icon">👤</span>
+                    <span class="tab-label">{username}@{currentServer}</span>
+                </div>
+                <button class="status-item tab-new" disabled title="Loading...">
+                    <span class="tab-new-icon">+</span>
+                </button>
+            {:else}
+                {#each tabs as tab, index (tab.id)}
+                    <div
+                        class="status-item tab-item"
+                        class:active={tab.id === activeTabId}
+                        class:processing={tab.isProcessing}
+                        class:home-tab={index === 0}
+                        on:click={async () => {
+                            await terminalTabsStore.switchTab(tab.id);
+                            await tick();
+                            scrollToBottom();
+                            focusInput();
+                        }}
+                        on:keydown={async (e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                                e.preventDefault();
+                                await terminalTabsStore.switchTab(tab.id);
+                                await tick();
+                                scrollToBottom();
+                                focusInput();
+                            }
+                        }}
+                        role="button"
+                        tabindex="0"
+                        title={index === 0
+                            ? `Home Terminal - ${username}@${currentServer}`
+                            : tab.isProcessing && tab.processingCommand
+                              ? `${tab.label} [${tab.processingCommand}...]`
+                              : tab.label}
+                    >
+                        {#if index === 0}
+                            <span class="tab-icon">👤</span>
+                            <span class="tab-label"
+                                >{username}@{currentServer}</span
+                            >
+                        {:else}
+                            <span class="tab-icon"
+                                >{tab.isProcessing ? "⚙️" : "▸"}</span
+                            >
+                            <span class="tab-label">{tab.label}</span>
+                            <button
+                                class="tab-close"
+                                on:click|stopPropagation={async () => {
+                                    await terminalTabsStore.closeTab(tab.id);
+                                    await tick();
+                                    focusInput();
+                                }}
+                                title="Close tab (Ctrl+W)"
+                                aria-label="Close tab">✕</button
+                            >
+                        {/if}
+                    </div>
+                {/each}
+                <button
+                    class="status-item tab-new"
+                    on:click={handleTabCreate}
+                    title="New terminal (Ctrl+T)"
+                >
+                    <span class="tab-new-icon">+</span>
+                </button>
+            {/if}
         </div>
         <div class="status-right">
             <span class="status-item">
@@ -610,13 +836,14 @@
     </div>
 
     <!-- Output Area -->
+    <!-- Output (use tab-specific output if tabs are active) -->
     <div class="output" bind:this={outputElement} role="log" aria-live="polite">
-        {#each outputLines as line (line.id)}
+        {#each currentTabOutputLines as line (line.id)}
             <div class={getLineClass(line)}>
                 <span class="line-timestamp"
-                    >[{line.timestamp.toLocaleTimeString()}]</span
+                    >{line.timestamp.toLocaleTimeString()}</span
                 >
-                {line.text}
+                <span class="line-content">{line.text}</span>
             </div>
         {/each}
     </div>
@@ -678,7 +905,7 @@
         width: 100vw;
         height: 100vh;
         background: #0a0e14;
-        color: #00ff41;
+        color: #00bcd4;
         font-family: "Fira Code", "JetBrains Mono", "Courier New", monospace;
         font-size: 14px;
         line-height: 1.6;
@@ -745,7 +972,7 @@
         background: rgba(0, 20, 30, 0.95);
         border-bottom: 1px solid rgba(0, 255, 65, 0.3);
         font-size: 12px;
-        color: #00ccff;
+        color: #00bcd4;
         position: relative;
         z-index: 3;
         backdrop-filter: blur(10px);
@@ -827,6 +1054,154 @@
         font-weight: bold;
     }
 
+    /* ==================== TAB ITEMS IN STATUS BAR ==================== */
+
+    .status-item.tab-item {
+        background: rgba(0, 255, 65, 0.05);
+        border: 1px solid rgba(0, 255, 65, 0.2);
+        padding: 4px 10px;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        gap: 6px;
+        border-radius: 4px 4px 0 0;
+    }
+
+    .status-item.tab-item.home-tab {
+        background: rgba(0, 188, 212, 0.1);
+        border-color: rgba(0, 188, 212, 0.3);
+    }
+
+    .status-item.tab-item.home-tab.active {
+        background: rgba(0, 188, 212, 0.2);
+        border-color: #00bcd4;
+    }
+
+    .status-item.tab-item:hover {
+        background: rgba(0, 255, 65, 0.1);
+        border-color: rgba(0, 255, 65, 0.4);
+        transform: translateY(0);
+    }
+
+    .status-item.tab-item.active {
+        background: rgba(0, 255, 65, 0.15);
+        border-color: #00ff41;
+        border-bottom: 2px solid #0a0e14;
+        font-weight: bold;
+        color: #00ff41;
+    }
+
+    .status-item.tab-item.processing {
+        border-color: #ffaa00;
+        animation: pulse-tab 1.5s ease-in-out infinite;
+    }
+
+    @keyframes pulse-tab {
+        0%,
+        100% {
+            border-color: #ffaa00;
+        }
+        50% {
+            border-color: #ff6600;
+        }
+    }
+
+    .status-item.tab-item.processing .tab-icon {
+        animation: spin 2s linear infinite;
+    }
+
+    @keyframes spin {
+        from {
+            transform: rotate(0deg);
+        }
+        to {
+            transform: rotate(360deg);
+        }
+    }
+
+    .tab-icon {
+        font-size: 10px;
+        display: inline-block;
+    }
+
+    .tab-label {
+        font-size: 11px;
+        font-family: "Fira Code", monospace;
+        text-transform: none;
+        letter-spacing: 0.5px;
+        max-width: 100px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .tab-close {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 14px;
+        height: 14px;
+        border-radius: 2px;
+        font-size: 10px;
+        opacity: 0.6;
+        transition: all 0.2s ease;
+        margin-left: 2px;
+        border: none;
+        background: transparent;
+        color: inherit;
+        padding: 0;
+        cursor: pointer;
+    }
+
+    .tab-close:hover {
+        background: rgba(255, 68, 68, 0.8);
+        color: #ffffff;
+        opacity: 1;
+    }
+
+    .tab-close:focus {
+        outline: 2px solid #00ff41;
+        outline-offset: 1px;
+    }
+
+    .status-item.tab-new {
+        background: rgba(0, 255, 65, 0.05);
+        border: 1px solid rgba(0, 255, 65, 0.2);
+        padding: 4px 8px;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        min-width: 28px;
+        justify-content: center;
+    }
+
+    .status-item.tab-new:hover:not(:disabled) {
+        background: rgba(0, 255, 65, 0.15);
+        border-color: #00ff41;
+        transform: scale(1.05);
+    }
+
+    .status-item.tab-new:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+    }
+
+    .tab-new-icon {
+        font-size: 14px;
+        font-weight: bold;
+        line-height: 1;
+    }
+
+    .status-divider {
+        background: none;
+        color: rgba(0, 255, 65, 0.3);
+        padding: 0 8px;
+        font-size: 14px;
+    }
+
+    .status-divider:hover {
+        background: none;
+        transform: none;
+    }
+
     /* ==================== OUTPUT AREA ==================== */
 
     .output {
@@ -848,7 +1223,7 @@
     }
 
     .output::-webkit-scrollbar-thumb {
-        background: #00ff41;
+        background: #00bcd4;
         border-radius: 4px;
     }
 
@@ -859,13 +1234,17 @@
     /* ==================== OUTPUT LINES ==================== */
 
     .output-line {
-        margin: 0;
-        padding: 4px 0;
-        white-space: pre-wrap;
-        word-wrap: break-word;
+        padding: 2px 8px;
+        margin: 1px 0;
+        line-height: 1.6;
+        transition: background-color 0.2s ease;
         font-family: inherit;
         animation: fadeIn 0.2s ease-in;
-        transition: background-color 0.2s ease;
+    }
+
+    .line-content {
+        white-space: pre-wrap;
+        word-wrap: break-word;
     }
 
     .output-line:hover {
@@ -898,25 +1277,25 @@
     }
 
     .output-line.command {
-        color: #00ff41;
+        color: #00bcd4;
         font-weight: bold;
         text-shadow: 0 0 5px rgba(0, 255, 65, 0.5);
         background: rgba(0, 255, 65, 0.05);
         padding: 6px 8px;
         margin: 4px 0;
-        border-left: 3px solid #00ff41;
+        border-left: 3px solid #00bcd4;
         border-radius: 2px;
     }
 
     .output-line.command::before {
         content: "▶ ";
-        color: #00ccff;
+        color: #00bcd4;
         margin-right: 8px;
         font-size: 12px;
     }
 
     .output-line.output {
-        color: #c0c0c0;
+        color: #00bcd4;
         padding-left: 20px;
     }
 
@@ -937,12 +1316,12 @@
     }
 
     .output-line.success {
-        color: #00ff41;
+        color: #00bcd4;
         text-shadow: 0 0 5px rgba(0, 255, 65, 0.5);
         background: rgba(0, 255, 65, 0.1);
         padding: 6px 8px;
         margin: 4px 0;
-        border-left: 3px solid #00ff41;
+        border-left: 3px solid #00bcd4;
         border-radius: 2px;
     }
 
@@ -953,7 +1332,7 @@
     }
 
     .output-line.system {
-        color: #00ccff;
+        color: #00bcd4;
         text-shadow: 0 0 5px rgba(0, 204, 255, 0.5);
         font-style: italic;
         opacity: 0.9;
@@ -966,7 +1345,7 @@
         align-items: center;
         padding: 16px 40px;
         background: linear-gradient(to bottom, #0d1117 0%, #0a0e14 100%);
-        border-top: 2px solid #00ff41;
+        border-top: 2px solid #00bcd4;
         box-shadow: 0 -4px 20px rgba(0, 255, 65, 0.2);
         gap: 12px;
         min-height: 55px;
@@ -984,9 +1363,9 @@
         background: linear-gradient(
             90deg,
             transparent,
-            #00ff41,
-            #00ccff,
-            #00ff41,
+            #00bcd4,
+            #00bcd4,
+            #00bcd4,
             transparent
         );
         animation: scanline 3s linear infinite;
@@ -1002,7 +1381,7 @@
     }
 
     .prompt {
-        color: #00ff41;
+        color: #00bcd4;
         font-weight: bold;
         white-space: nowrap;
         flex-shrink: 0;
@@ -1027,14 +1406,14 @@
         background: transparent;
         border: none;
         outline: none;
-        color: #00ff41;
+        color: #00bcd4;
         font-family: inherit;
         font-size: 15px;
         line-height: inherit;
         padding: 4px 0;
         margin: 0;
         text-shadow: 0 0 5px rgba(0, 255, 65, 0.4);
-        caret-color: #00ff41;
+        caret-color: #00bcd4;
     }
 
     .input:focus {
@@ -1042,7 +1421,7 @@
     }
 
     .input::placeholder {
-        color: #00ff4166;
+        color: #00bcd466;
     }
 
     .input:disabled {
@@ -1058,7 +1437,7 @@
         display: flex;
         align-items: center;
         gap: 8px;
-        color: #00ff41;
+        color: #00bcd4;
     }
 
     .loading-spinner {
@@ -1206,12 +1585,12 @@
     @media (prefers-contrast: high) {
         .terminal {
             background: #000;
-            color: #0f0;
+            color: #00ff41;
         }
 
         .input-line {
             background: #000;
-            border-top-color: #0f0;
+            border-top-color: #00ff41;
         }
 
         .output-line.error {
@@ -1219,7 +1598,7 @@
         }
 
         .output-line.success {
-            color: #0f0;
+            color: #00ff41;
         }
     }
 
@@ -1227,7 +1606,7 @@
 
     ::selection {
         background: rgba(0, 255, 65, 0.3);
-        color: #00ff41;
+        color: #00bcd4;
     }
 
     /* ==================== SCROLLBAR STYLING ==================== */
@@ -1262,7 +1641,7 @@
     /* ==================== FOCUS INDICATORS ==================== */
 
     .terminal:focus-within .input-line {
-        border-top-color: #00ccff;
+        border-top-color: #00bcd4;
         box-shadow: 0 -4px 20px rgba(0, 204, 255, 0.3);
     }
 

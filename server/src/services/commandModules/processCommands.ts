@@ -176,9 +176,10 @@ export class ProcessCommandsModule implements CommandModule {
       };
     }
 
-    let output = "📋 Process List\\n\\n";
-    output += "PID    NAME              USER      CPU%   MEM(KB) STATUS    TIME     PROGRESS\\n";
-    output += "─".repeat(80) + "\\n";
+    let output = "📋 Process List\n\n";
+    output +=
+      "PID    NAME              USER      CPU%   MEM(KB) STATUS    TIME     PROGRESS\n";
+    output += "─".repeat(80) + "\n";
 
     for (const proc of processes) {
       const runtime = Math.floor((Date.now() - proc.startTime) / 1000);
@@ -200,13 +201,13 @@ export class ProcessCommandsModule implements CommandModule {
         const progress = proc.commandMetadata.progress || 0;
         const progressBar = this.renderProgressBar(progress, 10);
         output += `${progressBar} ${progress.toFixed(0)}%`;
-        
+
         if (proc.commandMetadata.targetInfo) {
           output += ` → ${proc.commandMetadata.targetInfo}`;
         }
       }
 
-      output += "\\n";
+      output += "\n";
     }
 
     return {
@@ -235,18 +236,23 @@ export class ProcessCommandsModule implements CommandModule {
     const memInfo = memoryService.getMemoryInfo(sessionId);
     const loadAvg = memoryService.getLoadAverage(sessionId);
 
-    const cpuTotal = processes.reduce((sum: number, p: {cpu: number}) => sum + p.cpu, 0);
-    const runningCount = processes.filter((p: {status: string}) => p.status === "running").length;
+    const cpuTotal = processes.reduce(
+      (sum: number, p: { cpu: number }) => sum + p.cpu,
+      0,
+    );
+    const runningCount = processes.filter(
+      (p: { status: string }) => p.status === "running",
+    ).length;
 
-    let output = "🖥️  System Monitor (top)\\n\\n";
-    output += `Load Average: ${loadAvg.one.toFixed(2)}, ${loadAvg.five.toFixed(2)}, ${loadAvg.fifteen.toFixed(2)}\\n`;
-    output += `Processes: ${processes.length} total, ${runningCount} running\\n`;
-    output += `CPU: ${cpuTotal.toFixed(1)}% total\\n`;
-    output += `Memory: ${memInfo.used}/${memInfo.total} KB (${((memInfo.used / memInfo.total) * 100).toFixed(1)}%)\\n`;
-    output += `Swap: ${memInfo.swapUsed}/${memInfo.swapTotal} KB\\n\\n`;
+    let output = "🖥️  System Monitor (top)\n\n";
+    output += `Load Average: ${loadAvg.one.toFixed(2)}, ${loadAvg.five.toFixed(2)}, ${loadAvg.fifteen.toFixed(2)}\n`;
+    output += `Processes: ${processes.length} total, ${runningCount} running\n`;
+    output += `CPU: ${cpuTotal.toFixed(1)}% total\n`;
+    output += `Memory: ${memInfo.used}/${memInfo.total} KB (${((memInfo.used / memInfo.total) * 100).toFixed(1)}%)\n`;
+    output += `Swap: ${memInfo.swapUsed}/${memInfo.swapTotal} KB\n\n`;
 
-    output += "PID    NAME              CPU%   MEM(KB) STATUS\\n";
-    output += "─".repeat(50) + "\\n";
+    output += "PID    NAME              CPU%   MEM(KB) STATUS\n";
+    output += "─".repeat(50) + "\n";
 
     // Sort by CPU usage
     const sorted = [...processes].sort((a, b) => b.cpu - a.cpu).slice(0, 10);
@@ -256,7 +262,7 @@ export class ProcessCommandsModule implements CommandModule {
       output += `${proc.name.substring(0, 16).padEnd(17)} `;
       output += `${proc.cpu.toFixed(1).padStart(5)}  `;
       output += `${proc.memory.toString().padStart(7)} `;
-      output += `${proc.status}\\n`;
+      output += `${proc.status}\n`;
     }
 
     return {
@@ -275,7 +281,7 @@ export class ProcessCommandsModule implements CommandModule {
     if (args.length === 0) {
       return {
         success: false,
-        output: "Usage: kill [-SIGNAL] <pid>\\nSignals: TERM, KILL, STOP, CONT",
+        output: "Usage: kill [-SIGNAL] <pid>\nSignals: TERM, KILL, STOP, CONT",
         timestamp: new Date(),
       };
     }
@@ -307,11 +313,7 @@ export class ProcessCommandsModule implements CommandModule {
 
     try {
       const memoryService = this.getMemoryService(context);
-      const killed = await memoryService.killProcess(
-        sessionId,
-        pid,
-        signal,
-      );
+      const killed = await memoryService.killProcess(sessionId, pid, signal);
 
       if (!killed) {
         return {
@@ -329,7 +331,8 @@ export class ProcessCommandsModule implements CommandModule {
     } catch (error) {
       return {
         success: false,
-        output: error instanceof Error ? error.message : "Failed to kill process",
+        output:
+          error instanceof Error ? error.message : "Failed to kill process",
         timestamp: new Date(),
       };
     }
@@ -343,21 +346,21 @@ export class ProcessCommandsModule implements CommandModule {
     const memoryService = this.getMemoryService(context);
     const memInfo = memoryService.getMemoryInfo(sessionId);
 
-    let output = "💾 Memory Usage\\n\\n";
-    output += "              TOTAL      USED      FREE   BUFFERS    CACHED\\n";
-    output += "─".repeat(65) + "\\n";
+    let output = "💾 Memory Usage\n\n";
+    output += "              TOTAL      USED      FREE   BUFFERS    CACHED\n";
+    output += "─".repeat(65) + "\n";
 
     output += "Mem:     ";
     output += `${memInfo.total.toString().padStart(9)} `;
     output += `${memInfo.used.toString().padStart(9)} `;
     output += `${memInfo.free.toString().padStart(9)} `;
     output += `${memInfo.buffers.toString().padStart(9)} `;
-    output += `${memInfo.cached.toString().padStart(9)}\\n`;
+    output += `${memInfo.cached.toString().padStart(9)}\n`;
 
     output += "Swap:    ";
     output += `${memInfo.swapTotal.toString().padStart(9)} `;
     output += `${memInfo.swapUsed.toString().padStart(9)} `;
-    output += `${memInfo.swapFree.toString().padStart(9)}\\n\\n`;
+    output += `${memInfo.swapFree.toString().padStart(9)}\n\n`;
 
     const usagePercent = ((memInfo.used / memInfo.total) * 100).toFixed(1);
     output += `Available: ${memInfo.available} KB (${(100 - parseFloat(usagePercent)).toFixed(1)}% free)`;
@@ -379,7 +382,7 @@ export class ProcessCommandsModule implements CommandModule {
     const processes = memoryService.getProcesses(sessionId);
 
     // Find the init process to get session start time
-    const initProc = processes.find((p: {pid: number}) => p.pid === 1);
+    const initProc = processes.find((p: { pid: number }) => p.pid === 1);
     if (!initProc) {
       return {
         success: false,
@@ -393,15 +396,16 @@ export class ProcessCommandsModule implements CommandModule {
     const hours = Math.floor((uptime % 86400) / 3600);
     const minutes = Math.floor((uptime % 3600) / 60);
 
-    const userCount = new Set(processes.map((p: {user: string}) => p.user)).size;
+    const userCount = new Set(processes.map((p: { user: string }) => p.user))
+      .size;
 
-    let output = "⏱️  System Uptime\\n\\n";
+    let output = "⏱️  System Uptime\n\n";
     if (days > 0) {
-      output += `Up ${days} day${days !== 1 ? "s" : ""}, ${hours}:${minutes.toString().padStart(2, "0")}\\n`;
+      output += `Up ${days} day${days !== 1 ? "s" : ""}, ${hours}:${minutes.toString().padStart(2, "0")}\n`;
     } else {
-      output += `Up ${hours}:${minutes.toString().padStart(2, "0")}\\n`;
+      output += `Up ${hours}:${minutes.toString().padStart(2, "0")}\n`;
     }
-    output += `Users: ${userCount}\\n`;
+    output += `Users: ${userCount}\n`;
     output += `Load average: ${loadAvg.one.toFixed(2)}, ${loadAvg.five.toFixed(2)}, ${loadAvg.fifteen.toFixed(2)}`;
 
     return {
@@ -428,7 +432,9 @@ export class ProcessCommandsModule implements CommandModule {
     const processName = args[0];
     const memoryService = this.getMemoryService(context);
     const processes = memoryService.getProcesses(sessionId);
-    const matches = processes.filter((p: {name: string}) => p.name.includes(processName || ""));
+    const matches = processes.filter((p: { name: string }) =>
+      p.name.includes(processName || ""),
+    );
 
     if (matches.length === 0) {
       return {
@@ -449,13 +455,15 @@ export class ProcessCommandsModule implements CommandModule {
           killed++;
         }
       } catch (error) {
-        errors.push(`PID ${proc.pid}: ${error instanceof Error ? error.message : "Unknown error"}`);
+        errors.push(
+          `PID ${proc.pid}: ${error instanceof Error ? error.message : "Unknown error"}`,
+        );
       }
     }
 
     let output = `Killed ${killed} process${killed !== 1 ? "es" : ""} matching '${processName}'`;
     if (errors.length > 0) {
-      output += `\\n\\nErrors:\\n${errors.join("\\n")}`;
+      output += `\n\nErrors:\n${errors.join("\n")}`;
     }
 
     return {
@@ -482,7 +490,9 @@ export class ProcessCommandsModule implements CommandModule {
     const processName = args[0];
     const memoryService = this.getMemoryService(context);
     const processes = memoryService.getProcesses(sessionId);
-    const matches = processes.filter((p: {name: string}) => p.name.includes(processName || ""));
+    const matches = processes.filter((p: { name: string }) =>
+      p.name.includes(processName || ""),
+    );
 
     if (matches.length === 0) {
       return {
@@ -492,14 +502,14 @@ export class ProcessCommandsModule implements CommandModule {
       };
     }
 
-    let output = `🔍 Found ${matches.length} process${matches.length !== 1 ? "es" : ""} matching '${processName}':\\n\\n`;
-    output += "PID    NAME              USER\\n";
-    output += "─".repeat(40) + "\\n";
+    let output = `🔍 Found ${matches.length} process${matches.length !== 1 ? "es" : ""} matching '${processName}':\n\n`;
+    output += "PID    NAME              USER\n";
+    output += "─".repeat(40) + "\n";
 
     for (const proc of matches) {
       output += `${proc.pid.toString().padEnd(6)} `;
       output += `${proc.name.substring(0, 16).padEnd(17)} `;
-      output += `${proc.user}\\n`;
+      output += `${proc.user}\n`;
     }
 
     return {
@@ -570,7 +580,8 @@ export class ProcessCommandsModule implements CommandModule {
     } catch (error) {
       return {
         success: false,
-        output: error instanceof Error ? error.message : "Failed to start process",
+        output:
+          error instanceof Error ? error.message : "Failed to start process",
         timestamp: new Date(),
       };
     }
@@ -635,7 +646,8 @@ export class ProcessCommandsModule implements CommandModule {
     } catch (error) {
       return {
         success: false,
-        output: error instanceof Error ? error.message : "Failed to set priority",
+        output:
+          error instanceof Error ? error.message : "Failed to set priority",
         timestamp: new Date(),
       };
     }

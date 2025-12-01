@@ -302,7 +302,7 @@
         display: flex;
         flex-direction: column;
         font-family: "IBM Plex Mono", monospace;
-        color: #00ff00;
+        color: #00bcd4;
     }
 
     .loading, .error-message {
