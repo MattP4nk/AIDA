@@ -21,6 +21,9 @@ export const SHOP_SERVICE = Symbol.for("ShopService");
 export const MISSION_SERVICE = Symbol.for("MissionService");
 export const SERVER_SERVICE = Symbol.for("ServerService");
 export const HACK_SERVICE = Symbol.for("HackService");
+export const FACTION_SERVICE = Symbol.for("FactionService");
+export const AI_SERVICE = Symbol.for("AIService");
+export const PERSONA_SERVICE = Symbol.for("PersonaService");
 
 // Supporting Services
 export const FILE_SERVICE = Symbol.for("FileService");

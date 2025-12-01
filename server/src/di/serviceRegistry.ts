@@ -18,6 +18,9 @@ import PlayerPresenceService from "../services/playerPresenceService";
 import MemoryService from "../services/memoryService";
 import ProcessStateService from "../services/processStateService";
 import CommandProcessor from "../services/commandProcessor";
+import { FactionService } from "../services/factionService";
+import { AIService } from "../services/aiService";
+import { PersonaService } from "../services/personaService";
 
 /**
  * Service Registry
@@ -66,6 +69,18 @@ export class ServiceRegistry {
 
   static get hackService(): HackService {
     return container.resolve<HackService>(TOKENS.HACK_SERVICE);
+  }
+
+  static get factionService(): FactionService {
+    return container.resolve<FactionService>(TOKENS.FACTION_SERVICE);
+  }
+
+  static get aiService(): AIService {
+    return container.resolve<AIService>(TOKENS.AI_SERVICE);
+  }
+
+  static get personaService(): PersonaService {
+    return container.resolve<PersonaService>(TOKENS.PERSONA_SERVICE);
   }
 
   // Supporting Services

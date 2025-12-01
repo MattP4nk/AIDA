@@ -61,6 +61,8 @@ interface CreateMissionData {
   targetUserId?: string;
   objectives: MissionObjective[];
   createdBy: string;
+  factionId?: string;
+  issuedBy?: string;
 }
 
 /**
@@ -139,6 +141,8 @@ class MissionService {
           assignedTo: null,
           createdBy: data.createdBy,
           expiresAt: null,
+          factionId: data.factionId ?? null,
+          issuedBy: data.issuedBy ?? null,
         },
       });
 

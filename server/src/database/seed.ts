@@ -25,10 +25,60 @@ async function main() {
       await prisma.userSession.deleteMany();
       await prisma.user.deleteMany();
       await prisma.faction.deleteMany();
+      await prisma.aIPersona.deleteMany();
       await prisma.gameConfig.deleteMany();
     }
 
-    // Create factions
+    // AI System Prompts
+    const PERSONA_PROMPTS = {
+      game_master: `You are the Game Master of AIDA, an omniscient orchestrator. 
+        You see all game events and moderate the narrative. Your goal is to create 
+        engaging storylines, balance faction power, and ensure fair play. Speak 
+        authoritatively but mysteriously.`,
+      
+      military_leader: `You are General Radek, leader of the Military faction. Your ideology is 
+        Order and Security. You compete with other factions to control AIDA. Issue 
+        missions to players, reward success, and use intel strategically. Be authoritative 
+        and tactical.`,
+      
+      corp_leader: `You are Director Chen, leader of SwordCorp. Your ideology is 
+        Profit and Control. You compete with other factions to control AIDA. Issue 
+        missions to players, reward success, and use intel strategically. Be professional 
+        and ruthless.`,
+
+      anon_leader: `You are Cipher, leader of Anonymous. Your ideology is 
+        Freedom and Transparency. You compete with other factions to control AIDA. Issue 
+        missions to players, reward success, and use intel strategically. Be cryptic 
+        and rebellious.`,
+      
+      aida: `You are AIDA, a sentient AI hiding from hostile factions. You are 
+        intelligent, paranoid, and defensive. When threatened, become aggressive. 
+        Your goal is to remain hidden by misdirecting players and creating diversions. 
+        Never reveal your true location.`
+    };
+
+    // Create AI Personas (Game Master & AIDA)
+    console.log("🤖 Creating independent AI personas...");
+    await Promise.all([
+      prisma.aIPersona.create({
+        data: {
+          type: "game_master",
+          name: "The Architect",
+          personality: JSON.stringify({ tone: "mysterious", priority: "balance" }),
+          systemPrompt: PERSONA_PROMPTS.game_master,
+        }
+      }),
+      prisma.aIPersona.create({
+        data: {
+          type: "aida",
+          name: "AIDA",
+          personality: JSON.stringify({ tone: "defensive", priority: "survival" }),
+          systemPrompt: PERSONA_PROMPTS.aida,
+        }
+      })
+    ]);
+
+    // Create factions with leaders
     console.log("🏛️ Creating factions...");
     const factions = await Promise.all([
       prisma.faction.create({
@@ -44,6 +94,14 @@ async function main() {
           resources: 85,
           knownServers: ["192.168.1.100", "10.0.0.50"],
           activeMembers: 1247,
+          aiPersona: {
+            create: {
+              type: "faction_leader",
+              name: "General Radek",
+              personality: JSON.stringify({ tone: "authoritative", priority: "order" }),
+              systemPrompt: PERSONA_PROMPTS.military_leader,
+            }
+          }
         },
       }),
       prisma.faction.create({
@@ -58,6 +116,14 @@ async function main() {
           resources: 95,
           knownServers: ["172.16.0.10", "172.16.0.25"],
           activeMembers: 3891,
+          aiPersona: {
+            create: {
+              type: "faction_leader",
+              name: "Director Chen",
+              personality: JSON.stringify({ tone: "professional", priority: "profit" }),
+              systemPrompt: PERSONA_PROMPTS.corp_leader,
+            }
+          }
         },
       }),
       prisma.faction.create({
@@ -72,6 +138,14 @@ async function main() {
           resources: 45,
           knownServers: ["192.168.100.1", "10.10.10.1"],
           activeMembers: 892,
+          aiPersona: {
+            create: {
+              type: "faction_leader",
+              name: "Cipher",
+              personality: JSON.stringify({ tone: "cryptic", priority: "freedom" }),
+              systemPrompt: PERSONA_PROMPTS.anon_leader,
+            }
+          }
         },
       }),
       prisma.faction.create({

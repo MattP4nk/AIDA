@@ -53,6 +53,7 @@ model User {
   factionEvents    FactionEvent[]
   posts            Post[]
   progressBackups  ProgressBackup[]
+  factionMembers   FactionMember[]
 
   @@map("users")
 }
@@ -113,9 +114,9 @@ model PlayerProgress {
 model ProgressBackup {
   id        String   @id @default(cuid())
   userId    String   @map("user_id")
-  data      Json     // Complete snapshot of user + progress + servers
-  reason    String   // Why backup was created
-  checksum  String?  // Data integrity verification
+  data      Json // Complete snapshot of user + progress + servers
+  reason    String // Why backup was created
+  checksum  String? // Data integrity verification
   createdAt DateTime @default(now()) @map("created_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -133,11 +134,13 @@ model GameServer {
   ipAddress          String   @unique @map("ip_address")
   type               String // ServerType enum: player_home, corporate, government, underground, etc.
   ownerId            String?  @map("owner_id")
+  factionId          String?  @map("faction_id")
   securityLevel      Int      @default(1) @map("security_level") // 1-10, affects hack difficulty
   firewallLevel      Int      @default(1) @map("firewall_level") // 1-10, affects detection
   encryptionLevel    Int      @default(0) @map("encryption_level")
   discoveryLevel     Int      @default(0) @map("discovery_level") // Required skill level to discover
   isPlayerHome       Boolean  @default(false) @map("is_player_home") // Flag for player home systems
+  isAidaHomeServer   Boolean  @default(false) @map("is_aida_home_server") // Hidden AIDA server
   accessRules        Json     @default("[]") @map("access_rules")
   isOnline           Boolean  @default(true) @map("is_online")
   maxConnections     Int      @default(10) @map("max_connections")
@@ -147,6 +150,7 @@ model GameServer {
 
   // Relations
   owner       User?              @relation(fields: [ownerId], references: [id])
+  faction     Faction?           @relation(fields: [factionId], references: [id])
   fileSystem  FileSystemNode[]
   connections ServerConnection[]
   hackLogs    HackLog[]
@@ -256,8 +260,10 @@ model ForumPost {
   isSticky         Boolean  @default(false) @map("is_sticky")
   isLocked         Boolean  @default(false) @map("is_locked")
 
-  author  User         @relation(fields: [authorId], references: [id])
-  replies ForumReply[]
+  author    User         @relation(fields: [authorId], references: [id])
+  replies   ForumReply[]
+  faction   Faction?     @relation(fields: [factionId], references: [id])
+  factionId String?
 
   @@map("forum_posts")
 }
@@ -483,12 +489,16 @@ model Mission {
   objectives     Json      @default("[]")
   status         String    @default("available") // MissionStatus enum
   assignedTo     String?   @map("assigned_to")
-  createdBy      String    @map("created_by")
+  createdBy      String?   @map("created_by") // User ID if created by player
+  issuedBy       String?   @map("issued_by") // AI Persona ID if created by AI
+  factionId      String?   @map("faction_id")
   createdAt      DateTime  @default(now()) @map("created_at")
   expiresAt      DateTime? @map("expires_at")
 
-  assignee User? @relation("MissionAssignee", fields: [assignedTo], references: [id])
-  creator  User  @relation("MissionCreator", fields: [createdBy], references: [id])
+  assignee  User?      @relation("MissionAssignee", fields: [assignedTo], references: [id])
+  creator   User?      @relation("MissionCreator", fields: [createdBy], references: [id])
+  aiPersona AIPersona? @relation(fields: [issuedBy], references: [id])
+  faction   Faction?   @relation(fields: [factionId], references: [id])
 
   @@map("missions")
 }
@@ -579,13 +589,14 @@ model GameConfig {
 // ==================== PHASE 3A: FACTION SYSTEM ====================
 
 model Faction {
-  id             String   @id
+  id             String   @id @default(cuid())
   name           String   @unique
   shortName      String?  @unique @map("short_name") // 'anons', 'military', 'sword_corp'
-  fullName       String   @map("full_name")
+  fullName       String?  @map("full_name")
   description    String   @db.Text
   objective      String?  @db.Text
   ideology       String?  @db.Text
+  color          String   @default("#00ff00") // UI theme color
   hostilityLevel Int      @default(0) @map("hostility_level")
   resources      Json     @default("{}") // { funding: 100, intel: 50, military: 30 }
   knownServers   String[] @map("known_servers")
@@ -593,12 +604,35 @@ model Faction {
   metadata       Json     @default("{}")
   createdAt      DateTime @default(now()) @map("created_at")
 
+  // Phase 5: AI Relations
+  aiPersonaId String?    @unique @map("ai_persona_id")
+  aiPersona   AIPersona? @relation(fields: [aiPersonaId], references: [id])
+
   // Relations
-  standings FactionStanding[]
-  events    FactionEvent[]
-  forums    Forum[]
+  members    FactionMember[]
+  standings  FactionStanding[]
+  events     FactionEvent[]
+  forums     Forum[]
+  missions   Mission[]
+  servers    GameServer[]
+  forumPosts ForumPost[]
 
   @@map("factions")
+}
+
+model FactionMember {
+  id         String   @id @default(cuid())
+  userId     String   @map("user_id")
+  factionId  String   @map("faction_id")
+  rank       String   @default("recruit") // "recruit", "operative", "elite", "leader"
+  reputation Int      @default(0)
+  joinedAt   DateTime @default(now()) @map("joined_at")
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  faction Faction @relation(fields: [factionId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, factionId])
+  @@map("faction_members")
 }
 
 model FactionStanding {
@@ -653,4 +687,87 @@ model FactionEvent {
   @@index([factionId])
   @@index([eventType])
   @@map("faction_events")
+}
+
+// ==================== PHASE 5: AI PERSONAS ====================
+
+model AIPersona {
+  id           String @id @default(cuid())
+  type         String // "game_master", "faction_leader", "aida"
+  name         String @unique
+  personality  String // JSON: tone, priorities, strategies
+  systemPrompt String @map("system_prompt") @db.Text
+  model        String @default("llama3.1:8b")
+
+  faction Faction?
+
+  knowledge AIKnowledge[]
+  actions   AIAction[]
+  missions  Mission[]
+
+  lastActionAt DateTime? @map("last_action_at")
+  actionsToday Int       @default(0) @map("actions_today")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("ai_personas")
+}
+
+model AIKnowledge {
+  id        String    @id @default(cuid())
+  personaId String    @map("persona_id")
+  persona   AIPersona @relation(fields: [personaId], references: [id], onDelete: Cascade)
+
+  source     String // "mission_completion", "forum_post", "player_message", "game_event"
+  type       String // "server_location", "player_skill", "file_intel", "faction_activity"
+  content    Json // Flexible: { serverId, fileHash, playerId, description, etc. }
+  confidence Float  @default(1.0) // 0.0-1.0
+
+  timestamp DateTime  @default(now())
+  expiresAt DateTime? @map("expires_at")
+
+  @@index([personaId, type])
+  @@map("ai_knowledge")
+}
+
+model AIAction {
+  id        String    @id @default(cuid())
+  personaId String    @map("persona_id")
+  persona   AIPersona @relation(fields: [personaId], references: [id], onDelete: Cascade)
+
+  type   String // "issue_mission", "send_message", "forum_post", "server_action"
+  status String @default("pending") // "pending", "processing", "completed", "failed"
+
+  input  Json // Context for AI (e.g., recent events, player actions)
+  output Json? // Generated content (mission text, message, etc.)
+
+  triggeredBy String    @map("triggered_by") // "interval", "event:mission_complete", "event:server_hacked"
+  executedAt  DateTime? @map("executed_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([personaId, status])
+  @@index([status, createdAt])
+  @@map("ai_actions")
+}
+
+model AidaClue {
+  id       String @id @default(cuid())
+  type     String // "ip_fragment", "coordinate", "access_code", "network_map"
+  serverId String @map("server_id") // Server where clue is hidden
+  filePath String @map("file_path") // Path to file containing clue
+  content  String @db.Text // The actual clue data
+
+  requiredClues String[]  @map("required_clues") // Other clue IDs needed to decode this one
+  difficulty    Int // Server security level required
+  discovered    Boolean   @default(false)
+  discoveredBy  String?   @map("discovered_by") // User ID who found it
+  discoveredAt  DateTime? @map("discovered_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([serverId])
+  @@index([discovered])
+  @@map("aida_clues")
 }

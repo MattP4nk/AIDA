@@ -17,6 +17,7 @@ import { GameCommandsModule } from "./commandModules/gameCommands";
 import { HelpCommandsModule } from "./commandModules/helpCommands";
 import { ProcessCommandsModule } from "./commandModules/processCommands";
 import { MathCommandsModule } from "./commandModules/mathCommands";
+import { FactionCommandsModule } from "./commandModules/factionCommands";
 import { CommandModule, CommandContext } from "./commandModules/interface";
 import { memoryService } from "./memoryService";
 import { injectable, inject } from "tsyringe";
@@ -67,6 +68,7 @@ class CommandProcessor extends EventEmitter {
       new HelpCommandsModule(),
       new ProcessCommandsModule(),
       new MathCommandsModule(),
+      new FactionCommandsModule(),
     ];
 
     // Build command map from modules
@@ -594,6 +596,7 @@ class CommandProcessor extends EventEmitter {
     if (module instanceof HelpCommandsModule) return "help";
     if (module instanceof ProcessCommandsModule) return "process";
     if (module instanceof MathCommandsModule) return "math";
+    if (module instanceof FactionCommandsModule) return "faction";
     return "other";
   }
 
@@ -702,6 +705,7 @@ class CommandProcessor extends EventEmitter {
       help: 0,
       math: 0,
       process: 0,
+      faction: 0,
       other: 0,
     };
 

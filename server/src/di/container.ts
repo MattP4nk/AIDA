@@ -27,6 +27,9 @@ import PlayerPresenceService from "../services/playerPresenceService";
 import MemoryService from "../services/memoryService";
 import ProcessStateService from "../services/processStateService";
 import CommandProcessor from "../services/commandProcessor";
+import { FactionService } from "../services/factionService";
+import { AIService } from "../services/aiService";
+import { PersonaService } from "../services/personaService";
 
 /**
  * Initialize the DI container with all service registrations
@@ -58,6 +61,9 @@ export function initializeContainer(
   container.registerSingleton(TOKENS.MEMORY_SERVICE, MemoryService);
   container.registerSingleton(TOKENS.PROCESS_STATE_SERVICE, ProcessStateService);
   container.registerSingleton(TOKENS.COMMAND_PROCESSOR, CommandProcessor);
+  container.registerSingleton(TOKENS.FACTION_SERVICE, FactionService);
+  container.registerSingleton(TOKENS.AI_SERVICE, AIService);
+  container.registerSingleton(TOKENS.PERSONA_SERVICE, PersonaService);
 
   console.log("✅ DI Container initialized");
 }
