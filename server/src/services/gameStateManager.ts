@@ -30,6 +30,10 @@ class GameStateManager extends EventEmitter {
   private io: SocketIOServer;
   private eventService: EventService;
   private commandProcessor: CommandProcessor;
+  private cleanupTimer: NodeJS.Timeout | null = null;
+  private readonly CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+  private readonly MAX_SESSIONS = 1000;
+  private readonly SESSION_IDLE_TIMEOUT_MS = 60 * 60 * 1000; // 60 minutes
 
   constructor(
     @inject(SOCKET_IO) io: SocketIOServer,
@@ -44,7 +48,8 @@ class GameStateManager extends EventEmitter {
     this.activeConnections = new Map();
     this.serverStates = new Map();
 
-    console.log("🎮 GameStateManager initialized");
+    // Start automatic cleanup timer
+    this.startCleanupTimer();
   }
 
   // ==================== PUBLIC ACCESSORS ====================
@@ -142,8 +147,12 @@ class GameStateManager extends EventEmitter {
         },
       });
 
+      // Check if we've exceeded max sessions and cleanup if needed
+      if (this.playerSessions.size > this.MAX_SESSIONS) {
+        await this.cleanupIdleSessions();
+      }
+
       this.emit("session:created", { userId, session });
-      console.log(`✅ Session created for user ${userId}`);
 
       return session;
     } catch (error) {
@@ -179,7 +188,6 @@ class GameStateManager extends EventEmitter {
       });
 
       this.emit("session:destroyed", { userId });
-      console.log(`❌ Session destroyed for user ${userId}`);
     } catch (error) {
       console.error(`❌ Error destroying session for user ${userId}:`, error);
       throw error;
@@ -915,10 +923,74 @@ Tips:
 
   // ==================== CLEANUP ====================
 
-  public async cleanup(): Promise<void> {
-    console.log("🧹 Cleaning up GameStateManager...");
+  /**
+   * Start automatic cleanup timer
+   */
+  private startCleanupTimer(): void {
+    if (this.cleanupTimer) {
+      clearInterval(this.cleanupTimer);
+    }
 
+    this.cleanupTimer = setInterval(async () => {
+      await this.cleanupIdleSessions();
+    }, this.CLEANUP_INTERVAL_MS);
+  }
+
+  /**
+   * Stop automatic cleanup timer
+   */
+  private stopCleanupTimer(): void {
+    if (this.cleanupTimer) {
+      clearInterval(this.cleanupTimer);
+      this.cleanupTimer = null;
+    }
+  }
+
+  /**
+   * Clean up idle sessions that have exceeded timeout
+   */
+  public async cleanupIdleSessions(): Promise<number> {
+    const now = Date.now();
+    let cleanedCount = 0;
+
+    for (const [userId, session] of this.playerSessions.entries()) {
+      const idleTime = now - session.lastActivity.getTime();
+
+      if (idleTime > this.SESSION_IDLE_TIMEOUT_MS) {
+        try {
+          await this.destroySession(userId);
+          cleanedCount++;
+        } catch (error) {
+          console.error(`Error cleaning up session for user ${userId}:`, error);
+        }
+      }
+    }
+
+    if (cleanedCount > 0) {
+      this.emit("sessions:cleaned", { count: cleanedCount });
+    }
+
+    return cleanedCount;
+  }
+
+  /**
+   * Clean up session on disconnect
+   */
+  public async handleDisconnect(socketId: string): Promise<void> {
+    const userId = this.activeConnections.get(socketId);
+    if (userId) {
+      await this.destroySession(userId);
+    }
+  }
+
+  /**
+   * Full cleanup - destroy all sessions and stop timer
+   */
+  public async cleanup(): Promise<void> {
     try {
+      // Stop the cleanup timer
+      this.stopCleanupTimer();
+
       // Destroy all sessions
       const userIds = Array.from(this.playerSessions.keys());
       for (const userId of userIds) {
@@ -929,21 +1001,29 @@ Tips:
       this.playerSessions.clear();
       this.activeConnections.clear();
       this.serverStates.clear();
-
-      console.log("✅ GameStateManager cleanup complete");
     } catch (error) {
-      console.error("❌ Error during GameStateManager cleanup:", error);
+      console.error("Error during GameStateManager cleanup:", error);
     }
   }
 
   // ==================== MONITORING & STATS ====================
 
   public getStats() {
+    const now = Date.now();
+    const sessions = Array.from(this.playerSessions.values());
+    const idleSessions = sessions.filter(
+      (s) => now - s.lastActivity.getTime() > this.SESSION_IDLE_TIMEOUT_MS,
+    );
+
     return {
       activePlayers: this.playerSessions.size,
       activeConnections: this.activeConnections.size,
       activeServers: this.serverStates.size,
-      sessions: Array.from(this.playerSessions.values()).map((session) => ({
+      idleSessions: idleSessions.length,
+      maxSessions: this.MAX_SESSIONS,
+      cleanupInterval: this.CLEANUP_INTERVAL_MS,
+      sessionTimeout: this.SESSION_IDLE_TIMEOUT_MS,
+      sessions: sessions.map((session) => ({
         userId: session.userId,
         connectedAt: session.connectedAt,
         lastActivity: session.lastActivity,

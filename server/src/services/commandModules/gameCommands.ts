@@ -1,5 +1,6 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
+import { container } from "tsyringe";
 
 export class GameCommandsModule implements CommandModule {
   public commands: Set<string> = new Set([
@@ -14,6 +15,10 @@ export class GameCommandsModule implements CommandModule {
     "buy",
     "sell",
     "use",
+    "equip",
+    "unequip",
+    "equipment",
+    "gear",
     "players",
     "who",
     "whois",
@@ -47,6 +52,13 @@ export class GameCommandsModule implements CommandModule {
           return await this.handleSell(command, context);
         case "use":
           return await this.handleUse(command, context);
+        case "equip":
+          return await this.handleEquip(command, context);
+        case "unequip":
+          return await this.handleUnequip(command, context);
+        case "equipment":
+        case "gear":
+          return await this.handleEquipment(command, context);
         case "players":
           return await this.handlePlayers(command, context);
         case "who":
@@ -148,6 +160,27 @@ export class GameCommandsModule implements CommandModule {
         description: "Use an item from inventory",
         usage: "use <item_id>",
         examples: ["use health_pack", "use skill_boost"],
+      },
+      {
+        command: "equip",
+        category: "game",
+        description: "Equip an item from your inventory",
+        usage: "equip <item_id>",
+        examples: ["equip port_scanner", "equip stealth_module"],
+      },
+      {
+        command: "unequip",
+        category: "game",
+        description: "Unequip an item from a slot",
+        usage: "unequip <slot|item_id>",
+        examples: ["unequip TOOL", "unequip port_scanner"],
+      },
+      {
+        command: "equipment",
+        category: "game",
+        description: "Show currently equipped items and bonuses",
+        usage: "equipment",
+        examples: ["equipment", "gear"],
       },
       {
         command: "players",
@@ -252,7 +285,19 @@ export class GameCommandsModule implements CommandModule {
     context: CommandContext,
   ): Promise<CommandResult> {
     const missionService = context.services.missionService;
-    const missions = await missionService.getPlayerMissions(context.userId);
+    const missionGenerator = context.services.missionGenerator;
+
+    let missions = await missionService.getPlayerMissions(context.userId);
+
+    // Auto-generate missions if list is empty
+    if (missions.length === 0 && missionGenerator) {
+      try {
+        await missionGenerator.generateMissionsForPlayer(context.userId, 5);
+        missions = await missionService.getPlayerMissions(context.userId);
+      } catch (error) {
+        // Silent fail - just show empty list
+      }
+    }
 
     return {
       success: true,
@@ -501,7 +546,11 @@ export class GameCommandsModule implements CommandModule {
     const quantity = parseInt(command.args?.[1] || "1");
 
     const shopService = context.services.shopService;
-    const result = await shopService.purchaseItem(context.userId, itemId, quantity);
+    const result = await shopService.purchaseItem(
+      context.userId,
+      itemId,
+      quantity,
+    );
 
     return {
       success: result.success,
@@ -542,7 +591,7 @@ export class GameCommandsModule implements CommandModule {
     command: Command,
     context: CommandContext,
   ): Promise<CommandResult> {
-    const itemId = command.args?.[0];
+    const itemId = command.args[0];
 
     if (!itemId) {
       return {
@@ -552,13 +601,194 @@ export class GameCommandsModule implements CommandModule {
       };
     }
 
-    const shopService = context.services.shopService;
+    const shopService = container.resolve<any>("ShopService");
     const result = await shopService.useItem(context.userId, itemId);
 
     return {
       success: result.success,
       output: result.message,
-      data: result,
+      data: result.effects,
+      timestamp: new Date(),
+    };
+  }
+
+  private async handleEquip(
+    command: Command,
+    context: CommandContext,
+  ): Promise<CommandResult> {
+    const itemId = command.args[0];
+
+    if (!itemId) {
+      return {
+        success: false,
+        output: "Usage: equip <item_id>\nExample: equip port_scanner",
+        timestamp: new Date(),
+      };
+    }
+
+    const shopService = container.resolve<any>("ShopService");
+    const inventoryService = container.resolve<any>("InventoryService");
+
+    // Get the item from catalog
+    const item = shopService.getItem(itemId);
+    if (!item) {
+      return {
+        success: false,
+        output: `Item not found: ${itemId}`,
+        timestamp: new Date(),
+      };
+    }
+
+    // Equip the item
+    const result = await inventoryService.equipItem(
+      context.userId,
+      itemId,
+      item,
+    );
+
+    return {
+      success: result.success,
+      output: result.message,
+      data: result.effects,
+      timestamp: new Date(),
+    };
+  }
+
+  private async handleUnequip(
+    command: Command,
+    context: CommandContext,
+  ): Promise<CommandResult> {
+    const arg = command.args[0];
+
+    if (!arg) {
+      return {
+        success: false,
+        output:
+          "Usage: unequip <slot|item_id>\nSlots: TOOL, SOFTWARE, EXPLOIT, DEFENSE, UPGRADE",
+        timestamp: new Date(),
+      };
+    }
+
+    const inventoryService = container.resolve<any>("InventoryService");
+
+    // Check if arg is a valid slot name
+    const validSlots = ["TOOL", "SOFTWARE", "EXPLOIT", "DEFENSE", "UPGRADE"];
+    if (validSlots.includes(arg.toUpperCase())) {
+      const result = await inventoryService.unequipItem(
+        context.userId,
+        arg.toUpperCase(),
+      );
+      return {
+        success: result.success,
+        output: result.message,
+        timestamp: new Date(),
+      };
+    }
+
+    // Otherwise treat it as an item ID
+    const result = await inventoryService.unequipItemById(context.userId, arg);
+    return {
+      success: result.success,
+      output: result.message,
+      timestamp: new Date(),
+    };
+  }
+
+  private async handleEquipment(
+    _command: Command,
+    context: CommandContext,
+  ): Promise<CommandResult> {
+    const shopService = container.resolve<any>("ShopService");
+    const inventoryService = container.resolve<any>("InventoryService");
+
+    // Get equipped items
+    const equipment = await inventoryService.getEquipment(context.userId);
+
+    // Get item catalog
+    const catalog = shopService.getAllItems();
+
+    // Get bonuses
+    const bonuses = await inventoryService.getEquipmentBonuses(
+      context.userId,
+      catalog,
+    );
+
+    let output = "\n=== EQUIPPED ITEMS ===\n\n";
+
+    const slots = ["TOOL", "SOFTWARE", "EXPLOIT", "DEFENSE", "UPGRADE"];
+    let hasEquipped = false;
+
+    for (const slot of slots) {
+      const itemId = equipment[slot];
+      if (itemId) {
+        hasEquipped = true;
+        const item = catalog.find((i: any) => i.id === itemId);
+        if (item) {
+          output += `[${slot}] ${item.name}\n`;
+          if (item.effects) {
+            const effects = [];
+            if (item.effects.hackingBonus)
+              effects.push(`+${item.effects.hackingBonus} Hacking`);
+            if (item.effects.stealthBonus)
+              effects.push(`+${item.effects.stealthBonus} Stealth`);
+            if (item.effects.speedBonus)
+              effects.push(`+${item.effects.speedBonus}% Speed`);
+            if (item.effects.detectionReduction)
+              effects.push(`-${item.effects.detectionReduction}% Detection`);
+            if (item.effects.successRateIncrease)
+              effects.push(`+${item.effects.successRateIncrease}% Success`);
+            if (item.effects.xpMultiplier)
+              effects.push(
+                `${(item.effects.xpMultiplier * 100).toFixed(0)}% XP`,
+              );
+            if (item.effects.creditsMultiplier)
+              effects.push(
+                `${(item.effects.creditsMultiplier * 100).toFixed(0)}% Credits`,
+              );
+            if (effects.length > 0) {
+              output += `  Effects: ${effects.join(", ")}\n`;
+            }
+          }
+          output += "\n";
+        }
+      } else {
+        output += `[${slot}] (empty)\n\n`;
+      }
+    }
+
+    if (!hasEquipped) {
+      output += "No items equipped.\n\n";
+    }
+
+    // Show total bonuses
+    output += "=== TOTAL BONUSES ===\n\n";
+    const bonusLines = [];
+    if (bonuses.hackingBonus)
+      bonusLines.push(`Hacking: +${bonuses.hackingBonus}`);
+    if (bonuses.stealthBonus)
+      bonusLines.push(`Stealth: +${bonuses.stealthBonus}`);
+    if (bonuses.speedBonus) bonusLines.push(`Speed: +${bonuses.speedBonus}%`);
+    if (bonuses.detectionReduction)
+      bonusLines.push(`Detection: -${bonuses.detectionReduction}%`);
+    if (bonuses.successRateIncrease)
+      bonusLines.push(`Success Rate: +${bonuses.successRateIncrease}%`);
+    if (bonuses.xpMultiplier !== 1.0)
+      bonusLines.push(`XP Multiplier: ${bonuses.xpMultiplier.toFixed(2)}x`);
+    if (bonuses.creditsMultiplier !== 1.0)
+      bonusLines.push(
+        `Credits Multiplier: ${bonuses.creditsMultiplier.toFixed(2)}x`,
+      );
+
+    if (bonusLines.length > 0) {
+      output += bonusLines.join("\n");
+    } else {
+      output += "No active bonuses.";
+    }
+
+    return {
+      success: true,
+      output,
+      data: { equipment, bonuses },
       timestamp: new Date(),
     };
   }

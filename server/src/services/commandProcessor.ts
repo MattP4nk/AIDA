@@ -99,6 +99,7 @@ class CommandProcessor extends EventEmitter {
     const processStateService = ServiceRegistry.processStateService;
     const shopService = ServiceRegistry.shopService;
     const missionService = ServiceRegistry.missionService;
+    const missionGenerator = ServiceRegistry.missionGenerator;
     const serverService = ServiceRegistry.serverService;
 
     // Safely get presence service
@@ -121,6 +122,7 @@ class CommandProcessor extends EventEmitter {
       services: {
         shopService,
         missionService,
+        missionGenerator,
         playerPresenceService,
         serverService,
         memoryService,

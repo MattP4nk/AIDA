@@ -3,7 +3,8 @@ import { prisma } from "../database/client";
 import type { Forum, Post, ForumMember, ProxyConnection } from "@prisma/client";
 import type { Server as SocketIOServer } from "socket.io";
 import { injectable, inject } from "tsyringe";
-import { SOCKET_IO } from "../di/tokens";
+import { SOCKET_IO, MISSION_INTEGRATION_SERVICE } from "../di/tokens";
+import type MissionIntegrationService from "./missionIntegration";
 
 /**
  * ForumService - Underground forum networks and darkweb system
@@ -98,10 +99,16 @@ export class ForumService extends EventEmitter {
     },
   ];
 
-  constructor(@inject(SOCKET_IO) io: SocketIOServer) {
+  private missionIntegration: MissionIntegrationService | null = null;
+
+  constructor(
+    @inject(SOCKET_IO) io: SocketIOServer,
+    @inject(MISSION_INTEGRATION_SERVICE)
+    missionIntegrationService?: MissionIntegrationService,
+  ) {
     super();
     this.io = io;
-    console.log("⚡ ForumService initialized");
+    this.missionIntegration = missionIntegrationService || null;
   }
 
   // ==================== FORUM DISCOVERY ====================
@@ -605,16 +612,21 @@ export class ForumService extends EventEmitter {
         });
       }
 
+      // Track for mission objectives
+      if (this.missionIntegration) {
+        await this.missionIntegration.onForumActivity(userId, "post", forumId);
+      }
+
       return post;
     } catch (error) {
-      console.error("Error creating post:", error);
+      console.error("[ForumService] Error creating post:", error);
       throw error;
     }
   }
 
   /**
    * Create a forum post from an AI persona
-   * 
+   *
    * PHASE 5: AI forum posting (bypasses membership requirements)
    */
   public async createAIPost(
@@ -627,7 +639,7 @@ export class ForumService extends EventEmitter {
       // Get AI persona info
       const persona = await prisma.aIPersona.findUnique({
         where: { id: personaId },
-        include: { faction: true }
+        include: { faction: true },
       });
 
       if (!persona) {
@@ -1089,5 +1101,5 @@ export const forumService = new Proxy({} as ForumService, {
   get(_target, prop) {
     const instance = container.resolve(FORUM_SERVICE as any);
     return (instance as any)[prop];
-  }
+  },
 });

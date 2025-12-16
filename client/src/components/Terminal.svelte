@@ -8,6 +8,8 @@
     import MailDialog from "./MailDialog.svelte";
     import ChatDialog from "./ChatDialog.svelte";
     import ForumDialog from "./ForumDialog.svelte";
+    import ShopDialog from "./ShopDialog.svelte";
+    import EquipmentDialog from "./EquipmentDialog.svelte";
     // Socket service for real-time notifications
     import { liveMessages, socketService } from "../services/socket";
     // Terminal tabs service
@@ -55,7 +57,13 @@
     let currentDir = "~";
 
     // Dialog state
-    let activeDialog: "none" | "mail" | "chat" | "forum" = "none";
+    let activeDialog:
+        | "none"
+        | "mail"
+        | "chat"
+        | "forum"
+        | "shop"
+        | "equipment" = "none";
     let dialogData: any = null;
 
     // Notification state
@@ -314,6 +322,33 @@
         isExecuting = true;
 
         try {
+            // Check if this is a UI command that should open a dialog
+            const cmdParts = command.trim().split(/\s+/);
+            const cmdName = cmdParts[0].toLowerCase();
+
+            if (cmdName === "shop") {
+                openDialog("shop");
+                if (activeTabId) {
+                    terminalTabsStore.updateProcessingState(activeTabId, false);
+                }
+                isExecuting = false;
+                return;
+            }
+
+            if (
+                cmdName === "inventory" ||
+                cmdName === "equipment" ||
+                cmdName === "gear" ||
+                cmdName === "scripts"
+            ) {
+                openDialog("equipment");
+                if (activeTabId) {
+                    terminalTabsStore.updateProcessingState(activeTabId, false);
+                }
+                isExecuting = false;
+                return;
+            }
+
             // Execute the command on the server
             const result = await terminalService.executeCommand(command);
 
@@ -436,7 +471,10 @@
 
     // ==================== DIALOG MANAGEMENT ====================
 
-    function openDialog(type: "mail" | "chat" | "forum", data?: any) {
+    function openDialog(
+        type: "mail" | "chat" | "forum" | "shop" | "equipment",
+        data?: any,
+    ) {
         activeDialog = type;
         dialogData = data;
         // Blur terminal background
@@ -618,6 +656,20 @@
     function handleGlobalKeydown(event: KeyboardEvent) {
         // Prevent interference when dialog is active
         if (activeDialog !== "none") {
+            return;
+        }
+
+        // Ctrl+S: Open shop
+        if (event.ctrlKey && event.key === "s") {
+            event.preventDefault();
+            openDialog("shop");
+            return;
+        }
+
+        // Ctrl+I: Open inventory/equipment
+        if (event.ctrlKey && event.key === "i") {
+            event.preventDefault();
+            openDialog("equipment");
             return;
         }
 
@@ -894,6 +946,10 @@
         initialData={dialogData}
         on:close={closeDialog}
     />
+{:else if activeDialog === "shop"}
+    <ShopDialog visible={true} onClose={closeDialog} />
+{:else if activeDialog === "equipment"}
+    <EquipmentDialog visible={true} onClose={closeDialog} />
 {/if}
 
 <!-- ==================== STYLES ==================== -->

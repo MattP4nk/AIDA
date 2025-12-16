@@ -6,7 +6,14 @@ import helmet from "helmet";
 import compression from "compression";
 import morgan from "morgan";
 import rateLimit from "express-rate-limit";
+import crypto from "crypto";
 import pino from "pino";
+import {
+  sanitizeInputs,
+  detectSqlInjection,
+  detectXss,
+  detectPathTraversal,
+} from "./middleware/validation";
 
 import { config, validateConfig } from "./config/environment";
 import { db } from "./database/client";
@@ -147,7 +154,12 @@ class AidaServer {
         ],
         credentials: true,
         methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
+        allowedHeaders: [
+          "Content-Type",
+          "Authorization",
+          "X-Requested-With",
+          "X-CSRF-Token",
+        ],
       }),
     );
 
@@ -188,9 +200,142 @@ class AidaServer {
     });
 
     app.use("/api", limiter);
+
+    // Input validation and sanitization middleware
+    app.use(sanitizeInputs);
+    app.use(detectSqlInjection);
+    app.use(detectXss);
+    app.use(detectPathTraversal);
+
+    // CSRF protection middleware for state-changing operations
+    app.use(this.csrfProtection.bind(this));
+  }
+
+  // ==================== CSRF PROTECTION ====================
+  // Using custom header validation (no cookies needed for JWT-based auth)
+
+  private csrfTokenStore = new Map<
+    string,
+    { token: string; expires: number }
+  >();
+
+  private csrfProtection(
+    req: express.Request,
+    res: express.Response,
+    next: express.NextFunction,
+  ): void | express.Response {
+    // Skip CSRF for safe methods and certain paths
+    const safeMethods = ["GET", "HEAD", "OPTIONS"];
+    const skipPaths = [
+      "/health",
+      "/api/auth/login",
+      "/api/auth/register",
+      "/api/csrf-token",
+    ];
+
+    if (
+      safeMethods.includes(req.method) ||
+      skipPaths.some((path) => req.path.startsWith(path))
+    ) {
+      return next();
+    }
+
+    // Get CSRF token from header
+    const csrfToken = req.headers["x-csrf-token"] as string;
+    const authHeader = req.headers.authorization as string;
+
+    if (!csrfToken) {
+      return res.status(403).json({
+        success: false,
+        error: "CSRF token required",
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    // Extract JWT token to use as key
+    const jwtToken = authHeader?.replace("Bearer ", "");
+    if (!jwtToken) {
+      return res.status(403).json({
+        success: false,
+        error: "Authentication required",
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    // Validate CSRF token
+    const stored = this.csrfTokenStore.get(jwtToken);
+    if (!stored || stored.token !== csrfToken || stored.expires < Date.now()) {
+      return res.status(403).json({
+        success: false,
+        error: "Invalid or expired CSRF token",
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    next();
+  }
+
+  private generateCsrfToken(jwtToken: string): string {
+    const token = crypto.randomBytes(32).toString("hex");
+    const expires = Date.now() + 3600000; // 1 hour
+
+    // Store token
+    this.csrfTokenStore.set(jwtToken, { token, expires });
+
+    // Cleanup expired tokens periodically
+    if (this.csrfTokenStore.size > 1000) {
+      this.cleanupExpiredCsrfTokens();
+    }
+
+    return token;
+  }
+
+  private cleanupExpiredCsrfTokens(): void {
+    const now = Date.now();
+    for (const [key, value] of this.csrfTokenStore.entries()) {
+      if (value.expires < now) {
+        this.csrfTokenStore.delete(key);
+      }
+    }
   }
 
   private async setupRoutes(): Promise<void> {
+    // CSRF token endpoint (requires authentication)
+    app.get("/api/csrf-token", async (req, res): Promise<void> => {
+      const authHeader = req.headers.authorization as string;
+      const jwtToken = authHeader?.replace("Bearer ", "");
+
+      if (!jwtToken) {
+        res.status(401).json({
+          success: false,
+          error: "Authentication required",
+          timestamp: new Date().toISOString(),
+        });
+        return;
+      }
+
+      // Verify JWT token
+      const { verifySocketToken } = await import("./middleware/auth");
+      const user = await verifySocketToken(jwtToken);
+
+      if (!user) {
+        res.status(401).json({
+          success: false,
+          error: "Invalid authentication token",
+          timestamp: new Date().toISOString(),
+        });
+        return;
+      }
+
+      const csrfToken = this.generateCsrfToken(jwtToken);
+      res.json({
+        success: true,
+        csrfToken,
+        expiresIn: 3600000, // 1 hour in ms
+        timestamp: new Date().toISOString(),
+      });
+    });
+
     // Health check endpoint
     app.get("/health", async (_req, res) => {
       const dbHealth = await db.healthCheck();
@@ -203,6 +348,43 @@ class AidaServer {
         database: dbHealth ? "connected" : "disconnected",
         version: process.env.npm_package_version || "1.0.0",
       });
+    });
+
+    // Session stats endpoint for monitoring
+    app.get("/api/stats/sessions", (_req, res) => {
+      if (gameStateManager) {
+        const stats = gameStateManager.getStats();
+        res.json({
+          success: true,
+          data: stats,
+          timestamp: new Date().toISOString(),
+        });
+      } else {
+        res.status(503).json({
+          success: false,
+          error: "GameStateManager not initialized",
+          timestamp: new Date().toISOString(),
+        });
+      }
+    });
+
+    // Manual cleanup endpoint (for admin/monitoring)
+    app.post("/api/admin/cleanup-sessions", async (_req, res) => {
+      if (gameStateManager) {
+        const count = await gameStateManager.cleanupIdleSessions();
+        res.json({
+          success: true,
+          message: `Cleaned up ${count} idle sessions`,
+          count,
+          timestamp: new Date().toISOString(),
+        });
+      } else {
+        res.status(503).json({
+          success: false,
+          error: "GameStateManager not initialized",
+          timestamp: new Date().toISOString(),
+        });
+      }
     });
 
     // ============================================================
@@ -323,6 +505,75 @@ class AidaServer {
             success: false,
             error: error instanceof Error ? error.message : "Unknown error",
           });
+        }
+      });
+
+      // Handle authentication request with acknowledgment (prevents race condition)
+      socket.on("authenticate:request", async (callback) => {
+        const userId = socket.data.user?.id;
+        const username = socket.data.user?.username;
+
+        if (!userId) {
+          console.error("❌ No userId in authentication request");
+          if (typeof callback === "function") {
+            callback({
+              success: false,
+              error: "No user ID found",
+            });
+          }
+          return;
+        }
+
+        try {
+          // Check if session already exists
+          if (gameStateManager) {
+            const existingSession = gameStateManager.getSession(userId);
+            if (!existingSession) {
+              await gameStateManager.createSession(
+                userId,
+                socket.id,
+                socket.handshake.address,
+              );
+            }
+          }
+
+          // Mark player as online in presence service
+          const { getPresenceService } =
+            await import("./services/playerPresenceService");
+          const presenceService = getPresenceService();
+          await presenceService.playerConnected(userId, socket.id);
+
+          // Queue initial save for user
+          progressService.queueSave(userId, "login");
+
+          // Broadcast full game state to client
+          if (gameStateManager) {
+            await gameStateManager.broadcastStateUpdate(userId);
+          }
+
+          // Notify contacts that user is online
+          socket.broadcast.emit("user:status_change", {
+            userId,
+            isOnline: true,
+            timestamp: new Date(),
+          });
+
+          // Send acknowledgment response
+          if (typeof callback === "function") {
+            callback({
+              success: true,
+              userId,
+              username,
+            });
+          }
+        } catch (error) {
+          console.error("❌ Error during authentication request:", error);
+          if (typeof callback === "function") {
+            callback({
+              success: false,
+              error: error instanceof Error ? error.message : "Unknown error",
+            });
+          }
         }
       });
 

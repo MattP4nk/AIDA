@@ -3,7 +3,9 @@ import { db } from "../database/client";
 import type { HackAttempt, HackResult, HackCalculation } from "../types/game";
 import { HackMethod } from "../types/game";
 import { progressService } from "./progressService";
-import { injectable } from "tsyringe";
+import { injectable, inject } from "tsyringe";
+import { MISSION_INTEGRATION_SERVICE } from "../di/tokens";
+import type MissionIntegrationService from "./missionIntegration";
 
 /**
  * Enhanced HackService - Complete PvP hacking mechanics
@@ -24,6 +26,7 @@ class HackService extends EventEmitter {
   private readonly COOLDOWN_SECONDS = 30;
   private readonly BASE_DETECTION_RATE = 0.3;
   private readonly BASE_SUCCESS_RATE = 0.5;
+  private missionIntegration: MissionIntegrationService | null = null;
 
   // Hack method difficulty multipliers
   private readonly METHOD_DIFFICULTY: Record<HackMethod, number> = {
@@ -62,12 +65,14 @@ class HackService extends EventEmitter {
     log_cleaner: 0.25,
   };
 
-  constructor() {
+  constructor(
+    @inject(MISSION_INTEGRATION_SERVICE)
+    missionIntegrationService?: MissionIntegrationService,
+  ) {
     super();
     this.cooldowns = new Map();
     this.activeHacks = new Map();
-
-    console.log("🔓 Enhanced HackService initialized");
+    this.missionIntegration = missionIntegrationService || null;
   }
 
   // ==================== MAIN HACK PROCESSING ====================
@@ -271,12 +276,17 @@ class HackService extends EventEmitter {
         }
       }
 
-      // 2. Log hack event for mission tracking (future integration)
-      // Note: Mission objective updates require active mission lookup
-      // This would be implemented when mission-hack tracking is needed
-      console.log(
-        `Hack event logged for potential mission tracking: ${attackerId} -> ${targetServerId} (${success ? "success" : "failed"})`,
-      );
+      // 2. Track hack for mission objectives
+      if (this.missionIntegration && result.success) {
+        await this.missionIntegration.onHackComplete(
+          attackerId,
+          targetId,
+          result.success,
+          result.detected,
+          result.accessLevel,
+          method,
+        );
+      }
 
       return result;
     } catch (error) {
@@ -544,12 +554,12 @@ class HackService extends EventEmitter {
 
       // Filter by protection level vs access level
       const discoveredFiles = files
-        .filter((file) => {
+        .filter((file: any) => {
           if (file.isProtected && accessLevel < 7) return false;
           if (file.isHidden && accessLevel < 5) return false;
           return true;
         })
-        .map((file) => file.name);
+        .map((file: any) => file.name);
 
       return discoveredFiles.slice(0, Math.min(10, accessLevel * 2));
     } catch (error) {
@@ -960,5 +970,5 @@ export const hackService = new Proxy({} as HackService, {
   get(_target, prop) {
     const instance = container.resolve(HACK_SERVICE as any);
     return (instance as any)[prop];
-  }
+  },
 });

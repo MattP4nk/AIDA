@@ -1,7 +1,10 @@
 import { Router, Request, Response } from "express";
-import { body, validationResult } from "express-validator";
 import { authenticateToken } from "../middleware/auth";
 import { commandProcessor } from "../services/commandProcessor";
+import {
+  validateCommandExecution,
+  handleValidationErrors,
+} from "../middleware/validation";
 
 const router = Router();
 
@@ -30,33 +33,10 @@ router.use(authenticateToken);
  */
 router.post(
   "/execute",
-  [
-    body("command")
-      .isString()
-      .trim()
-      .notEmpty()
-      .withMessage("Command is required")
-      .isLength({ max: 1000 })
-      .withMessage("Command too long (max 1000 characters)"),
-    body("serverId")
-      .optional()
-      .isString()
-      .withMessage("serverId must be a string"),
-  ],
+  validateCommandExecution(),
+  handleValidationErrors,
   async (req: Request, res: Response) => {
     try {
-      // Validate request
-      const errors = validationResult(req);
-      if (!errors.isEmpty()) {
-        res.status(400).json({
-          success: false,
-          output: [errors.array()[0]!.msg],
-          exitCode: 1,
-          timestamp: new Date(),
-        });
-        return;
-      }
-
       const userId = req.user?.id;
       if (!userId) {
         res.status(401).json({
@@ -119,11 +99,6 @@ router.post(
       const output = Array.isArray(result.output)
         ? result.output
         : result.output.split("\n");
-
-      // Log command execution
-      console.log(
-        `[CMD] User ${userId} executed: ${command} (exit: ${exitCode})`,
-      );
 
       // Return result
       res.json({

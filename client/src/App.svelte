@@ -44,12 +44,10 @@
 
     async function initializeSocketAndTerminals() {
         try {
-            console.log("🔄 Starting socket and terminal initialization...");
-
             // Ensure we have a fresh socket connection with auth token
             socketService.reconnect();
 
-            // Wait for authentication to complete on the server
+            // Wait for authentication to complete on the server using acknowledgment pattern
             const socket = (socketService as any).socket;
             if (socket) {
                 await new Promise<void>((resolve, reject) => {
@@ -57,22 +55,23 @@
                         reject(new Error("Authentication timeout (10s)"));
                     }, 10000);
 
-                    // Listen for authentication complete
-                    socket.once("authentication:complete", (data: any) => {
+                    // Use acknowledgment pattern to avoid race condition
+                    // This ensures we don't miss the authentication event
+                    socket.emit("authenticate:request", (response: any) => {
                         clearTimeout(timeout);
-                        console.log("✅ Authentication complete:", data);
-                        if (data.success) {
+                        if (response && response.success) {
                             resolve();
                         } else {
                             reject(
                                 new Error(
-                                    `Authentication failed: ${data.error}`,
+                                    `Authentication failed: ${response?.error || "Unknown error"}`,
                                 ),
                             );
                         }
                     });
 
-                    // Also handle connection errors
+                    // Also handle connection errors (remove old listener first)
+                    socket.off("connect_error");
                     socket.once("connect_error", (error: any) => {
                         clearTimeout(timeout);
                         reject(error);
@@ -81,18 +80,12 @@
             }
 
             // Now initialize terminal tabs (server session is ready)
-            console.log("🔄 Initializing terminal tabs...");
             await terminalTabsStore.initialize();
 
             isTerminalReady = true;
-            console.log("✅ Socket and terminals fully initialized");
         } catch (error) {
-            console.error(
-                "❌ Failed to initialize socket and terminals:",
-                error,
-            );
+            console.error("Failed to initialize socket and terminals:", error);
             // Still show terminal even if tabs failed to load
-            console.error("Continuing with terminal in degraded mode...");
             isTerminalReady = true;
         }
     }

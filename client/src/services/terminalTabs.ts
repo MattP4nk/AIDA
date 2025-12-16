@@ -37,57 +37,32 @@ const createTerminalTabsStore = () => {
     // Initialize tabs from server
     initialize: async () => {
       try {
-        console.log("📋 [TerminalTabs] Starting initialization...");
         const socket = (socketService as any).socket;
 
         // Wait for socket to be connected if it's not already
         if (!socket || !socket.connected) {
-          console.log(
-            "📋 [TerminalTabs] Socket not connected yet, waiting for connection...",
-          );
-
           // Return a promise that resolves when connected
           return new Promise<void>((resolve, reject) => {
             const timeout = setTimeout(() => {
-              console.error(
-                "📋 [TerminalTabs] ❌ Socket connection timeout (10s)",
-              );
               reject(new Error("Socket connection timeout"));
             }, 10000); // 10 second timeout
 
-            let attemptCount = 0;
             const attemptInitialize = () => {
-              attemptCount++;
               const currentSocket = (socketService as any).socket;
-              console.log(
-                `📋 [TerminalTabs] Attempt ${attemptCount}: Socket=${!!currentSocket}, Connected=${currentSocket?.connected}`,
-              );
 
               if (currentSocket && currentSocket.connected) {
                 clearTimeout(timeout);
-                console.log(
-                  "📋 [TerminalTabs] ✅ Socket connected, requesting terminal list...",
-                );
 
                 currentSocket.emit("terminal:list");
-                console.log("📋 [TerminalTabs] Emitted 'terminal:list' event");
 
-                // Listen for response
+                // Listen for response (remove old listener first to prevent leaks)
+                currentSocket.off("terminal:list");
                 currentSocket.once(
                   "terminal:list",
                   (data: {
                     terminals: TerminalTab[];
                     activeTerminalId: string;
                   }) => {
-                    console.log(
-                      "📋 [TerminalTabs] ✅ Received terminal list:",
-                      {
-                        terminalCount: data.terminals?.length || 0,
-                        activeId: data.activeTerminalId,
-                        terminals: data.terminals,
-                      },
-                    );
-
                     update((state) => {
                       state.tabs = data.terminals;
                       state.activeTabId = data.activeTerminalId;
@@ -108,10 +83,6 @@ const createTerminalTabsStore = () => {
                       return state;
                     });
 
-                    console.log(
-                      "📋 [TerminalTabs] ✅ Terminal tabs initialized:",
-                      data.terminals.length,
-                    );
                     resolve();
                   },
                 );
@@ -126,30 +97,19 @@ const createTerminalTabsStore = () => {
         }
 
         // Socket is already connected
-        console.log(
-          "📋 [TerminalTabs] Socket already connected, requesting terminal list...",
-        );
         socket.emit("terminal:list");
-        console.log("📋 [TerminalTabs] Emitted 'terminal:list' event");
 
         // Listen for response
         return new Promise<void>((resolve, reject) => {
           const timeout = setTimeout(() => {
-            console.error(
-              "📋 [TerminalTabs] ❌ No response to 'terminal:list' after 10s",
-            );
             reject(new Error("Terminal list response timeout"));
           }, 10000);
 
+          socket.off("terminal:list");
           socket.once(
             "terminal:list",
             (data: { terminals: TerminalTab[]; activeTerminalId: string }) => {
               clearTimeout(timeout);
-              console.log("📋 [TerminalTabs] ✅ Received terminal list:", {
-                terminalCount: data.terminals?.length || 0,
-                activeId: data.activeTerminalId,
-                terminals: data.terminals,
-              });
 
               update((state) => {
                 state.tabs = data.terminals;
@@ -171,19 +131,12 @@ const createTerminalTabsStore = () => {
                 return state;
               });
 
-              console.log(
-                "📋 [TerminalTabs] ✅ Terminal tabs initialized:",
-                data.terminals.length,
-              );
               resolve();
             },
           );
         });
       } catch (error) {
-        console.error(
-          "📋 [TerminalTabs] ❌ Failed to initialize terminals:",
-          error,
-        );
+        console.error("Failed to initialize terminals:", error);
         throw error;
       }
     },
@@ -195,7 +148,8 @@ const createTerminalTabsStore = () => {
         if (socket && socket.connected) {
           socket.emit("terminal:create", { label });
 
-          // Listen for response
+          // Listen for response (remove old listener first to prevent leaks)
+          socket.off("terminal:created");
           socket.once("terminal:created", (terminal: TerminalTab) => {
             update((state) => {
               state.tabs.push(terminal);
@@ -219,7 +173,8 @@ const createTerminalTabsStore = () => {
         if (socket && socket.connected) {
           socket.emit("terminal:close", { terminalId });
 
-          // Listen for response
+          // Listen for response (remove old listener first to prevent leaks)
+          socket.off("terminal:closed");
           socket.once("terminal:closed", (data: { terminalId: string }) => {
             update((state) => {
               const index = state.tabs.findIndex(
@@ -257,7 +212,8 @@ const createTerminalTabsStore = () => {
         if (socket && socket.connected) {
           socket.emit("terminal:switch", { terminalId });
 
-          // Listen for response
+          // Listen for response (remove old listener first to prevent leaks)
+          socket.off("terminal:switched");
           socket.once("terminal:switched", (data: { terminalId: string }) => {
             update((state) => {
               state.activeTabId = data.terminalId;
@@ -384,8 +340,28 @@ const createTerminalTabsStore = () => {
       });
     },
 
+    // Cleanup all socket listeners (prevents memory leaks)
+    cleanup: () => {
+      const socket = (socketService as any).socket;
+      if (socket) {
+        socket.off("terminal:list");
+        socket.off("terminal:created");
+        socket.off("terminal:closed");
+        socket.off("terminal:switched");
+      }
+    },
+
     // Reset store (for logout, etc.)
     reset: () => {
+      // Clean up listeners first
+      const socket = (socketService as any).socket;
+      if (socket) {
+        socket.off("terminal:list");
+        socket.off("terminal:created");
+        socket.off("terminal:closed");
+        socket.off("terminal:switched");
+      }
+
       set({
         tabs: [],
         activeTabId: "",

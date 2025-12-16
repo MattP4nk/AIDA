@@ -16,7 +16,8 @@ import { prisma } from "../database/client";
 import { Server as SocketIOServer } from "socket.io";
 import crypto from "crypto";
 import { injectable, inject } from "tsyringe";
-import { SOCKET_IO } from "../di/tokens";
+import { SOCKET_IO, MISSION_INTEGRATION_SERVICE } from "../di/tokens";
+import type MissionIntegrationService from "./missionIntegration";
 
 // ==================== TYPES ====================
 
@@ -77,10 +78,15 @@ export interface EncryptionResult {
 export class MessageService {
   private encryptionAlgorithm = "aes-256-cbc";
   private deliveryQueue: Map<string, QueuedMessage[]> = new Map();
+  private missionIntegration: MissionIntegrationService | null = null;
 
-  constructor(@inject(SOCKET_IO) private io: SocketIOServer) {
+  constructor(
+    @inject(SOCKET_IO) private io: SocketIOServer,
+    @inject(MISSION_INTEGRATION_SERVICE)
+    missionIntegrationService?: MissionIntegrationService,
+  ) {
+    this.missionIntegration = missionIntegrationService || null;
     this.startDeliveryProcessor();
-    console.log("💬 MessageService initialized");
   }
 
   // ==================== SEND MESSAGES ====================
@@ -186,6 +192,15 @@ export class MessageService {
       // Log the message send
       await this.logMessageActivity(senderId, "send", message.id);
 
+      // Track for mission objectives
+      if (this.missionIntegration) {
+        await this.missionIntegration.onMessageSent(
+          senderId,
+          recipientId,
+          message.id,
+        );
+      }
+
       return {
         success: true,
         message: `Message sent to ${recipient.username}`,
@@ -265,7 +280,7 @@ export class MessageService {
 
   /**
    * Send a message from an AI persona to a player
-   * 
+   *
    * PHASE 5: AI-driven messaging with rate limiting
    */
   async sendAIMessage(
@@ -284,9 +299,9 @@ export class MessageService {
           messageType: "faction",
           timestamp: { gte: today },
           sender: {
-            id: { startsWith: "ai_" } // AI persona IDs
-          }
-        }
+            id: { startsWith: "ai_" }, // AI persona IDs
+          },
+        },
       });
 
       if (todayCount >= 5) {
@@ -1052,12 +1067,12 @@ export class MessageService {
 
   /**
    * Get or create AI user ID for a persona
-   * 
+   *
    * PHASE 5: Creates user accounts for AI personas to send messages
    */
   private async getAIUserId(personaId: string): Promise<string> {
     const aiUsername = `AI_${personaId.substring(0, 8)}`;
-    
+
     const aiUser = await prisma.user.findFirst({
       where: { username: aiUsername },
     });
@@ -1178,5 +1193,5 @@ export const messageService = new Proxy({} as MessageService, {
   get(_target, prop) {
     const instance = container.resolve(MESSAGE_SERVICE as any);
     return (instance as any)[prop];
-  }
+  },
 });

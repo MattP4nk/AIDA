@@ -8,6 +8,7 @@ import EventService from "../services/eventService";
 import IPService from "../services/ipService";
 import { CacheService } from "../services/cacheService";
 import ShopService from "../services/shopService";
+import { InventoryService } from "../services/inventoryService";
 import MissionService from "../services/missionService";
 import ServerService from "../services/serverService";
 import HackService from "../services/hackService";
@@ -21,13 +22,14 @@ import CommandProcessor from "../services/commandProcessor";
 import { FactionService } from "../services/factionService";
 import { AIService } from "../services/aiService";
 import { PersonaService } from "../services/personaService";
+import MissionGeneratorService from "../services/missionGenerator";
 
 /**
  * Service Registry
- * 
+ *
  * Provides a central, type-safe access point for all services.
  * Uses lazy resolution to prevent circular dependency issues.
- * 
+ *
  * Usage:
  * import { ServiceRegistry } from "../di/serviceRegistry";
  * const shopService = ServiceRegistry.shopService;
@@ -59,8 +61,18 @@ export class ServiceRegistry {
     return container.resolve<ShopService>(TOKENS.SHOP_SERVICE);
   }
 
+  static get inventoryService(): InventoryService {
+    return container.resolve<InventoryService>(TOKENS.INVENTORY_SERVICE);
+  }
+
   static get missionService(): MissionService {
     return container.resolve<MissionService>(TOKENS.MISSION_SERVICE);
+  }
+
+  static get missionGenerator(): MissionGeneratorService {
+    return container.resolve<MissionGeneratorService>(
+      TOKENS.MISSION_GENERATOR_SERVICE,
+    );
   }
 
   static get serverService(): ServerService {
@@ -97,7 +109,9 @@ export class ServiceRegistry {
   }
 
   static get playerPresenceService(): PlayerPresenceService {
-    return container.resolve<PlayerPresenceService>(TOKENS.PLAYER_PRESENCE_SERVICE);
+    return container.resolve<PlayerPresenceService>(
+      TOKENS.PLAYER_PRESENCE_SERVICE,
+    );
   }
 
   static get memoryService(): MemoryService {

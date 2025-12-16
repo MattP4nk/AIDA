@@ -15,8 +15,13 @@ import { prisma } from "../database/client";
 import { Server as SocketIOServer } from "socket.io";
 import crypto from "crypto";
 import { injectable, inject } from "tsyringe";
-import { SOCKET_IO, CACHE_SERVICE } from "../di/tokens";
+import {
+  SOCKET_IO,
+  CACHE_SERVICE,
+  MISSION_INTEGRATION_SERVICE,
+} from "../di/tokens";
 import type { CacheService } from "./cacheService";
+import type MissionIntegrationService from "./missionIntegration";
 import { isPathSafe, isValidFilename } from "../utils/pathSanitizer";
 
 // ==================== TYPES ====================
@@ -88,13 +93,16 @@ export interface PathResolution {
 @injectable()
 export class FileService {
   private encryptionAlgorithm = "aes-256-cbc";
+  private missionIntegration: MissionIntegrationService | null = null;
 
   constructor(
     @inject(SOCKET_IO) _io: SocketIOServer,
-    @inject(CACHE_SERVICE) private cacheService: CacheService
+    @inject(CACHE_SERVICE) private cacheService: CacheService,
+    @inject(MISSION_INTEGRATION_SERVICE)
+    missionIntegrationService?: MissionIntegrationService,
   ) {
-    // io parameter kept for DI initialization, will be used for future real-time features  
-    console.log("📁 FileService initialized");
+    // io parameter kept for DI initialization, will be used for future real-time features
+    this.missionIntegration = missionIntegrationService || null;
   }
 
   // ==================== FILE OPERATIONS ====================
@@ -228,7 +236,9 @@ export class FileService {
       const accessLevel = await this.getUserAccessLevel(userId, serverId);
 
       // Check read permission
-      if (!(await this.canRead(userId, file as unknown as FileNode, accessLevel))) {
+      if (
+        !(await this.canRead(userId, file as unknown as FileNode, accessLevel))
+      ) {
         return {
           success: false,
           message: `Permission denied: ${path}`,
@@ -269,11 +279,15 @@ export class FileService {
       // Log file access
       await this.logFileAccess(userId, serverId, file.id, "read");
 
-      // Log file operation for mission tracking (future integration)
-      // Note: Mission objective updates require active mission lookup
-      console.log(
-        `File operation logged: read ${path} on server ${serverId} by ${userId}`,
-      );
+      // Track for mission objectives
+      if (this.missionIntegration) {
+        await this.missionIntegration.onFileOperation(
+          userId,
+          "read",
+          file.id,
+          serverId,
+        );
+      }
 
       return {
         success: true,
@@ -316,9 +330,9 @@ export class FileService {
           error: "INVALID_PATH",
         };
       }
-      
+
       const { directory, filename } = this.splitPath(path);
-      
+
       // Validate filename
       if (!isValidFilename(filename)) {
         return {
@@ -343,7 +357,13 @@ export class FileService {
       // We need to fetch parent node to pass it, or just pass ID and let it fetch
       // Since we have dirResolution.nodeId, but not the full node object with permissions in resolution (it has node property but type is FileNode | undefined)
       // resolvePath returns node property.
-      if (!(await this.canWrite(userId, dirResolution.node as unknown as FileNode, accessLevel))) {
+      if (
+        !(await this.canWrite(
+          userId,
+          dirResolution.node as unknown as FileNode,
+          accessLevel,
+        ))
+      ) {
         return {
           success: false,
           message: `Permission denied: cannot create file in ${directory}`,
@@ -455,7 +475,9 @@ export class FileService {
       const accessLevel = await this.getUserAccessLevel(userId, serverId);
 
       // Check write permission
-      if (!(await this.canWrite(userId, file as unknown as FileNode, accessLevel))) {
+      if (
+        !(await this.canWrite(userId, file as unknown as FileNode, accessLevel))
+      ) {
         return {
           success: false,
           message: `Permission denied: ${path}`,
@@ -476,7 +498,7 @@ export class FileService {
         // If encrypted, we'd need to decrypt first, append, then re-encrypt
         // For now, assume simple append for non-encrypted or raw append
         if (file.isEncrypted) {
-           return {
+          return {
             success: false,
             message: "Cannot append to encrypted file directly",
             error: "ENCRYPTED_APPEND_NOT_SUPPORTED",
@@ -484,12 +506,12 @@ export class FileService {
         }
         newContent = file.content + "\n" + content;
       } else if (file.isEncrypted) {
-         // Overwriting encrypted file - re-encrypt if needed or keep as is?
-         // For simplicity, let's say we just update the content and keep encryption status if we had the key,
-         // but here we are just writing raw string.
-         // If the file was encrypted, we should probably reset encryption unless we handle it.
-         // Let's just update content and set isEncrypted to false for now as we are writing plain text.
-         // Realistically we should ask for encryption key or flag.
+        // Overwriting encrypted file - re-encrypt if needed or keep as is?
+        // For simplicity, let's say we just update the content and keep encryption status if we had the key,
+        // but here we are just writing raw string.
+        // If the file was encrypted, we should probably reset encryption unless we handle it.
+        // Let's just update content and set isEncrypted to false for now as we are writing plain text.
+        // Realistically we should ask for encryption key or flag.
       }
 
       await prisma.fileSystemNode.update({
@@ -540,9 +562,9 @@ export class FileService {
           error: "INVALID_PATH",
         };
       }
-      
+
       const { directory, filename: dirName } = this.splitPath(path);
-      
+
       // Validate directory name
       if (!isValidFilename(dirName)) {
         return {
@@ -565,7 +587,11 @@ export class FileService {
 
       // Check write permission
       if (
-        !(await this.canWrite(userId, parentResolution.node as unknown as FileNode, accessLevel))
+        !(await this.canWrite(
+          userId,
+          parentResolution.node as unknown as FileNode,
+          accessLevel,
+        ))
       ) {
         return {
           success: false,
@@ -670,7 +696,9 @@ export class FileService {
       }
 
       // Check write permission
-      if (!(await this.canWrite(userId, node as unknown as FileNode, accessLevel))) {
+      if (
+        !(await this.canWrite(userId, node as unknown as FileNode, accessLevel))
+      ) {
         return {
           success: false,
           message: `Permission denied: ${path}`,
@@ -700,10 +728,15 @@ export class FileService {
 
       await this.logFileAccess(userId, serverId, node.id, "delete");
 
-      // Log file operation for mission tracking (future integration)
-      console.log(
-        `File operation logged: delete ${path} on server ${serverId} by ${userId}`,
-      );
+      // Track for mission objectives
+      if (this.missionIntegration) {
+        await this.missionIntegration.onFileOperation(
+          userId,
+          "delete",
+          node.id,
+          serverId,
+        );
+      }
 
       return {
         success: true,
@@ -752,7 +785,11 @@ export class FileService {
 
       // Check read permission on source
       if (
-        !(await this.canRead(userId, sourceResolution.node as unknown as FileNode, accessLevel))
+        !(await this.canRead(
+          userId,
+          sourceResolution.node as unknown as FileNode,
+          accessLevel,
+        ))
       ) {
         return {
           success: false,
@@ -775,7 +812,11 @@ export class FileService {
 
       // Check write permission on destination
       if (
-        !(await this.canWrite(userId, destDirResolution.node as unknown as FileNode, accessLevel))
+        !(await this.canWrite(
+          userId,
+          destDirResolution.node as unknown as FileNode,
+          accessLevel,
+        ))
       ) {
         return {
           success: false,
@@ -854,7 +895,13 @@ export class FileService {
       }
 
       // Check write permission on source
-      if (!(await this.canWrite(userId, sourceNode as unknown as FileNode, accessLevel))) {
+      if (
+        !(await this.canWrite(
+          userId,
+          sourceNode as unknown as FileNode,
+          accessLevel,
+        ))
+      ) {
         return {
           success: false,
           message: `Permission denied: ${sourcePath}`,
@@ -876,7 +923,11 @@ export class FileService {
 
       // Check write permission on destination
       if (
-        !(await this.canWrite(userId, destDirResolution.node as unknown as FileNode, accessLevel))
+        !(await this.canWrite(
+          userId,
+          destDirResolution.node as unknown as FileNode,
+          accessLevel,
+        ))
       ) {
         return {
           success: false,
@@ -926,8 +977,8 @@ export class FileService {
     accessLevel: number,
   ): Promise<boolean> {
     let node: FileNode | null = null;
-    
-    if (typeof nodeOrId === 'string') {
+
+    if (typeof nodeOrId === "string") {
       const fetched = await prisma.fileSystemNode.findUnique({
         where: { id: nodeOrId },
       });
@@ -966,8 +1017,8 @@ export class FileService {
     accessLevel: number,
   ): Promise<boolean> {
     let node: FileNode | null = null;
-    
-    if (typeof nodeOrId === 'string') {
+
+    if (typeof nodeOrId === "string") {
       const fetched = await prisma.fileSystemNode.findUnique({
         where: { id: nodeOrId },
       });
@@ -1031,10 +1082,10 @@ export class FileService {
     });
 
     const level = latestHack?.accessLevel || 0;
-    
+
     // Cache result (short TTL as access level can change)
     this.cacheService.set(cacheKey, level, 60);
-    
+
     return level;
   }
 
@@ -1147,7 +1198,7 @@ export class FileService {
    */
   private normalizePath(path: string): string {
     // Use the central path sanitizer for security
-    const { sanitizePath } = require('../utils/pathSanitizer');
+    const { sanitizePath } = require("../utils/pathSanitizer");
     return sanitizePath(path);
   }
 
@@ -1463,5 +1514,5 @@ export const fileService = new Proxy({} as FileService, {
   get(_target, prop) {
     const instance = container.resolve(FILE_SERVICE as any);
     return (instance as any)[prop];
-  }
+  },
 });

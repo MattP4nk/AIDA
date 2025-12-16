@@ -100,6 +100,7 @@ model PlayerProgress {
 
   // Inventory and Skills
   inventory Json @default("{}") @map("inventory")
+  equipment Json @default("{}") @map("equipment")
   skills    Json @default("{}") @map("skills")
 
   missionProgress Json     @default("{}") @map("mission_progress")

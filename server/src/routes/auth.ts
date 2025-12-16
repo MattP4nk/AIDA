@@ -1,10 +1,15 @@
 import { Router } from "express";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
-import { body, validationResult } from "express-validator";
+
 import { prisma } from "../database/client";
 import { config } from "../config/environment";
 import type { AuthRequest, AuthResponse } from "../../../shared/types";
+import {
+  validateRegistration,
+  validateLogin,
+  handleValidationErrors,
+} from "../middleware/validation";
 
 const router = Router();
 
@@ -24,37 +29,10 @@ function generateToken(userId: string): string {
 // User Registration
 router.post(
   "/register",
-  [
-    body("username")
-      .isLength({ min: 3, max: 20 })
-      .matches(/^[a-zA-Z0-9_]+$/)
-      .withMessage(
-        "Username must be 3-20 characters and contain only letters, numbers, and underscores",
-      ),
-    body("email")
-      .isEmail()
-      .normalizeEmail()
-      .withMessage("Please provide a valid email"),
-    body("password")
-      .isLength({ min: 8 })
-      .matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/)
-      .withMessage(
-        "Password must be at least 8 characters with uppercase, lowercase, and number",
-      ),
-  ],
+  validateRegistration(),
+  handleValidationErrors,
   async (req: any, res: any) => {
     try {
-      // Check validation errors
-      const errors = validationResult(req);
-      if (!errors.isEmpty()) {
-        return res.status(400).json({
-          success: false,
-          error: "Validation failed",
-          details: errors.array(),
-          timestamp: new Date(),
-        });
-      }
-
       const { username, email, password } = req.body as {
         username: string;
         email: string;
@@ -103,7 +81,7 @@ router.post(
       const hashedPassword = await bcrypt.hash(password, config.BCRYPT_ROUNDS);
 
       // Create user with transaction
-      const result = await prisma.$transaction(async (tx) => {
+      const result = await prisma.$transaction(async (tx: any) => {
         // Create user
         const user = await tx.user.create({
           data: {
@@ -259,22 +237,10 @@ router.post(
 // User Login
 router.post(
   "/login",
-  [
-    body("username").notEmpty().withMessage("Username is required"),
-    body("password").notEmpty().withMessage("Password is required"),
-  ],
+  validateLogin(),
+  handleValidationErrors,
   async (req: any, res: any) => {
     try {
-      const errors = validationResult(req);
-      if (!errors.isEmpty()) {
-        return res.status(400).json({
-          success: false,
-          error: "Validation failed",
-          details: errors.array(),
-          timestamp: new Date(),
-        });
-      }
-
       const { username, password }: AuthRequest = req.body;
 
       // Find user

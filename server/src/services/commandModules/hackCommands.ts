@@ -108,7 +108,8 @@ export class HackCommandsModule implements CommandModule {
     if (!targetIp) {
       return {
         success: false,
-        output: "Usage: hack <target_ip> [options]",
+        output:
+          "Usage: hack <target_ip> [--method <method>] [--tools <tool1,tool2,...>]",
         timestamp: new Date(),
       };
     }
@@ -122,16 +123,30 @@ export class HackCommandsModule implements CommandModule {
       };
     }
 
+    // Resolve target server and owner from IP address
+    const targetResolution = await this.resolveHackTarget(targetIp, context);
+    if (!targetResolution.success) {
+      return {
+        success: false,
+        output: targetResolution.error || "Failed to resolve target",
+        timestamp: new Date(),
+      };
+    }
+
+    const { serverId, ownerId } = targetResolution;
+
+    // Parse hack method from command arguments
+    const method = this.parseHackMethod(command.args);
+
+    // Parse tools from command arguments
+    const tools = this.parseTools(command.args);
+
     const memoryService = context.services.memoryService;
     const processStateService = context.services.processStateService;
 
     if (!memoryService || !processStateService) {
       // Fallback to non-tracked execution if services not available
-      return await this.executeHackWithoutTracking(
-        command,
-        context,
-        targetIp,
-      );
+      return await this.executeHackWithoutTracking(command, context, targetIp);
     }
 
     try {
@@ -196,10 +211,7 @@ export class HackCommandsModule implements CommandModule {
           const proc = memoryService.getProcess(session.id, pid);
           if (proc && proc.commandMetadata) {
             const elapsed = Date.now() - proc.startTime;
-            const progress = Math.min(
-              95,
-              (elapsed / estimatedDuration) * 100,
-            );
+            const progress = Math.min(95, (elapsed / estimatedDuration) * 100);
             proc.commandMetadata.progress = progress;
             processStateService.updateProgress(pid, progress);
           }
@@ -209,10 +221,10 @@ export class HackCommandsModule implements CommandModule {
         const { hackService } = await import("../hackService");
         const result = await hackService.processHackAttempt(
           context.userId,
-          "unknown",
-          targetIp,
-          HackMethod.BRUTEFORCE,
-          [],
+          ownerId!,
+          serverId!,
+          method,
+          tools,
         );
 
         clearInterval(progressInterval);
@@ -276,27 +288,160 @@ export class HackCommandsModule implements CommandModule {
    * Fallback execution without process tracking
    */
   private async executeHackWithoutTracking(
-    _command: Command,
+    command: Command,
     context: CommandContext,
     targetIp: string,
   ): Promise<CommandResult> {
+    // Resolve target server and owner from IP address
+    const targetResolution = await this.resolveHackTarget(targetIp, context);
+    if (!targetResolution.success) {
+      return {
+        success: false,
+        output: targetResolution.error || "Failed to resolve target",
+        timestamp: new Date(),
+      };
+    }
+
+    const { serverId, ownerId } = targetResolution;
+
+    // Parse hack method and tools
+    const method = this.parseHackMethod(command.args);
+    const tools = this.parseTools(command.args);
+
     const { hackService } = await import("../hackService");
     const result = await hackService.processHackAttempt(
       context.userId,
-      "unknown",
-      targetIp,
-      HackMethod.BRUTEFORCE,
-      [],
+      ownerId!,
+      serverId!,
+      method,
+      tools,
     );
 
     return {
       success: result.success,
       output:
-        result.message ||
-        (result.success ? "Hack successful" : "Hack failed"),
+        result.message || (result.success ? "Hack successful" : "Hack failed"),
       data: { ...result, targetIp },
       timestamp: new Date(),
     };
+  }
+
+  /**
+   * Resolve target server and owner from IP address or server name
+   */
+  private async resolveHackTarget(
+    targetIdentifier: string,
+    context: CommandContext,
+  ): Promise<{
+    success: boolean;
+    serverId?: string;
+    ownerId?: string;
+    error?: string;
+  }> {
+    try {
+      const { db } = await import("../../database/client");
+
+      // Try to find server by IP address or name
+      const server = await db.client.gameServer.findFirst({
+        where: {
+          OR: [{ ipAddress: targetIdentifier }, { name: targetIdentifier }],
+        },
+        select: {
+          id: true,
+          ownerId: true,
+          name: true,
+          ipAddress: true,
+        },
+      });
+
+      if (!server) {
+        return {
+          success: false,
+          error: `Target server not found: ${targetIdentifier}`,
+        };
+      }
+
+      if (server.ownerId === context.userId) {
+        return {
+          success: false,
+          error: "Cannot hack your own server",
+        };
+      }
+
+      if (!server.ownerId) {
+        return {
+          success: false,
+          error: "Target server has no owner",
+        };
+      }
+
+      return {
+        success: true,
+        serverId: server.id,
+        ownerId: server.ownerId,
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: `Failed to resolve target: ${error instanceof Error ? error.message : "Unknown error"}`,
+      };
+    }
+  }
+
+  /**
+   * Parse hack method from command arguments
+   */
+  private parseHackMethod(args?: string[]): HackMethod {
+    if (!args) return HackMethod.BRUTEFORCE;
+
+    const methodIndex = args.findIndex(
+      (arg) => arg === "--method" || arg === "-m",
+    );
+    if (methodIndex === -1 || methodIndex >= args.length - 1) {
+      return HackMethod.BRUTEFORCE;
+    }
+
+    const methodValue = args[methodIndex + 1];
+    if (!methodValue) return HackMethod.BRUTEFORCE;
+
+    const methodArg = methodValue.toUpperCase();
+
+    // Map string to HackMethod enum
+    const methodMap: Record<string, HackMethod> = {
+      BRUTEFORCE: HackMethod.BRUTEFORCE,
+      BRUTE: HackMethod.BRUTEFORCE,
+      EXPLOIT: HackMethod.EXPLOIT,
+      SOCIAL: HackMethod.SOCIAL,
+      BACKDOOR: HackMethod.BACKDOOR,
+      SQL_INJECTION: HackMethod.SQL_INJECTION,
+      SQL: HackMethod.SQL_INJECTION,
+      PHISHING: HackMethod.PHISHING,
+      ROOTKIT: HackMethod.ROOTKIT,
+    };
+
+    return methodMap[methodArg] || HackMethod.BRUTEFORCE;
+  }
+
+  /**
+   * Parse tools from command arguments
+   */
+  private parseTools(args?: string[]): string[] {
+    if (!args) return [];
+
+    const toolsIndex = args.findIndex(
+      (arg) => arg === "--tools" || arg === "-t",
+    );
+    if (toolsIndex === -1 || toolsIndex >= args.length - 1) {
+      return [];
+    }
+
+    const toolsArg = args[toolsIndex + 1];
+    if (!toolsArg) return [];
+
+    return toolsArg
+      .split(",")
+      .map((tool) => tool.trim().toLowerCase())
+      .filter(Boolean);
   }
 
   /**
@@ -332,9 +477,10 @@ export class HackCommandsModule implements CommandModule {
       const result = await options.execute();
       return {
         success: result.success,
-        output: result.message || result.success
-          ? (options.successMessage || "Operation successful")
-          : (options.failureMessage || "Operation failed"),
+        output:
+          result.message || result.success
+            ? options.successMessage || "Operation successful"
+            : options.failureMessage || "Operation failed",
         data: result,
         timestamp: new Date(),
       };
@@ -349,7 +495,8 @@ export class HackCommandsModule implements CommandModule {
         context.userId,
       );
 
-      const estimatedDuration = options.estimatedDuration || (5000 + Math.random() * 10000);
+      const estimatedDuration =
+        options.estimatedDuration || 5000 + Math.random() * 10000;
       let operationAborted = false;
 
       // Register process
@@ -361,7 +508,9 @@ export class HackCommandsModule implements CommandModule {
         cancellable: true,
         onCancel: async () => {
           operationAborted = true;
-          console.log(`${options.commandName} on ${options.targetInfo} aborted by user`);
+          console.log(
+            `${options.commandName} on ${options.targetInfo} aborted by user`,
+          );
         },
         onProgress: (progress) => {
           const process = memoryService.getProcess(session.id, pid);
@@ -437,9 +586,10 @@ export class HackCommandsModule implements CommandModule {
 
         return {
           success: result.success,
-          output: result.message || result.success
-            ? (options.successMessage || "Operation successful")
-            : (options.failureMessage || "Operation failed"),
+          output:
+            result.message || result.success
+              ? options.successMessage || "Operation successful"
+              : options.failureMessage || "Operation failed",
           data: result,
           timestamp: new Date(),
         };
@@ -503,6 +653,18 @@ export class HackCommandsModule implements CommandModule {
       };
     }
 
+    // Resolve target
+    const targetResolution = await this.resolveHackTarget(targetIp, context);
+    if (!targetResolution.success) {
+      return {
+        success: false,
+        output: targetResolution.error || "Failed to resolve target",
+        timestamp: new Date(),
+      };
+    }
+
+    const { serverId, ownerId } = targetResolution;
+
     return await this.executeWithProcessTracking(command, context, {
       commandName: "exploit",
       targetInfo: `${targetIp} (${exploitName})`,
@@ -511,8 +673,8 @@ export class HackCommandsModule implements CommandModule {
         const { hackService } = await import("../hackService");
         return await hackService.processHackAttempt(
           context.userId,
-          "unknown",
-          targetIp,
+          ownerId!,
+          serverId!,
           HackMethod.EXPLOIT,
           [exploitName],
         );
@@ -536,6 +698,18 @@ export class HackCommandsModule implements CommandModule {
       };
     }
 
+    // Resolve target
+    const targetResolution = await this.resolveHackTarget(targetIp, context);
+    if (!targetResolution.success) {
+      return {
+        success: false,
+        output: targetResolution.error || "Failed to resolve target",
+        timestamp: new Date(),
+      };
+    }
+
+    const { serverId, ownerId } = targetResolution;
+
     return await this.executeWithProcessTracking(command, context, {
       commandName: "backdoor",
       targetInfo: targetIp,
@@ -544,8 +718,8 @@ export class HackCommandsModule implements CommandModule {
         const { hackService } = await import("../hackService");
         return await hackService.processHackAttempt(
           context.userId,
-          "unknown",
-          targetIp,
+          ownerId!,
+          serverId!,
           HackMethod.BACKDOOR,
           ["backdoor_tool"],
         );
@@ -569,6 +743,18 @@ export class HackCommandsModule implements CommandModule {
       };
     }
 
+    // Resolve target
+    const targetResolution = await this.resolveHackTarget(targetIp, context);
+    if (!targetResolution.success) {
+      return {
+        success: false,
+        output: targetResolution.error || "Failed to resolve target",
+        timestamp: new Date(),
+      };
+    }
+
+    const { serverId, ownerId } = targetResolution;
+
     return await this.executeWithProcessTracking(command, context, {
       commandName: "rootkit",
       targetInfo: targetIp,
@@ -577,8 +763,8 @@ export class HackCommandsModule implements CommandModule {
         const { hackService } = await import("../hackService");
         return await hackService.processHackAttempt(
           context.userId,
-          "unknown",
-          targetIp,
+          ownerId!,
+          serverId!,
           HackMethod.ROOTKIT,
           ["rootkit_installer"],
         );

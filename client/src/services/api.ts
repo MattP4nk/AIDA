@@ -10,6 +10,7 @@ const SOCKET_URL = "http://localhost:3001";
 
 // Token management
 let authToken: string | null = null;
+let csrfToken: string | null = null;
 
 class ApiClient {
   private baseURL: string;
@@ -39,6 +40,7 @@ class ApiClient {
       localStorage.removeItem("aida_auth_token");
     }
     authToken = null;
+    csrfToken = null;
   }
 
   public getToken(): string | null {
@@ -47,6 +49,35 @@ class ApiClient {
 
   public isAuthenticated(): boolean {
     return !!authToken;
+  }
+
+  // CSRF token management
+  private async fetchCsrfToken(): Promise<string | null> {
+    if (!authToken) return null;
+
+    try {
+      const response = await fetch(`${this.baseURL}/csrf-token`, {
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+        },
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        csrfToken = data.csrfToken;
+        return csrfToken;
+      }
+    } catch (error) {
+      console.error("Failed to fetch CSRF token:", error);
+    }
+
+    return null;
+  }
+
+  public async ensureCsrfToken(): Promise<void> {
+    if (!csrfToken && authToken) {
+      await this.fetchCsrfToken();
+    }
   }
 
   // HTTP request helper
@@ -65,6 +96,15 @@ class ApiClient {
     // Add auth token if available
     if (authToken) {
       (headers as any)["Authorization"] = `Bearer ${authToken}`;
+    }
+
+    // Add CSRF token for state-changing operations
+    if (
+      csrfToken &&
+      options.method &&
+      !["GET", "HEAD", "OPTIONS"].includes(options.method)
+    ) {
+      (headers as any)["X-CSRF-Token"] = csrfToken;
     }
 
     try {
@@ -138,6 +178,8 @@ class ApiClient {
 
       if (authResponse.success && authResponse.token) {
         this.saveTokenToStorage(authResponse.token);
+        // Fetch CSRF token after successful registration
+        await this.fetchCsrfToken();
       }
 
       return authResponse;
@@ -155,6 +197,8 @@ class ApiClient {
 
       if (authResponse.success && authResponse.token) {
         this.saveTokenToStorage(authResponse.token);
+        // Fetch CSRF token after successful login
+        await this.fetchCsrfToken();
       }
 
       return authResponse;

@@ -1,6 +1,6 @@
 /**
  * Dependency Injection Tokens
- * 
+ *
  * Define injection tokens as const symbols for type-safe DI.
  * These are used with the @inject() decorator to specify dependencies.
  */
@@ -14,6 +14,7 @@ export const GAME_STATE_MANAGER = "GameStateManager";
 export const PROGRESS_SERVICE = "ProgressService";
 export const EVENT_SERVICE = "EventService";
 export const SHOP_SERVICE = "ShopService";
+export const INVENTORY_SERVICE = "InventoryService";
 export const MISSION_SERVICE = "MissionService";
 export const SERVER_SERVICE = "ServerService";
 export const HACK_SERVICE = "HackService";
@@ -26,6 +27,10 @@ export const PROCESS_STATE_SERVICE = "ProcessStateService";
 export const COMMAND_PROCESSOR = "CommandProcessor";
 export const IP_SERVICE = "IPService";
 export const CACHE_SERVICE = "CacheService";
+
+// Mission Services
+export const MISSION_INTEGRATION_SERVICE = "MissionIntegrationService";
+export const MISSION_GENERATOR_SERVICE = "MissionGeneratorService";
 
 // Phase 5: AI Services
 export const FACTION_SERVICE = "FactionService";

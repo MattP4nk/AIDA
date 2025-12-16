@@ -1,6 +1,6 @@
 /**
  * Dependency Injection Container Configuration
- * 
+ *
  * This file sets up the tsyringe DI container and registers all services.
  * Services are registered as singletons by default to maintain state.
  */
@@ -18,6 +18,7 @@ import EventService from "../services/eventService";
 import IPService from "../services/ipService";
 import { CacheService } from "../services/cacheService";
 import ShopService from "../services/shopService";
+import { InventoryService } from "../services/inventoryService";
 import MissionService from "../services/missionService";
 import ServerService from "../services/serverService";
 import HackService from "../services/hackService";
@@ -32,6 +33,8 @@ import { FactionService } from "../services/factionService";
 import { AIService } from "../services/aiService";
 import { PersonaService } from "../services/personaService";
 import AISchedulerService from "../services/aiSchedulerService";
+import MissionIntegrationService from "../services/missionIntegration";
+import MissionGeneratorService from "../services/missionGenerator";
 
 import * as TOKENS from "./tokens";
 
@@ -41,7 +44,7 @@ import * as TOKENS from "./tokens";
 export function setupContainer(
   io: SocketIOServer,
   prismaClient: PrismaClient,
-  logger: Logger
+  logger: Logger,
 ): void {
   // Register external dependencies
   container.registerInstance("Logger", logger);
@@ -57,15 +60,30 @@ export function setupContainer(
 
   // Feature Services
   container.registerSingleton(TOKENS.SHOP_SERVICE, ShopService);
+  container.registerSingleton(TOKENS.INVENTORY_SERVICE, InventoryService);
   container.registerSingleton(TOKENS.MISSION_SERVICE, MissionService);
+  container.registerSingleton(
+    TOKENS.MISSION_INTEGRATION_SERVICE,
+    MissionIntegrationService,
+  );
+  container.registerSingleton(
+    TOKENS.MISSION_GENERATOR_SERVICE,
+    MissionGeneratorService,
+  );
   container.registerSingleton(TOKENS.SERVER_SERVICE, ServerService);
   container.registerSingleton(TOKENS.HACK_SERVICE, HackService);
   container.registerSingleton(TOKENS.FILE_SERVICE, FileService);
   container.registerSingleton(TOKENS.MESSAGE_SERVICE, MessageService);
   container.registerSingleton(TOKENS.FORUM_SERVICE, ForumService);
-  container.registerSingleton(TOKENS.PLAYER_PRESENCE_SERVICE, PlayerPresenceService);
+  container.registerSingleton(
+    TOKENS.PLAYER_PRESENCE_SERVICE,
+    PlayerPresenceService,
+  );
   container.registerSingleton(TOKENS.MEMORY_SERVICE, MemoryService);
-  container.registerSingleton(TOKENS.PROCESS_STATE_SERVICE, ProcessStateService);
+  container.registerSingleton(
+    TOKENS.PROCESS_STATE_SERVICE,
+    ProcessStateService,
+  );
   container.registerSingleton(TOKENS.COMMAND_PROCESSOR, CommandProcessor);
   container.registerSingleton(TOKENS.FACTION_SERVICE, FactionService);
   container.registerSingleton(TOKENS.AI_SERVICE, AIService);

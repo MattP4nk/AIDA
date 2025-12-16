@@ -51,6 +51,8 @@ class SocketService {
 
   public disconnect(): void {
     if (this.socket) {
+      // Remove all listeners before disconnecting to prevent memory leaks
+      this.removeAllListeners();
       this.socket.disconnect();
       this.socket = null;
       socketConnected.set(false);
@@ -64,14 +66,47 @@ class SocketService {
     }, 100);
   }
 
+  // ==================== CLEANUP ====================
+
+  private removeAllListeners(): void {
+    if (!this.socket) return;
+
+    // Remove all event listeners to prevent memory leaks
+    this.socket.off("connect");
+    this.socket.off("disconnect");
+    this.socket.off("connect_error");
+    this.socket.off("authenticated");
+    this.socket.off("user:status_change");
+    this.socket.off("server:user_connected");
+    this.socket.off("server:user_disconnected");
+    this.socket.off("server:file_modified");
+    this.socket.off("message:received");
+    this.socket.off("message:error");
+    this.socket.off("hack:attempted");
+    this.socket.off("hack:successful");
+    this.socket.off("hack:blocked");
+    this.socket.off("hack:result");
+    this.socket.off("hack:error");
+    this.socket.off("game:event");
+    this.socket.off("game:event:public");
+    this.socket.off("system:announcement");
+    this.socket.off("mission:assigned");
+    this.socket.off("mission:updated");
+    this.socket.off("mission:completed");
+    this.socket.off("game:notification");
+    this.socket.off("game:state_update");
+  }
+
   // ==================== EVENT HANDLERS ====================
 
   private setupEventHandlers(): void {
     if (!this.socket) return;
 
+    // Remove any existing listeners first to prevent duplicates
+    this.removeAllListeners();
+
     // Connection events
     this.socket.on("connect", () => {
-      console.log("🔌 WebSocket connected");
       socketConnected.set(true);
       socketError.set(null);
       this.reconnectAttempts = 0;
@@ -81,7 +116,6 @@ class SocketService {
     });
 
     this.socket.on("disconnect", (reason) => {
-      console.log("🔌 WebSocket disconnected:", reason);
       socketConnected.set(false);
 
       if (reason === "io server disconnect") {
@@ -100,7 +134,7 @@ class SocketService {
 
     // Authentication events
     this.socket.on("authenticated", () => {
-      console.log("🔐 WebSocket authenticated successfully");
+      // Authenticated successfully
     });
 
     // ==================== USER PRESENCE EVENTS ====================
@@ -108,8 +142,6 @@ class SocketService {
     this.socket.on(
       "user:status_change",
       (data: { userId: string; isOnline: boolean; timestamp: Date }) => {
-        console.log("👤 User status changed:", data);
-
         onlineUsers.update((users) => {
           if (data.isOnline) {
             return users.includes(data.userId)
@@ -125,7 +157,6 @@ class SocketService {
     // ==================== SERVER ACTIVITY EVENTS ====================
 
     this.socket.on("server:user_connected", (data: any) => {
-      console.log("🖥️ User connected to server:", data);
       serverActivity.update((activities) => [
         { type: "user_connected", data, timestamp: new Date() },
         ...activities.slice(0, 49), // Keep last 50 activities
@@ -133,7 +164,6 @@ class SocketService {
     });
 
     this.socket.on("server:user_disconnected", (data: any) => {
-      console.log("🖥️ User disconnected from server:", data);
       serverActivity.update((activities) => [
         { type: "user_disconnected", data, timestamp: new Date() },
         ...activities.slice(0, 49),
@@ -141,7 +171,6 @@ class SocketService {
     });
 
     this.socket.on("server:file_modified", (data: any) => {
-      console.log("📁 File modified:", data);
       serverActivity.update((activities) => [
         { type: "file_modified", data, timestamp: new Date() },
         ...activities.slice(0, 49),
@@ -169,7 +198,6 @@ class SocketService {
     // ==================== HACKING EVENTS ====================
 
     this.socket.on("hack:attempted", (data: any) => {
-      console.log("🔓 Hack attempt detected:", data);
       hackAttempts.update((attempts) => [
         { type: "attempted", data, timestamp: new Date() },
         ...attempts.slice(0, 19), // Keep last 20 attempts
