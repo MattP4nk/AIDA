@@ -1028,9 +1028,18 @@ export class FileService {
     }
 
     if (!node) return false;
-    if (node.isProtected) return false;
 
     const permissions = node.permissions as unknown as FilePermissions;
+
+    // Server owner has full access (bypass protected flag)
+    if (accessLevel >= 10) {
+      if (permissions.owner === userId) {
+        return permissions.ownerWrite;
+      }
+    }
+
+    // Protected files cannot be modified by non-owners
+    if (node.isProtected) return false;
 
     // Check required access level
     if (

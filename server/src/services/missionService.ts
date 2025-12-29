@@ -104,9 +104,7 @@ class MissionService {
   private prisma = db.client;
   private io: SocketIOServer | null = null; // Initialize as null
 
-  constructor(
-    @inject(CACHE_SERVICE) private cacheService: CacheService
-  ) {
+  constructor(@inject(CACHE_SERVICE) private cacheService: CacheService) {
     console.log("🎯 MissionService initialized");
   }
 
@@ -284,6 +282,18 @@ class MissionService {
         throw new Error("Mission not found");
       }
 
+      // Check if mission is already assigned to this user
+      const progress = await this.prisma.playerProgress.findUnique({
+        where: { userId },
+      });
+
+      if (progress) {
+        const missionProgress = (progress.missionProgress as any) || {};
+        if (missionProgress[missionId]) {
+          throw new Error("Mission is not available");
+        }
+      }
+
       if (mission.status !== "available") {
         throw new Error("Mission is not available");
       }
@@ -319,10 +329,6 @@ class MissionService {
       });
 
       // Store player mission in progress
-      const progress = await this.prisma.playerProgress.findUnique({
-        where: { userId },
-      });
-
       if (progress) {
         const missionProgress = (progress.missionProgress as any) || {};
         missionProgress[missionId] = playerMission;
@@ -390,8 +396,8 @@ class MissionService {
 
       // Enrich with mission details
       // Enrich with mission details using batch fetch
-      const missionIds = playerMissions.map(pm => pm.missionId);
-      
+      const missionIds = playerMissions.map((pm) => pm.missionId);
+
       // Check cache for all missions first
       const cachedMissions = new Map<string, Mission>();
       const missingIds: string[] = [];
@@ -421,7 +427,7 @@ class MissionService {
       const enrichedMissions = playerMissions.map((pm) => {
         const mission = cachedMissions.get(pm.missionId);
         if (!mission) return pm;
-        
+
         return {
           ...pm,
           title: mission.title,
@@ -1141,5 +1147,5 @@ export const missionService = new Proxy({} as MissionService, {
   get(_target, prop) {
     const instance = container.resolve(MISSION_SERVICE as any);
     return (instance as any)[prop];
-  }
+  },
 });

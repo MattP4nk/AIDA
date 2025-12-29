@@ -48,12 +48,16 @@ model User {
   proxyConnection  ProxyConnection?
   storyProgress    StoryProgress?
   intelligence     IntelligenceReport[]
+
+  // Game mechanics
+  inventoryItems   InventoryItem[]
+  notifications    Notification[]
   keyFragments     KeyFragmentDiscovery[]
   factionStandings FactionStanding[]
   factionEvents    FactionEvent[]
-  posts            Post[]
-  progressBackups  ProgressBackup[]
   factionMembers   FactionMember[]
+  progressBackups  ProgressBackup[]
+  posts            Post[]
 
   @@map("users")
 }
@@ -771,4 +775,102 @@ model AidaClue {
   @@index([serverId])
   @@index([discovered])
   @@map("aida_clues")
+}
+
+// ==================== GAME MECHANICS ====================
+
+model ShopItem {
+  id          String @id @default(cuid())
+  name        String
+  description String @db.Text
+  itemType    String @map("item_type") // "software", "hardware", "exploit", "defense"
+  category    String @default("general") // "hacking", "stealth", "crypto", "network"
+  price       Int
+  level       Int    @default(1) // Required player level
+
+  // Item effects
+  hackingBonus      Int @default(0) @map("hacking_bonus")
+  stealthBonus      Int @default(0) @map("stealth_bonus")
+  cryptographyBonus Int @default(0) @map("cryptography_bonus")
+  networkingBonus   Int @default(0) @map("networking_bonus")
+
+  // Item properties
+  isConsumable Boolean @default(false) @map("is_consumable")
+  isStackable  Boolean @default(false) @map("is_stackable")
+  maxStack     Int     @default(1) @map("max_stack")
+  rarity       String  @default("common") // "common", "uncommon", "rare", "epic", "legendary"
+
+  // Availability
+  isActive    Boolean @default(true) @map("is_active")
+  stock       Int? // null = unlimited
+  restockTime Int?    @map("restock_time") // minutes
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  inventoryItems InventoryItem[]
+
+  @@index([itemType])
+  @@index([category])
+  @@index([isActive])
+  @@map("shop_items")
+}
+
+model InventoryItem {
+  id         String  @id @default(cuid())
+  userId     String  @map("user_id")
+  shopItemId String  @map("shop_item_id")
+  quantity   Int     @default(1)
+  isEquipped Boolean @default(false) @map("is_equipped")
+  slot       String? // "primary", "secondary", "defense", etc.
+
+  acquiredAt DateTime  @default(now()) @map("acquired_at")
+  lastUsedAt DateTime? @map("last_used_at")
+
+  // Consumable tracking
+  usesRemaining Int?      @map("uses_remaining")
+  expiresAt     DateTime? @map("expires_at")
+
+  // Relations
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  shopItem ShopItem @relation(fields: [shopItemId], references: [id])
+
+  @@index([userId])
+  @@index([shopItemId])
+  @@index([isEquipped])
+  @@map("inventory_items")
+}
+
+model Notification {
+  id      String @id @default(cuid())
+  userId  String @map("user_id")
+  type    String // "info", "warning", "success", "error", "mission", "hack", "message", "faction"
+  title   String
+  message String @db.Text
+
+  // Notification data
+  category String @default("general") // "game", "social", "security", "mission", "faction"
+  priority String @default("normal") // "low", "normal", "high", "urgent"
+  data     Json   @default("{}") // Additional data (link, action, etc.)
+
+  // Status
+  isRead      Boolean   @default(false) @map("is_read")
+  isDismissed Boolean   @default(false) @map("is_dismissed")
+  readAt      DateTime? @map("read_at")
+
+  // Expiration
+  expiresAt DateTime? @map("expires_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // Relations
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([isRead])
+  @@index([type])
+  @@index([category])
+  @@index([createdAt])
+  @@map("notifications")
 }

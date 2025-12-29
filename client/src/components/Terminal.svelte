@@ -6,12 +6,19 @@
     import { apiClient } from "../services/api";
     // New ASCII Dialog system
     import MailDialog from "./MailDialog.svelte";
+    import MessageDialog from "./MessageDialog.svelte";
     import ChatDialog from "./ChatDialog.svelte";
     import ForumDialog from "./ForumDialog.svelte";
     import ShopDialog from "./ShopDialog.svelte";
     import EquipmentDialog from "./EquipmentDialog.svelte";
+    import NotificationPanel from "./NotificationPanel.svelte";
     // Socket service for real-time notifications
     import { liveMessages, socketService } from "../services/socket";
+    // Notification service
+    import {
+        unreadCounts,
+        notificationService,
+    } from "../services/notifications";
     // Terminal tabs service
     import {
         terminalTabsStore,
@@ -63,13 +70,17 @@
         | "chat"
         | "forum"
         | "shop"
-        | "equipment" = "none";
+        | "equipment"
+        | "message" = "none";
     let dialogData: any = null;
 
-    // Notification state
-    let unreadCount = 0;
-    let unreadChatCount = 0;
-    let unreadMailCount = 0;
+    // Notification panel state
+    let showNotifications = false;
+
+    // Notification state (now managed by notification service)
+    $: unreadCount = $unreadCounts.total;
+    $: unreadChatCount = $unreadCounts.chat;
+    $: unreadMailCount = $unreadCounts.mail;
 
     // UI enhancements
     let currentTime = new Date().toLocaleTimeString();
@@ -349,6 +360,45 @@
                 return;
             }
 
+            // Open chat dialog for messaging commands
+            if (
+                cmdName === "msg" ||
+                cmdName === "message" ||
+                cmdName === "chat" ||
+                cmdName === "dm"
+            ) {
+                openDialog("chat", { command: cmdParts });
+                if (activeTabId) {
+                    terminalTabsStore.updateProcessingState(activeTabId, false);
+                }
+                isExecuting = false;
+                return;
+            }
+
+            // Open mail dialog for inbox/mail commands
+            if (
+                cmdName === "mail" ||
+                cmdName === "inbox" ||
+                cmdName === "messages"
+            ) {
+                openDialog("mail");
+                if (activeTabId) {
+                    terminalTabsStore.updateProcessingState(activeTabId, false);
+                }
+                isExecuting = false;
+                return;
+            }
+
+            // Open forum dialog for forum commands
+            if (cmdName === "forum" || cmdName === "forums") {
+                openDialog("forum", { command: cmdParts });
+                if (activeTabId) {
+                    terminalTabsStore.updateProcessingState(activeTabId, false);
+                }
+                isExecuting = false;
+                return;
+            }
+
             // Execute the command on the server
             const result = await terminalService.executeCommand(command);
 
@@ -472,7 +522,7 @@
     // ==================== DIALOG MANAGEMENT ====================
 
     function openDialog(
-        type: "mail" | "chat" | "forum" | "shop" | "equipment",
+        type: "mail" | "chat" | "forum" | "shop" | "equipment" | "message",
         data?: any,
     ) {
         activeDialog = type;
@@ -491,6 +541,24 @@
         }
         // Return focus to terminal input
         focusInput();
+    }
+
+    // ==================== NOTIFICATION HANDLERS ====================
+
+    function handleNotificationPanelClick(event: CustomEvent): void {
+        const { notification, type, data } = event.detail;
+
+        // Close notifications panel
+        showNotifications = false;
+
+        // Open appropriate dialog based on notification type
+        if (type === "chat") {
+            openDialog("chat", data);
+        } else if (type === "mail" || type === "message") {
+            openDialog("mail", data);
+        } else if (type === "forum") {
+            openDialog("forum", data);
+        }
     }
 
     // ==================== NOTIFICATION SYSTEM ====================
@@ -670,6 +738,38 @@
         if (event.ctrlKey && event.key === "i") {
             event.preventDefault();
             openDialog("equipment");
+            return;
+        }
+
+        // Ctrl+M: Open mail/inbox
+        if (event.ctrlKey && event.key === "m") {
+            event.preventDefault();
+            openDialog("mail");
+            return;
+        }
+
+        // Ctrl+C: Open chat (only when not selecting text)
+        if (
+            event.ctrlKey &&
+            event.key === "c" &&
+            !window.getSelection()?.toString()
+        ) {
+            event.preventDefault();
+            openDialog("chat");
+            return;
+        }
+
+        // Ctrl+F: Open forum (override browser find)
+        if (event.ctrlKey && event.key === "f") {
+            event.preventDefault();
+            openDialog("forum");
+            return;
+        }
+
+        // Ctrl+N: Open notifications panel
+        if (event.ctrlKey && event.key === "n") {
+            event.preventDefault();
+            showNotifications = !showNotifications;
             return;
         }
 
@@ -950,7 +1050,17 @@
     <ShopDialog visible={true} onClose={closeDialog} />
 {:else if activeDialog === "equipment"}
     <EquipmentDialog visible={true} onClose={closeDialog} />
+{:else if activeDialog === "message"}
+    <MessageDialog visible={true} mode="inbox" on:close={closeDialog} />
 {/if}
+
+<!-- Notification Panel -->
+<NotificationPanel
+    bind:visible={showNotifications}
+    position="top-right"
+    on:close={() => (showNotifications = false)}
+    on:notificationClick={handleNotificationPanelClick}
+/>
 
 <!-- ==================== STYLES ==================== -->
 
