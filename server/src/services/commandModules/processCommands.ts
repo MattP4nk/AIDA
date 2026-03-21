@@ -1,5 +1,13 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
+import {
+  table,
+  panel,
+  render,
+  renderSections,
+  progressBar,
+  Column,
+} from "./asciiBox";
 
 export class ProcessCommandsModule implements CommandModule {
   public commands: Set<string> = new Set([
@@ -41,31 +49,31 @@ export class ProcessCommandsModule implements CommandModule {
     try {
       switch (command.command) {
         case "ps":
-          return await this.handlePs(command, context, session.id);
+          return await this.handlePs(command, context, session.socketId);
 
         case "top":
-          return await this.handleTop(command, context, session.id);
+          return await this.handleTop(command, context, session.socketId);
 
         case "kill":
-          return await this.handleKill(command, context, session.id);
+          return await this.handleKill(command, context, session.socketId);
 
         case "free":
-          return await this.handleFree(command, context, session.id);
+          return await this.handleFree(command, context, session.socketId);
 
         case "uptime":
-          return await this.handleUptime(command, context, session.id);
+          return await this.handleUptime(command, context, session.socketId);
 
         case "pkill":
-          return await this.handlePkill(command, context, session.id);
+          return await this.handlePkill(command, context, session.socketId);
 
         case "pgrep":
-          return await this.handlePgrep(command, context, session.id);
+          return await this.handlePgrep(command, context, session.socketId);
 
         case "nice":
-          return await this.handleNice(command, context, session.id);
+          return await this.handleNice(command, context, session.socketId);
 
         case "renice":
-          return await this.handleRenice(command, context, session.id);
+          return await this.handleRenice(command, context, session.socketId);
 
         default:
           return {
@@ -176,54 +184,56 @@ export class ProcessCommandsModule implements CommandModule {
       };
     }
 
-    let output = "📋 Process List\n\n";
-    output +=
-      "PID    NAME              USER      CPU%   MEM(KB) STATUS    TIME     PROGRESS\n";
-    output += "─".repeat(80) + "\n";
+    const columns: Column[] = [
+      { header: "PID", width: 6, align: "left" },
+      { header: "NAME", width: 16, align: "left" },
+      { header: "USER", width: 9, align: "left" },
+      { header: "CPU%", width: 5, align: "right" },
+      { header: "MEM(KB)", width: 7, align: "right" },
+      { header: "STATUS", width: 9, align: "left" },
+      { header: "TIME", width: 8, align: "left" },
+      { header: "PROGRESS", width: 22, align: "left" },
+    ];
 
-    for (const proc of processes) {
+    const rows: string[][] = processes.map((proc: any) => {
       const runtime = Math.floor((Date.now() - proc.startTime) / 1000);
       const hours = Math.floor(runtime / 3600);
       const minutes = Math.floor((runtime % 3600) / 60);
       const seconds = runtime % 60;
       const time = `${hours.toString().padStart(2, "0")}:${minutes.toString().padStart(2, "0")}:${seconds.toString().padStart(2, "0")}`;
 
-      output += `${proc.pid.toString().padEnd(6)} `;
-      output += `${proc.name.substring(0, 16).padEnd(17)} `;
-      output += `${proc.user.substring(0, 9).padEnd(10)} `;
-      output += `${proc.cpu.toFixed(1).padStart(5)}  `;
-      output += `${proc.memory.toString().padStart(7)} `;
-      output += `${proc.status.padEnd(9)} `;
-      output += `${time}  `;
-
-      // Show progress for command processes
+      let progressCol = "";
       if (proc.isCommand && proc.commandMetadata) {
         const progress = proc.commandMetadata.progress || 0;
-        const progressBar = this.renderProgressBar(progress, 10);
-        output += `${progressBar} ${progress.toFixed(0)}%`;
-
+        progressCol = progressBar(progress / 100, 10);
         if (proc.commandMetadata.targetInfo) {
-          output += ` → ${proc.commandMetadata.targetInfo}`;
+          progressCol += ` > ${proc.commandMetadata.targetInfo}`;
         }
       }
 
-      output += "\n";
-    }
+      return [
+        proc.pid.toString(),
+        proc.name.substring(0, 16),
+        proc.user.substring(0, 9),
+        proc.cpu.toFixed(1),
+        proc.memory.toString(),
+        proc.status,
+        time,
+        progressCol,
+      ];
+    });
+
+    const lines = table(
+      columns,
+      rows,
+      `PROCESS LIST -- ${processes.length} process(es)`,
+    );
 
     return {
       success: true,
-      output,
+      output: render(lines),
       timestamp: new Date(),
     };
-  }
-
-  /**
-   * Render a simple ASCII progress bar
-   */
-  private renderProgressBar(progress: number, width: number): string {
-    const filled = Math.floor((progress / 100) * width);
-    const empty = width - filled;
-    return `[${"█".repeat(filled)}${"░".repeat(empty)}]`;
   }
 
   private async handleTop(
@@ -244,30 +254,54 @@ export class ProcessCommandsModule implements CommandModule {
       (p: { status: string }) => p.status === "running",
     ).length;
 
-    let output = "🖥️  System Monitor (top)\n\n";
-    output += `Load Average: ${loadAvg.one.toFixed(2)}, ${loadAvg.five.toFixed(2)}, ${loadAvg.fifteen.toFixed(2)}\n`;
-    output += `Processes: ${processes.length} total, ${runningCount} running\n`;
-    output += `CPU: ${cpuTotal.toFixed(1)}% total\n`;
-    output += `Memory: ${memInfo.used}/${memInfo.total} KB (${((memInfo.used / memInfo.total) * 100).toFixed(1)}%)\n`;
-    output += `Swap: ${memInfo.swapUsed}/${memInfo.swapTotal} KB\n\n`;
+    const statsPanel = panel(
+      "SYSTEM MONITOR (top)",
+      [
+        {
+          label: "Load Average:  ",
+          value: `${loadAvg.one.toFixed(2)}, ${loadAvg.five.toFixed(2)}, ${loadAvg.fifteen.toFixed(2)}`,
+        },
+        {
+          label: "Processes:     ",
+          value: `${processes.length} total, ${runningCount} running`,
+        },
+        { label: "CPU:           ", value: `${cpuTotal.toFixed(1)}% total` },
+        {
+          label: "Memory:        ",
+          value: `${memInfo.used}/${memInfo.total} KB (${((memInfo.used / memInfo.total) * 100).toFixed(1)}%)`,
+        },
+        {
+          label: "Swap:          ",
+          value: `${memInfo.swapUsed}/${memInfo.swapTotal} KB`,
+        },
+      ],
+      52,
+    );
 
-    output += "PID    NAME              CPU%   MEM(KB) STATUS\n";
-    output += "─".repeat(50) + "\n";
+    const procColumns: Column[] = [
+      { header: "PID", width: 6, align: "left" },
+      { header: "NAME", width: 16, align: "left" },
+      { header: "CPU%", width: 5, align: "right" },
+      { header: "MEM(KB)", width: 7, align: "right" },
+      { header: "STATUS", width: 9, align: "left" },
+    ];
 
     // Sort by CPU usage
     const sorted = [...processes].sort((a, b) => b.cpu - a.cpu).slice(0, 10);
 
-    for (const proc of sorted) {
-      output += `${proc.pid.toString().padEnd(6)} `;
-      output += `${proc.name.substring(0, 16).padEnd(17)} `;
-      output += `${proc.cpu.toFixed(1).padStart(5)}  `;
-      output += `${proc.memory.toString().padStart(7)} `;
-      output += `${proc.status}\n`;
-    }
+    const procRows: string[][] = sorted.map((proc: any) => [
+      proc.pid.toString(),
+      proc.name.substring(0, 16),
+      proc.cpu.toFixed(1),
+      proc.memory.toString(),
+      proc.status,
+    ]);
+
+    const procTable = table(procColumns, procRows);
 
     return {
       success: true,
-      output,
+      output: renderSections(statsPanel, procTable),
       timestamp: new Date(),
     };
   }
@@ -346,28 +380,44 @@ export class ProcessCommandsModule implements CommandModule {
     const memoryService = this.getMemoryService(context);
     const memInfo = memoryService.getMemoryInfo(sessionId);
 
-    let output = "💾 Memory Usage\n\n";
-    output += "              TOTAL      USED      FREE   BUFFERS    CACHED\n";
-    output += "─".repeat(65) + "\n";
+    const memColumns: Column[] = [
+      { header: "", width: 8, align: "left" },
+      { header: "TOTAL", width: 9, align: "right" },
+      { header: "USED", width: 9, align: "right" },
+      { header: "FREE", width: 9, align: "right" },
+      { header: "BUFFERS", width: 9, align: "right" },
+      { header: "CACHED", width: 9, align: "right" },
+    ];
 
-    output += "Mem:     ";
-    output += `${memInfo.total.toString().padStart(9)} `;
-    output += `${memInfo.used.toString().padStart(9)} `;
-    output += `${memInfo.free.toString().padStart(9)} `;
-    output += `${memInfo.buffers.toString().padStart(9)} `;
-    output += `${memInfo.cached.toString().padStart(9)}\n`;
-
-    output += "Swap:    ";
-    output += `${memInfo.swapTotal.toString().padStart(9)} `;
-    output += `${memInfo.swapUsed.toString().padStart(9)} `;
-    output += `${memInfo.swapFree.toString().padStart(9)}\n\n`;
+    const memRows: string[][] = [
+      [
+        "Mem:",
+        memInfo.total.toString(),
+        memInfo.used.toString(),
+        memInfo.free.toString(),
+        memInfo.buffers.toString(),
+        memInfo.cached.toString(),
+      ],
+      [
+        "Swap:",
+        memInfo.swapTotal.toString(),
+        memInfo.swapUsed.toString(),
+        memInfo.swapFree.toString(),
+        "",
+        "",
+      ],
+    ];
 
     const usagePercent = ((memInfo.used / memInfo.total) * 100).toFixed(1);
-    output += `Available: ${memInfo.available} KB (${(100 - parseFloat(usagePercent)).toFixed(1)}% free)`;
+    const lines = table(
+      memColumns,
+      memRows,
+      `MEMORY USAGE -- Available: ${memInfo.available} KB (${(100 - parseFloat(usagePercent)).toFixed(1)}% free)`,
+    );
 
     return {
       success: true,
-      output,
+      output: render(lines),
       timestamp: new Date(),
     };
   }
@@ -399,18 +449,27 @@ export class ProcessCommandsModule implements CommandModule {
     const userCount = new Set(processes.map((p: { user: string }) => p.user))
       .size;
 
-    let output = "⏱️  System Uptime\n\n";
-    if (days > 0) {
-      output += `Up ${days} day${days !== 1 ? "s" : ""}, ${hours}:${minutes.toString().padStart(2, "0")}\n`;
-    } else {
-      output += `Up ${hours}:${minutes.toString().padStart(2, "0")}\n`;
-    }
-    output += `Users: ${userCount}\n`;
-    output += `Load average: ${loadAvg.one.toFixed(2)}, ${loadAvg.five.toFixed(2)}, ${loadAvg.fifteen.toFixed(2)}`;
+    const uptimeStr =
+      days > 0
+        ? `${days} day${days !== 1 ? "s" : ""}, ${hours}:${minutes.toString().padStart(2, "0")}`
+        : `${hours}:${minutes.toString().padStart(2, "0")}`;
+
+    const lines = panel(
+      "SYSTEM UPTIME",
+      [
+        { label: "Up:            ", value: uptimeStr },
+        { label: "Users:         ", value: `${userCount}` },
+        {
+          label: "Load average:  ",
+          value: `${loadAvg.one.toFixed(2)}, ${loadAvg.five.toFixed(2)}, ${loadAvg.fifteen.toFixed(2)}`,
+        },
+      ],
+      44,
+    );
 
     return {
       success: true,
-      output,
+      output: render(lines),
       timestamp: new Date(),
     };
   }
@@ -502,19 +561,27 @@ export class ProcessCommandsModule implements CommandModule {
       };
     }
 
-    let output = `🔍 Found ${matches.length} process${matches.length !== 1 ? "es" : ""} matching '${processName}':\n\n`;
-    output += "PID    NAME              USER\n";
-    output += "─".repeat(40) + "\n";
+    const pgrepColumns: Column[] = [
+      { header: "PID", width: 6, align: "left" },
+      { header: "NAME", width: 16, align: "left" },
+      { header: "USER", width: 10, align: "left" },
+    ];
 
-    for (const proc of matches) {
-      output += `${proc.pid.toString().padEnd(6)} `;
-      output += `${proc.name.substring(0, 16).padEnd(17)} `;
-      output += `${proc.user}\n`;
-    }
+    const pgrepRows: string[][] = matches.map((proc: any) => [
+      proc.pid.toString(),
+      proc.name.substring(0, 16),
+      proc.user,
+    ]);
+
+    const lines = table(
+      pgrepColumns,
+      pgrepRows,
+      `Found ${matches.length} process${matches.length !== 1 ? "es" : ""} matching '${processName}'`,
+    );
 
     return {
       success: true,
-      output,
+      output: render(lines),
       timestamp: new Date(),
     };
   }

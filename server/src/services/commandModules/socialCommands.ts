@@ -1,6 +1,18 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
-import { sanitizeMessageContent, validateMessageContent } from "../../utils/validators";
+import {
+  sanitizeMessageContent,
+  validateMessageContent,
+} from "../../utils/validators";
+import {
+  render,
+  list,
+  multiPanel,
+  infoBox,
+  helpPanel,
+  statusCard,
+  HelpEntry,
+} from "./asciiBox";
 
 export class SocialCommandsModule implements CommandModule {
   public commands: Set<string> = new Set([
@@ -48,7 +60,10 @@ export class SocialCommandsModule implements CommandModule {
         category: "social",
         description: "Send a quick private message to another player",
         usage: "msg <username> <message>",
-        examples: ["msg alice Hey, how are you?", "msg bob Check out this hack!"],
+        examples: [
+          "msg alice Hey, how are you?",
+          "msg bob Check out this hack!",
+        ],
       },
       {
         command: "mail",
@@ -72,11 +87,7 @@ export class SocialCommandsModule implements CommandModule {
         category: "social",
         description: "Manage your contact list",
         usage: "contact [list|add|remove] [username]",
-        examples: [
-          "contact list",
-          "contact add alice",
-          "contact remove bob",
-        ],
+        examples: ["contact list", "contact add alice", "contact remove bob"],
       },
       {
         command: "chat",
@@ -88,14 +99,20 @@ export class SocialCommandsModule implements CommandModule {
       {
         command: "forum",
         category: "social",
-        description: "Access darknet forums and underground networks",
+        description:
+          "[Social 5] Access darknet forums and underground networks",
         usage: "forum [scan|access|register|post|read|search]",
-        examples: ["forum scan", "forum access hackthenet", "forum post <id> <title> <content>"],
+        examples: [
+          "forum scan",
+          "forum access hackthenet",
+          "forum post <id> <title> <content>",
+        ],
       },
       {
         command: "proxy",
         category: "social",
-        description: "Manage proxy connections for secure darkweb access",
+        description:
+          "[Network 10] Manage proxy connections for secure darkweb access",
         usage: "proxy [list|connect|disconnect|status]",
         examples: ["proxy list", "proxy connect proxy1", "proxy status"],
       },
@@ -127,7 +144,7 @@ export class SocialCommandsModule implements CommandModule {
         timestamp: new Date(),
       };
     }
-    
+
     const sanitizedContent = sanitizeMessageContent(content);
 
     const { db } = context;
@@ -143,7 +160,7 @@ export class SocialCommandsModule implements CommandModule {
       };
     }
 
-    const { messageService } = await import("../messageService");
+    const messageService = context.services.messageService;
     const result = await messageService.sendPrivateMessage(
       userId,
       recipient.id,
@@ -170,9 +187,11 @@ export class SocialCommandsModule implements CommandModule {
 
     // Handle subcommands
     if (subCommand === "sent") {
-      const { messageService } = await import("../messageService");
-      const result = await messageService.getSentMessages(userId, { limit: 20 });
-      
+      const messageService = context.services.messageService;
+      const result = await messageService.getSentMessages(userId, {
+        limit: 20,
+      });
+
       if (!result.success || !result.data) {
         return {
           success: false,
@@ -191,14 +210,14 @@ export class SocialCommandsModule implements CommandModule {
         };
       }
 
-      const output = messages.map(
+      const items = messages.map(
         (msg: any) =>
           `To ${msg.recipientUsername}: ${msg.subject || "(No Subject)"} - ${msg.content.substring(0, 30)}...`,
       );
 
       return {
         success: true,
-        output: ["Sent Messages:", ...output],
+        output: render(list("SENT MESSAGES", items, 50)).split("\n"),
         data: result.data,
         timestamp: new Date(),
       };
@@ -214,9 +233,9 @@ export class SocialCommandsModule implements CommandModule {
         };
       }
 
-      const { messageService } = await import("../messageService");
+      const messageService = context.services.messageService;
       const result = await messageService.markAsRead(messageId, userId);
-      
+
       return {
         success: result.success,
         output: result.message,
@@ -234,9 +253,9 @@ export class SocialCommandsModule implements CommandModule {
         };
       }
 
-      const { messageService } = await import("../messageService");
+      const messageService = context.services.messageService;
       const result = await messageService.deleteMessage(messageId, userId);
-      
+
       return {
         success: result.success,
         output: result.message,
@@ -257,7 +276,7 @@ export class SocialCommandsModule implements CommandModule {
           "Usage: mail <username> <subject> <message>",
           "       mail sent",
           "       mail read <id>",
-          "       mail delete <id>"
+          "       mail delete <id>",
         ],
         timestamp: new Date(),
       };
@@ -272,7 +291,7 @@ export class SocialCommandsModule implements CommandModule {
         timestamp: new Date(),
       };
     }
-    
+
     const sanitizedContent = sanitizeMessageContent(content);
     const sanitizedSubject = sanitizeMessageContent(subject);
 
@@ -289,7 +308,7 @@ export class SocialCommandsModule implements CommandModule {
       };
     }
 
-    const { messageService } = await import("../messageService");
+    const messageService = context.services.messageService;
     const result = await messageService.sendPrivateMessage(
       userId,
       recipient.id,
@@ -312,7 +331,7 @@ export class SocialCommandsModule implements CommandModule {
     context: CommandContext,
   ): Promise<CommandResult> {
     const { userId } = context;
-    const { messageService } = await import("../messageService");
+    const messageService = context.services.messageService;
     const result = await messageService.getInbox(userId, { limit: 10 });
 
     if (!result.success || !result.data) {
@@ -332,14 +351,14 @@ export class SocialCommandsModule implements CommandModule {
       };
     }
 
-    const output = messages.map(
+    const items = messages.map(
       (msg: any) =>
         `[${msg.isRead ? " " : "*"}] ${msg.senderUsername}: ${msg.subject || "(No Subject)"} - ${msg.content.substring(0, 30)}...`,
     );
 
     return {
       success: true,
-      output: ["Inbox:", ...output],
+      output: render(list("INBOX", items, 50)).split("\n"),
       data: result.data,
       openDialog: "mail",
       timestamp: new Date(),
@@ -368,12 +387,12 @@ export class SocialCommandsModule implements CommandModule {
         };
       }
 
-      const output = contacts.map(
-        (c: any) => `- ${c.contact?.username || c.handle} (${c.status})`,
+      const items = contacts.map(
+        (c: any) => `${c.contact?.username || c.handle} (${c.status})`,
       );
       return {
         success: true,
-        output: ["Contacts:", ...output],
+        output: render(list("CONTACTS", items, 44)).split("\n"),
         openDialog: "chat", // Contacts often managed in chat UI
         timestamp: new Date(),
       };
@@ -475,7 +494,7 @@ export class SocialCommandsModule implements CommandModule {
     const { userId } = context;
     const subCommand = command.args[0]?.toLowerCase();
 
-    const { forumService } = await import("../forumService");
+    const forumService = context.services.forumService;
 
     try {
       // forum (no args) - list discovered forums
@@ -493,20 +512,25 @@ export class SocialCommandsModule implements CommandModule {
           };
         }
 
-        const output = ["═══════════════════════════════════════", "          DISCOVERED FORUMS", "═══════════════════════════════════════"];
-        
-        forums.forEach((forum: any) => {
-          output.push(`[${forum.id}] ${forum.name}`);
-          output.push(`  ${forum.description}`);
-          output.push(`  Security: ${forum.securityLevel} | Members: ${forum._count?.members || 0} | Posts: ${forum._count?.posts || 0}`);
-          if (forum.requiresProxy) output.push(`  ⚠️  Requires proxy connection`);
-          if (forum.isHoneypot) output.push(`  🍯 WARNING: Potential honeypot`);
-          output.push("");
+        const sections = forums.map((forum: any) => {
+          const rows: Array<{ label: string; value: string }> = [
+            { label: "Description:  ", value: forum.description },
+            { label: "Security:     ", value: `${forum.securityLevel}` },
+            { label: "Members:      ", value: `${forum._count?.members || 0}` },
+            { label: "Posts:        ", value: `${forum._count?.posts || 0}` },
+          ];
+          if (forum.requiresProxy)
+            rows.push({ label: "", value: "[!] Requires proxy connection" });
+          if (forum.isHoneypot)
+            rows.push({ label: "", value: "[!] WARNING: Potential honeypot" });
+          return { heading: `[${forum.id}] ${forum.name}`, rows };
         });
+
+        const output = multiPanel("DISCOVERED FORUMS", sections, 46);
 
         return {
           success: true,
-          output,
+          output: render(output).split("\n"),
           data: { forums },
           openDialog: "forum",
           timestamp: new Date(),
@@ -518,21 +542,27 @@ export class SocialCommandsModule implements CommandModule {
         const useProxy = command.args.includes("--proxy");
         const result = await forumService.scanForForums(userId, useProxy);
 
-        const output = [
-          "Scanning for forums...",
-          "",
-          `Found ${result.forums.length} forums`,
-          `New discoveries: ${result.newDiscoveries}`,
+        const rows: Array<{ label: string; value: string }> = [
+          {
+            label: "Found:           ",
+            value: `${result.forums.length} forums`,
+          },
+          { label: "New discoveries:  ", value: `${result.newDiscoveries}` },
         ];
 
         if (result.requiresHigherSkills.length > 0) {
-          output.push("", "Requires higher skills:");
-          result.requiresHigherSkills.forEach((f: string) => output.push(`  - ${f}`));
+          rows.push({ label: "", value: "" });
+          rows.push({ label: "Requires higher skills:", value: "" });
+          result.requiresHigherSkills.forEach((f: string) =>
+            rows.push({ label: "  - ", value: f }),
+          );
         }
+
+        const output = infoBox("FORUM SCAN RESULTS", rows, 44);
 
         return {
           success: true,
-          output,
+          output: render(output).split("\n"),
           data: { scanResult: result },
           openDialog: "forum",
           timestamp: new Date(),
@@ -551,42 +581,73 @@ export class SocialCommandsModule implements CommandModule {
         }
 
         const useProxy = command.args.includes("--proxy");
-        const access = await forumService.accessForum(userId, forumId, useProxy);
+        const access = await forumService.accessForum(
+          userId,
+          forumId,
+          useProxy,
+        );
 
-        const output = [
-          `═══════════════════════════════════════`,
-          `  ${access.forum.name}`,
-          `═══════════════════════════════════════`,
-          access.forum.description,
-          "",
-          `Members: ${access.forum._count?.members || 0} | Posts: ${access.forum._count?.posts || 0}`,
-          `Member Status: ${access.isMember ? "✓ Registered" : "✗ Not registered"}`,
+        const infoRows: Array<{ label: string; value: string }> = [
+          { label: "", value: access.forum.description },
+          {
+            label: "Members:       ",
+            value: `${access.forum._count?.members || 0}`,
+          },
+          {
+            label: "Posts:         ",
+            value: `${access.forum._count?.posts || 0}`,
+          },
+          {
+            label: "Member Status: ",
+            value: access.isMember ? "✓ Registered" : "✗ Not registered",
+          },
         ];
 
         if (access.requiresProxy) {
-          output.push(`⚠️  This forum requires a proxy connection`);
+          infoRows.push({ label: "", value: "[!] Requires proxy connection" });
         }
 
         if (access.isHoneypot) {
-          output.push(`🍯 WARNING: This may be a honeypot!`);
+          infoRows.push({
+            label: "",
+            value: "[!] WARNING: This may be a honeypot!",
+          });
         }
 
-        output.push("", "Recent posts:");
+        const postRows: Array<{ label: string; value: string }> = [];
         access.posts.slice(0, 5).forEach((post: any) => {
-          output.push(`  [${post.id}] ${post.title} (by ${post.authorHandle})`);
+          postRows.push({
+            label: `  [${post.id}] `,
+            value: `${post.title} (by ${post.authorHandle})`,
+          });
         });
 
-        output.push("", "Commands:");
-        output.push("  forum read <postId> - Read a post");
+        const cmdRows: Array<{ label: string; value: string }> = [
+          { label: "forum read <postId>", value: "  Read a post" },
+        ];
         if (access.isMember) {
-          output.push("  forum post <title> <content> - Create a post");
+          cmdRows.push({
+            label: "forum post <title> <content>",
+            value: "  Create a post",
+          });
         } else {
-          output.push(`  forum register ${forumId} <handle> - Register an account`);
+          cmdRows.push({
+            label: `forum register ${forumId} <handle>`,
+            value: "  Register",
+          });
         }
+
+        const sections = [
+          { rows: infoRows },
+          { heading: "RECENT POSTS", rows: postRows },
+          { heading: "COMMANDS", rows: cmdRows },
+        ];
+
+        const output = multiPanel(access.forum.name, sections, 48);
 
         return {
           success: true,
-          output,
+          output: render(output).split("\n"),
           data: { access },
           openDialog: "forum",
           timestamp: new Date(),
@@ -631,7 +692,12 @@ export class SocialCommandsModule implements CommandModule {
           };
         }
 
-        const post = await forumService.createPost(userId, forumId, title, content);
+        const post = await forumService.createPost(
+          userId,
+          forumId,
+          title,
+          content,
+        );
 
         return {
           success: true,
@@ -661,27 +727,45 @@ export class SocialCommandsModule implements CommandModule {
 
         const post = await forumService.readPost(userId, forumId, postId);
 
-        const output = [
-          "═══════════════════════════════════════",
-          post.title,
-          "═══════════════════════════════════════",
-          `By: ${post.authorHandle} | ${new Date(post.createdAt).toLocaleString()}`,
-          `Views: ${post.viewCount}`,
-          "",
-          post.content,
+        const metaRows: Array<{ label: string; value: string }> = [
+          { label: "Author:  ", value: post.authorHandle },
+          {
+            label: "Date:    ",
+            value: new Date(post.createdAt).toLocaleString(),
+          },
+          { label: "Views:   ", value: `${post.viewCount}` },
+        ];
+
+        const contentRows: Array<{ label: string; value: string }> = [
+          { label: "", value: post.content },
         ];
 
         if (post.storyRelevant) {
-          output.push("", "💡 This post contains story-relevant information");
+          contentRows.push({ label: "", value: "" });
+          contentRows.push({
+            label: "",
+            value: "[*] This post contains story-relevant information",
+          });
         }
 
         if (post.keyFragmentId) {
-          output.push("", "🔑 This post contains a key fragment!");
+          contentRows.push({ label: "", value: "" });
+          contentRows.push({
+            label: "",
+            value: "[KEY] This post contains a key fragment!",
+          });
         }
+
+        const sections = [
+          { rows: metaRows },
+          { heading: "CONTENT", rows: contentRows },
+        ];
+
+        const output = multiPanel(post.title, sections, 48);
 
         return {
           success: true,
-          output,
+          output: render(output).split("\n"),
           data: { post },
           openDialog: "forum",
           timestamp: new Date(),
@@ -711,16 +795,20 @@ export class SocialCommandsModule implements CommandModule {
           };
         }
 
-        const output = [`Found ${posts.length} posts:`, ""];
-        posts.forEach((post: any) => {
-          output.push(`[${post.id}] ${post.title} (by ${post.authorHandle})`);
-          output.push(`  ${post.content.substring(0, 60)}...`);
-          output.push("");
-        });
+        const items = posts.map(
+          (post: any) =>
+            `[${post.id}] ${post.title} (by ${post.authorHandle}) - ${post.content.substring(0, 40)}...`,
+        );
+
+        const output = list(
+          `SEARCH RESULTS (${posts.length} found)`,
+          items,
+          50,
+        );
 
         return {
           success: true,
-          output,
+          output: render(output).split("\n"),
           data: { posts },
           openDialog: "forum",
           timestamp: new Date(),
@@ -728,18 +816,25 @@ export class SocialCommandsModule implements CommandModule {
       }
 
       // Unknown subcommand
+      const entries: HelpEntry[] = [
+        { command: "forum", description: "List discovered forums" },
+        { command: "forum scan [--proxy]", description: "Scan for forums" },
+        { command: "forum access <id>", description: "Access a forum" },
+        {
+          command: "forum register <id> <handle>",
+          description: "Register on a forum",
+        },
+        {
+          command: "forum post <id> <title> <content>",
+          description: "Create a post",
+        },
+        { command: "forum read <id> <postId>", description: "Read a post" },
+        { command: "forum search <id> <query>", description: "Search posts" },
+      ];
+
       return {
         success: false,
-        output: [
-          "Unknown forum command. Available commands:",
-          "  forum               - List discovered forums",
-          "  forum scan [--proxy] - Scan for forums",
-          "  forum access <id>   - Access a forum",
-          "  forum register <id> <handle> - Register on a forum",
-          "  forum post <id> <title> <content> - Create a post",
-          "  forum read <id> <postId> - Read a post",
-          "  forum search <id> <query> - Search posts",
-        ],
+        output: render(helpPanel("FORUM COMMANDS", entries, 50)).split("\n"),
         timestamp: new Date(),
       };
     } catch (error) {
@@ -751,7 +846,6 @@ export class SocialCommandsModule implements CommandModule {
     }
   }
 
-
   private async handleProxy(
     command: Command,
     context: CommandContext,
@@ -759,38 +853,42 @@ export class SocialCommandsModule implements CommandModule {
     const { userId } = context;
     const subCommand = command.args[0]?.toLowerCase();
 
-    const { forumService } = await import("../forumService");
+    const forumService = context.services.forumService;
 
     try {
       // proxy list - show available proxy servers
       if (subCommand === "list" || !subCommand) {
         const proxies = await forumService.listProxyServers(userId);
 
-        const output = [
-          "═══════════════════════════════════════",
-          "        AVAILABLE PROXY SERVERS",
-          "═══════════════════════════════════════",
-          "",
-        ];
+        const speedMap: Record<string, string> = {
+          slow: "Slow",
+          medium: "Medium",
+          fast: "Fast",
+        };
 
-        proxies.forEach((proxy: any) => {
-          const status = proxy.status === "active" ? "🟢 ONLINE" : "🔴 OFFLINE";
-          const speedMap: Record<string, string> = { slow: "🐌 Slow", medium: "⚡ Medium", fast: "🚀 Fast" };
+        const sections = proxies.map((proxy: any) => {
+          const status = proxy.status === "active" ? "ONLINE" : "OFFLINE";
           const speed = speedMap[proxy.speed] || "Unknown";
-          
-          output.push(`[${proxy.id}] ${proxy.name}`);
-          output.push(`  Location: ${proxy.location}`);
-          output.push(`  Status: ${status}`);
-          output.push(`  Anonymity: ${"█".repeat(proxy.anonymityLevel)}${"░".repeat(5 - proxy.anonymityLevel)} (${proxy.anonymityLevel}/5)`);
-          output.push(`  Speed: ${speed}`);
-          output.push("");
+          return {
+            heading: `[${proxy.id}] ${proxy.name}`,
+            rows: [
+              { label: "Location:   ", value: proxy.location },
+              { label: "Status:     ", value: status },
+              {
+                label: "Anonymity:  ",
+                value: `${"█".repeat(proxy.anonymityLevel)}${"░".repeat(5 - proxy.anonymityLevel)} (${proxy.anonymityLevel}/5)`,
+              },
+              { label: "Speed:      ", value: speed },
+            ],
+          };
         });
 
-        output.push("Use 'proxy connect <id>' to establish connection");
+        const output = multiPanel("AVAILABLE PROXY SERVERS", sections, 46);
+        output.push(" Use 'proxy connect <id>' to establish connection");
 
         return {
           success: true,
-          output,
+          output: render(output).split("\n"),
           data: { proxies },
           timestamp: new Date(),
         };
@@ -799,7 +897,7 @@ export class SocialCommandsModule implements CommandModule {
       // proxy connect <id> - connect to a proxy
       if (subCommand === "connect") {
         const proxyId = command.args[1];
-        
+
         if (!proxyId) {
           return {
             success: false,
@@ -810,16 +908,25 @@ export class SocialCommandsModule implements CommandModule {
 
         const connection = await forumService.connectToProxy(userId, proxyId);
 
+        const lines = infoBox(
+          "PROXY CONNECTED",
+          [
+            { label: "Status:    ", value: "✓ Connected" },
+            { label: "Server:    ", value: connection.proxyServer },
+            { label: "Location:  ", value: connection.location },
+            {
+              label: "Expires:   ",
+              value: new Date(connection.expiresAt).toLocaleString(),
+            },
+            { label: "", value: "" },
+            { label: "", value: "You can now access proxy-required forums." },
+          ],
+          46,
+        );
+
         return {
           success: true,
-          output: [
-            "✓ Proxy connection established",
-            `Server: ${connection.proxyServer}`,
-            `Location: ${connection.location}`,
-            `Expires: ${new Date(connection.expiresAt).toLocaleString()}`,
-            "",
-            "You can now access proxy-required forums safely.",
-          ],
+          output: render(lines).split("\n"),
           data: { connection },
           timestamp: new Date(),
         };
@@ -841,41 +948,59 @@ export class SocialCommandsModule implements CommandModule {
         const status = await forumService.getProxyStatus(userId);
 
         if (!status.connected) {
+          const lines = statusCard(
+            "PROXY STATUS",
+            [
+              { label: "Connected:  ", value: "✗ No" },
+              { label: "", value: "" },
+              { label: "", value: "Use 'proxy list' to see available servers" },
+            ],
+            44,
+          );
+
           return {
             success: true,
-            output: [
-              "Proxy Status: ✗ Not connected",
-              "",
-              "Use 'proxy list' to see available servers",
-            ],
+            output: render(lines).split("\n"),
             data: { status },
             timestamp: new Date(),
           };
         }
 
+        const lines = statusCard(
+          "PROXY STATUS",
+          [
+            { label: "Connected:  ", value: "✓ Yes" },
+            { label: "Server:     ", value: `${status.proxyServer || "N/A"}` },
+            { label: "Location:   ", value: `${status.location || "N/A"}` },
+            {
+              label: "Expires:    ",
+              value: status.expiresAt
+                ? new Date(status.expiresAt).toLocaleString()
+                : "N/A",
+            },
+          ],
+          44,
+        );
+
         return {
           success: true,
-          output: [
-            "Proxy Status: ✓ Connected",
-            `Server: ${status.proxyServer}`,
-            `Location: ${status.location}`,
-            `Expires: ${status.expiresAt ? new Date(status.expiresAt).toLocaleString() : 'N/A'}`,
-          ],
+          output: render(lines).split("\n"),
           data: { status },
           timestamp: new Date(),
         };
       }
 
       // Unknown subcommand
+      const entries: HelpEntry[] = [
+        { command: "proxy list", description: "Show available proxy servers" },
+        { command: "proxy connect <id>", description: "Connect to a proxy" },
+        { command: "proxy disconnect", description: "Disconnect from proxy" },
+        { command: "proxy status", description: "Check connection status" },
+      ];
+
       return {
         success: false,
-        output: [
-          "Unknown proxy command. Available commands:",
-          "  proxy list       - Show available proxy servers",
-          "  proxy connect <id> - Connect to a proxy",
-          "  proxy disconnect - Disconnect from proxy",
-          "  proxy status     - Check connection status",
-        ],
+        output: render(helpPanel("PROXY COMMANDS", entries, 50)).split("\n"),
         timestamp: new Date(),
       };
     } catch (error) {
@@ -1076,13 +1201,7 @@ export class SocialCommandsModule implements CommandModule {
         output: ["Chat contacts loaded."],
         data: {
           contacts: contacts.map(
-            ({
-              id,
-              username,
-              isOnline,
-              unreadCount,
-              lastMessagePreview,
-            }) => ({
+            ({ id, username, isOnline, unreadCount, lastMessagePreview }) => ({
               id,
               username,
               isOnline,

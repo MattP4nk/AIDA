@@ -1,5 +1,7 @@
 import { EventEmitter } from "events";
-import { injectable } from "tsyringe";
+import { injectable, inject } from "tsyringe";
+import type { Logger } from "pino";
+import { LOGGER } from "../di/tokens";
 
 /**
  * Memory Management Service - Backend process and memory tracking
@@ -78,15 +80,17 @@ class MemoryService extends EventEmitter {
   private sessionStats: Map<string, SessionMemoryStats> = new Map();
   private nextPid: Map<string, number> = new Map(); // sessionId -> next PID
   private memoryFragmentation: Map<string, number> = new Map(); // sessionId -> fragmentation %
+  private backgroundIntervals: NodeJS.Timeout[] = [];
+  private static readonly MAX_PID = 65535;
 
   // Memory limits per session
   private readonly SESSION_MEMORY_LIMIT = 128 * 1024; // 128 MB per session
   private readonly SWAP_MEMORY = 4 * 1024 * 1024; // 4 GB swap
 
-  constructor() {
+  constructor(@inject(LOGGER) private logger: Logger) {
     super();
     this.startBackgroundTasks();
-    console.log("🧠 Memory Service initialized");
+    this.logger.info("Memory Service initialized");
   }
 
   /**
@@ -237,7 +241,8 @@ class MemoryService extends EventEmitter {
     }
 
     const currentPid = this.nextPid.get(sessionId) || 1000;
-    this.nextPid.set(sessionId, currentPid + 1);
+    const nextPid = currentPid >= MemoryService.MAX_PID ? 1001 : currentPid + 1;
+    this.nextPid.set(sessionId, nextPid);
 
     const process: Process = {
       pid: currentPid,
@@ -612,17 +617,24 @@ class MemoryService extends EventEmitter {
    */
   private startBackgroundTasks(): void {
     // Update process stats every 5 seconds
-    setInterval(() => {
+    this.backgroundIntervals.push(setInterval(() => {
       for (const sessionId of this.processes.keys()) {
         this.updateProcessStats(sessionId);
         this.simulateMemoryActivity(sessionId);
       }
-    }, 5000);
+    }, 5000));
 
     // Cleanup inactive sessions every minute
-    setInterval(() => {
+    this.backgroundIntervals.push(setInterval(() => {
       this.cleanupInactiveSessions();
-    }, 60000);
+    }, 60000));
+  }
+
+  destroy(): void {
+    for (const id of this.backgroundIntervals) {
+      clearInterval(id);
+    }
+    this.backgroundIntervals = [];
   }
 
   /**
@@ -756,13 +768,3 @@ class MemoryService extends EventEmitter {
 }
 
 export default MemoryService;
-
-// Backward compatibility
-import { container } from "../di/container";
-import { MEMORY_SERVICE } from "../di/tokens";
-export const memoryService = new Proxy({} as MemoryService, {
-  get(_target, prop) {
-    const instance = container.resolve(MEMORY_SERVICE as any);
-    return (instance as any)[prop];
-  }
-});

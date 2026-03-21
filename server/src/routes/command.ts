@@ -1,6 +1,9 @@
 import { Router, Request, Response } from "express";
+import logger from "../logger";
 import { authenticateToken } from "../middleware/auth";
-import { commandProcessor } from "../services/commandProcessor";
+import { getService } from "../di/container";
+import { COMMAND_PROCESSOR } from "../di/tokens";
+import type CommandProcessor from "../services/commandProcessor";
 import {
   validateCommandExecution,
   handleValidationErrors,
@@ -48,6 +51,7 @@ router.post(
         return;
       }
 
+      const commandProcessor = getService<CommandProcessor>(COMMAND_PROCESSOR);
       const { command, serverId } = req.body;
 
       // Parse command
@@ -110,7 +114,7 @@ router.post(
         timestamp: new Date(),
       });
     } catch (error) {
-      console.error("Error executing command:", error);
+      logger.error({ err: error }, "Error executing command");
       res.status(500).json({
         success: false,
         output: ["Internal server error while executing command"],

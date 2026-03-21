@@ -1,5 +1,6 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
+import { infoBox, render } from "./asciiBox";
 
 export class FileCommandsModule implements CommandModule {
   public commands: Set<string> = new Set([
@@ -41,7 +42,10 @@ export class FileCommandsModule implements CommandModule {
         category: "file",
         description: "Upload a file to the current server",
         usage: "upload <filename> <content>",
-        examples: ["upload script.sh 'echo hello'", "upload data.txt important info"],
+        examples: [
+          "upload script.sh 'echo hello'",
+          "upload data.txt important info",
+        ],
       },
       {
         command: "download",
@@ -53,21 +57,22 @@ export class FileCommandsModule implements CommandModule {
       {
         command: "encrypt",
         category: "file",
-        description: "Encrypt a file for security",
+        description: "[Crypto 10] Encrypt a file for security",
         usage: "encrypt <filename>",
         examples: ["encrypt passwords.txt", "encrypt /data/secrets.db"],
       },
       {
         command: "decrypt",
         category: "file",
-        description: "Decrypt an encrypted file",
+        description: "[Crypto 15] Decrypt an encrypted file",
         usage: "decrypt <filename>",
         examples: ["decrypt passwords.txt.enc", "decrypt secrets.db.enc"],
       },
       {
         command: "analyze",
         category: "file",
-        description: "Analyze a file for vulnerabilities or information",
+        description:
+          "[Forensics 10] Analyze a file for vulnerabilities or information",
         usage: "analyze <filename>",
         examples: ["analyze system.log", "analyze firewall.conf"],
       },
@@ -265,25 +270,61 @@ export class FileCommandsModule implements CommandModule {
 
       const content = readResult.data.content;
 
-      // 2. Delete original file
-      await context.fileService.deleteNode(serverId, context.userId, path);
-
-      // 3. Create new encrypted file
+      // 2. Create encrypted file at a temp path first to avoid data loss
+      const tempPath = `${path}.__encrypting__`;
       const createResult = await context.fileService.createFile(
         serverId,
         context.userId,
-        path,
+        tempPath,
         content,
         true, // encrypt
         password,
       );
 
       if (!createResult.success) {
-        // Try to restore original if create failed?
-        // For now just return error
+        // Clean up temp file if it was partially created
+        try {
+          await context.fileService.deleteNode(
+            serverId,
+            context.userId,
+            tempPath,
+          );
+        } catch {
+          // Ignore cleanup errors
+        }
         return {
           success: false,
           output: `Encryption failed: ${createResult.message}`,
+          timestamp: new Date(),
+        };
+      }
+
+      // 3. Delete original and rename temp to original path
+      await context.fileService.deleteNode(serverId, context.userId, path);
+      // Move temp file to original path by creating final and deleting temp
+      const finalResult = await context.fileService.createFile(
+        serverId,
+        context.userId,
+        path,
+        content,
+        true,
+        password,
+      );
+      // Clean up temp file
+      try {
+        await context.fileService.deleteNode(
+          serverId,
+          context.userId,
+          tempPath,
+        );
+      } catch {
+        // Ignore - temp file cleanup is best-effort
+      }
+
+      if (!finalResult.success) {
+        return {
+          success: false,
+          output: `Encryption partially failed - check file: ${path}`,
           timestamp: new Date(),
         };
       }
@@ -448,15 +489,29 @@ export class FileCommandsModule implements CommandModule {
         };
       }
 
-      const output = [
-        `Analysis Report: ${filename}`,
-        `---------------------------`,
-        `Type: ${entry.type}`,
-        `Size: ${entry.size} bytes`,
-        `Encrypted: ${entry.isEncrypted ? "Yes" : "No"}`,
-        `Permissions: ${entry.permissions || "N/A"}`,
-        `Modified: ${new Date(entry.modified).toLocaleString()}`,
-      ].join("\n");
+      const labelWidth = 14;
+      const output = render(
+        infoBox(
+          `ANALYSIS REPORT: ${filename}`,
+          [
+            { label: "Type:".padEnd(labelWidth), value: entry.type },
+            { label: "Size:".padEnd(labelWidth), value: `${entry.size} bytes` },
+            {
+              label: "Encrypted:".padEnd(labelWidth),
+              value: entry.isEncrypted ? "Yes" : "No",
+            },
+            {
+              label: "Permissions:".padEnd(labelWidth),
+              value: entry.permissions || "N/A",
+            },
+            {
+              label: "Modified:".padEnd(labelWidth),
+              value: new Date(entry.modified).toLocaleString(),
+            },
+          ],
+          40,
+        ),
+      );
 
       return {
         success: true,

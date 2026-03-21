@@ -1400,6 +1400,7 @@
     /* ==================== OUTPUT LINES ==================== */
 
     .output-line {
+        position: relative;
         padding: 2px 8px;
         margin: 1px 0;
         line-height: 1.6;
@@ -1431,11 +1432,16 @@
     }
 
     .line-timestamp {
+        position: absolute;
+        right: 8px;
+        top: 50%;
+        transform: translateY(-50%);
         opacity: 0;
         font-size: 10px;
         color: rgba(0, 204, 255, 0.5);
-        margin-right: 8px;
+        pointer-events: none;
         transition: opacity 0.2s ease;
+        z-index: 1;
     }
 
     .output-line:hover .line-timestamp {

@@ -1,7 +1,10 @@
+import { Server as SocketIOServer } from "socket.io";
 import { prisma } from "../database/client";
-import { io } from "../index";
 import type { GameEvent, FactionId } from "../../../shared/types";
 import { EventType, EventSeverity } from "../../../shared/types";
+import { injectable, inject } from "tsyringe";
+import type { Logger } from "pino";
+import { LOGGER, SOCKET_IO } from "../di/tokens";
 
 // Event subscription tracking
 interface EventSubscription {
@@ -17,10 +20,21 @@ interface EventSubscription {
 // In-memory subscription store (could be moved to Redis for scale)
 const activeSubscriptions = new Map<string, EventSubscription>();
 
-import { injectable } from "tsyringe";
-
 @injectable()
 export class EventService {
+  private cleanupInterval: NodeJS.Timeout;
+
+  constructor(
+    @inject(LOGGER) private logger: Logger,
+    @inject(SOCKET_IO) private io: SocketIOServer,
+  ) {
+    // Periodically remove expired in-memory subscriptions
+    this.cleanupInterval = setInterval(
+      () => this.cleanupExpiredSubscriptions(),
+      5 * 60 * 1000,
+    );
+    (this.cleanupInterval as NodeJS.Timeout & { unref?: () => void }).unref?.();
+  }
   // ==================== EVENT CREATION ====================
 
   /**
@@ -57,9 +71,7 @@ export class EventService {
     this.broadcastEvent(gameEvent, recipients);
 
     // Log event creation
-    console.log(
-      `📡 Event created: ${type} - ${title} (recipients: ${recipients.length})`,
-    );
+    this.logger.info({ type, title, recipientCount: recipients.length }, "Event created");
 
     return gameEvent;
   }
@@ -131,14 +143,14 @@ export class EventService {
    */
   private broadcastEvent(event: GameEvent, recipients: string[]): void {
     recipients.forEach((userId) => {
-      io.to(`user:${userId}`).emit("game:event", {
+      this.io.to(`user:${userId}`).emit("game:event", {
         ...event,
         timestamp: new Date(),
       });
     });
 
     // Also broadcast to general event channel
-    io.emit("game:event:public", {
+    this.io.emit("game:event:public", {
       type: event.type,
       title: event.title,
       severity: event.severity,
@@ -187,9 +199,7 @@ export class EventService {
       },
     });
 
-    console.log(
-      `🎧 Subscription created: ${userId} listening to ${eventType} (method: ${method}, quality: ${quality})`,
-    );
+    this.logger.info({ userId, eventType, method, quality }, "Subscription created");
 
     return subscription;
   }
@@ -256,7 +266,7 @@ export class EventService {
     }
 
     if (cleaned > 0) {
-      console.log(`🧹 Cleaned up ${cleaned} expired subscriptions`);
+      this.logger.info({ cleaned }, "Cleaned up expired subscriptions");
     }
 
     return cleaned;
@@ -288,9 +298,7 @@ export class EventService {
       activeSubscriptions.set(subId, subscription);
     });
 
-    console.log(
-      `📡 Loaded ${dbSubscriptions.length} active subscriptions from database`,
-    );
+    this.logger.info({ count: dbSubscriptions.length }, "Loaded active subscriptions from database");
   }
 
   // ==================== SPECIFIC EVENT CREATORS ====================
@@ -522,13 +530,3 @@ export class EventService {
 }
 
 export default EventService;
-
-// Backward compatibility - lazy singleton that resolves from DI
-import { container } from "../di/container";
-import { EVENT_SERVICE } from "../di/tokens";
-export const eventService = new Proxy({} as EventService, {
-  get(_target, prop) {
-    const instance = container.resolve(EVENT_SERVICE as any);
-    return (instance as any)[prop];
-  }
-});

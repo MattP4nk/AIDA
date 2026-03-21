@@ -1,5 +1,5 @@
 import { EventEmitter } from "events";
-import { prisma } from "../database/client";
+import { prisma, Prisma } from "../database/client";
 
 /**
  * Tool/Software Item Interface
@@ -363,7 +363,10 @@ const SHOP_CATALOG: ShopItem[] = [
   },
 ];
 
-import { injectable } from "tsyringe";
+import { injectable, inject } from "tsyringe";
+import type { Logger } from "pino";
+import { LOGGER, MISSION_INTEGRATION_SERVICE } from "../di/tokens";
+import type MissionIntegrationService from "./missionIntegration";
 
 /**
  * ShopService - Manages shop, inventory, and economy
@@ -371,12 +374,21 @@ import { injectable } from "tsyringe";
 @injectable()
 class ShopService extends EventEmitter {
   private catalog: Map<string, ShopItem>;
+  private missionIntegration: MissionIntegrationService | null = null;
 
-  constructor() {
+  constructor(
+    @inject(LOGGER) private logger: Logger,
+    @inject(MISSION_INTEGRATION_SERVICE)
+    missionIntegrationService?: MissionIntegrationService,
+  ) {
     super();
+    this.missionIntegration = missionIntegrationService || null;
     this.catalog = new Map();
     this.initializeCatalog();
-    console.log("🛒 Shop Service initialized with", this.catalog.size, "items");
+    this.logger.info(
+      { itemCount: this.catalog.size },
+      "Shop Service initialized",
+    );
   }
 
   /**
@@ -542,7 +554,7 @@ class ShopService extends EventEmitter {
       this.emit("item:added", { userId, itemId, quantity });
       return true;
     } catch (error) {
-      console.error("Error adding item to inventory:", error);
+      this.logger.error({ err: error }, "Error adding item to inventory");
       return false;
     }
   }
@@ -588,7 +600,7 @@ class ShopService extends EventEmitter {
       this.emit("item:removed", { userId, itemId, quantity });
       return true;
     } catch (error) {
-      console.error("Error removing script from scripts folder:", error);
+      this.logger.error({ err: error }, "Error removing item from inventory");
       return false;
     }
   }
@@ -697,6 +709,18 @@ class ShopService extends EventEmitter {
 
       await this.addItemToInventory(userId, itemId, quantity);
 
+      // Track credit spending for mission objectives
+      if (this.missionIntegration) {
+        this.missionIntegration
+          .onCreditsTransaction(userId, totalCost, "spent")
+          .catch((err) =>
+            this.logger.error(
+              { err },
+              "Mission integration onCreditsTransaction error",
+            ),
+          );
+      }
+
       // Create transaction record
       const transactionId = `txn_${Date.now()}_${userId.slice(0, 8)}`;
 
@@ -716,7 +740,7 @@ class ShopService extends EventEmitter {
         transactionId,
       };
     } catch (error) {
-      console.error("Error purchasing item:", error);
+      this.logger.error({ err: error }, "Error purchasing item");
       return {
         success: false,
         message: "Purchase failed due to server error",
@@ -741,48 +765,94 @@ class ShopService extends EventEmitter {
         };
       }
 
-      const currentQuantity = await this.getItemQuantity(userId, itemId);
-      if (currentQuantity < quantity) {
-        return {
-          success: false,
-          message: `You only have ${currentQuantity} of this item`,
-        };
-      }
-
       // Calculate sell price (50% of original)
       const sellPrice = Math.floor((item.price * quantity) / 2);
 
-      // Remove item and add credits
-      await this.removeItemFromInventory(userId, itemId, quantity);
+      // Atomic transaction: check quantity, remove item, add credits
+      const result = await prisma.$transaction(async (tx) => {
+        const progress = await tx.playerProgress.findUnique({
+          where: { userId },
+        });
 
-      const progress = await prisma.playerProgress.findUnique({
-        where: { userId },
+        if (!progress) {
+          return {
+            success: false as const,
+            message: "Player progress not found",
+          };
+        }
+
+        const inventory = progress.inventory as Record<string, number>;
+        const currentQuantity = inventory[itemId] || 0;
+        if (currentQuantity < quantity) {
+          return {
+            success: false as const,
+            message: `You only have ${currentQuantity} of this item`,
+          };
+        }
+
+        // Check item is not currently equipped
+        const equipment = (progress.equipment as Record<string, unknown>) || {};
+        const equippedSlots = Object.entries(equipment).filter(
+          ([, eqItemId]) => eqItemId === itemId,
+        );
+        if (
+          equippedSlots.length > 0 &&
+          currentQuantity - quantity < equippedSlots.length
+        ) {
+          return {
+            success: false as const,
+            message: `Cannot sell: ${item.name} is currently equipped`,
+          };
+        }
+
+        // Update inventory and credits atomically
+        inventory[itemId] = currentQuantity - quantity;
+        if (inventory[itemId] <= 0) {
+          delete inventory[itemId];
+        }
+
+        const newCredits = progress.credits + sellPrice;
+
+        await tx.playerProgress.update({
+          where: { userId },
+          data: {
+            inventory: inventory as Prisma.JsonObject,
+            credits: newCredits,
+          },
+        });
+
+        return { success: true as const, newCredits };
       });
 
-      if (!progress) {
+      if (!result.success) {
         return {
           success: false,
-          message: "Player progress not found",
+          message: result.message,
         };
       }
 
-      const newCredits = progress.credits + sellPrice;
-
-      await prisma.playerProgress.update({
-        where: { userId },
-        data: { credits: newCredits },
-      });
-
       this.emit("item:sold", { userId, itemId, quantity, sellPrice });
+
+      // Track credit earning for mission objectives
+      if (this.missionIntegration) {
+        this.missionIntegration
+          .onCreditsTransaction(userId, sellPrice, "earned")
+          .catch((err) =>
+            this.logger.error(
+              { err },
+              "Mission integration onCreditsTransaction error",
+            ),
+          );
+      }
 
       return {
         success: true,
         message: `Sold ${quantity}x ${item.name} for ${sellPrice} credits`,
         item,
-        remainingCredits: newCredits,
+        remainingCredits: result.newCredits,
       };
     } catch (error) {
-      console.error("Error selling item:", error);
+      this.logger.error({ err: error }, "Error selling item");
       return {
         success: false,
         message: "Sale failed due to server error",
@@ -823,7 +893,7 @@ class ShopService extends EventEmitter {
         ...(item.effects ? { effects: item.effects } : {}),
       };
     } catch (error) {
-      console.error("Error using item:", error);
+      this.logger.error({ err: error }, "Error using item");
       return { success: false, message: "Failed to call script" };
     }
   }
@@ -865,13 +935,3 @@ class ShopService extends EventEmitter {
 }
 
 export default ShopService;
-
-// Backward compatibility
-import { container } from "../di/container";
-import { SHOP_SERVICE } from "../di/tokens";
-export const shopService = new Proxy({} as ShopService, {
-  get(_target, prop) {
-    const instance = container.resolve(SHOP_SERVICE as any);
-    return (instance as any)[prop];
-  }
-});

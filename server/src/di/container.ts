@@ -30,11 +30,23 @@ import MemoryService from "../services/memoryService";
 import ProcessStateService from "../services/processStateService";
 import CommandProcessor from "../services/commandProcessor";
 import { FactionService } from "../services/factionService";
+import { ReputationEngine } from "../services/reputationEngine";
 import { AIService } from "../services/aiService";
 import { PersonaService } from "../services/personaService";
 import AISchedulerService from "../services/aiSchedulerService";
 import MissionIntegrationService from "../services/missionIntegration";
 import MissionGeneratorService from "../services/missionGenerator";
+import { ServerContentService } from "../services/serverContentService";
+import ResourceService from "../services/resourceService";
+import ContestService from "../services/contestService";
+import WarfareService from "../services/warfareService";
+import AliasService from "../services/aliasService";
+import DarkNetDiscoveryService from "../services/darknetDiscoveryService";
+import CensorshipService from "../services/censorshipService";
+import { FactionKnowledgeService } from "../services/factionKnowledgeService";
+import { NetworkTopologyService } from "../services/networkTopologyService";
+import BackdoorService from "../services/backdoorService";
+import TraceService from "../services/traceService";
 
 import * as TOKENS from "./tokens";
 
@@ -47,7 +59,7 @@ export function setupContainer(
   logger: Logger,
 ): void {
   // Register external dependencies
-  container.registerInstance("Logger", logger);
+  container.registerInstance(TOKENS.LOGGER, logger);
   container.registerInstance(TOKENS.SOCKET_IO, io);
   container.registerInstance(TOKENS.PRISMA_CLIENT, prismaClient);
 
@@ -70,6 +82,10 @@ export function setupContainer(
     TOKENS.MISSION_GENERATOR_SERVICE,
     MissionGeneratorService,
   );
+  container.registerSingleton(
+    TOKENS.SERVER_CONTENT_SERVICE,
+    ServerContentService,
+  );
   container.registerSingleton(TOKENS.SERVER_SERVICE, ServerService);
   container.registerSingleton(TOKENS.HACK_SERVICE, HackService);
   container.registerSingleton(TOKENS.FILE_SERVICE, FileService);
@@ -86,11 +102,41 @@ export function setupContainer(
   );
   container.registerSingleton(TOKENS.COMMAND_PROCESSOR, CommandProcessor);
   container.registerSingleton(TOKENS.FACTION_SERVICE, FactionService);
+  container.registerSingleton(TOKENS.REPUTATION_ENGINE, ReputationEngine);
   container.registerSingleton(TOKENS.AI_SERVICE, AIService);
   container.registerSingleton(TOKENS.PERSONA_SERVICE, PersonaService);
   container.registerSingleton(TOKENS.AI_SCHEDULER_SERVICE, AISchedulerService);
 
-  console.log("✅ DI Container initialized with all services");
+  // Territory & Resources (Phase 3)
+  container.registerSingleton(TOKENS.RESOURCE_SERVICE, ResourceService);
+  container.registerSingleton(TOKENS.CONTEST_SERVICE, ContestService);
+
+  // Phase 5: Warfare, Alias, DarkNet, Censorship
+  container.registerSingleton(TOKENS.WARFARE_SERVICE, WarfareService);
+  container.registerSingleton(TOKENS.ALIAS_SERVICE, AliasService);
+  container.registerSingleton(
+    TOKENS.DARKNET_DISCOVERY_SERVICE,
+    DarkNetDiscoveryService,
+  );
+  container.registerSingleton(TOKENS.CENSORSHIP_SERVICE, CensorshipService);
+
+  // Faction Knowledge
+  container.registerSingleton(
+    TOKENS.FACTION_KNOWLEDGE_SERVICE,
+    FactionKnowledgeService,
+  );
+
+  // Network Topology
+  container.registerSingleton(
+    TOKENS.NETWORK_TOPOLOGY_SERVICE,
+    NetworkTopologyService,
+  );
+
+  // PvP Hacking Improvements
+  container.registerSingleton(TOKENS.BACKDOOR_SERVICE, BackdoorService);
+  container.registerSingleton(TOKENS.TRACE_SERVICE, TraceService);
+
+  logger.info("DI Container initialized with all services");
 }
 
 // Alias for backward compatibility

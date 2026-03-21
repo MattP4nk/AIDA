@@ -11,18 +11,23 @@
  * Phase 2, Day 8
  */
 
-import { prisma } from "../database/client";
+import { Logger } from "pino";
+import { prisma, Prisma } from "../database/client";
 import { Server as SocketIOServer } from "socket.io";
 import crypto from "crypto";
 import { injectable, inject } from "tsyringe";
 import {
+  LOGGER,
   SOCKET_IO,
   CACHE_SERVICE,
   MISSION_INTEGRATION_SERVICE,
+  FACTION_KNOWLEDGE_SERVICE,
 } from "../di/tokens";
 import type { CacheService } from "./cacheService";
 import type MissionIntegrationService from "./missionIntegration";
+import type { FactionKnowledgeService } from "./factionKnowledgeService";
 import { isPathSafe, isValidFilename } from "../utils/pathSanitizer";
+import { FilePermissions, PermissionLevel } from "../../../shared/types";
 
 // ==================== TYPES ====================
 
@@ -46,21 +51,9 @@ export interface FileNode {
   isProtected: boolean;
 }
 
-export interface FilePermissions {
-  [key: string]: any; // Allow index signature for Prisma Json compatibility
-  owner: string;
-  group?: string;
-  ownerRead: boolean;
-  ownerWrite: boolean;
-  ownerExecute: boolean;
-  groupRead: boolean;
-  groupWrite: boolean;
-  groupExecute: boolean;
-  otherRead: boolean;
-  otherWrite: boolean;
-  otherExecute: boolean;
-  requiredAccessLevel?: number; // 0-10, based on hack access level
-}
+// FilePermissions and PermissionLevel are imported from shared/types
+export type { FilePermissions } from "../../../shared/types";
+export { PermissionLevel } from "../../../shared/types";
 
 export interface FileSystemEntry {
   name: string;
@@ -94,15 +87,20 @@ export interface PathResolution {
 export class FileService {
   private encryptionAlgorithm = "aes-256-cbc";
   private missionIntegration: MissionIntegrationService | null = null;
+  private factionKnowledge: FactionKnowledgeService | null = null;
 
   constructor(
+    @inject(LOGGER) private logger: Logger,
     @inject(SOCKET_IO) _io: SocketIOServer,
     @inject(CACHE_SERVICE) private cacheService: CacheService,
     @inject(MISSION_INTEGRATION_SERVICE)
     missionIntegrationService?: MissionIntegrationService,
+    @inject(FACTION_KNOWLEDGE_SERVICE)
+    factionKnowledgeService?: FactionKnowledgeService,
   ) {
     // io parameter kept for DI initialization, will be used for future real-time features
     this.missionIntegration = missionIntegrationService || null;
+    this.factionKnowledge = factionKnowledgeService || null;
   }
 
   // ==================== FILE OPERATIONS ====================
@@ -187,7 +185,7 @@ export class FileService {
         },
       };
     } catch (error: any) {
-      console.error("List directory error:", error);
+      this.logger.error({ err: error }, "List directory error");
       return {
         success: false,
         message: "Failed to list directory",
@@ -289,6 +287,33 @@ export class FileService {
         );
       }
 
+      // Track file discovery for faction knowledge (non-home servers only)
+      if (this.factionKnowledge) {
+        this.factionKnowledge
+          .getPlayerFactionId(userId)
+          .then((factionId) => {
+            if (factionId) {
+              this.factionKnowledge!.addEntry(factionId, {
+                assetType: "file",
+                assetId: file.id,
+                assetMeta: {
+                  name: file.name,
+                  serverId,
+                  isEncrypted: file.isEncrypted,
+                  isHidden: file.isHidden,
+                  size: file.size,
+                },
+                source: "server_discovery",
+                confidence: 0.85,
+                discoveredBy: userId,
+              });
+            }
+          })
+          .catch((err) =>
+            this.logger.error({ err }, "Faction knowledge file discovery error"),
+          );
+      }
+
       return {
         success: true,
         message: `File read: ${path}`,
@@ -301,7 +326,7 @@ export class FileService {
         },
       };
     } catch (error: any) {
-      console.error("Read file error:", error);
+      this.logger.error({ err: error }, "Read file error");
       return {
         success: false,
         message: "Failed to read file",
@@ -411,16 +436,22 @@ export class FileService {
           encryptionKey: finalEncryptionKey,
           isHidden: filename.startsWith("."),
           isProtected: false,
-          permissions: this.getDefaultPermissions(userId) as any,
+          permissions:
+            this.getDefaultPermissions() as unknown as Prisma.JsonObject,
         },
       });
 
       await this.logFileAccess(userId, serverId, file.id, "create");
 
-      // Log file operation for mission tracking (future integration)
-      console.log(
-        `File operation logged: create ${path} on server ${serverId} by ${userId}`,
-      );
+      // Track for mission objectives (file upload/creation)
+      if (this.missionIntegration) {
+        await this.missionIntegration.onFileOperation(
+          userId,
+          "upload",
+          file.id,
+          serverId,
+        );
+      }
       return {
         success: true,
         message: `Created file: ${path}`,
@@ -433,7 +464,7 @@ export class FileService {
         },
       };
     } catch (error: any) {
-      console.error("Create file error:", error);
+      this.logger.error({ err: error }, "Create file error");
       return {
         success: false,
         message: "Failed to create file",
@@ -536,7 +567,7 @@ export class FileService {
         },
       };
     } catch (error: any) {
-      console.error("Update file error:", error);
+      this.logger.error({ err: error }, "Update file error");
       return {
         success: false,
         message: "Failed to update file",
@@ -631,7 +662,8 @@ export class FileService {
           encryptionKey: null,
           isHidden: dirName.startsWith("."),
           isProtected: false,
-          permissions: this.getDefaultPermissions(userId) as any,
+          permissions:
+            this.getDefaultPermissions() as unknown as Prisma.JsonObject,
         },
       });
 
@@ -646,7 +678,7 @@ export class FileService {
         },
       };
     } catch (error: any) {
-      console.error("Create directory error:", error);
+      this.logger.error({ err: error }, "Create directory error");
       return {
         success: false,
         message: "Failed to create directory",
@@ -744,7 +776,7 @@ export class FileService {
         data: { path, type: node.type },
       };
     } catch (error: any) {
-      console.error("Delete node error:", error);
+      this.logger.error({ err: error }, "Delete node error");
       return {
         success: false,
         message: "Failed to delete",
@@ -845,7 +877,7 @@ export class FileService {
         },
       };
     } catch (error: any) {
-      console.error("Copy node error:", error);
+      this.logger.error({ err: error }, "Copy node error");
       return {
         success: false,
         message: "Failed to copy",
@@ -957,7 +989,7 @@ export class FileService {
         },
       };
     } catch (error: any) {
-      console.error("Move node error:", error);
+      this.logger.error({ err: error }, "Move node error");
       return {
         success: false,
         message: "Failed to move",
@@ -991,7 +1023,7 @@ export class FileService {
 
     const permissions = node.permissions as unknown as FilePermissions;
 
-    // Check required access level
+    // Game mechanic: file requires a minimum hack access level
     if (
       permissions.requiredAccessLevel &&
       accessLevel < permissions.requiredAccessLevel
@@ -999,13 +1031,12 @@ export class FileService {
       return false;
     }
 
-    // Owner always has read access
-    if (permissions.owner === userId) {
-      return permissions.ownerRead;
+    // Owner identity lives on the node, not inside permissions
+    if (node.createdBy === userId) {
+      return (permissions.owner & PermissionLevel.READ) !== 0;
     }
 
-    // Check other permissions
-    return permissions.otherRead;
+    return (permissions.others & PermissionLevel.READ) !== 0;
   }
 
   /**
@@ -1031,17 +1062,15 @@ export class FileService {
 
     const permissions = node.permissions as unknown as FilePermissions;
 
-    // Server owner has full access (bypass protected flag)
-    if (accessLevel >= 10) {
-      if (permissions.owner === userId) {
-        return permissions.ownerWrite;
-      }
+    // Root-level access + owner bypasses protected flag
+    if (accessLevel >= 10 && node.createdBy === userId) {
+      return true;
     }
 
     // Protected files cannot be modified by non-owners
     if (node.isProtected) return false;
 
-    // Check required access level
+    // Game mechanic: file requires a minimum hack access level
     if (
       permissions.requiredAccessLevel &&
       accessLevel < permissions.requiredAccessLevel
@@ -1049,13 +1078,11 @@ export class FileService {
       return false;
     }
 
-    // Owner
-    if (permissions.owner === userId) {
-      return permissions.ownerWrite;
+    if (node.createdBy === userId) {
+      return (permissions.owner & PermissionLevel.WRITE) !== 0;
     }
 
-    // Check other permissions
-    return permissions.otherWrite;
+    return (permissions.others & PermissionLevel.WRITE) !== 0;
   }
 
   /**
@@ -1192,7 +1219,7 @@ export class FileService {
         node: currentNode as unknown as FileNode,
       };
     } catch (error) {
-      console.error("Path resolution error:", error);
+      this.logger.error({ err: error }, "Path resolution error");
       return {
         nodeId: null,
         path,
@@ -1290,18 +1317,11 @@ export class FileService {
   /**
    * Get default permissions for new files/directories
    */
-  private getDefaultPermissions(ownerId: string): FilePermissions {
+  private getDefaultPermissions(): FilePermissions {
     return {
-      owner: ownerId,
-      ownerRead: true,
-      ownerWrite: true,
-      ownerExecute: true,
-      groupRead: true,
-      groupWrite: false,
-      groupExecute: false,
-      otherRead: false,
-      otherWrite: false,
-      otherExecute: false,
+      owner: PermissionLevel.FULL, // owner can read/write/execute/delete
+      faction: PermissionLevel.READ, // faction members can read
+      others: PermissionLevel.NONE, // others have no access
       requiredAccessLevel: 1,
     };
   }
@@ -1310,25 +1330,17 @@ export class FileService {
    * Format permissions as Unix-style string (e.g., "rwxr-xr--")
    */
   private formatPermissions(permissions: FilePermissions): string {
-    const owner = [
-      permissions.ownerRead ? "r" : "-",
-      permissions.ownerWrite ? "w" : "-",
-      permissions.ownerExecute ? "x" : "-",
-    ].join("");
-
-    const group = [
-      permissions.groupRead ? "r" : "-",
-      permissions.groupWrite ? "w" : "-",
-      permissions.groupExecute ? "x" : "-",
-    ].join("");
-
-    const other = [
-      permissions.otherRead ? "r" : "-",
-      permissions.otherWrite ? "w" : "-",
-      permissions.otherExecute ? "x" : "-",
-    ].join("");
-
-    return owner + group + other;
+    const decode = (level: number): string =>
+      [
+        level & PermissionLevel.READ ? "r" : "-",
+        level & PermissionLevel.WRITE ? "w" : "-",
+        level & PermissionLevel.EXECUTE ? "x" : "-",
+      ].join("");
+    return (
+      decode(permissions.owner) +
+      decode(permissions.faction) +
+      decode(permissions.others)
+    );
   }
 
   /**
@@ -1353,7 +1365,7 @@ export class FileService {
         encryptionKey: sourceNode.encryptionKey,
         isHidden: sourceNode.isHidden,
         isProtected: false,
-        permissions: sourceNode.permissions,
+        permissions: sourceNode.permissions as unknown as Prisma.JsonObject,
       },
     });
 
@@ -1365,7 +1377,7 @@ export class FileService {
 
       for (const child of children) {
         await this.duplicateNode(
-          child as FileNode,
+          child as unknown as FileNode,
           newNode.id,
           newName,
           userId,
@@ -1412,7 +1424,7 @@ export class FileService {
         });
       }
     } catch (error) {
-      console.error("Failed to log file access:", error);
+      this.logger.error({ err: error }, "Failed to log file access");
     }
   }
 
@@ -1448,21 +1460,14 @@ export class FileService {
             isHidden: false,
             isProtected: true,
             permissions: {
-              owner: ownerId,
-              ownerRead: true,
-              ownerWrite: true,
-              ownerExecute: true,
-              groupRead: true,
-              groupWrite: false,
-              groupExecute: true,
-              otherRead: false,
-              otherWrite: false,
-              otherExecute: false,
+              owner: PermissionLevel.FULL,
+              faction: PermissionLevel.READ | PermissionLevel.EXECUTE,
+              others: PermissionLevel.NONE,
               requiredAccessLevel: 0,
-            } as any,
+            } as unknown as Prisma.JsonObject,
           },
         });
-        console.log(`Created root directory for server ${serverId}`);
+        this.logger.info({ serverId }, "Created root directory for server");
       }
 
       // Check which common directories already exist
@@ -1501,27 +1506,18 @@ export class FileService {
             encryptionKey: null,
             isHidden: false,
             isProtected: dirName === "bin" || dirName === "etc",
-            permissions: this.getDefaultPermissions(ownerId) as any,
+            permissions:
+              this.getDefaultPermissions() as unknown as Prisma.JsonObject,
           },
         });
       }
 
-      console.log(`File system initialized for server ${serverId}`);
+      this.logger.info({ serverId }, "File system initialized for server");
     } catch (error) {
-      console.error("Failed to initialize file system:", error);
+      this.logger.error({ err: error }, "Failed to initialize file system");
       throw error;
     }
   }
 }
 
 export default FileService;
-
-// Backward compatibility
-import { container } from "../di/container";
-import { FILE_SERVICE } from "../di/tokens";
-export const fileService = new Proxy({} as FileService, {
-  get(_target, prop) {
-    const instance = container.resolve(FILE_SERVICE as any);
-    return (instance as any)[prop];
-  },
-});

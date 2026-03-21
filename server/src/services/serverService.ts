@@ -1,9 +1,19 @@
 import { GameServer, ServerConnection } from "@prisma/client";
 import { Server as SocketIOServer } from "socket.io";
+import { Logger } from "pino";
 import { db } from "../database/client";
 import { injectable, inject } from "tsyringe";
-import { CACHE_SERVICE } from "../di/tokens";
+import {
+  LOGGER,
+  CACHE_SERVICE,
+  MISSION_INTEGRATION_SERVICE,
+  SERVER_CONTENT_SERVICE,
+  FACTION_KNOWLEDGE_SERVICE,
+} from "../di/tokens";
 import type { CacheService } from "./cacheService";
+import type { ServerContentService } from "./serverContentService";
+import type MissionIntegrationService from "./missionIntegration";
+import type { FactionKnowledgeService } from "./factionKnowledgeService";
 
 /**
  * Server state interface
@@ -93,11 +103,25 @@ interface AccessCheck {
 class ServerService {
   private prisma = db.client;
   private io: SocketIOServer | null = null;
+  private missionIntegration: MissionIntegrationService | null = null;
+
+  private serverContent: ServerContentService | null = null;
+  private factionKnowledge: FactionKnowledgeService | null = null;
 
   constructor(
-    @inject(CACHE_SERVICE) private cacheService: CacheService
+    @inject(LOGGER) private logger: Logger,
+    @inject(CACHE_SERVICE) private cacheService: CacheService,
+    @inject(MISSION_INTEGRATION_SERVICE)
+    missionIntegrationService?: MissionIntegrationService,
+    @inject(SERVER_CONTENT_SERVICE)
+    serverContentService?: ServerContentService,
+    @inject(FACTION_KNOWLEDGE_SERVICE)
+    factionKnowledgeService?: FactionKnowledgeService,
   ) {
-    console.log("🖥️  ServerService initialized");
+    this.missionIntegration = missionIntegrationService || null;
+    this.serverContent = serverContentService || null;
+    this.factionKnowledge = factionKnowledgeService || null;
+    this.logger.info("ServerService initialized");
   }
 
   /**
@@ -156,12 +180,23 @@ class ServerService {
         alerts: 0,
       };
 
-      return {
-        ...server,
-        state: defaultState,
-      };
+      const result = { ...server, state: defaultState };
+
+      // Fire-and-forget: provision thematic filesystem content for the new server
+      if (this.serverContent && server.type !== "player_home") {
+        this.serverContent
+          .provisionServerContent(server.id)
+          .catch((err) =>
+            this.logger.error(
+              { err, serverId: server.id },
+              "Background server content provisioning failed",
+            ),
+          );
+      }
+
+      return result;
     } catch (error) {
-      console.error("[ServerService] Error creating server:", error);
+      this.logger.error({ err: error }, "Error creating server");
       throw new Error(
         `Failed to create server: ${error instanceof Error ? error.message : "Unknown error"}`,
       );
@@ -189,14 +224,12 @@ class ServerService {
         return null;
       }
 
-      // Generate current state
+      // Use live count for both load and connections to stay in sync
+      const liveConnections = await this.getActiveConnectionCount(serverId);
       const state: ServerState = {
         online: server.isOnline,
-        load: Math.min(
-          100,
-          (server.currentConnections / server.maxConnections) * 100,
-        ),
-        connections: await this.getActiveConnectionCount(serverId),
+        load: Math.min(100, (liveConnections / server.maxConnections) * 100),
+        connections: liveConnections,
         lastActivity: server.updatedAt,
         alerts: 0,
       };
@@ -211,7 +244,7 @@ class ServerService {
 
       return result;
     } catch (error) {
-      console.error("[ServerService] Error getting server:", error);
+      this.logger.error({ err: error }, "Error getting server");
       throw new Error(
         `Failed to get server: ${error instanceof Error ? error.message : "Unknown error"}`,
       );
@@ -226,7 +259,9 @@ class ServerService {
   public async getServerByIp(ipAddress: string): Promise<ServerDetails | null> {
     try {
       // Check cache first
-      const cached = this.cacheService.get<ServerDetails>(`server_ip:${ipAddress}`);
+      const cached = this.cacheService.get<ServerDetails>(
+        `server_ip:${ipAddress}`,
+      );
       if (cached) {
         return cached;
       }
@@ -239,14 +274,12 @@ class ServerService {
         return null;
       }
 
-      // Generate current state
+      // Use live count for both load and connections to stay in sync
+      const liveConnections = await this.getActiveConnectionCount(server.id);
       const state: ServerState = {
         online: server.isOnline,
-        load: Math.min(
-          100,
-          (server.currentConnections / server.maxConnections) * 100,
-        ),
-        connections: await this.getActiveConnectionCount(server.id),
+        load: Math.min(100, (liveConnections / server.maxConnections) * 100),
+        connections: liveConnections,
         lastActivity: server.updatedAt,
         alerts: 0,
       };
@@ -263,7 +296,7 @@ class ServerService {
 
       return result;
     } catch (error) {
-      console.error("[ServerService] Error getting server by IP:", error);
+      this.logger.error({ err: error }, "Error getting server by IP");
       return null;
     }
   }
@@ -326,7 +359,7 @@ class ServerService {
 
       return (await this.getServer(serverId)) as ServerDetails;
     } catch (error) {
-      console.error("[ServerService] Error updating server:", error);
+      this.logger.error({ err: error }, "Error updating server");
       throw new Error(
         `Failed to update server: ${error instanceof Error ? error.message : "Unknown error"}`,
       );
@@ -373,7 +406,7 @@ class ServerService {
         });
       }
     } catch (error) {
-      console.error("[ServerService] Error deleting server:", error);
+      this.logger.error({ err: error }, "Error deleting server");
       throw new Error(
         `Failed to delete server: ${error instanceof Error ? error.message : "Unknown error"}`,
       );
@@ -381,14 +414,31 @@ class ServerService {
   }
 
   /**
-   * Discover servers based on player scan level
-   * @param userId - User ID
-   * @param scanLevel - Scan skill level (0-10)
-   * @returns Array of discovered servers
+   * Extract the subnet prefix from an IP address.
+   * Returns the first two octets (e.g. "192.168") which corresponds to the
+   * /16 network zones used by this game (player 10.0.x.x, corporate 172.16-31.x.x,
+   * government 192.168.x.x, underground 169.254.x.x).
+   */
+  private getSubnet(ip: string): string {
+    const parts = ip.split(".");
+    return `${parts[0]}.${parts[1]}`;
+  }
+
+  /**
+   * Discover servers on the same network as the given IP address.
+   *
+   * Scans the /16 subnet of `fromIp` for servers the player hasn't visited yet,
+   * filtered by the player's skill level and scan depth.
+   *
+   * @param userId   - User ID
+   * @param scanLevel - Scan depth (higher reveals more encrypted servers)
+   * @param fromIp   - The IP address to scan from (current server or home server)
+   * @returns Array of newly-discovered servers on the same subnet
    */
   public async discoverServers(
     userId: string,
     scanLevel: number,
+    fromIp?: string,
   ): Promise<ServerInfo[]> {
     try {
       // Get player's current level
@@ -402,21 +452,42 @@ class ServerService {
 
       const playerLevel = progress.level;
 
-      // Discover servers within player's range
-      // Higher scan level reveals more servers
+      // Max encryption level the player can detect
       const maxEncryption = Math.min(100, playerLevel * 10 + scanLevel * 5);
 
+      // Collect server IDs the player already knows about (owned + visited)
+      const ownedServers = await this.prisma.gameServer.findMany({
+        where: { ownerId: userId },
+        select: { id: true },
+      });
+      const visitedConnections = await this.prisma.serverConnection.findMany({
+        where: { userId },
+        select: { serverId: true },
+        distinct: ["serverId"],
+      });
+
+      const knownIds = new Set<string>();
+      for (const s of ownedServers) knownIds.add(s.id);
+      for (const c of visitedConnections) knownIds.add(c.serverId);
+
+      // Build the base query — online, within encryption range, not already known
+      const whereClause: Record<string, unknown> = {
+        isOnline: true,
+        encryptionLevel: { lte: maxEncryption },
+        id: { notIn: Array.from(knownIds) },
+      };
+
+      // If we have a source IP, scope the scan to the same /16 subnet
+      let subnet: string | null = null;
+      if (fromIp) {
+        subnet = this.getSubnet(fromIp);
+        whereClause.ipAddress = { startsWith: `${subnet}.` };
+      }
+
       const servers = await this.prisma.gameServer.findMany({
-        where: {
-          isOnline: true,
-          encryptionLevel: {
-            lte: maxEncryption,
-          },
-        },
+        where: whereClause,
         take: 10 + scanLevel * 5, // More servers with higher scan level
-        orderBy: {
-          encryptionLevel: "asc",
-        },
+        orderBy: { encryptionLevel: "asc" },
       });
 
       // Audit log
@@ -424,12 +495,15 @@ class ServerService {
         count: servers.length,
         scanLevel,
         maxEncryption,
+        subnet: subnet || "global",
+        fromIp: fromIp || "none",
       });
 
       // Emit Socket.IO event
       if (this.io) {
         this.io.to(`player:${userId}`).emit("server:discovered", {
           count: servers.length,
+          subnet: subnet || "global",
           servers: servers
             .slice(0, 5)
             .map((s) => ({ id: s.id, name: s.name, ipAddress: s.ipAddress })),
@@ -445,7 +519,7 @@ class ServerService {
         isOnline: server.isOnline,
       }));
     } catch (error) {
-      console.error("[ServerService] Error discovering servers:", error);
+      this.logger.error({ err: error }, "Error discovering servers");
       throw new Error(
         `Failed to discover servers: ${error instanceof Error ? error.message : "Unknown error"}`,
       );
@@ -543,6 +617,45 @@ class ServerService {
         accessLevel: accessCheck.accessLevel,
       });
 
+      // Track for mission objectives
+      if (this.missionIntegration) {
+        this.missionIntegration
+          .onServerConnect(userId, server.id, server.type || "unknown")
+          .catch((err) =>
+            this.logger.error(
+              { err },
+              "Mission integration onServerConnect error",
+            ),
+          );
+      }
+
+      // Track server discovery for faction knowledge
+      if (this.factionKnowledge) {
+        this.factionKnowledge
+          .getPlayerFactionId(userId)
+          .then((factionId) => {
+            if (factionId) {
+              this.factionKnowledge!.addEntry(factionId, {
+                assetType: "server",
+                assetId: server.id,
+                assetMeta: {
+                  name: server.name,
+                  ip: server.ipAddress,
+                  serverType: server.type,
+                  securityLevel: server.securityLevel,
+                  ownerId: server.ownerId,
+                },
+                source: "server_discovery",
+                confidence: 0.8,
+                discoveredBy: userId,
+              });
+            }
+          })
+          .catch((err) =>
+            this.logger.error({ err }, "Faction knowledge server discovery error"),
+          );
+      }
+
       return {
         success: true,
         serverId: server.id,
@@ -550,7 +663,7 @@ class ServerService {
         message: `Connected to ${server.name}`,
       };
     } catch (error) {
-      console.error("[ServerService] Error connecting to server:", error);
+      this.logger.error({ err: error }, "Error connecting to server");
       return {
         success: false,
         serverId: idOrIp,
@@ -611,7 +724,7 @@ class ServerService {
         }
       }
     } catch (error) {
-      console.error("[ServerService] Error disconnecting from server:", error);
+      this.logger.error({ err: error }, "Error disconnecting from server");
       throw new Error(
         `Failed to disconnect from server: ${error instanceof Error ? error.message : "Unknown error"}`,
       );
@@ -642,7 +755,7 @@ class ServerService {
 
       return connections;
     } catch (error) {
-      console.error("[ServerService] Error getting active connections:", error);
+      this.logger.error({ err: error }, "Error getting active connections");
       throw new Error(
         `Failed to get active connections: ${error instanceof Error ? error.message : "Unknown error"}`,
       );
@@ -675,7 +788,7 @@ class ServerService {
 
       return connections;
     } catch (error) {
-      console.error("[ServerService] Error getting connection history:", error);
+      this.logger.error({ err: error }, "Error getting connection history");
       throw new Error(
         `Failed to get connection history: ${error instanceof Error ? error.message : "Unknown error"}`,
       );
@@ -713,7 +826,7 @@ class ServerService {
         rating,
       };
     } catch (error) {
-      console.error("[ServerService] Error calculating security level:", error);
+      this.logger.error({ err: error }, "Error calculating security level");
       return {
         firewall: 50,
         ids: 40,
@@ -800,7 +913,7 @@ class ServerService {
         reason: "Access granted",
       };
     } catch (error) {
-      console.error("[ServerService] Error checking server access:", error);
+      this.logger.error({ err: error }, "Error checking server access");
       return {
         canAccess: false,
         accessLevel: 0,
@@ -876,7 +989,7 @@ class ServerService {
         }
       }
     } catch (error) {
-      console.error("[ServerService] Error triggering security alert:", error);
+      this.logger.error({ err: error }, "Error triggering security alert");
       throw new Error(
         `Failed to trigger security alert: ${error instanceof Error ? error.message : "Unknown error"}`,
       );
@@ -922,7 +1035,7 @@ class ServerService {
         }
       }
     } catch (error) {
-      console.error("[ServerService] Error updating server state:", error);
+      this.logger.error({ err: error }, "Error updating server state");
       throw new Error(
         `Failed to update server state: ${error instanceof Error ? error.message : "Unknown error"}`,
       );
@@ -954,7 +1067,7 @@ class ServerService {
         alerts: 0, // Could be tracked separately
       };
     } catch (error) {
-      console.error("[ServerService] Error getting server state:", error);
+      this.logger.error({ err: error }, "Error getting server state");
       throw new Error(
         `Failed to get server state: ${error instanceof Error ? error.message : "Unknown error"}`,
       );
@@ -977,7 +1090,7 @@ class ServerService {
         },
       });
     } catch (error) {
-      console.error("[ServerService] Error getting connection count:", error);
+      this.logger.error({ err: error }, "Error getting connection count");
       return 0;
     }
   }
@@ -1004,20 +1117,10 @@ class ServerService {
         },
       });
     } catch (error) {
-      console.error("[ServerService] Error creating audit log:", error);
+      this.logger.error({ err: error }, "Error creating audit log");
       // Don't throw - audit log failure shouldn't break main functionality
     }
   }
 }
 
 export default ServerService;
-
-// Backward compatibility
-import { container } from "../di/container";
-import { SERVER_SERVICE } from "../di/tokens";
-export const serverService = new Proxy({} as ServerService, {
-  get(_target, prop) {
-    const instance = container.resolve(SERVER_SERVICE as any);
-    return (instance as any)[prop];
-  }
-});

@@ -2,9 +2,15 @@ import { Router } from "express";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 
+import logger from "../logger";
 import { prisma } from "../database/client";
 import { config } from "../config/environment";
-import type { AuthRequest, AuthResponse } from "../../../shared/types";
+import { authenticateToken, invalidateAuthCache } from "../middleware/auth";
+import { getService } from "../di/container";
+import { FACTION_SERVICE, IP_SERVICE } from "../di/tokens";
+import type { FactionService } from "../services/factionService";
+import type IPService from "../services/ipService";
+import type { AuthRequest, AuthResponse, User } from "../../../shared/types";
 import {
   validateRegistration,
   validateLogin,
@@ -12,12 +18,6 @@ import {
 } from "../middleware/validation";
 
 const router = Router();
-
-// Helper function to generate IP address for new users
-function generateHomeIP(): string {
-  const octet = () => Math.floor(Math.random() * 200) + 10; // 10-209 range
-  return `192.168.${octet()}.${octet()}`;
-}
 
 // Helper function to generate JWT token
 function generateToken(userId: string): string {
@@ -57,19 +57,13 @@ router.post(
         return res.status(409).json(response);
       }
 
-      // Generate unique home IP
-      let homeIp: string = generateHomeIP();
-      let attempts = 0;
-      do {
-        const ipExists = await prisma.user.findUnique({
-          where: { homeIp },
-        });
-        if (!ipExists) break;
-        homeIp = generateHomeIP();
-        attempts++;
-      } while (attempts < 10);
-
-      if (attempts >= 10) {
+      // Generate unique home IP on an isolated /16 subnet via IPService
+      let homeIp: string;
+      try {
+        const ipService = getService<IPService>(IP_SERVICE);
+        homeIp = await ipService.generatePlayerHomeIP();
+      } catch (err) {
+        logger.error({ err }, "Failed to generate player home IP");
         return res.status(500).json({
           success: false,
           error: "Unable to generate unique home IP",
@@ -101,6 +95,7 @@ router.post(
             lastLogin: true,
             isActive: true,
             isOnline: true,
+            role: true,
           },
         });
 
@@ -118,10 +113,6 @@ router.post(
             stealth: 10,
             socialEng: 5,
             forensics: 5,
-            repMilitary: 0,
-            repSwordCorp: 0,
-            repAnons: 0,
-            repNeutral: 0,
             missionProgress: {},
             achievements: [],
           },
@@ -185,6 +176,14 @@ router.post(
         return user;
       });
 
+      // Initialize faction standings for new user
+      try {
+        const factionService = getService<FactionService>(FACTION_SERVICE);
+        await factionService.initializeStandings(result.id);
+      } catch {
+        // Non-critical: standings will be created on first interaction
+      }
+
       // Generate JWT token
       const token = generateToken(result.id);
 
@@ -224,7 +223,7 @@ router.post(
 
       res.status(201).json(response);
     } catch (error) {
-      console.error("Registration error:", error);
+      logger.error({ err: error }, "Registration error");
       res.status(500).json({
         success: false,
         error: "Internal server error",
@@ -262,6 +261,7 @@ router.post(
           lastLogin: true,
           isActive: true,
           isOnline: true,
+          role: true,
         },
       });
 
@@ -324,13 +324,13 @@ router.post(
       const response: AuthResponse = {
         success: true,
         token,
-        user: userWithoutPassword,
+        user: userWithoutPassword as unknown as User,
         message: "Login successful",
       };
 
       res.json(response);
     } catch (error) {
-      console.error("Login error:", error);
+      logger.error({ err: error }, "Login error");
       res.status(500).json({
         success: false,
         error: "Internal server error",
@@ -340,42 +340,48 @@ router.post(
   },
 );
 
-// User Logout
-router.post("/logout", async (req, res) => {
+// User Logout (authenticated — only deactivates YOUR session)
+router.post("/logout", authenticateToken, async (req, res) => {
   try {
+    const userId = req.user?.id;
+    if (!userId) {
+      res.status(401).json({
+        success: false,
+        error: "Not authenticated",
+        timestamp: new Date(),
+      });
+      return;
+    }
+
     const token = req.headers.authorization?.replace("Bearer ", "");
 
     if (token) {
-      // Deactivate session
+      // Evict from auth cache immediately so the token stops working at once
+      invalidateAuthCache(token);
+
+      // Deactivate only sessions belonging to the authenticated user
       await prisma.userSession.updateMany({
-        where: { token },
+        where: { token, userId },
         data: { isActive: false },
       });
 
       // Update user offline status
-      try {
-        const decoded = jwt.verify(token, config.JWT_SECRET) as {
-          userId: string;
-        };
-        await prisma.user.update({
-          where: { id: decoded.userId },
-          data: { isOnline: false },
-        });
+      await prisma.user.update({
+        where: { id: userId },
+        data: { isOnline: false },
+      });
 
-        // Log logout
-        await prisma.auditLog.create({
-          data: {
-            userId: decoded.userId,
-            action: "user_logout",
-            resource: "user",
-            resourceId: decoded.userId,
-            ipAddress: req.ip || null,
-            userAgent: req.get("User-Agent") || null,
-          },
-        });
-      } catch (jwtError) {
-        // Token might be invalid, but that's okay for logout
-      }
+      // Log logout
+      await prisma.auditLog.create({
+        data: {
+          userId,
+          action: "user_logout",
+          resource: "user",
+          resourceId: userId,
+          ipAddress: req.ip || null,
+          userAgent: req.get("User-Agent") || null,
+        },
+      });
     }
 
     res.json({
@@ -384,7 +390,7 @@ router.post("/logout", async (req, res) => {
       timestamp: new Date(),
     });
   } catch (error) {
-    console.error("Logout error:", error);
+    logger.error({ err: error }, "Logout error");
     res.status(500).json({
       success: false,
       error: "Internal server error",
@@ -437,6 +443,7 @@ router.get("/verify", async (req: any, res: any) => {
         lastLogin: true,
         isActive: true,
         isOnline: true,
+        role: true,
       },
     });
 
@@ -454,7 +461,7 @@ router.get("/verify", async (req: any, res: any) => {
       timestamp: new Date(),
     });
   } catch (error) {
-    console.error("Token verification error:", error);
+    logger.error({ err: error }, "Token verification error");
     res.status(401).json({
       success: false,
       error: "Invalid token",

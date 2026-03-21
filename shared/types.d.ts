@@ -1,3 +1,5 @@
+export type UserRole = "player" | "moderator" | "admin";
+
 export interface User {
     id: string;
     username: string;
@@ -7,6 +9,7 @@ export interface User {
     lastLogin: Date;
     isActive: boolean;
     isOnline: boolean;
+    role?: UserRole;
 }
 export interface AuthRequest {
     username: string;
@@ -46,12 +49,9 @@ export declare enum DiscoveryLevel {
     TARGET_IDENTIFIED = 4,
     AIDA_REVEALED = 5
 }
-export type FactionId = "military" | "sword_corp" | "anons" | "neutral";
+export type FactionId = "garrison" | "dothackers" | "cybercorp" | "darknet";
 export interface FactionReputation {
-    military: number;
-    sword_corp: number;
-    anons: number;
-    neutral: number;
+    [factionShortName: string]: number;
 }
 export interface Faction {
     id: FactionId;

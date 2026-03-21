@@ -1,8 +1,9 @@
 import { EventEmitter } from "events";
+import { Logger } from "pino";
 import { Server as SocketIOServer } from "socket.io";
 import { prisma } from "../database/client";
 import { injectable, inject } from "tsyringe";
-import { SOCKET_IO } from "../di/tokens";
+import { LOGGER, SOCKET_IO } from "../di/tokens";
 
 /**
  * Online player information
@@ -81,13 +82,16 @@ export class PlayerPresenceService extends EventEmitter {
   private activityTimeouts: Map<string, NodeJS.Timeout>;
   private readonly ACTIVITY_TIMEOUT = 5 * 60 * 1000; // 5 minutes
 
-  constructor(@inject(SOCKET_IO) private io: SocketIOServer) {
+  constructor(
+    @inject(LOGGER) private logger: Logger,
+    @inject(SOCKET_IO) private io: SocketIOServer,
+  ) {
     super();
     this.onlinePlayers = new Map();
     this.playersByServer = new Map();
     this.activityTimeouts = new Map();
 
-    console.log("👥 Player Presence Service initialized");
+    this.logger.info("Player Presence Service initialized");
 
     // Clean up inactive players every minute
     setInterval(() => this.cleanupInactivePlayers(), 60000);
@@ -112,7 +116,7 @@ export class PlayerPresenceService extends EventEmitter {
       });
 
       if (!user) {
-        console.error(`User ${userId} not found`);
+        this.logger.error({ userId }, "User not found");
         return;
       }
 
@@ -120,15 +124,7 @@ export class PlayerPresenceService extends EventEmitter {
         userId: user.id,
         username: user.username,
         level: user.progress?.level || 1,
-        reputation: user.progress
-          ? Math.round(
-              (user.progress.repMilitary +
-                user.progress.repSwordCorp +
-                user.progress.repAnons +
-                user.progress.repNeutral) /
-                4,
-            )
-          : 0,
+        reputation: 0, // Reputation now tracked per-faction via FactionStanding
         connectedAt: new Date(),
         lastActivity: new Date(),
         socketId,
@@ -154,9 +150,9 @@ export class PlayerPresenceService extends EventEmitter {
       });
 
       this.emit("player_online", onlinePlayer);
-      console.log(`✅ Player ${user.username} is now online`);
+      this.logger.info({ username: user.username }, "Player is now online");
     } catch (error) {
-      console.error("Error marking player online:", error);
+      this.logger.error({ err: error }, "Error marking player online");
     }
   }
 
@@ -197,9 +193,9 @@ export class PlayerPresenceService extends EventEmitter {
       });
 
       this.emit("player_offline", { userId, username: player.username });
-      console.log(`👋 Player ${player.username} is now offline`);
+      this.logger.info({ username: player.username }, "Player is now offline");
     } catch (error) {
-      console.error("Error marking player offline:", error);
+      this.logger.error({ err: error }, "Error marking player offline");
     }
   }
 
@@ -224,7 +220,7 @@ export class PlayerPresenceService extends EventEmitter {
 
     // Set new timeout
     const timeout = setTimeout(() => {
-      console.log(`⏰ Player ${userId} inactive, marking as away`);
+      this.logger.info({ userId }, "Player inactive, marking as away");
       // Could mark as "away" status here
     }, this.ACTIVITY_TIMEOUT);
 
@@ -238,13 +234,19 @@ export class PlayerPresenceService extends EventEmitter {
     const now = Date.now();
     const timeout = 30 * 60 * 1000; // 30 minutes
 
+    // Collect inactive IDs first to avoid modifying Map during iteration
+    const inactiveIds: string[] = [];
     this.onlinePlayers.forEach((player, userId) => {
-      const inactiveTime = now - player.lastActivity.getTime();
-      if (inactiveTime > timeout) {
-        console.log(`🧹 Cleaning up inactive player ${player.username}`);
-        this.playerDisconnected(userId);
+      if (now - player.lastActivity.getTime() > timeout) {
+        inactiveIds.push(userId);
       }
     });
+
+    for (const userId of inactiveIds) {
+      const player = this.onlinePlayers.get(userId);
+      this.logger.info({ username: player?.username }, "Cleaning up inactive player");
+      this.playerDisconnected(userId);
+    }
   }
 
   // ==================== SERVER OCCUPANCY ====================
@@ -294,11 +296,9 @@ export class PlayerPresenceService extends EventEmitter {
       });
 
       this.emit("player_joined_server", { userId, serverId });
-      console.log(
-        `🖥️  Player ${player.username} joined server ${server?.name || serverId}`,
-      );
+      this.logger.info({ username: player.username, serverName: server?.name || serverId }, "Player joined server");
     } catch (error) {
-      console.error("Error handling player server join:", error);
+      this.logger.error({ err: error }, "Error handling player server join");
     }
   }
 
@@ -340,9 +340,9 @@ export class PlayerPresenceService extends EventEmitter {
       delete player.currentServerName;
 
       this.emit("player_left_server", { userId, serverId });
-      console.log(`🚪 Player ${player.username} left server ${serverId}`);
+      this.logger.info({ username: player.username, serverId }, "Player left server");
     } catch (error) {
-      console.error("Error handling player server leave:", error);
+      this.logger.error({ err: error }, "Error handling player server leave");
     }
   }
 
@@ -382,7 +382,7 @@ export class PlayerPresenceService extends EventEmitter {
         isPublic: true, // Could be based on server.accessRules
       };
     } catch (error) {
-      console.error("Error getting server occupancy:", error);
+      this.logger.error({ err: error }, "Error getting server occupancy");
       return null;
     }
   }
@@ -450,15 +450,7 @@ export class PlayerPresenceService extends EventEmitter {
         username: user.username,
         email: user.email, // Only show to admins/self
         level: user.progress?.level || 1,
-        reputation: user.progress
-          ? Math.round(
-              (user.progress.repMilitary +
-                user.progress.repSwordCorp +
-                user.progress.repAnons +
-                user.progress.repNeutral) /
-                4,
-            )
-          : 0,
+        reputation: 0, // Reputation now tracked per-faction via FactionStanding
         joinedAt: user.createdAt,
         totalHacks: hackLogs.length,
         successfulHacks,
@@ -482,7 +474,7 @@ export class PlayerPresenceService extends EventEmitter {
 
       return details;
     } catch (error) {
-      console.error("Error getting player details:", error);
+      this.logger.error({ err: error }, "Error getting player details");
       return null;
     }
   }
@@ -593,22 +585,3 @@ export class PlayerPresenceService extends EventEmitter {
 }
 
 export default PlayerPresenceService;
-
-// Backward compatibility
-import { container } from "../di/container";
-import { PLAYER_PRESENCE_SERVICE } from "../di/tokens";
-export const presenceService = new Proxy({} as PlayerPresenceService, {
-  get(_target, prop) {
-    const instance = container.resolve(PLAYER_PRESENCE_SERVICE as any);
-    return (instance as any)[prop];
-  }
-});
-
-// Keep old initialization function for compatibility during transition
-export function initializePresenceService(_io: SocketIOServer): PlayerPresenceService {
-  return container.resolve(PLAYER_PRESENCE_SERVICE as any);
-}
-
-export function getPresenceService(): PlayerPresenceService {
-  return container.resolve(PLAYER_PRESENCE_SERVICE as any);
-}

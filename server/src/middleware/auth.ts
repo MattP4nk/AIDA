@@ -1,7 +1,22 @@
 import { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
+import logger from "../logger";
 import { prisma } from "../database/client";
 import { config } from "../config/environment";
+
+// ── Auth session cache ────────────────────────────────────────────
+// Keyed by token; avoids 2 DB queries on every authenticated request.
+// TTL is intentionally short so changes (ban, deactivation) take effect quickly.
+const AUTH_CACHE_TTL_MS = 60_000; // 60 seconds
+interface AuthCacheEntry {
+  user: { id: string; username: string; email: string; homeIp: string; isActive: boolean; isOnline: boolean; role: string };
+  expiresAt: number;
+}
+const authCache = new Map<string, AuthCacheEntry>();
+
+export function invalidateAuthCache(token: string): void {
+  authCache.delete(token);
+}
 
 // Extend Express Request interface to include user
 declare global {
@@ -13,6 +28,7 @@ declare global {
         email: string;
         homeIp: string;
         isActive: boolean;
+        role: string;
       } | null;
     }
   }
@@ -39,6 +55,13 @@ export const authenticateToken = async (
       });
     }
 
+    // Cache hit — skip DB entirely
+    const cached = authCache.get(token);
+    if (cached && cached.expiresAt > Date.now()) {
+      req.user = cached.user;
+      return next();
+    }
+
     // Verify JWT token
     const decoded = jwt.verify(token, config.JWT_SECRET) as { userId: string };
 
@@ -52,6 +75,7 @@ export const authenticateToken = async (
     });
 
     if (!session) {
+      authCache.delete(token);
       return res.status(401).json({
         success: false,
         error: "Session expired or invalid",
@@ -69,16 +93,21 @@ export const authenticateToken = async (
         homeIp: true,
         isActive: true,
         isOnline: true,
+        role: true,
       },
     });
 
     if (!user || !user.isActive) {
+      authCache.delete(token);
       return res.status(401).json({
         success: false,
         error: "User not found or inactive",
         timestamp: new Date(),
       });
     }
+
+    // Store in cache
+    authCache.set(token, { user, expiresAt: Date.now() + AUTH_CACHE_TTL_MS });
 
     // Attach user to request
     req.user = user;
@@ -92,7 +121,7 @@ export const authenticateToken = async (
       });
     }
 
-    console.error("Authentication error:", error);
+    logger.error({ err: error }, "Authentication error");
     return res.status(500).json({
       success: false,
       error: "Internal server error",
@@ -118,6 +147,12 @@ export const optionalAuth = async (
       return next(); // Continue without user
     }
 
+    const cached = authCache.get(token);
+    if (cached && cached.expiresAt > Date.now()) {
+      req.user = cached.user;
+      return next();
+    }
+
     const decoded = jwt.verify(token, config.JWT_SECRET) as { userId: string };
 
     const session = await prisma.userSession.findFirst({
@@ -138,10 +173,12 @@ export const optionalAuth = async (
           homeIp: true,
           isActive: true,
           isOnline: true,
+          role: true,
         },
       });
 
       if (user && user.isActive) {
+        authCache.set(token, { user, expiresAt: Date.now() + AUTH_CACHE_TTL_MS });
         req.user = user;
       }
     }
@@ -156,6 +193,11 @@ export const optionalAuth = async (
 // Socket.io authentication helper
 export const verifySocketToken = async (token: string) => {
   try {
+    const cached = authCache.get(token);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.user;
+    }
+
     const decoded = jwt.verify(token, config.JWT_SECRET) as { userId: string };
 
     const session = await prisma.userSession.findFirst({
@@ -179,22 +221,30 @@ export const verifySocketToken = async (token: string) => {
         homeIp: true,
         isActive: true,
         isOnline: true,
+        role: true,
       },
     });
 
-    return user && user.isActive ? user : null;
+    if (user && user.isActive) {
+      authCache.set(token, { user, expiresAt: Date.now() + AUTH_CACHE_TTL_MS });
+      return user;
+    }
+    return null;
   } catch (error) {
     return null;
   }
 };
 
+// Role hierarchy: admin > moderator > player
+const ROLE_HIERARCHY: Record<string, number> = {
+  player: 0,
+  moderator: 1,
+  admin: 2,
+};
+
 // Role-based access control middleware
-export const requirePermission = (_permission: string) => {
-  return async (
-    req: Request,
-    res: Response,
-    next: NextFunction,
-  ): Promise<void> => {
+export const requireRole = (minimumRole: string) => {
+  return (req: Request, res: Response, next: NextFunction): void => {
     if (!req.user) {
       res.status(401).json({
         success: false,
@@ -204,15 +254,27 @@ export const requirePermission = (_permission: string) => {
       return;
     }
 
-    // TODO: Implement role/permission system
-    // For now, all authenticated users have basic permissions
+    const userLevel = ROLE_HIERARCHY[req.user.role] ?? 0;
+    const requiredLevel = ROLE_HIERARCHY[minimumRole] ?? 0;
+
+    if (userLevel < requiredLevel) {
+      res.status(403).json({
+        success: false,
+        error: "Insufficient permissions",
+        timestamp: new Date(),
+      });
+      return;
+    }
+
     next();
   };
 };
 
-// Rate limiting per user
+// Rate limiting per user (with periodic cleanup to prevent memory leak)
 export const userRateLimit = (requestsPerMinute: number) => {
   const userRequests = new Map<string, { count: number; resetTime: number }>();
+  let lastCleanup = Date.now();
+  const CLEANUP_INTERVAL = 5 * 60 * 1000; // Clean up every 5 minutes
 
   return (req: Request, res: Response, next: NextFunction): void => {
     const userId = req.user?.id;
@@ -221,8 +283,18 @@ export const userRateLimit = (requestsPerMinute: number) => {
     }
 
     const now = Date.now();
-    const resetTime = now + 60 * 1000; // 1 minute from now
 
+    // Periodic cleanup of expired entries
+    if (now - lastCleanup > CLEANUP_INTERVAL) {
+      for (const [key, entry] of userRequests.entries()) {
+        if (now > entry.resetTime) {
+          userRequests.delete(key);
+        }
+      }
+      lastCleanup = now;
+    }
+
+    const resetTime = now + 60 * 1000; // 1 minute from now
     const userLimit = userRequests.get(userId);
 
     if (!userLimit || now > userLimit.resetTime) {
@@ -273,7 +345,7 @@ export const auditLog = (action: string, resource: string) => {
       }
       next();
     } catch (error) {
-      console.error("Audit logging error:", error);
+      logger.error({ err: error }, "Audit logging error");
       next(); // Don't fail the request if audit logging fails
     }
   };

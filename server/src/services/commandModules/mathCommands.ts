@@ -16,6 +16,7 @@ export class MathCommandsModule implements CommandModule {
 
   // Per-user expression engines to isolate variables
   private expressionEngines: Map<string, ExpressionEngine> = new Map();
+  private static readonly MAX_ENGINES = 500;
 
   public async execute(
     command: Command,
@@ -126,9 +127,21 @@ export class MathCommandsModule implements CommandModule {
    */
   private getEngine(userId: string): ExpressionEngine {
     if (!this.expressionEngines.has(userId)) {
+      // Evict oldest entry when cap reached
+      if (this.expressionEngines.size >= MathCommandsModule.MAX_ENGINES) {
+        const oldestKey = this.expressionEngines.keys().next().value;
+        if (oldestKey !== undefined) this.expressionEngines.delete(oldestKey);
+      }
       this.expressionEngines.set(userId, new ExpressionEngine());
     }
     return this.expressionEngines.get(userId)!;
+  }
+
+  /**
+   * Release expression engine for a user (call on session cleanup)
+   */
+  public releaseEngine(userId: string): void {
+    this.expressionEngines.delete(userId);
   }
 
   private async handleCalculate(

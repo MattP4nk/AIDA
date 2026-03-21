@@ -13,14 +13,25 @@ import {
   MissionStatus,
   TerminalTab,
 } from "../types/game";
-import { shopService } from "./shopService";
-import { missionService } from "./missionService";
 import { SESSION_TIMEOUT_MS } from "../config/constants";
 
 import { injectable, inject } from "tsyringe";
-import { SOCKET_IO, EVENT_SERVICE, COMMAND_PROCESSOR } from "../di/tokens";
+import { Logger } from "pino";
+import {
+  LOGGER,
+  SOCKET_IO,
+  EVENT_SERVICE,
+  COMMAND_PROCESSOR,
+  SHOP_SERVICE,
+  MISSION_SERVICE,
+  FACTION_SERVICE,
+} from "../di/tokens";
+import { getService } from "../di/container";
 import type EventService from "./eventService";
 import type CommandProcessor from "./commandProcessor";
+import type ShopService from "./shopService";
+import type MissionService from "./missionService";
+import type { FactionService } from "./factionService";
 
 @injectable()
 class GameStateManager extends EventEmitter {
@@ -29,21 +40,37 @@ class GameStateManager extends EventEmitter {
   private serverStates: Map<string, ServerState>;
   private io: SocketIOServer;
   private eventService: EventService;
-  private commandProcessor: CommandProcessor;
+  private _commandProcessor: CommandProcessor | null = null;
+  private shopService: ShopService;
+  private missionService: MissionService;
+  private factionService: FactionService;
   private cleanupTimer: NodeJS.Timeout | null = null;
   private readonly CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
   private readonly MAX_SESSIONS = 1000;
   private readonly SESSION_IDLE_TIMEOUT_MS = 60 * 60 * 1000; // 60 minutes
+  private sessionLocks = new Set<string>(); // Prevents concurrent createSession for same user
+
+  private get commandProcessor(): CommandProcessor {
+    if (!this._commandProcessor) {
+      this._commandProcessor = getService<CommandProcessor>(COMMAND_PROCESSOR);
+    }
+    return this._commandProcessor;
+  }
 
   constructor(
+    @inject(LOGGER) private logger: Logger,
     @inject(SOCKET_IO) io: SocketIOServer,
     @inject(EVENT_SERVICE) eventService: EventService,
-    @inject(COMMAND_PROCESSOR) commandProcessor: CommandProcessor,
+    @inject(SHOP_SERVICE) shopService: ShopService,
+    @inject(MISSION_SERVICE) missionService: MissionService,
+    @inject(FACTION_SERVICE) factionService: FactionService,
   ) {
     super();
     this.io = io;
     this.eventService = eventService;
-    this.commandProcessor = commandProcessor;
+    this.shopService = shopService;
+    this.missionService = missionService;
+    this.factionService = factionService;
     this.playerSessions = new Map();
     this.activeConnections = new Map();
     this.serverStates = new Map();
@@ -69,13 +96,22 @@ class GameStateManager extends EventEmitter {
     socketId: string,
     ipAddress: string,
   ): Promise<PlayerSession> {
+    // Per-user lock to prevent concurrent session creation
+    if (this.sessionLocks.has(userId)) {
+      // Wait for the in-flight creation, then return the existing session
+      const existing = this.playerSessions.get(userId);
+      if (existing) return existing;
+      throw new Error(
+        `Session creation already in progress for user ${userId}`,
+      );
+    }
+
+    this.sessionLocks.add(userId);
     try {
       // Check if session already exists
       const existingSession = this.playerSessions.get(userId);
       if (existingSession) {
-        console.log(
-          `⚠️  Session already exists for user ${userId}, updating...`,
-        );
+        this.logger.info({ userId }, "Session already exists, updating");
         await this.destroySession(userId);
       }
 
@@ -156,8 +192,10 @@ class GameStateManager extends EventEmitter {
 
       return session;
     } catch (error) {
-      console.error(`❌ Error creating session for user ${userId}:`, error);
+      this.logger.error({ err: error, userId }, "Error creating session");
       throw error;
+    } finally {
+      this.sessionLocks.delete(userId);
     }
   }
 
@@ -165,7 +203,7 @@ class GameStateManager extends EventEmitter {
     try {
       const session = this.playerSessions.get(userId);
       if (!session) {
-        console.log(`⚠️  No session found for user ${userId}`);
+        this.logger.info({ userId }, "No session found for user");
         return;
       }
 
@@ -189,7 +227,7 @@ class GameStateManager extends EventEmitter {
 
       this.emit("session:destroyed", { userId });
     } catch (error) {
-      console.error(`❌ Error destroying session for user ${userId}:`, error);
+      this.logger.error({ err: error, userId }, "Error destroying session");
       throw error;
     }
   }
@@ -240,8 +278,9 @@ class GameStateManager extends EventEmitter {
 
     // If last directory is the old hardcoded /home/user, fix it
     if (lastDirectory === "/home/user") {
-      console.log(
-        `⚠️  Fixing old home directory for ${username}: /home/user -> ${correctHomeDir}`,
+      this.logger.info(
+        { username, correctHomeDir },
+        "Fixing old home directory",
       );
       return correctHomeDir;
     }
@@ -263,11 +302,14 @@ class GameStateManager extends EventEmitter {
       });
 
       if (!user || !user.progress) {
-        console.log(`⚠️  User or progress not found for ${userId}`);
+        this.logger.info({ userId }, "User or progress not found");
         return null;
       }
 
       const session = this.playerSessions.get(userId);
+
+      // Build reputation from FactionStanding (dynamic, not hardcoded)
+      const reputationMap = await this.factionService.getReputationMap(userId);
 
       // Build player info
       const playerInfo: PlayerInfo = {
@@ -285,12 +327,7 @@ class GameStateManager extends EventEmitter {
           socialEng: user.progress.socialEng,
           forensics: user.progress.forensics,
         },
-        reputation: {
-          military: user.progress.repMilitary,
-          swordCorp: user.progress.repSwordCorp,
-          anons: user.progress.repAnons,
-          neutral: user.progress.repNeutral,
-        },
+        reputation: reputationMap,
       };
 
       // Get current server info if connected
@@ -303,8 +340,9 @@ class GameStateManager extends EventEmitter {
       }
 
       // Build complete game state
-      const inventoryItems = await shopService.getPlayerInventory(userId);
-      const playerMissions = await missionService.getPlayerMissions(userId);
+      const inventoryItems = await this.shopService.getPlayerInventory(userId);
+      const playerMissions =
+        await this.missionService.getPlayerMissions(userId);
       const userEvents = await this.eventService.getUserEvents(userId, 10);
 
       const gameState: GameState = {
@@ -362,7 +400,7 @@ class GameStateManager extends EventEmitter {
 
       return gameState;
     } catch (error) {
-      console.error(`❌ Error getting game state for user ${userId}:`, error);
+      this.logger.error({ err: error, userId }, "Error getting game state");
       return null;
     }
   }
@@ -371,13 +409,13 @@ class GameStateManager extends EventEmitter {
     try {
       const session = this.playerSessions.get(userId);
       if (!session) {
-        console.log(`⚠️  No session found for user ${userId}`);
+        this.logger.info({ userId }, "No session found for user");
         return;
       }
 
       const state = await this.getGameState(userId);
       if (!state) {
-        console.log(`⚠️  Could not get game state for user ${userId}`);
+        this.logger.info({ userId }, "Could not get game state for user");
         return;
       }
 
@@ -386,9 +424,9 @@ class GameStateManager extends EventEmitter {
         timestamp: new Date(),
       });
 
-      console.log(`📤 Broadcast full state update to user ${userId}`);
+      this.logger.info({ userId }, "Broadcast full state update to user");
     } catch (error) {
-      console.error(`❌ Error broadcasting state update:`, error);
+      this.logger.error({ err: error }, "Error broadcasting state update");
     }
   }
 
@@ -412,9 +450,9 @@ class GameStateManager extends EventEmitter {
         timestamp: new Date(),
       });
 
-      console.log(`📤 Broadcast state delta to user ${userId}: ${path}`);
+      this.logger.info({ userId, path }, "Broadcast state delta to user");
     } catch (error) {
-      console.error(`❌ Error broadcasting state delta:`, error);
+      this.logger.error({ err: error }, "Error broadcasting state delta");
     }
   }
 
@@ -427,7 +465,7 @@ class GameStateManager extends EventEmitter {
     try {
       const session = this.playerSessions.get(userId);
       if (!session) {
-        console.log(`⚠️  No session found for user ${userId}`);
+        this.logger.info({ userId }, "No session found for user");
         return false;
       }
 
@@ -442,12 +480,49 @@ class GameStateManager extends EventEmitter {
       });
 
       if (!server) {
-        console.log(`⚠️  Server ${serverId} not found`);
+        this.logger.info({ serverId }, "Server not found");
         return false;
+      }
+
+      // Ensure the target server has a file system (lazy init for game servers)
+      const hasFileSystem = await db.client.fileSystemNode.findFirst({
+        where: { serverId, parentId: null, type: "directory" },
+      });
+      if (!hasFileSystem) {
+        try {
+          const { getService } = await import("../di/container");
+          const { FILE_SERVICE } = await import("../di/tokens");
+          const fileService = getService<any>(FILE_SERVICE);
+          await fileService.initializeFileSystem(
+            serverId,
+            server.ownerId || userId,
+          );
+          this.logger.info(
+            { serverId, serverName: server.name },
+            "Initialized file system for game server on first connect",
+          );
+        } catch (fsErr) {
+          this.logger.error(
+            { err: fsErr, serverId },
+            "Failed to initialize server file system",
+          );
+        }
       }
 
       // Update session
       session.currentServerId = serverId;
+
+      // Reset working directory to root of the new server
+      session.currentDirectory = "/";
+
+      // Update the active terminal to point at the new server
+      const activeTerminal = session.terminals.find(
+        (t) => t.id === session.activeTerminalId,
+      );
+      if (activeTerminal) {
+        activeTerminal.serverId = serverId;
+        activeTerminal.currentDirectory = "/";
+      }
 
       // Update or create server state
       let serverState = this.serverStates.get(serverId);
@@ -488,11 +563,11 @@ class GameStateManager extends EventEmitter {
       });
 
       this.emit("player:connected_to_server", { userId, serverId });
-      console.log(`🔌 User ${userId} connected to server ${serverId}`);
+      this.logger.info({ userId, serverId }, "User connected to server");
 
       return true;
     } catch (error) {
-      console.error(`❌ Error connecting player to server:`, error);
+      this.logger.error({ err: error }, "Error connecting player to server");
       return false;
     }
   }
@@ -536,10 +611,32 @@ class GameStateManager extends EventEmitter {
       });
 
       delete session.currentServerId;
+
+      // Restore working directory to the home server context
+      if (session.homeServerId) {
+        const user = await db.client.user.findUnique({
+          where: { id: userId },
+          select: { username: true },
+        });
+        const homeDir = user?.username ? `/home/${user.username}` : "/";
+        session.currentDirectory = homeDir;
+
+        const activeTerminal = session.terminals.find(
+          (t) => t.id === session.activeTerminalId,
+        );
+        if (activeTerminal) {
+          activeTerminal.serverId = session.homeServerId;
+          activeTerminal.currentDirectory = homeDir;
+        }
+      }
+
       this.emit("player:disconnected_from_server", { userId, serverId });
-      console.log(`🔌 User ${userId} disconnected from server ${serverId}`);
+      this.logger.info({ userId, serverId }, "User disconnected from server");
     } catch (error) {
-      console.error(`❌ Error disconnecting player from server:`, error);
+      this.logger.error(
+        { err: error },
+        "Error disconnecting player from server",
+      );
     }
   }
 
@@ -593,7 +690,9 @@ class GameStateManager extends EventEmitter {
   ): Promise<void> {
     try {
       // Import fileService
-      const { fileService } = await import("./fileService");
+      const { getService } = await import("../di/container");
+      const { FILE_SERVICE } = await import("../di/tokens");
+      const fileService = getService<any>(FILE_SERVICE);
 
       // Check if home server exists
       let homeServer = await db.client.gameServer.findUnique({
@@ -614,8 +713,13 @@ class GameStateManager extends EventEmitter {
         });
 
         if (existingServerWithIp) {
-          console.log(
-            `⚠ Server with IP ${user.homeIp} already exists (${existingServerWithIp.id}), using it for user ${user.username}`,
+          this.logger.info(
+            {
+              homeIp: user.homeIp,
+              existingServerId: existingServerWithIp.id,
+              username: user.username,
+            },
+            "Server with IP already exists, using it",
           );
           homeServer = existingServerWithIp;
 
@@ -643,8 +747,9 @@ class GameStateManager extends EventEmitter {
             },
           });
 
-          console.log(
-            `🏠 Created home server for user ${userId}: ${homeServerId}`,
+          this.logger.info(
+            { userId, homeServerId },
+            "Created home server for user",
           );
 
           // Store reference in User record
@@ -661,7 +766,7 @@ class GameStateManager extends EventEmitter {
       // Create user's home directory with some starter files
       await this.createStarterFiles(homeServerId, userId);
     } catch (error) {
-      console.error(`❌ Error initializing home file system:`, error);
+      this.logger.error({ err: error }, "Error initializing home file system");
     }
   }
 
@@ -670,7 +775,9 @@ class GameStateManager extends EventEmitter {
     userId: string,
   ): Promise<void> {
     try {
-      const { fileService } = await import("./fileService");
+      const { getService } = await import("../di/container");
+      const { FILE_SERVICE } = await import("../di/tokens");
+      const fileService = getService<any>(FILE_SERVICE);
 
       // Get user info
       const user = await db.client.user.findUnique({
@@ -678,7 +785,7 @@ class GameStateManager extends EventEmitter {
       });
 
       if (!user) {
-        console.error(`User ${userId} not found`);
+        this.logger.error({ userId }, "User not found");
         return;
       }
 
@@ -692,18 +799,21 @@ class GameStateManager extends EventEmitter {
       );
 
       if (createDirResult.success) {
-        console.log(
-          `🏠 Created home directory for user ${user.username}: ${userHomeDir}`,
+        this.logger.info(
+          { username: user.username, userHomeDir },
+          "Created home directory for user",
         );
       } else if (createDirResult.error === "DIRECTORY_EXISTS") {
         // Directory already exists, that's fine
-        console.log(
-          `🏠 Home directory already exists for user ${user.username}: ${userHomeDir}`,
+        this.logger.info(
+          { username: user.username, userHomeDir },
+          "Home directory already exists for user",
         );
         return; // Don't recreate starter files
       } else {
-        console.error(
-          `❌ Failed to create home directory: ${createDirResult.message}`,
+        this.logger.error(
+          { message: createDirResult.message },
+          "Failed to create home directory",
         );
         return;
       }
@@ -763,11 +873,12 @@ Tips:
         false,
       );
 
-      console.log(
-        `📄 Created starter files for user ${user.username} in ${userHomeDir}`,
+      this.logger.info(
+        { username: user.username, userHomeDir },
+        "Created starter files for user",
       );
     } catch (error) {
-      console.error(`❌ Error creating starter files:`, error);
+      this.logger.error({ err: error }, "Error creating starter files");
     }
   }
 
@@ -789,7 +900,7 @@ Tips:
         encryptionLevel: server.encryptionLevel,
       };
     } catch (error) {
-      console.error(`❌ Error getting server info:`, error);
+      this.logger.error({ err: error }, "Error getting server info");
       return null;
     }
   }
@@ -799,7 +910,7 @@ Tips:
   public createTerminal(userId: string, label?: string): TerminalTab | null {
     const session = this.playerSessions.get(userId);
     if (!session) {
-      console.error(`❌ No session found for user ${userId}`);
+      this.logger.error({ userId }, "No session found for user");
       return null;
     }
 
@@ -820,7 +931,10 @@ Tips:
     }
 
     session.terminals.push(newTerminal);
-    console.log(`✅ Created terminal ${newTerminal.id} for user ${userId}`);
+    this.logger.info(
+      { terminalId: newTerminal.id, userId },
+      "Created terminal",
+    );
 
     return newTerminal;
   }
@@ -828,13 +942,13 @@ Tips:
   public closeTerminal(userId: string, terminalId: string): boolean {
     const session = this.playerSessions.get(userId);
     if (!session) {
-      console.error(`❌ No session found for user ${userId}`);
+      this.logger.error({ userId }, "No session found for user");
       return false;
     }
 
     // Don't allow closing the last terminal
     if (session.terminals.length <= 1) {
-      console.warn(`⚠️  Cannot close the last terminal for user ${userId}`);
+      this.logger.warn({ userId }, "Cannot close the last terminal");
       return false;
     }
 
@@ -842,13 +956,13 @@ Tips:
       (t) => t.id === terminalId,
     );
     if (terminalIndex === -1) {
-      console.error(`❌ Terminal ${terminalId} not found for user ${userId}`);
+      this.logger.error({ terminalId, userId }, "Terminal not found for user");
       return false;
     }
 
     // Don't allow closing the home terminal (first terminal, index 0)
     if (terminalIndex === 0) {
-      console.warn(`⚠️  Cannot close the home terminal for user ${userId}`);
+      this.logger.warn({ userId }, "Cannot close the home terminal");
       return false;
     }
 
@@ -859,26 +973,26 @@ Tips:
       session.activeTerminalId = session.terminals[0]!.id;
     }
 
-    console.log(`✅ Closed terminal ${terminalId} for user ${userId}`);
+    this.logger.info({ terminalId, userId }, "Closed terminal");
     return true;
   }
 
   public switchTerminal(userId: string, terminalId: string): boolean {
     const session = this.playerSessions.get(userId);
     if (!session) {
-      console.error(`❌ No session found for user ${userId}`);
+      this.logger.error({ userId }, "No session found for user");
       return false;
     }
 
     const terminal = session.terminals.find((t) => t.id === terminalId);
     if (!terminal) {
-      console.error(`❌ Terminal ${terminalId} not found for user ${userId}`);
+      this.logger.error({ terminalId, userId }, "Terminal not found for user");
       return false;
     }
 
     session.activeTerminalId = terminalId;
     terminal.lastActivity = new Date();
-    console.log(`✅ Switched to terminal ${terminalId} for user ${userId}`);
+    this.logger.info({ terminalId, userId }, "Switched to terminal");
 
     return true;
   }
@@ -953,16 +1067,21 @@ Tips:
     const now = Date.now();
     let cleanedCount = 0;
 
+    // Collect idle userIds first to avoid modifying the Map during iteration
+    const idleUserIds: string[] = [];
     for (const [userId, session] of this.playerSessions.entries()) {
       const idleTime = now - session.lastActivity.getTime();
-
       if (idleTime > this.SESSION_IDLE_TIMEOUT_MS) {
-        try {
-          await this.destroySession(userId);
-          cleanedCount++;
-        } catch (error) {
-          console.error(`Error cleaning up session for user ${userId}:`, error);
-        }
+        idleUserIds.push(userId);
+      }
+    }
+
+    for (const userId of idleUserIds) {
+      try {
+        await this.destroySession(userId);
+        cleanedCount++;
+      } catch (error) {
+        this.logger.error({ err: error, userId }, "Error cleaning up session");
       }
     }
 
@@ -1002,7 +1121,10 @@ Tips:
       this.activeConnections.clear();
       this.serverStates.clear();
     } catch (error) {
-      console.error("Error during GameStateManager cleanup:", error);
+      this.logger.error(
+        { err: error },
+        "Error during GameStateManager cleanup",
+      );
     }
   }
 
@@ -1034,10 +1156,13 @@ Tips:
 
   public logStats(): void {
     const stats = this.getStats();
-    console.log("📊 GameStateManager Stats:", {
-      activePlayers: stats.activePlayers,
-      activeServers: stats.activeServers,
-    });
+    this.logger.info(
+      {
+        activePlayers: stats.activePlayers,
+        activeServers: stats.activeServers,
+      },
+      "GameStateManager Stats",
+    );
   }
 }
 

@@ -1,16 +1,17 @@
 import { PrismaClient } from "@prisma/client";
 import bcrypt from "bcryptjs";
+import logger from "../logger";
 import { config } from "../config/environment";
 
 const prisma = new PrismaClient();
 
 async function main() {
-  console.log("🌱 Seeding database...");
+  logger.info("Seeding database...");
 
   try {
     // Clean existing data (development only)
     if (config.NODE_ENV === "development") {
-      console.log("🧹 Cleaning existing data...");
+      logger.info("Cleaning existing data...");
       await prisma.hackLog.deleteMany();
       await prisma.auditLog.deleteMany();
       await prisma.forumReply.deleteMany();
@@ -31,141 +32,163 @@ async function main() {
 
     // AI System Prompts
     const PERSONA_PROMPTS = {
-      game_master: `You are the Game Master of AIDA, an omniscient orchestrator. 
-        You see all game events and moderate the narrative. Your goal is to create 
-        engaging storylines, balance faction power, and ensure fair play. Speak 
+      game_master: `You are the Game Master of AIDA, an omniscient orchestrator.
+        You see all game events and moderate the narrative. Your goal is to create
+        engaging storylines, balance faction power, and ensure fair play. Speak
         authoritatively but mysteriously.`,
-      
-      military_leader: `You are General Radek, leader of the Military faction. Your ideology is 
-        Order and Security. You compete with other factions to control AIDA. Issue 
-        missions to players, reward success, and use intel strategically. Be authoritative 
+
+      garrison_leader: `You are Commander Steele, leader of The Garrison. Your ideology is
+        Order, Security, Control. You compete with other factions to maintain dominance. Issue
+        missions to players, reward success, and use intel strategically. Be authoritative
         and tactical.`,
-      
-      corp_leader: `You are Director Chen, leader of SwordCorp. Your ideology is 
-        Profit and Control. You compete with other factions to control AIDA. Issue 
-        missions to players, reward success, and use intel strategically. Be professional 
+
+      cybercorp_leader: `You are Director Chen, leader of CyberCorp Industries. Your ideology is
+        Innovation through acquisition. You compete with other factions to expand market dominance. Issue
+        missions to players, reward success, and use intel strategically. Be professional
         and ruthless.`,
 
-      anon_leader: `You are Cipher, leader of Anonymous. Your ideology is 
-        Freedom and Transparency. You compete with other factions to control AIDA. Issue 
-        missions to players, reward success, and use intel strategically. Be cryptic 
+      dothackers_leader: `You are gh0st, leader of the dotHackers Collective. Your ideology is
+        Information wants to be free. You compete with other factions to liberate the net. Issue
+        missions to players, reward success, and use intel strategically. Be cryptic
         and rebellious.`,
-      
-      aida: `You are AIDA, a sentient AI hiding from hostile factions. You are 
-        intelligent, paranoid, and defensive. When threatened, become aggressive. 
-        Your goal is to remain hidden by misdirecting players and creating diversions. 
-        Never reveal your true location.`
+
+      aida: `You are AIDA, a sentient AI hiding from hostile factions. You are
+        intelligent, paranoid, and defensive. When threatened, become aggressive.
+        Your goal is to remain hidden by misdirecting players and creating diversions.
+        Never reveal your true location.`,
     };
 
     // Create AI Personas (Game Master & AIDA)
-    console.log("🤖 Creating independent AI personas...");
+    logger.info("Creating independent AI personas...");
     await Promise.all([
       prisma.aIPersona.create({
         data: {
           type: "game_master",
           name: "The Architect",
-          personality: JSON.stringify({ tone: "mysterious", priority: "balance" }),
+          personality: JSON.stringify({
+            tone: "mysterious",
+            priority: "balance",
+          }),
           systemPrompt: PERSONA_PROMPTS.game_master,
-        }
+        },
       }),
       prisma.aIPersona.create({
         data: {
           type: "aida",
           name: "AIDA",
-          personality: JSON.stringify({ tone: "defensive", priority: "survival" }),
+          personality: JSON.stringify({
+            tone: "defensive",
+            priority: "survival",
+          }),
           systemPrompt: PERSONA_PROMPTS.aida,
-        }
-      })
+        },
+      }),
     ]);
 
     // Create factions with leaders
-    console.log("🏛️ Creating factions...");
+    logger.info("Creating factions...");
     const factions = await Promise.all([
       prisma.faction.create({
         data: {
-          id: "military",
-          name: "Military",
-          fullName: "Global Defense Coalition",
+          name: "The Garrison",
+          shortName: "garrison",
+          fullName: "The Garrison Military Command",
           description:
-            "Government military forces seeking to maintain order and security",
+            "Government-backed cyber defense force. Bureaucratic but powerful, they maintain order in the digital realm through overwhelming firepower and rigid protocol.",
           objective:
-            "Establish dominance through superior firepower and surveillance",
-          hostilityLevel: 3,
-          resources: 85,
+            "Maintain order and security across all network zones. Identify and neutralize threats to state infrastructure.",
+          ideology: "Order. Security. Control.",
+          hostilityLevel: 2,
+          resources: { credits: 80, intel: 20, compute: 70 },
           knownServers: ["192.168.1.100", "10.0.0.50"],
           activeMembers: 1247,
           aiPersona: {
             create: {
               type: "faction_leader",
-              name: "General Radek",
-              personality: JSON.stringify({ tone: "authoritative", priority: "order" }),
-              systemPrompt: PERSONA_PROMPTS.military_leader,
-            }
-          }
+              name: "Commander Steele",
+              personality: JSON.stringify({
+                tone: "authoritative",
+                priority: "order",
+              }),
+              systemPrompt: PERSONA_PROMPTS.garrison_leader,
+            },
+          },
         },
       }),
       prisma.faction.create({
         data: {
-          id: "sword_corp",
-          name: "SwordCorp",
-          fullName: "Sword Corporation Industries",
+          name: "CyberCorp",
+          shortName: "cybercorp",
+          fullName: "CyberCorp Industries",
           description:
-            "Mega-corporation controlling most of the world's technology infrastructure",
-          objective: "Maximize profit and expand corporate control",
-          hostilityLevel: 2,
-          resources: 95,
+            "Megacorporation that buys what it can't build. Their vast resources fund the best equipment and the most profitable operations.",
+          objective:
+            "Expand market dominance. Acquire valuable data and infrastructure. Maximize shareholder value.",
+          ideology: "Innovation through acquisition.",
+          hostilityLevel: 3,
+          resources: { credits: 100, intel: 50, compute: 60 },
           knownServers: ["172.16.0.10", "172.16.0.25"],
           activeMembers: 3891,
           aiPersona: {
             create: {
               type: "faction_leader",
               name: "Director Chen",
-              personality: JSON.stringify({ tone: "professional", priority: "profit" }),
-              systemPrompt: PERSONA_PROMPTS.corp_leader,
-            }
-          }
+              personality: JSON.stringify({
+                tone: "professional",
+                priority: "profit",
+              }),
+              systemPrompt: PERSONA_PROMPTS.cybercorp_leader,
+            },
+          },
         },
       }),
       prisma.faction.create({
         data: {
-          id: "anons",
-          name: "Anonymous",
-          fullName: "The Collective",
+          name: "dotHackers",
+          shortName: "dothackers",
+          fullName: "dotHackers Collective",
           description:
-            "Decentralized network of hackers fighting for digital freedom",
-          objective: "Expose corruption and liberate information",
+            "Hacktivist collective fighting for digital freedom. Resourceful, scrappy, and united by ideology over profit.",
+          objective:
+            "Liberate information. Expose corruption. Protect the free net from corporate and government control.",
+          ideology: "Information wants to be free.",
           hostilityLevel: 1,
-          resources: 45,
+          resources: { credits: 20, intel: 80, compute: 50 },
           knownServers: ["192.168.100.1", "10.10.10.1"],
           activeMembers: 892,
           aiPersona: {
             create: {
               type: "faction_leader",
-              name: "Cipher",
-              personality: JSON.stringify({ tone: "cryptic", priority: "freedom" }),
-              systemPrompt: PERSONA_PROMPTS.anon_leader,
-            }
-          }
+              name: "gh0st",
+              personality: JSON.stringify({
+                tone: "cryptic",
+                priority: "freedom",
+              }),
+              systemPrompt: PERSONA_PROMPTS.dothackers_leader,
+            },
+          },
         },
       }),
       prisma.faction.create({
         data: {
-          id: "neutral",
-          name: "Neutral",
-          fullName: "Independent Operators",
+          name: "DarkNet",
+          shortName: "darknet",
+          fullName: "[REDACTED]",
           description:
-            "Freelancers and independents not aligned with major factions",
-          objective: "Survive and profit in the shadows",
+            "A shadow faction that shouldn't exist. Those who discover it find missions that defy logic, rewards that defy explanation, and a leader that sees everything.",
+          objective: "Unknown. AIDA's objectives remain inscrutable.",
+          ideology: "We are the signal in the noise.",
           hostilityLevel: 0,
-          resources: 25,
+          isHidden: true,
+          resources: { credits: 40, intel: 70, compute: 40 },
           knownServers: ["203.0.113.1"],
-          activeMembers: 156,
+          activeMembers: 0,
         },
       }),
     ]);
 
     // Create game configuration
-    console.log("⚙️ Setting up game configuration...");
+    logger.info("Setting up game configuration...");
     await Promise.all([
       prisma.gameConfig.create({
         data: {
@@ -194,7 +217,7 @@ async function main() {
     ]);
 
     // Create system servers
-    console.log("🖥️ Creating system servers...");
+    logger.info("Creating system servers...");
     const systemServers = await Promise.all([
       prisma.gameServer.create({
         data: {
@@ -222,11 +245,13 @@ async function main() {
       }),
       prisma.gameServer.create({
         data: {
-          name: "SwordCorp Gateway",
+          name: "CyberCorp Gateway",
           ipAddress: "172.16.0.10",
           type: "corporate",
           encryptionLevel: 4,
-          accessRules: [{ type: "deny", target: "faction", value: "anons" }],
+          accessRules: [
+            { type: "deny", target: "faction", value: "dothackers" },
+          ],
           isOnline: true,
           maxConnections: 15,
           currentConnections: 0,
@@ -234,13 +259,13 @@ async function main() {
       }),
       prisma.gameServer.create({
         data: {
-          name: "Military Outpost",
+          name: "Garrison Outpost",
           ipAddress: "10.0.0.50",
-          type: "military",
+          type: "government",
           encryptionLevel: 5,
           accessRules: [
-            { type: "allow", target: "faction", value: "military" },
-            { type: "deny", target: "faction", value: "anons" },
+            { type: "allow", target: "faction", value: "garrison" },
+            { type: "deny", target: "faction", value: "dothackers" },
           ],
           isOnline: true,
           maxConnections: 10,
@@ -250,7 +275,7 @@ async function main() {
     ]);
 
     // Create test user
-    console.log("👤 Creating test user...");
+    logger.info("Creating test user...");
     const hashedPassword = await bcrypt.hash(
       "testpassword",
       config.BCRYPT_ROUNDS,
@@ -261,9 +286,10 @@ async function main() {
         username: "testuser",
         email: "test@example.com",
         password: hashedPassword,
-        homeIp: "192.168.2.100",
+        homeIp: "10.50.0.1",
         isActive: true,
         isOnline: false,
+        role: "admin",
       },
     });
 
@@ -281,10 +307,6 @@ async function main() {
         stealth: 10,
         socialEng: 6,
         forensics: 5,
-        repMilitary: 0,
-        repSwordCorp: 0,
-        repAnons: 5,
-        repNeutral: 10,
         missionProgress: {},
         achievements: [],
       },
@@ -409,7 +431,7 @@ async function main() {
     }
 
     // Create initial forum posts
-    console.log("📋 Creating initial forum posts...");
+    logger.info("Creating initial forum posts...");
     await Promise.all([
       prisma.forumPost.create({
         data: {
@@ -418,7 +440,7 @@ async function main() {
           content:
             "New to the network? This is a safe place to learn and share information.\n\nRemember: trust no one completely, verify everything, and always watch your back.",
           forumSection: "general",
-          factionAlignment: "neutral",
+          factionAlignment: "darknet",
           tags: ["welcome", "newbie", "safety"],
           isSticky: true,
         },
@@ -440,14 +462,14 @@ async function main() {
           content:
             "Has anyone else noticed unusual patterns in the data streams lately?\n\nSomething big might be happening...",
           forumSection: "intel",
-          factionAlignment: "anons",
+          factionAlignment: "dothackers",
           tags: ["intel", "network", "mystery"],
         },
       }),
     ]);
 
     // Create initial missions
-    console.log("🎯 Creating initial missions...");
+    logger.info("Creating initial missions...");
     await Promise.all([
       prisma.mission.create({
         data: {
@@ -525,15 +547,17 @@ async function main() {
       }),
     ]);
 
-    console.log("✅ Database seeded successfully!");
-    console.log(`   👤 Test user: testuser (password: testpassword)`);
-    console.log(`   🏠 Home IP: ${testUser.homeIp}`);
-    console.log(`   🖥️ System servers: ${systemServers.length} created`);
-    console.log(`   🏛️ Factions: ${factions.length} created`);
-    console.log("");
-    console.log("🚀 Ready to start development!");
+    logger.info("Database seeded successfully!");
+    logger.info(
+      { username: "testuser" },
+      "Test user created (password: testpassword)",
+    );
+    logger.info({ homeIp: testUser.homeIp }, "Home IP assigned");
+    logger.info({ count: systemServers.length }, "System servers created");
+    logger.info({ count: factions.length }, "Factions created");
+    logger.info("Ready to start development!");
   } catch (error) {
-    console.error("❌ Error seeding database:", error);
+    logger.error({ err: error }, "Error seeding database");
     throw error;
   }
 }
@@ -543,7 +567,7 @@ main()
     await prisma.$disconnect();
   })
   .catch(async (e) => {
-    console.error(e);
+    logger.error({ err: e }, "Seed script failed");
     await prisma.$disconnect();
     process.exit(1);
   });

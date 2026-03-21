@@ -3,6 +3,10 @@ import { PrismaClient } from "@prisma/client";
 import { Logger } from "pino";
 import { PersonaService } from "./personaService";
 import { CronJob } from "cron";
+import { getService } from "../di/container";
+import { LOGGER, RESOURCE_SERVICE, FACTION_KNOWLEDGE_SERVICE } from "../di/tokens";
+import ResourceService from "./resourceService";
+import type { FactionKnowledgeService } from "./factionKnowledgeService";
 
 /**
  * AISchedulerService - Automated AI Persona Actions
@@ -24,12 +28,14 @@ export class AISchedulerService {
 
   // Configuration
   private readonly INTERVAL_HOURS = parseInt(process.env.AI_INTERVAL_HOURS || "8");
+  private readonly FACTION_LEADER_INTERVAL_HOURS = parseInt(process.env.AI_FACTION_LEADER_INTERVAL_HOURS || "4");
   private readonly MAX_ACTIONS_PER_DAY = parseInt(process.env.AI_MAX_ACTIONS_PER_DAY || "3");
   private readonly EVENT_ACTIONS_ENABLED = process.env.AI_EVENT_ACTION_ENABLED !== "false";
+  private gameStateCheckInterval: NodeJS.Timeout | undefined;
 
   constructor(
     @inject("PrismaClient") private prisma: PrismaClient,
-    @inject("Logger") private logger: Logger,
+    @inject(LOGGER) private logger: Logger,
     @inject("PersonaService") private personaService: PersonaService
   ) {}
 
@@ -53,13 +59,17 @@ export class AISchedulerService {
       }
     });
 
-    // Start interval timer for each persona
+    // Start interval timer for each persona (faction leaders run on a tighter schedule)
     for (const persona of personas) {
-      this.schedulePersonaActions(persona.id);
+      const isFactionLeader = persona.type === "faction_leader";
+      this.schedulePersonaActions(persona.id, isFactionLeader ? this.FACTION_LEADER_INTERVAL_HOURS : this.INTERVAL_HOURS);
     }
 
     // Schedule midnight reset
     this.scheduleMidnightReset();
+
+    // Start game-state-aware check every 30 minutes for faction leaders
+    this.startGameStateCheck();
 
     this.isRunning = true;
     this.logger.info(`AI Scheduler started for ${personas.length} personas`);
@@ -84,15 +94,114 @@ export class AISchedulerService {
       this.midnightResetJob = undefined;
     }
 
+    if (this.gameStateCheckInterval) {
+      clearInterval(this.gameStateCheckInterval);
+      this.gameStateCheckInterval = undefined;
+    }
+
     this.isRunning = false;
     this.logger.info("AI Scheduler stopped");
   }
 
   /**
+   * Start game-state-aware checks for faction leaders every 30 minutes.
+   * If a faction is low on resources or under attack, triggers a dynamic mission.
+   */
+  private startGameStateCheck(): void {
+    const CHECK_INTERVAL_MS = 30 * 60 * 1000;
+    this.gameStateCheckInterval = setInterval(async () => {
+      if (!this.isRunning) return;
+      try {
+        await this.checkFactionGameState();
+      } catch (error) {
+        this.logger.error({ error }, "Error in faction game state check");
+      }
+    }, CHECK_INTERVAL_MS);
+    this.gameStateCheckInterval.unref?.();
+  }
+
+  private async checkFactionGameState(): Promise<void> {
+    let resourceService: ResourceService | null = null;
+    try {
+      resourceService = getService<ResourceService>(RESOURCE_SERVICE);
+    } catch {
+      return; // ResourceService not available
+    }
+
+    // Expire stale faction knowledge entries
+    let fkService: FactionKnowledgeService | null = null;
+    try {
+      fkService = getService<FactionKnowledgeService>(FACTION_KNOWLEDGE_SERVICE);
+      await fkService.expireEntries();
+    } catch {
+      // FactionKnowledgeService not available — not fatal
+    }
+
+    const factions = await this.prisma.faction.findMany({ where: { isHidden: false } });
+
+    for (const faction of factions) {
+      try {
+        const resources = await resourceService.getFactionResources(faction.id);
+        const totalResources = (resources.credits ?? 0) + (resources.intel ?? 0) + (resources.compute ?? 0);
+        const lowThreshold = 50;
+
+        // Check active wars involving this faction
+        const activeWars = await this.prisma.factionWar.count({
+          where: {
+            OR: [{ attackerFactionId: faction.id }, { defenderFactionId: faction.id }],
+            status: "active",
+          },
+        });
+
+        // Check contested servers
+        const contestedServers = await this.prisma.serverContest.count({
+          where: {
+            OR: [{ attackingFactionId: faction.id }, { defendingFactionId: faction.id }],
+            status: "active",
+          },
+        });
+
+        // Generate mission if faction needs help
+        if (totalResources < lowThreshold) {
+          await this.personaService.generateDynamicMission(faction.id, { lowResources: true });
+          this.logger.info({ factionId: faction.id, totalResources, activeWars }, "Generated defensive mission for low-resource faction");
+        } else if (contestedServers > 0) {
+          await this.personaService.generateDynamicMission(faction.id, { underAttack: true });
+          this.logger.info({ factionId: faction.id, contestedServers, activeWars }, "Generated defensive mission for contested faction");
+        } else if (activeWars > 0 && totalResources < 100) {
+          // At war with moderate resources — generate war-support mission
+          await this.personaService.generateDynamicMission(faction.id, { underAttack: true });
+          this.logger.info({ factionId: faction.id, activeWars, totalResources }, "Generated war-support mission for faction at war");
+        }
+      } catch (error) {
+        this.logger.error({ error, factionId: faction.id }, "Error checking faction game state");
+      }
+    }
+
+    // Game Master director check — omniscient narrative orchestration
+    try {
+      const gameMaster = await this.prisma.aIPersona.findFirst({ where: { type: "game_master" } });
+      if (gameMaster) {
+        const canAct = await this.canTakeAction(gameMaster.id);
+        if (canAct) {
+          const action = await this.personaService.decideDirectorAction(gameMaster.id);
+          if (action) {
+            await this.personaService.executeAction(action.id);
+            await this.incrementActionCounter(gameMaster.id);
+            this.logger.info({ actionId: action.id, actionType: action.type }, "Game Master director action executed");
+          }
+        }
+      }
+    } catch (error) {
+      this.logger.error({ error }, "Error in Game Master director check");
+    }
+  }
+
+  /**
    * Schedule interval-based actions for a persona
    */
-  private schedulePersonaActions(personaId: string): void {
-    const intervalMs = this.INTERVAL_HOURS * 60 * 60 * 1000; // Convert hours to ms
+  private schedulePersonaActions(personaId: string, intervalHours: number = this.INTERVAL_HOURS): void {
+    const intervalMs = intervalHours * 60 * 60 * 1000; // Convert hours to ms
 
     const timer = setInterval(async () => {
       try {
@@ -103,7 +212,7 @@ export class AISchedulerService {
     }, intervalMs);
 
     this.schedulerTimers.set(personaId, timer);
-    this.logger.debug({ personaId, intervalHours: this.INTERVAL_HOURS }, "Scheduled actions for persona");
+    this.logger.debug({ personaId, intervalHours }, "Scheduled actions for persona");
   }
 
   /**

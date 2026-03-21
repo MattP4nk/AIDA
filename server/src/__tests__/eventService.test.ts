@@ -397,16 +397,16 @@ describe("EventService Integration Tests", () => {
 
     test("should create faction war event", async () => {
       const event = await eventService.createFactionWarEvent(
-        "military",
-        "anons",
+        "garrison",
+        "dothackers",
         "Conflict escalates between factions",
       );
 
       expect(event.type).toBe(EventType.FACTION_WAR);
-      expect(event.title).toContain("military vs anons");
+      expect(event.title).toContain("garrison vs dothackers");
       expect(event.description).toBe("Conflict escalates between factions");
-      expect(event.metadata.factionId).toBe("military");
-      expect(event.metadata.targetFactionId).toBe("anons");
+      expect(event.metadata.factionId).toBe("garrison");
+      expect(event.metadata.targetFactionId).toBe("dothackers");
       expect(event.isGlobal).toBe(true);
       expect(event.severity).toBe(EventSeverity.CRITICAL);
     });
@@ -444,18 +444,18 @@ describe("EventService Integration Tests", () => {
     test("should create reputation change event", async () => {
       const event = await eventService.createReputationChangeEvent(
         attacker.id,
-        "military",
+        "garrison",
         50,
         75,
-        "Completed military contract",
+        "Completed Garrison contract",
       );
 
       expect(event.type).toBe(EventType.REPUTATION_CHANGE);
       expect(event.title).toContain("increased");
-      expect(event.title).toContain("military");
-      expect(event.description).toBe("Completed military contract");
+      expect(event.title).toContain("garrison");
+      expect(event.description).toBe("Completed Garrison contract");
       expect(event.metadata.userId).toBe(attacker.id);
-      expect(event.metadata.factionId).toBe("military");
+      expect(event.metadata.factionId).toBe("garrison");
       expect(event.metadata.oldRep).toBe(50);
       expect(event.metadata.newRep).toBe(75);
       expect(event.metadata.change).toBe(25);
@@ -466,7 +466,7 @@ describe("EventService Integration Tests", () => {
     test("should create reputation decrease event", async () => {
       const event = await eventService.createReputationChangeEvent(
         attacker.id,
-        "sword_corp",
+        "cybercorp",
         80,
         60,
         "Failed contract",
@@ -479,7 +479,7 @@ describe("EventService Integration Tests", () => {
     test("should create low severity reputation change for small changes", async () => {
       const event = await eventService.createReputationChangeEvent(
         attacker.id,
-        "anons",
+        "dothackers",
         50,
         55,
         "Minor contribution",

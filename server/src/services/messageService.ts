@@ -15,8 +15,9 @@
 import { prisma } from "../database/client";
 import { Server as SocketIOServer } from "socket.io";
 import crypto from "crypto";
+import { Logger } from "pino";
 import { injectable, inject } from "tsyringe";
-import { SOCKET_IO, MISSION_INTEGRATION_SERVICE } from "../di/tokens";
+import { LOGGER, SOCKET_IO, MISSION_INTEGRATION_SERVICE } from "../di/tokens";
 import type MissionIntegrationService from "./missionIntegration";
 
 // ==================== TYPES ====================
@@ -78,9 +79,11 @@ export interface EncryptionResult {
 export class MessageService {
   private encryptionAlgorithm = "aes-256-cbc";
   private deliveryQueue: Map<string, QueuedMessage[]> = new Map();
+  private deliveryProcessorInterval: NodeJS.Timeout | null = null;
   private missionIntegration: MissionIntegrationService | null = null;
 
   constructor(
+    @inject(LOGGER) private logger: Logger,
     @inject(SOCKET_IO) private io: SocketIOServer,
     @inject(MISSION_INTEGRATION_SERVICE)
     missionIntegrationService?: MissionIntegrationService,
@@ -127,9 +130,22 @@ export class MessageService {
         where: { userId: senderId },
       });
 
-      let finalContent = options.content;
+      // Apply censorship filtering
+      let filteredContent = options.content;
+      try {
+        const { getService } = await import("../di/container");
+        const censorshipService = getService<import("./censorshipService").default>("CensorshipService");
+        filteredContent = await censorshipService.filterAndAlert(options.content, { userId: senderId });
+      } catch { /* Censorship service not available — pass through */ }
+
+      let finalContent = filteredContent;
       let isEncrypted = false;
       let encryptionLevel: number | undefined;
+      // SECURITY NOTE: Encryption keys are stored server-side deliberately to
+      // enable future AI moderation and content-policy enforcement. This is a
+      // conscious design choice — the threat model protects data in transit and
+      // at the application boundary, not from the server itself.
+      let storedEncryptionKey: string | undefined;
 
       // Handle encryption
       if (options.encrypt) {
@@ -154,11 +170,12 @@ export class MessageService {
             encryptionLevel,
           );
           finalContent = encryptionResult.encryptedContent;
+          storedEncryptionKey = encryptionResult.key;
           isEncrypted = true;
         }
       }
 
-      // Create message in database
+      // Create message in database (includes encryption key for server-side decryption)
       const message = await prisma.message.create({
         data: {
           senderId,
@@ -171,6 +188,7 @@ export class MessageService {
             isEncrypted && encryptionLevel !== undefined
               ? encryptionLevel
               : null,
+          encryptionKey: storedEncryptionKey || null,
           messageType: options.messageType || "private",
         },
       });
@@ -226,7 +244,7 @@ export class MessageService {
         },
       };
     } catch (error: any) {
-      console.error("Send private message error:", error);
+      this.logger.error({ err: error }, "Send private message error");
       return {
         success: false,
         message: "Failed to send message",
@@ -269,7 +287,7 @@ export class MessageService {
         data: { messageId: message.id },
       };
     } catch (error: any) {
-      console.error("Send system message error:", error);
+      this.logger.error({ err: error }, "Send system message error");
       return {
         success: false,
         message: "Failed to send system message",
@@ -335,7 +353,7 @@ export class MessageService {
         data: { messageId: message.id, count: todayCount + 1 },
       };
     } catch (error: any) {
-      console.error("Send AI message error:", error);
+      this.logger.error({ err: error }, "Send AI message error");
       return {
         success: false,
         message: "Failed to send AI message",
@@ -371,7 +389,7 @@ export class MessageService {
         },
       };
     } catch (error: any) {
-      console.error("Broadcast message error:", error);
+      this.logger.error({ err: error }, "Broadcast message error");
       return {
         success: false,
         message: "Failed to broadcast message",
@@ -439,7 +457,7 @@ export class MessageService {
         },
       };
     } catch (error: any) {
-      console.error("Get inbox error:", error);
+      this.logger.error({ err: error }, "Get inbox error");
       return {
         success: false,
         message: "Failed to retrieve inbox",
@@ -493,7 +511,7 @@ export class MessageService {
         },
       };
     } catch (error: any) {
-      console.error("Get sent messages error:", error);
+      this.logger.error({ err: error }, "Get sent messages error");
       return {
         success: false,
         message: "Failed to retrieve sent messages",
@@ -551,7 +569,7 @@ export class MessageService {
         data: this.formatMessageData(message),
       };
     } catch (error: any) {
-      console.error("Get message error:", error);
+      this.logger.error({ err: error }, "Get message error");
       return {
         success: false,
         message: "Failed to retrieve message",
@@ -613,7 +631,7 @@ export class MessageService {
         data: { messageId },
       };
     } catch (error: any) {
-      console.error("Mark as read error:", error);
+      this.logger.error({ err: error }, "Mark as read error");
       return {
         success: false,
         message: "Failed to mark message as read",
@@ -644,7 +662,7 @@ export class MessageService {
         data: { count: updated.count },
       };
     } catch (error: any) {
-      console.error("Mark multiple as read error:", error);
+      this.logger.error({ err: error }, "Mark multiple as read error");
       return {
         success: false,
         message: "Failed to mark messages as read",
@@ -695,7 +713,7 @@ export class MessageService {
         data: { messageId },
       };
     } catch (error: any) {
-      console.error("Delete message error:", error);
+      this.logger.error({ err: error }, "Delete message error");
       return {
         success: false,
         message: "Failed to delete message",
@@ -737,20 +755,57 @@ export class MessageService {
         key,
       };
     } catch (error) {
-      console.error("Encryption error:", error);
+      this.logger.error({ err: error }, "Encryption error");
       throw error;
     }
   }
 
   /**
-   * Decrypt message content
+   * Decrypt message content.
+   *
+   * If `key` is omitted/empty and `messageId` is provided, the stored
+   * server-side encryption key will be looked up from the database.
    */
   async decryptMessage(
     encryptedContent: string,
-    key: string,
+    key: string | undefined,
     userId: string,
+    messageId?: string,
   ): Promise<MessageOperationResult> {
     try {
+      // If no key was supplied, try to look it up from the database
+      let resolvedKey = key;
+      if (!resolvedKey && messageId) {
+        const dbMessage = await prisma.message.findUnique({
+          where: { id: messageId },
+          select: { encryptionKey: true, senderId: true, recipientId: true },
+        });
+
+        if (!dbMessage) {
+          return { success: false, message: "Message not found", error: "NOT_FOUND" };
+        }
+        // Only sender or recipient may use the stored key
+        if (dbMessage.senderId !== userId && dbMessage.recipientId !== userId) {
+          return { success: false, message: "Permission denied", error: "PERMISSION_DENIED" };
+        }
+        if (!dbMessage.encryptionKey) {
+          return {
+            success: false,
+            message: "No stored encryption key for this message",
+            error: "NO_KEY",
+          };
+        }
+        resolvedKey = dbMessage.encryptionKey;
+      }
+
+      if (!resolvedKey) {
+        return {
+          success: false,
+          message: "No encryption key provided and no messageId to look it up",
+          error: "NO_KEY",
+        };
+      }
+
       // Get user's cryptography skill
       const progress = await prisma.playerProgress.findUnique({
         where: { userId },
@@ -775,7 +830,7 @@ export class MessageService {
 
       const iv = Buffer.from(parts[0]!, "hex");
       const encrypted = parts[1]!;
-      const keyBuffer = crypto.scryptSync(key, "salt", 32);
+      const keyBuffer = crypto.scryptSync(resolvedKey, "salt", 32);
       const decipher = crypto.createDecipheriv(
         this.encryptionAlgorithm,
         keyBuffer,
@@ -791,11 +846,67 @@ export class MessageService {
         data: { content: decrypted },
       };
     } catch (error: any) {
-      console.error("Decryption error:", error);
+      this.logger.error({ err: error }, "Decryption error");
       return {
         success: false,
         message: "Failed to decrypt message. Invalid key or corrupted data.",
         error: "DECRYPTION_FAILED",
+      };
+    }
+  }
+
+  /**
+   * Decrypt a message by its ID using the server-side stored encryption key.
+   *
+   * Validates that the requesting user is the sender or recipient before
+   * allowing decryption.
+   */
+  async decryptMessageById(
+    messageId: string,
+    userId: string,
+  ): Promise<MessageOperationResult> {
+    try {
+      const message = await prisma.message.findUnique({
+        where: { id: messageId },
+      });
+
+      if (!message) {
+        return { success: false, message: "Message not found", error: "NOT_FOUND" };
+      }
+
+      // Only sender or recipient may decrypt
+      if (message.senderId !== userId && message.recipientId !== userId) {
+        return { success: false, message: "Permission denied", error: "PERMISSION_DENIED" };
+      }
+
+      if (!message.isEncrypted) {
+        return {
+          success: true,
+          message: "Message is not encrypted",
+          data: { content: message.content },
+        };
+      }
+
+      if (!message.encryptionKey) {
+        return {
+          success: false,
+          message: "No stored encryption key for this message",
+          error: "NO_KEY",
+        };
+      }
+
+      return await this.decryptMessage(
+        message.content,
+        message.encryptionKey,
+        userId,
+        messageId,
+      );
+    } catch (error: any) {
+      this.logger.error({ err: error }, "Decrypt message by ID error");
+      return {
+        success: false,
+        message: "Failed to decrypt message",
+        error: error.message,
       };
     }
   }
@@ -884,7 +995,7 @@ export class MessageService {
         };
       }
     } catch (error: any) {
-      console.error("Crack encryption error:", error);
+      this.logger.error({ err: error }, "Crack encryption error");
       return {
         success: false,
         message: "Failed to crack encryption",
@@ -939,7 +1050,7 @@ export class MessageService {
 
       return true;
     } catch (error) {
-      console.error("Real-time delivery error:", error);
+      this.logger.error({ err: error }, "Real-time delivery error");
       return false;
     }
   }
@@ -957,7 +1068,7 @@ export class MessageService {
         readAt: new Date(),
       });
     } catch (error) {
-      console.error("Read receipt error:", error);
+      this.logger.error({ err: error }, "Read receipt error");
     }
   }
 
@@ -977,9 +1088,13 @@ export class MessageService {
    * Process delivery queue (runs periodically)
    */
   private startDeliveryProcessor(): void {
-    setInterval(async () => {
+    this.deliveryProcessorInterval = setInterval(async () => {
       for (const [recipientId, queue] of this.deliveryQueue.entries()) {
-        if (queue.length === 0) continue;
+        if (queue.length === 0) {
+          // Clean up empty queue entries for offline users
+          this.deliveryQueue.delete(recipientId);
+          continue;
+        }
 
         // Try to deliver all queued messages
         const delivered: string[] = [];
@@ -993,12 +1108,16 @@ export class MessageService {
           }
         }
 
-        // Remove delivered messages from queue
+        // Remove delivered messages from queue; delete entry if fully delivered
         if (delivered.length > 0) {
           const remainingQueue = queue.filter(
             (msg) => !delivered.includes(msg.messageId),
           );
-          this.deliveryQueue.set(recipientId, remainingQueue);
+          if (remainingQueue.length === 0) {
+            this.deliveryQueue.delete(recipientId);
+          } else {
+            this.deliveryQueue.set(recipientId, remainingQueue);
+          }
         }
       }
     }, 5000); // Check every 5 seconds
@@ -1122,7 +1241,7 @@ export class MessageService {
         },
       });
     } catch (error) {
-      console.error("Failed to log message activity:", error);
+      this.logger.error({ err: error }, "Failed to log message activity");
     }
   }
 
@@ -1140,7 +1259,7 @@ export class MessageService {
         },
       });
     } catch (error) {
-      console.error("Get unread count error:", error);
+      this.logger.error({ err: error }, "Get unread count error");
       return 0;
     }
   }
@@ -1167,12 +1286,19 @@ export class MessageService {
         },
       };
     } catch (error: any) {
-      console.error("Get message stats error:", error);
+      this.logger.error({ err: error }, "Get message stats error");
       return {
         success: false,
         message: "Failed to retrieve message stats",
         error: error.message,
       };
+    }
+  }
+
+  public stop(): void {
+    if (this.deliveryProcessorInterval !== null) {
+      clearInterval(this.deliveryProcessorInterval);
+      this.deliveryProcessorInterval = null;
     }
   }
 }
@@ -1185,13 +1311,3 @@ interface QueuedMessage {
 }
 
 export default MessageService;
-
-// Backward compatibility
-import { container } from "../di/container";
-import { MESSAGE_SERVICE } from "../di/tokens";
-export const messageService = new Proxy({} as MessageService, {
-  get(_target, prop) {
-    const instance = container.resolve(MESSAGE_SERVICE as any);
-    return (instance as any)[prop];
-  },
-});

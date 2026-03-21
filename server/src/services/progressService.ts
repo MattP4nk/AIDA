@@ -2,7 +2,9 @@ import { db } from "../database/client";
 import { config } from "../config/environment";
 import type { SaveTrigger, ProgressBackup } from "../types/game";
 import { SavePriority } from "../types/game";
-import { injectable } from "tsyringe";
+import { injectable, inject } from "tsyringe";
+import { LOGGER } from "../di/tokens";
+import type { Logger } from "pino";
 
 @injectable()
 class ProgressService {
@@ -13,7 +15,7 @@ class ProgressService {
   private savesAttempted: number;
   private lastSaveTime: Date | null;
 
-  constructor() {
+  constructor(@inject(LOGGER) private logger: Logger) {
     this.saveQueue = new Map();
     this.saveInterval = null;
     this.isSaving = false;
@@ -21,14 +23,14 @@ class ProgressService {
     this.savesAttempted = 0;
     this.lastSaveTime = null;
 
-    console.log("💾 ProgressService initialized");
+    this.logger.info("ProgressService initialized");
   }
 
   // ==================== INITIALIZATION ====================
 
   public start(): void {
     if (this.saveInterval) {
-      console.log("⚠️  ProgressService already running");
+      this.logger.warn("ProgressService already running");
       return;
     }
 
@@ -38,8 +40,9 @@ class ProgressService {
       this.processAutoSave();
     }, intervalMs);
 
-    console.log(
-      `✅ Progress auto-save started (interval: ${intervalMs / 1000}s)`,
+    this.logger.info(
+      { intervalSeconds: intervalMs / 1000 },
+      "Progress auto-save started",
     );
   }
 
@@ -49,14 +52,14 @@ class ProgressService {
       this.saveInterval = null;
     }
 
-    console.log("🛑 Progress auto-save stopped");
+    this.logger.info("Progress auto-save stopped");
   }
 
   // ==================== AUTO-SAVE ====================
 
   private async processAutoSave(): Promise<void> {
     if (this.isSaving) {
-      console.log("⏳ Save already in progress, skipping...");
+      this.logger.info("Save already in progress, skipping");
       return;
     }
 
@@ -69,8 +72,9 @@ class ProgressService {
         // Check for online users who haven't been queued
         const onlineUsers = await this.getOnlineUsers();
         if (onlineUsers.length > 0) {
-          console.log(
-            `💾 Queuing ${onlineUsers.length} online users for auto-save`,
+          this.logger.info(
+            { count: onlineUsers.length },
+            "Queuing online users for auto-save",
           );
           onlineUsers.forEach((userId) => {
             this.queueSave(userId, "periodic");
@@ -80,7 +84,7 @@ class ProgressService {
         return;
       }
 
-      console.log(`💾 Auto-saving progress for ${usersToSave.length} users...`);
+      this.logger.info({ count: usersToSave.length }, "Auto-saving progress for users");
 
       let successCount = 0;
       let errorCount = 0;
@@ -94,15 +98,16 @@ class ProgressService {
           successCount++;
           this.savesCompleted++;
         } catch (error) {
-          console.error(`❌ Error saving progress for user ${userId}:`, error);
+          this.logger.error({ err: error, userId }, "Error saving progress for user");
           errorCount++;
         }
       }
 
       this.lastSaveTime = new Date();
 
-      console.log(
-        `✅ Auto-save complete: ${successCount} success, ${errorCount} errors`,
+      this.logger.info(
+        { successCount, errorCount },
+        "Auto-save complete",
       );
     } finally {
       this.isSaving = false;
@@ -132,14 +137,15 @@ class ProgressService {
       priority,
     });
 
-    console.log(
-      `📋 Queued save for user ${userId} (${reason}, priority: ${priority})`,
+    this.logger.info(
+      { userId, reason, priority },
+      "Queued save for user",
     );
 
     // Immediate save for critical priority
     if (priority === SavePriority.IMMEDIATE) {
       this.savePlayerProgress(userId, reason).catch((error) => {
-        console.error(`❌ Immediate save failed for user ${userId}:`, error);
+        this.logger.error({ err: error, userId }, "Immediate save failed for user");
       });
     }
   }
@@ -170,7 +176,7 @@ class ProgressService {
       });
 
       if (!user) {
-        console.error(`⚠️  User ${userId} not found`);
+        this.logger.error({ userId }, "User not found");
         return false;
       }
 
@@ -187,10 +193,10 @@ class ProgressService {
         });
       }
 
-      console.log(`💾 Saved progress for user ${userId} (${reason})`);
+      this.logger.info({ userId, reason }, "Saved progress for user");
       return true;
     } catch (error) {
-      console.error(`❌ Error saving progress for user ${userId}:`, error);
+      this.logger.error({ err: error, userId }, "Error saving progress for user");
       return false;
     }
   }
@@ -253,7 +259,7 @@ class ProgressService {
       });
 
       if (!user) {
-        console.error(`⚠️  User ${userId} not found for backup`);
+        this.logger.error({ userId }, "User not found for backup");
         return null;
       }
 
@@ -296,10 +302,10 @@ class ProgressService {
       // Clean up old backups to maintain retention policy
       await this.deleteOldBackups(userId, 5);
 
-      console.log(`📦 Created backup for user ${userId} (${reason})`);
+      this.logger.info({ userId, reason }, "Created backup for user");
       return backup;
     } catch (error) {
-      console.error(`❌ Error creating backup for user ${userId}:`, error);
+      this.logger.error({ err: error, userId }, "Error creating backup for user");
       return null;
     }
   }
@@ -315,13 +321,14 @@ class ProgressService {
       });
 
       if (!backup) {
-        console.error(`⚠️  Backup ${backupId} not found`);
+        this.logger.error({ backupId }, "Backup not found");
         return false;
       }
 
       if (backup.userId !== userId) {
-        console.error(
-          `⚠️  Backup ${backupId} does not belong to user ${userId}`,
+        this.logger.error(
+          { backupId, userId },
+          "Backup does not belong to user",
         );
         return false;
       }
@@ -331,8 +338,9 @@ class ProgressService {
         JSON.stringify(backup.data),
       );
       if (backup.checksum && currentChecksum !== backup.checksum) {
-        console.error(
-          `⚠️  Checksum mismatch for backup ${backupId} - data may be corrupted`,
+        this.logger.error(
+          { backupId },
+          "Checksum mismatch for backup - data may be corrupted",
         );
         return false;
       }
@@ -351,12 +359,13 @@ class ProgressService {
         });
       }
 
-      console.log(
-        `🔄 Successfully restored backup ${backupId} for user ${userId}`,
+      this.logger.info(
+        { backupId, userId },
+        "Successfully restored backup for user",
       );
       return true;
     } catch (error) {
-      console.error(`❌ Error restoring backup ${backupId}:`, error);
+      this.logger.error({ err: error, backupId }, "Error restoring backup");
       return false;
     }
   }
@@ -377,7 +386,7 @@ class ProgressService {
 
       return backups as ProgressBackup[];
     } catch (error) {
-      console.error(`❌ Error fetching backups for user ${userId}:`, error);
+      this.logger.error({ err: error, userId }, "Error fetching backups for user");
       return [];
     }
   }
@@ -410,14 +419,15 @@ class ProgressService {
         },
       });
 
-      console.log(
-        `🧹 Deleted ${result.count} old backups for user ${userId}`,
+      this.logger.info(
+        { count: result.count, userId },
+        "Deleted old backups for user",
       );
       return result.count;
     } catch (error) {
-      console.error(
-        `❌ Error deleting old backups for user ${userId}:`,
-        error,
+      this.logger.error(
+        { err: error, userId },
+        "Error deleting old backups for user",
       );
       return 0;
     }
@@ -437,12 +447,12 @@ class ProgressService {
   // ==================== BATCH OPERATIONS ====================
 
   public async saveAll(reason: string = "shutdown"): Promise<void> {
-    console.log("💾 Saving all player progress...");
+    this.logger.info("Saving all player progress");
 
     try {
       const onlineUsers = await this.getOnlineUsers();
 
-      console.log(`💾 Found ${onlineUsers.length} online users to save`);
+      this.logger.info({ count: onlineUsers.length }, "Found online users to save");
 
       let successCount = 0;
       let errorCount = 0;
@@ -452,21 +462,22 @@ class ProgressService {
           await this.savePlayerProgress(userId, reason);
           successCount++;
         } catch (error) {
-          console.error(`❌ Error saving user ${userId}:`, error);
+          this.logger.error({ err: error, userId }, "Error saving user");
           errorCount++;
         }
       }
 
-      console.log(
-        `✅ Saved progress for ${successCount} users (${errorCount} errors)`,
+      this.logger.info(
+        { successCount, errorCount },
+        "Saved progress for users",
       );
     } catch (error) {
-      console.error("❌ Error in saveAll:", error);
+      this.logger.error({ err: error }, "Error in saveAll");
     }
   }
 
   public async createBackupForAll(): Promise<number> {
-    console.log("📦 Creating backups for all online users...");
+    this.logger.info("Creating backups for all online users");
 
     try {
       const onlineUsers = await this.getOnlineUsers();
@@ -480,10 +491,10 @@ class ProgressService {
         }
       }
 
-      console.log(`✅ Created ${successCount} backups`);
+      this.logger.info({ count: successCount }, "Created backups");
       return successCount;
     } catch (error) {
-      console.error("❌ Error creating backups:", error);
+      this.logger.error({ err: error }, "Error creating backups");
       return 0;
     }
   }
@@ -499,7 +510,7 @@ class ProgressService {
 
       return users.map((user) => user.id);
     } catch (error) {
-      console.error("❌ Error getting online users:", error);
+      this.logger.error({ err: error }, "Error getting online users");
       return [];
     }
   }
@@ -529,12 +540,12 @@ class ProgressService {
 
   public logStats(): void {
     const stats = this.getStats();
-    console.log("📊 ProgressService Stats:", {
+    this.logger.info({
       queueSize: stats.queueSize,
       isRunning: stats.isRunning,
       savesCompleted: stats.savesCompleted,
       successRate: stats.successRate,
-    });
+    }, "ProgressService Stats");
   }
 
   // ==================== MAINTENANCE ====================
@@ -542,11 +553,11 @@ class ProgressService {
   public clearQueue(): void {
     const size = this.saveQueue.size;
     this.saveQueue.clear();
-    console.log(`🧹 Cleared save queue (${size} items removed)`);
+    this.logger.info({ itemsRemoved: size }, "Cleared save queue");
   }
 
   public async forceSaveUser(userId: string): Promise<boolean> {
-    console.log(`🔨 Force saving user ${userId}...`);
+    this.logger.info({ userId }, "Force saving user");
     return await this.savePlayerProgress(userId, "force_save");
   }
 
@@ -560,12 +571,12 @@ class ProgressService {
       });
 
       if (!user) {
-        console.error(`⚠️  User ${userId} not found`);
+        this.logger.error({ userId }, "User not found");
         return false;
       }
 
       if (!user.progress) {
-        console.error(`⚠️  No progress found for user ${userId}`);
+        this.logger.error({ userId }, "No progress found for user");
         return false;
       }
 
@@ -590,12 +601,12 @@ class ProgressService {
         progress.forensics <= 100;
 
       if (!isValid) {
-        console.error(`⚠️  Invalid progress data for user ${userId}`);
+        this.logger.error({ userId }, "Invalid progress data for user");
       }
 
       return isValid;
     } catch (error) {
-      console.error(`❌ Error validating progress for user ${userId}:`, error);
+      this.logger.error({ err: error, userId }, "Error validating progress for user");
       return false;
     }
   }
@@ -604,21 +615,22 @@ class ProgressService {
     this.savesCompleted = 0;
     this.savesAttempted = 0;
     this.lastSaveTime = null;
-    console.log("🔄 ProgressService stats reset");
+    this.logger.info("ProgressService stats reset");
   }
 
   // ==================== CLEANUP ====================
 
   public async cleanup(): Promise<void> {
-    console.log("🧹 Cleaning up ProgressService...");
+    this.logger.info("Cleaning up ProgressService");
 
     // Stop the interval
     this.stop();
 
     // Save all remaining queued users
     if (this.saveQueue.size > 0) {
-      console.log(
-        `💾 Saving ${this.saveQueue.size} queued users before cleanup...`,
+      this.logger.info(
+        { queueSize: this.saveQueue.size },
+        "Saving queued users before cleanup",
       );
       await this.processAutoSave();
     }
@@ -626,18 +638,8 @@ class ProgressService {
     // Clear the queue
     this.clearQueue();
 
-    console.log("✅ ProgressService cleanup complete");
+    this.logger.info("ProgressService cleanup complete");
   }
 }
 
 export default ProgressService;
-
-// Backward compatibility - lazy singleton that resolves from DI
-import { container } from "../di/container";
-import { PROGRESS_SERVICE } from "../di/tokens";
-export const progressService = new Proxy({} as ProgressService, {
-  get(_target, prop) {
-    const instance = container.resolve(PROGRESS_SERVICE as any);
-    return (instance as any)[prop];
-  }
-});

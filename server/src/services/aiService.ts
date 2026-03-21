@@ -1,6 +1,7 @@
 import { injectable, inject } from "tsyringe";
 import { Logger } from "pino";
 import type { CacheService } from "./cacheService";
+import { LOGGER } from "../di/tokens";
 import crypto from "crypto";
 
 interface OllamaResponse {
@@ -41,7 +42,7 @@ export class AIService {
   };
 
   constructor(
-    @inject("Logger") logger: Logger,
+    @inject(LOGGER) logger: Logger,
     @inject("CacheService") cacheService: CacheService
   ) {
     this.logger = logger;

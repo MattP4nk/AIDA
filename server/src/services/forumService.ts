@@ -3,8 +3,10 @@ import { prisma } from "../database/client";
 import type { Forum, Post, ForumMember, ProxyConnection } from "@prisma/client";
 import type { Server as SocketIOServer } from "socket.io";
 import { injectable, inject } from "tsyringe";
-import { SOCKET_IO, MISSION_INTEGRATION_SERVICE } from "../di/tokens";
+import type { Logger } from "pino";
+import { SOCKET_IO, MISSION_INTEGRATION_SERVICE, LOGGER, FACTION_KNOWLEDGE_SERVICE } from "../di/tokens";
 import type MissionIntegrationService from "./missionIntegration";
+import type { FactionKnowledgeService } from "./factionKnowledgeService";
 
 /**
  * ForumService - Underground forum networks and darkweb system
@@ -100,15 +102,20 @@ export class ForumService extends EventEmitter {
   ];
 
   private missionIntegration: MissionIntegrationService | null = null;
+  private factionKnowledge: FactionKnowledgeService | null = null;
 
   constructor(
     @inject(SOCKET_IO) io: SocketIOServer,
+    @inject(LOGGER) private logger: Logger,
     @inject(MISSION_INTEGRATION_SERVICE)
     missionIntegrationService?: MissionIntegrationService,
+    @inject(FACTION_KNOWLEDGE_SERVICE)
+    factionKnowledgeService?: FactionKnowledgeService,
   ) {
     super();
     this.io = io;
     this.missionIntegration = missionIntegrationService || null;
+    this.factionKnowledge = factionKnowledgeService || null;
   }
 
   // ==================== FORUM DISCOVERY ====================
@@ -216,7 +223,7 @@ export class ForumService extends EventEmitter {
         ),
       };
     } catch (error) {
-      console.error("Error scanning forums:", error);
+      this.logger.error({ err: error }, "Error scanning forums");
       throw error;
     }
   }
@@ -247,7 +254,7 @@ export class ForumService extends EventEmitter {
 
       return discoveries.map((d: any) => d.forum);
     } catch (error) {
-      console.error("Error getting discovered forums:", error);
+      this.logger.error({ err: error }, "Error getting discovered forums");
       throw error;
     }
   }
@@ -276,7 +283,7 @@ export class ForumService extends EventEmitter {
         update: {},
       });
     } catch (error) {
-      console.error("Error discovering forum:", error);
+      this.logger.error({ err: error }, "Error discovering forum");
       throw error;
     }
   }
@@ -374,7 +381,7 @@ export class ForumService extends EventEmitter {
         canPost: isMember && !forum.isHoneypot,
       };
     } catch (error) {
-      console.error("Error accessing forum:", error);
+      this.logger.error({ err: error }, "Error accessing forum");
       throw error;
     }
   }
@@ -452,7 +459,7 @@ export class ForumService extends EventEmitter {
 
       return member;
     } catch (error) {
-      console.error("Error registering forum account:", error);
+      this.logger.error({ err: error }, "Error registering forum account");
       throw error;
     }
   }
@@ -493,7 +500,7 @@ export class ForumService extends EventEmitter {
         hasMore: skip + posts.length < total,
       };
     } catch (error) {
-      console.error("Error getting posts:", error);
+      this.logger.error({ err: error }, "Error getting posts");
       throw error;
     }
   }
@@ -541,7 +548,7 @@ export class ForumService extends EventEmitter {
 
       return post;
     } catch (error) {
-      console.error("Error reading post:", error);
+      this.logger.error({ err: error }, "Error reading post");
       throw error;
     }
   }
@@ -574,14 +581,27 @@ export class ForumService extends EventEmitter {
         throw new Error("You are banned from this forum");
       }
 
+      // Apply censorship filtering
+      let filteredTitle = title;
+      let filteredContent = content;
+      try {
+        const { getService } = await import("../di/container");
+        const censorshipService = getService<import("./censorshipService").default>("CensorshipService");
+        const forum = await prisma.forum.findUnique({ where: { id: forumId } });
+        const ctx: { userId: string; factionId?: string | undefined } = { userId };
+        if (forum?.factionId) ctx.factionId = forum.factionId;
+        filteredTitle = await censorshipService.filterAndAlert(title, ctx);
+        filteredContent = await censorshipService.filterAndAlert(content, ctx);
+      } catch { /* Censorship service not available — pass through */ }
+
       // Create post
       const post = await prisma.post.create({
         data: {
           forumId,
           authorId: userId,
           authorHandle: member.handle,
-          title,
-          content,
+          title: filteredTitle,
+          content: filteredContent,
           isSticky: false,
           isPinned: false,
           storyRelevant: false,
@@ -612,14 +632,59 @@ export class ForumService extends EventEmitter {
         });
       }
 
+      // Notify AI personas of forum activity (knowledge pipeline)
+      const forumRecord = await prisma.forum.findUnique({ where: { id: forumId }, select: { factionId: true } });
+      this.emit("forum:post_created", {
+        forumId,
+        postId: post.id,
+        userId,
+        title: post.title,
+        factionId: forumRecord?.factionId || null,
+      });
+
+      // Feed forum activity into faction knowledge (poster's faction learns about the forum)
+      if (this.factionKnowledge) {
+        this.factionKnowledge
+          .getPlayerFactionId(userId)
+          .then((playerFactionId) => {
+            if (playerFactionId) {
+              this.factionKnowledge!.addEntry(playerFactionId, {
+                assetType: "player",
+                assetId: userId,
+                assetMeta: {
+                  username: member.handle,
+                  lastForumActivity: forumId,
+                  postTitle: post.title,
+                },
+                source: "forum_intel",
+                confidence: 0.7,
+                discoveredBy: userId,
+              });
+            }
+          })
+          .catch((err) =>
+            this.logger.error({ err }, "Faction knowledge forum intel error"),
+          );
+      }
+
       // Track for mission objectives
       if (this.missionIntegration) {
         await this.missionIntegration.onForumActivity(userId, "post", forumId);
       }
 
+      // Apply faction reputation via ReputationEngine
+      try {
+        const { getService } = await import("../di/container");
+        const { REPUTATION_ENGINE } = await import("../di/tokens");
+        const reputationEngine = getService<any>(REPUTATION_ENGINE);
+        await reputationEngine.onForumPost(userId, forumId);
+      } catch (error) {
+        this.logger.error({ err: error }, "Failed to apply forum reputation");
+      }
+
       return post;
     } catch (error) {
-      console.error("[ForumService] Error creating post:", error);
+      this.logger.error({ err: error }, "Error creating post");
       throw error;
     }
   }
@@ -721,7 +786,7 @@ export class ForumService extends EventEmitter {
 
       return post;
     } catch (error) {
-      console.error("Error creating AI post:", error);
+      this.logger.error({ err: error }, "Error creating AI post");
       throw error;
     }
   }
@@ -761,7 +826,7 @@ export class ForumService extends EventEmitter {
 
       return posts;
     } catch (error) {
-      console.error("Error searching posts:", error);
+      this.logger.error({ err: error }, "Error searching posts");
       throw error;
     }
   }
@@ -829,7 +894,7 @@ export class ForumService extends EventEmitter {
 
       return connection;
     } catch (error) {
-      console.error("Error connecting to proxy:", error);
+      this.logger.error({ err: error }, "Error connecting to proxy");
       throw error;
     }
   }
@@ -848,7 +913,7 @@ export class ForumService extends EventEmitter {
         this.io.to(`user:${userId}`).emit("proxy:disconnected", {});
       }
     } catch (error) {
-      console.error("Error disconnecting proxy:", error);
+      this.logger.error({ err: error }, "Error disconnecting proxy");
       throw error;
     }
   }
@@ -884,7 +949,7 @@ export class ForumService extends EventEmitter {
         expiresAt: connection.expiresAt,
       };
     } catch (error) {
-      console.error("Error getting proxy status:", error);
+      this.logger.error({ err: error }, "Error getting proxy status");
       throw error;
     }
   }
@@ -906,9 +971,7 @@ export class ForumService extends EventEmitter {
 
       if (!forum) return;
 
-      console.log(
-        `⚠️ Honeypot triggered for user ${userId} on forum ${forum.name}`,
-      );
+      this.logger.info({ userId, forumName: forum.name }, "Honeypot triggered");
 
       // Get player's home IP for tracking
       const user = await prisma.user.findUnique({
@@ -932,9 +995,17 @@ export class ForumService extends EventEmitter {
         },
       });
 
-      // If forum belongs to a faction, decrease reputation
+      // If forum belongs to a faction, decrease reputation via ReputationEngine
       if (forum.factionId) {
-        // This will be wired to FactionService in Day 9
+        try {
+          const { getService } = await import("../di/container");
+          const { REPUTATION_ENGINE } = await import("../di/tokens");
+          const reputationEngine = getService<any>(REPUTATION_ENGINE);
+          await reputationEngine.onCaughtByFaction(userId, forum.factionId, "high");
+        } catch (error) {
+          this.logger.error({ err: error }, "Failed to apply honeypot reputation");
+        }
+
         this.emit("honeypot:triggered", {
           userId,
           forumId,
@@ -953,7 +1024,7 @@ export class ForumService extends EventEmitter {
         });
       }
     } catch (error) {
-      console.error("Error triggering honeypot:", error);
+      this.logger.error({ err: error }, "Error triggering honeypot");
     }
   }
 
@@ -999,11 +1070,9 @@ export class ForumService extends EventEmitter {
         title: post.title,
       });
 
-      console.log(
-        `📖 Story-relevant post read by user ${userId}: ${post.title}`,
-      );
+      this.logger.info({ userId, postTitle: post.title }, "Story-relevant post read");
     } catch (error) {
-      console.error("Error checking story triggers:", error);
+      this.logger.error({ err: error }, "Error checking story triggers");
     }
   }
 
@@ -1085,21 +1154,11 @@ export class ForumService extends EventEmitter {
         });
       }
 
-      console.log(`🔑 Key fragment found by user ${userId}: ${fragment.name}`);
+      this.logger.info({ userId, fragmentName: fragment.name }, "Key fragment found");
     } catch (error) {
-      console.error("Error checking key fragment:", error);
+      this.logger.error({ err: error }, "Error checking key fragment");
     }
   }
 }
 
 export default ForumService;
-
-// Backward compatibility
-import { container } from "../di/container";
-import { FORUM_SERVICE } from "../di/tokens";
-export const forumService = new Proxy({} as ForumService, {
-  get(_target, prop) {
-    const instance = container.resolve(FORUM_SERVICE as any);
-    return (instance as any)[prop];
-  },
-});
