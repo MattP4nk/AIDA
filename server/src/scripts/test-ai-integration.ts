@@ -11,7 +11,7 @@ import http from "http";
 
 const prisma = new PrismaClient();
 const logger = pino({ level: "info" });
-const cacheService = new CacheService();
+const cacheService = new CacheService(logger);
 
 async function testAIIntegration() {
   console.log("🧪 Testing AI Integration...\n");
@@ -28,14 +28,14 @@ async function testAIIntegration() {
       // Test generation
       const { response } = await aiService.generateResponse(
         "Say hello in one word",
-        "You are a friendly AI assistant"
+        "You are a friendly AI assistant",
       );
       console.log(`   AI Response: "${response.substring(0, 50)}..."`);
 
       // Test caching
       const { response: cached } = await aiService.generateResponse(
         "Say hello in one word",
-        "You are a friendly AI assistant"
+        "You are a friendly AI assistant",
       );
       console.log(`   Cache test: "${cached.substring(0, 50)}..."`);
 
@@ -48,15 +48,31 @@ async function testAIIntegration() {
 
   // 2. Test PersonaService with real persona
   console.log("\n2️⃣ Testing PersonaService...");
-  const missionService = new MissionService(cacheService);
-  
+  const missionService = new MissionService(logger, cacheService);
+
   // Create minimal SocketIO instance for MessageService and ForumService
   const httpServer = http.createServer();
   const io = new SocketIOServer(httpServer);
-  const messageService = new MessageService(io);
-  const forumService = new (await import("../services/forumService")).default(io);
-  
-  const personaService = new PersonaService(prisma, logger, missionService, aiService, messageService, forumService);
+  const messageService = new MessageService(logger, io);
+  const forumService = new (await import("../services/forumService")).default(
+    io,
+    logger,
+  );
+
+  const { FactionService } = await import("../services/factionService");
+  const factionService = new FactionService(prisma, logger);
+  const EventService = (await import("../services/eventService")).default;
+  const eventService = new EventService(logger, io);
+  const personaService = new PersonaService(
+    prisma,
+    logger,
+    missionService,
+    aiService,
+    messageService,
+    forumService,
+    factionService,
+    eventService,
+  );
 
   try {
     // Get Game Master persona
@@ -79,7 +95,7 @@ async function testAIIntegration() {
     // Test AI decision making
     console.log("   🤖 Asking AI to decide on an action...");
     const action = await personaService.decideAction(gm.id);
-    
+
     if (action) {
       console.log(`   ✅ AI decided: ${action.type}`);
       console.log(`   Input: ${JSON.stringify(action.input, null, 2)}`);
@@ -87,9 +103,11 @@ async function testAIIntegration() {
       // Test action execution
       console.log("   ⚙️ Executing action...");
       await personaService.executeAction(action.id);
-      
+
       // Check result
-      const executed = await prisma.aIAction.findUnique({ where: { id: action.id } });
+      const executed = await prisma.aIAction.findUnique({
+        where: { id: action.id },
+      });
       console.log(`   Status: ${executed?.status}`);
       if (executed?.output) {
         console.log(`   Output: ${JSON.stringify(executed.output, null, 2)}`);
@@ -97,7 +115,6 @@ async function testAIIntegration() {
     } else {
       console.log("   ℹ️ AI decided no action needed");
     }
-
   } catch (error) {
     console.error("   ❌ PersonaService test failed:", error);
   }

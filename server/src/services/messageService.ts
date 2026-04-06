@@ -17,8 +17,20 @@ import { Server as SocketIOServer } from "socket.io";
 import crypto from "crypto";
 import { Logger } from "pino";
 import { injectable, inject } from "tsyringe";
-import { LOGGER, SOCKET_IO, MISSION_INTEGRATION_SERVICE } from "../di/tokens";
+import {
+  LOGGER,
+  SOCKET_IO,
+  MISSION_INTEGRATION_SERVICE,
+  AI_SERVICE,
+} from "../di/tokens";
 import type MissionIntegrationService from "./missionIntegration";
+import type { AIService } from "./aiService";
+import {
+  findPersonaToken,
+  type PersonaTokenInfo,
+} from "../utils/tokenConsumption";
+import { generateAvatar, getCompactAvatar } from "../utils/asciiAvatars";
+import type { AvatarInfo } from "../../../shared/types";
 
 // ==================== TYPES ====================
 
@@ -73,6 +85,18 @@ export interface EncryptionResult {
   key: string;
 }
 
+export interface ChatContact {
+  userId: string;
+  username: string;
+  isOnline: boolean;
+  unreadCount: number;
+  lastMessage: string;
+  lastMessageTime: Date;
+  isContact: boolean;
+  factionId: string | null;
+  avatar: AvatarInfo;
+}
+
 // ==================== MESSAGE SERVICE CLASS ====================
 
 @injectable()
@@ -82,6 +106,16 @@ export class MessageService {
   private deliveryProcessorInterval: NodeJS.Timeout | null = null;
   private missionIntegration: MissionIntegrationService | null = null;
 
+  // Post-send hooks — called after a private message is successfully sent
+  private messageSentCallbacks: Array<
+    (
+      senderId: string,
+      recipientId: string,
+      content: string,
+      subject?: string,
+    ) => void
+  > = [];
+
   constructor(
     @inject(LOGGER) private logger: Logger,
     @inject(SOCKET_IO) private io: SocketIOServer,
@@ -90,6 +124,36 @@ export class MessageService {
   ) {
     this.missionIntegration = missionIntegrationService || null;
     this.startDeliveryProcessor();
+  }
+
+  // ==================== AVATAR HELPER ====================
+
+  private generateAvatarInfo(
+    username: string,
+    type: "player" | "npc" | "system" | "ai" = "player",
+    factionId?: string,
+  ): AvatarInfo {
+    const avatar = generateAvatar(username, type, factionId);
+    return {
+      glyph: avatar.glyph,
+      color: avatar.color,
+      compact: getCompactAvatar(avatar),
+    };
+  }
+
+  /**
+   * Register a callback to be invoked after any private message is sent.
+   * Used by TutorialService to intercept messages to The Architect.
+   */
+  onPrivateMessageSent(
+    callback: (
+      senderId: string,
+      recipientId: string,
+      content: string,
+      subject?: string,
+    ) => void,
+  ): void {
+    this.messageSentCallbacks.push(callback);
   }
 
   // ==================== SEND MESSAGES ====================
@@ -134,9 +198,17 @@ export class MessageService {
       let filteredContent = options.content;
       try {
         const { getService } = await import("../di/container");
-        const censorshipService = getService<import("./censorshipService").default>("CensorshipService");
-        filteredContent = await censorshipService.filterAndAlert(options.content, { userId: senderId });
-      } catch { /* Censorship service not available — pass through */ }
+        const censorshipService =
+          getService<import("./censorshipService").default>(
+            "CensorshipService",
+          );
+        filteredContent = await censorshipService.filterAndAlert(
+          options.content,
+          { userId: senderId },
+        );
+      } catch {
+        /* Censorship service not available — pass through */
+      }
 
       let finalContent = filteredContent;
       let isEncrypted = false;
@@ -210,6 +282,20 @@ export class MessageService {
       // Log the message send
       await this.logMessageActivity(senderId, "send", message.id);
 
+      // Emit new_mail event for messages with subjects (mail, not chat)
+      if (options.subject && options.subject !== "") {
+        this.io.to(`user:${recipientId}`).emit("message:new_mail", {
+          id: message.id,
+          senderId,
+          senderUsername: sender.username,
+          subject: options.subject,
+          timestamp: message.timestamp,
+          isEncrypted,
+          messageType: options.messageType || "private",
+          avatar: this.generateAvatarInfo(sender.username, "player"),
+        });
+      }
+
       // Track for mission objectives
       if (this.missionIntegration) {
         await this.missionIntegration.onMessageSent(
@@ -217,6 +303,15 @@ export class MessageService {
           recipientId,
           message.id,
         );
+      }
+
+      // Fire post-send hooks (e.g., tutorial system listens for messages to AI personas)
+      for (const cb of this.messageSentCallbacks) {
+        try {
+          cb(senderId, recipientId, finalContent, options.subject);
+        } catch {
+          // Hook errors should not break message sending
+        }
       }
 
       return {
@@ -782,11 +877,19 @@ export class MessageService {
         });
 
         if (!dbMessage) {
-          return { success: false, message: "Message not found", error: "NOT_FOUND" };
+          return {
+            success: false,
+            message: "Message not found",
+            error: "NOT_FOUND",
+          };
         }
         // Only sender or recipient may use the stored key
         if (dbMessage.senderId !== userId && dbMessage.recipientId !== userId) {
-          return { success: false, message: "Permission denied", error: "PERMISSION_DENIED" };
+          return {
+            success: false,
+            message: "Permission denied",
+            error: "PERMISSION_DENIED",
+          };
         }
         if (!dbMessage.encryptionKey) {
           return {
@@ -871,12 +974,20 @@ export class MessageService {
       });
 
       if (!message) {
-        return { success: false, message: "Message not found", error: "NOT_FOUND" };
+        return {
+          success: false,
+          message: "Message not found",
+          error: "NOT_FOUND",
+        };
       }
 
       // Only sender or recipient may decrypt
       if (message.senderId !== userId && message.recipientId !== userId) {
-        return { success: false, message: "Permission denied", error: "PERMISSION_DENIED" };
+        return {
+          success: false,
+          message: "Permission denied",
+          error: "PERMISSION_DENIED",
+        };
       }
 
       if (!message.isEncrypted) {
@@ -973,11 +1084,24 @@ export class MessageService {
           },
         });
 
+        // Actually decrypt the content using the stored encryption key
+        const decryptResult = await this.decryptMessage(
+          message.content,
+          message.encryptionKey!,
+          userId,
+          messageId,
+        );
+
+        const decryptedContent =
+          decryptResult.success && decryptResult.data
+            ? decryptResult.data.content
+            : message.content; // Fallback to ciphertext if decryption fails unexpectedly
+
         return {
           success: true,
           message: "Encryption cracked successfully!",
           data: {
-            content: message.content, // In real implementation, decrypt here
+            content: decryptedContent,
             xpGained: xpGain,
             skillGained: Math.min(2, message.encryptionLevel!),
           },
@@ -1021,6 +1145,7 @@ export class MessageService {
             select: {
               id: true,
               username: true,
+              factionMembers: { select: { factionId: true }, take: 1 },
             },
           },
         },
@@ -1046,6 +1171,11 @@ export class MessageService {
         preview: message.isEncrypted
           ? "[ENCRYPTED]"
           : message.content.substring(0, 50),
+        avatar: this.generateAvatarInfo(
+          message.sender.username,
+          "player",
+          message.sender.factionMembers?.[0]?.factionId ?? undefined,
+        ),
       });
 
       return true;
@@ -1292,6 +1422,544 @@ export class MessageService {
         message: "Failed to retrieve message stats",
         error: error.message,
       };
+    }
+  }
+
+  // ==================== CHAT METHODS ====================
+
+  /**
+   * Get chat history between two users
+   */
+  async getChatHistory(
+    userId: string,
+    contactId: string,
+    limit: number = 100,
+  ): Promise<MessageOperationResult> {
+    try {
+      const messages = await prisma.message.findMany({
+        where: {
+          OR: [
+            { senderId: userId, recipientId: contactId },
+            { senderId: contactId, recipientId: userId },
+          ],
+          subject: "",
+        },
+        include: {
+          sender: { select: { id: true, username: true } },
+          recipient: { select: { id: true, username: true } },
+        },
+        orderBy: { timestamp: "desc" },
+        take: limit,
+      });
+
+      const formattedMessages = messages.map((msg) => ({
+        id: msg.id,
+        senderId: msg.senderId,
+        senderUsername: msg.sender?.username ?? "Unknown",
+        recipientId: msg.recipientId,
+        recipientUsername: msg.recipient?.username ?? "Unknown",
+        content: msg.isEncrypted ? "[ENCRYPTED]" : msg.content,
+        timestamp: msg.timestamp,
+        isRead: msg.isRead,
+        isEncrypted: msg.isEncrypted,
+        avatar: this.generateAvatarInfo(msg.sender?.username ?? "Unknown"),
+      }));
+
+      return {
+        success: true,
+        message: `Retrieved ${formattedMessages.length} messages`,
+        data: { messages: formattedMessages },
+      };
+    } catch (error: any) {
+      this.logger.error({ err: error }, "Get chat history error");
+      return {
+        success: false,
+        message: "Failed to load chat history",
+        error: error.message,
+      };
+    }
+  }
+
+  /**
+   * Get chat contacts for a user (from DB contacts + message history)
+   */
+  async getChatContacts(userId: string): Promise<MessageOperationResult> {
+    try {
+      // Get DB contacts
+      const dbContacts = await prisma.contact.findMany({
+        where: { userId },
+        include: {
+          contact: {
+            select: {
+              id: true,
+              username: true,
+              factionMembers: { select: { factionId: true }, take: 1 },
+            },
+          },
+        },
+      });
+
+      // Get all chat messages to find additional contacts from message history
+      const chatMessages = await prisma.message.findMany({
+        where: {
+          OR: [{ senderId: userId }, { recipientId: userId }],
+          subject: "",
+        },
+        include: {
+          sender: {
+            select: {
+              id: true,
+              username: true,
+              factionMembers: { select: { factionId: true }, take: 1 },
+            },
+          },
+          recipient: {
+            select: {
+              id: true,
+              username: true,
+              factionMembers: { select: { factionId: true }, take: 1 },
+            },
+          },
+        },
+        orderBy: { timestamp: "desc" },
+      });
+
+      const contactMap = new Map<string, ChatContact>();
+
+      // Add DB contacts
+      for (const dbContact of dbContacts) {
+        if (dbContact.contact && !contactMap.has(dbContact.contactUserId)) {
+          const factionId =
+            dbContact.contact.factionMembers?.[0]?.factionId ?? null;
+          contactMap.set(dbContact.contactUserId, {
+            userId: dbContact.contactUserId,
+            username: dbContact.contact.username,
+            isOnline: false,
+            unreadCount: 0,
+            lastMessage: "",
+            lastMessageTime: new Date(0),
+            isContact: true,
+            factionId,
+            avatar: this.generateAvatarInfo(
+              dbContact.contact.username,
+              "player",
+              factionId ?? undefined,
+            ),
+          });
+        }
+      }
+
+      // Add contacts from message history
+      for (const msg of chatMessages) {
+        const otherId =
+          msg.senderId === userId ? msg.recipientId : msg.senderId;
+        const other = msg.senderId === userId ? msg.recipient : msg.sender;
+        if (other && !contactMap.has(otherId)) {
+          const factionId = other.factionMembers?.[0]?.factionId ?? null;
+          contactMap.set(otherId, {
+            userId: otherId,
+            username: other.username,
+            isOnline: false,
+            unreadCount: 0,
+            lastMessage: "",
+            lastMessageTime: new Date(0),
+            isContact: false,
+            factionId,
+            avatar: this.generateAvatarInfo(
+              other.username,
+              "player",
+              factionId ?? undefined,
+            ),
+          });
+        }
+
+        // Update last message preview
+        const contact = contactMap.get(otherId);
+        if (contact && msg.timestamp > contact.lastMessageTime) {
+          contact.lastMessage = msg.isEncrypted
+            ? "[ENCRYPTED]"
+            : msg.content.substring(0, 50);
+          contact.lastMessageTime = msg.timestamp;
+        }
+      }
+
+      // Get unread counts in a single query
+      const unreadCounts = await prisma.message.groupBy({
+        by: ["senderId"],
+        where: {
+          recipientId: userId,
+          isRead: false,
+          subject: "",
+        },
+        _count: { id: true },
+      });
+
+      for (const uc of unreadCounts) {
+        const contact = contactMap.get(uc.senderId);
+        if (contact) {
+          contact.unreadCount = uc._count.id;
+        }
+      }
+
+      // Check online status via Socket.IO rooms
+      const contacts = Array.from(contactMap.values());
+      for (const contact of contacts) {
+        const sockets = await this.io
+          .in(`user:${contact.userId}`)
+          .fetchSockets();
+        contact.isOnline = sockets.length > 0;
+      }
+
+      // Sort by last message time (most recent first)
+      contacts.sort(
+        (a, b) => b.lastMessageTime.getTime() - a.lastMessageTime.getTime(),
+      );
+
+      return {
+        success: true,
+        message: `Found ${contacts.length} contacts`,
+        data: { contacts },
+      };
+    } catch (error: any) {
+      this.logger.error({ err: error }, "Get chat contacts error");
+      return {
+        success: false,
+        message: "Failed to load contacts",
+        error: error.message,
+      };
+    }
+  }
+
+  /**
+   * Mark all messages in a conversation as read
+   */
+  async markConversationRead(
+    userId: string,
+    senderId: string,
+  ): Promise<MessageOperationResult> {
+    try {
+      const result = await prisma.message.updateMany({
+        where: {
+          recipientId: userId,
+          senderId: senderId,
+          isRead: false,
+          subject: "",
+        },
+        data: { isRead: true },
+      });
+
+      // Send read receipts for each marked message
+      if (result.count > 0) {
+        this.io.to(`user:${senderId}`).emit("message:conversation_read", {
+          readBy: userId,
+          count: result.count,
+        });
+      }
+
+      return {
+        success: true,
+        message: `Marked ${result.count} messages as read`,
+        data: { count: result.count },
+      };
+    } catch (error: any) {
+      this.logger.error({ err: error }, "Mark conversation read error");
+      return {
+        success: false,
+        message: "Failed to mark messages as read",
+        error: error.message,
+      };
+    }
+  }
+
+  /**
+   * Get unread chat message counts grouped by sender
+   */
+  async getUnreadChatCounts(userId: string): Promise<MessageOperationResult> {
+    try {
+      const counts = await prisma.message.groupBy({
+        by: ["senderId"],
+        where: {
+          recipientId: userId,
+          isRead: false,
+          subject: "",
+        },
+        _count: { id: true },
+      });
+
+      const countMap: Record<string, number> = {};
+      for (const c of counts) {
+        countMap[c.senderId] = c._count.id;
+      }
+
+      return {
+        success: true,
+        message: "Unread counts retrieved",
+        data: { counts: countMap },
+      };
+    } catch (error: any) {
+      this.logger.error({ err: error }, "Get unread chat counts error");
+      return {
+        success: false,
+        message: "Failed to get unread counts",
+        error: error.message,
+      };
+    }
+  }
+
+  /**
+   * Request decryption of a message (wrapper around decryptMessageById)
+   */
+  async requestDecryption(
+    messageId: string,
+    userId: string,
+  ): Promise<MessageOperationResult> {
+    // This delegates to decryptMessageById which checks sender/recipient authorization
+    return this.decryptMessageById(messageId, userId);
+  }
+
+  // ==================== TOKEN-GATED AI PERSONA MESSAGING ====================
+
+  /**
+   * Send a token-gated message to an AI persona.
+   * Consumes one communication token from the player's inventory.
+   * The persona will respond asynchronously via AI.
+   */
+  async sendTokenMessage(
+    senderId: string,
+    personaName: string,
+    subject: string,
+    content: string,
+  ): Promise<{ success: boolean; error?: string; messageId?: string }> {
+    try {
+      // 1. Look up the AI persona by name
+      const persona = await prisma.aIPersona.findUnique({
+        where: { name: personaName },
+      });
+
+      if (!persona) {
+        return {
+          success: false,
+          error: `AI persona "${personaName}" not found.`,
+        };
+      }
+
+      // 2. Check for a matching communication token (pre-flight)
+      const token = await findPersonaToken(prisma, senderId, personaName);
+
+      if (!token) {
+        return {
+          success: false,
+          error:
+            `You need a communication token to contact ${personaName}. ` +
+            `These can be found on certain servers or earned through missions.`,
+        };
+      }
+
+      // 3. Resolve the persona's User account (idempotent — safe outside txn)
+      const aiUserId = await this.getAIUserId(persona.id);
+
+      // 4. Resolve sender username for prompt building
+      const sender = await prisma.user.findUnique({
+        where: { id: senderId },
+        select: { username: true },
+      });
+
+      if (!sender) {
+        return { success: false, error: "Sender not found." };
+      }
+
+      // 5. Atomic transaction: consume token + create message + record PersonaMessage
+      const { message: outboundMessage } = await prisma.$transaction(
+        async (tx) => {
+          // Re-verify the token inside the transaction (race-condition guard)
+          const invItem = await tx.inventoryItem.findUnique({
+            where: { id: token.inventoryItemId },
+          });
+
+          if (!invItem || invItem.quantity <= 0) {
+            throw new Error(
+              "Your communication token is no longer available. It may have been used already.",
+            );
+          }
+
+          // Consume the token
+          if (invItem.quantity === 1) {
+            await tx.inventoryItem.delete({
+              where: { id: token.inventoryItemId },
+            });
+          } else {
+            await tx.inventoryItem.update({
+              where: { id: token.inventoryItemId },
+              data: {
+                quantity: { decrement: 1 },
+                lastUsedAt: new Date(),
+              },
+            });
+          }
+
+          // Create the outbound message (player → persona)
+          const message = await tx.message.create({
+            data: {
+              senderId,
+              recipientId: aiUserId,
+              subject,
+              content,
+              isRead: false,
+              isEncrypted: false,
+              messageType: "private",
+            },
+          });
+
+          // Record in PersonaMessage table
+          await tx.personaMessage.create({
+            data: {
+              userId: senderId,
+              personaId: persona.id,
+              tokenItemId: token.inventoryItemId,
+              direction: "outbound",
+              subject,
+              content,
+              messageId: message.id,
+            },
+          });
+
+          return { message };
+        },
+      );
+
+      // 6. Deliver outbound message in real-time
+      await this.deliverMessageRealtime(outboundMessage.id, aiUserId);
+
+      // 6b. Record token_used event to StoryLedger
+      try {
+        const { getService } = await import("../di/container");
+        const { STORY_PROGRESSION_SERVICE } = await import("../di/tokens");
+        const storyProgression = getService<
+          import("./storyProgressionService").StoryProgressionService
+        >(STORY_PROGRESSION_SERVICE);
+        await storyProgression.recordEvent({
+          type: "token_used",
+          category: "communication",
+          actorId: senderId,
+          actorType: "player",
+          summary: `Player used ${token.shopItemName} to contact ${persona.name}`,
+          data: {
+            tokenName: token.shopItemName,
+            personaName: persona.name,
+            personaId: persona.id,
+          },
+          impact: { discoveryWeight: 2 },
+          weight: 5,
+        });
+      } catch (err) {
+        // Non-critical — don't fail the message send
+        this.logger.warn({ err }, "Failed to record token_used event");
+      }
+
+      // 7. Fire asynchronous AI response generation
+      this.generatePersonaReply(
+        senderId,
+        sender.username,
+        persona,
+        subject,
+        content,
+        token,
+      ).catch((err) => {
+        this.logger.error(
+          { err, personaId: persona.id, senderId },
+          "Failed to generate AI persona reply",
+        );
+      });
+
+      return { success: true, messageId: outboundMessage.id };
+    } catch (error: any) {
+      this.logger.error({ err: error }, "sendTokenMessage error");
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * Generate an AI persona reply and deliver it to the player.
+   * Called asynchronously after a token-gated message is sent.
+   */
+  private async generatePersonaReply(
+    playerId: string,
+    playerUsername: string,
+    persona: { id: string; name: string; systemPrompt: string },
+    originalSubject: string,
+    originalContent: string,
+    token: PersonaTokenInfo,
+  ): Promise<void> {
+    // 1. Resolve AI service lazily (avoids circular DI)
+    let aiService: AIService;
+    try {
+      const { getService } = await import("../di/container");
+      aiService = getService<AIService>(AI_SERVICE);
+    } catch {
+      this.logger.warn("AIService not available — skipping persona reply");
+      return;
+    }
+
+    // 2. Fetch recent conversation history from PersonaMessage
+    const history = await prisma.personaMessage.findMany({
+      where: {
+        userId: playerId,
+        personaId: persona.id,
+      },
+      orderBy: { createdAt: "desc" },
+      take: 10,
+    });
+
+    // Build conversation context (oldest-first)
+    const conversationLines = history
+      .reverse()
+      .map((pm) => {
+        const role =
+          pm.direction === "outbound" ? playerUsername : persona.name;
+        return `[${role}]: ${pm.content}`;
+      })
+      .join("\n");
+
+    // 3. Build prompt
+    const prompt =
+      `A player named ${playerUsername} has used a ${token.shopItemName} to contact you.\n` +
+      (conversationLines
+        ? `Recent conversation:\n${conversationLines}\n\n`
+        : "") +
+      `Their latest message (subject: "${originalSubject}"):\n${originalContent}\n\n` +
+      `Respond in character. Keep your reply concise (1-3 paragraphs).`;
+
+    // 4. Generate response via AI
+    const { response: replyContent } = await aiService.generateResponse(
+      prompt,
+      persona.systemPrompt,
+    );
+
+    // 5. Send the reply as an AI message (persona → player)
+    const replySubject = originalSubject.startsWith("Re: ")
+      ? originalSubject
+      : `Re: ${originalSubject}`;
+
+    const sendResult = await this.sendAIMessage(
+      persona.id,
+      playerId,
+      replySubject,
+      replyContent,
+    );
+
+    // 6. Record the inbound PersonaMessage
+    if (sendResult.success && sendResult.data?.messageId) {
+      await prisma.personaMessage.create({
+        data: {
+          userId: playerId,
+          personaId: persona.id,
+          tokenItemId: token.inventoryItemId,
+          direction: "inbound",
+          subject: replySubject,
+          content: replyContent,
+          messageId: sendResult.data.messageId,
+        },
+      });
     }
   }
 

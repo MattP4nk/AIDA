@@ -157,6 +157,62 @@ export class MissionGeneratorService {
       }
 
       this.generationStats.totalGenerated += missionIds.length;
+
+      // Add generated missions to the player's missionProgress as "available"
+      // so they appear in getPlayerMissions() results
+      if (missionIds.length > 0) {
+        try {
+          const missions = await db.client.mission.findMany({
+            where: { id: { in: missionIds } },
+          });
+
+          const missionProgress =
+            (progress.missionProgress as Record<string, any>) || {};
+
+          for (const mission of missions) {
+            const objectives = (mission.objectives as unknown as any[]) || [];
+
+            missionProgress[mission.id] = {
+              missionId: mission.id,
+              userId,
+              status: "available",
+              objectives: objectives.map((obj: any) => ({
+                ...obj,
+                current:
+                  typeof obj.target === "number"
+                    ? 0
+                    : typeof obj.target === "boolean"
+                      ? false
+                      : "",
+                completed: false,
+              })),
+              startedAt: null,
+              completedAt: null,
+              expiresAt: mission.timeLimit
+                ? new Date(Date.now() + (mission.timeLimit as number) * 1000)
+                : null,
+            };
+          }
+
+          await db.client.playerProgress.update({
+            where: { userId },
+            data: {
+              missionProgress: missionProgress as any,
+            },
+          });
+
+          this.logger.info(
+            { userId, count: missionIds.length },
+            "Generated missions added to player missionProgress",
+          );
+        } catch (progressError) {
+          this.logger.error(
+            { err: progressError, userId },
+            "Failed to update missionProgress with generated missions",
+          );
+        }
+      }
+
       return missionIds;
     } catch (error) {
       this.logger.error({ err: error }, "Error generating missions");

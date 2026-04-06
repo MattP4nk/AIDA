@@ -7,7 +7,7 @@ import { MessageService } from "./messageService";
 import ForumService from "./forumService";
 import { FactionService } from "./factionService";
 import EventService from "./eventService";
-import { LOGGER, EVENT_SERVICE, RESOURCE_SERVICE, FACTION_KNOWLEDGE_SERVICE } from "../di/tokens";
+import { LOGGER, EVENT_SERVICE, RESOURCE_SERVICE, FACTION_KNOWLEDGE_SERVICE, STORY_MISSION_SERVICE } from "../di/tokens";
 import { EventSeverity } from "../../../shared/types";
 import type { FactionKnowledgeService, KnowledgeSnapshot } from "./factionKnowledgeService";
 import {
@@ -261,7 +261,7 @@ Respond ONLY with JSON: { "title": "...", "content": "..." }`;
    * Generate a context-aware dynamic mission for a faction.
    * Pipeline: template selection → fill with real IDs from knowledge → AI flavor → fallback
    */
-  async generateDynamicMission(factionId: string, context: { lowResources?: boolean; underAttack?: boolean }): Promise<void> {
+  async generateDynamicMission(factionId: string, context: { lowResources?: boolean; underAttack?: boolean; rebalance?: boolean }): Promise<void> {
     try {
       // Step 1: Find faction leader persona
       const leader = await this.prisma.aIPersona.findFirst({
@@ -431,9 +431,24 @@ Respond ONLY with JSON:
       const requiresServerId = typeDef?.requiredMetadata?.includes("serverId");
       const requiresFileId = typeDef?.requiredMetadata?.includes("fileId");
       const requiresFactionId = typeDef?.requiredMetadata?.includes("factionId");
+      const requiresNetworkId = typeDef?.requiredMetadata?.includes("networkId");
 
       let description = objTemplate.descriptionTemplate;
       const metadata: Record<string, unknown> = { ...objTemplate.metadata };
+
+      // Fill network targets from knowledge (for infiltrate_network)
+      if (requiresNetworkId && !metadata.networkId) {
+        // Pick a server that belongs to a network (has networkName in meta)
+        const networkServer = snapshot.servers.find((s) => s.assetMeta.networkName);
+        if (networkServer) {
+          metadata.networkId = networkServer.assetMeta.networkId || null;
+          metadata.serverId = networkServer.assetId;
+          metadata.serverName = networkServer.assetMeta.name || "target network";
+          description = description.replace("{network}", String(networkServer.assetMeta.networkName || "target network"));
+        } else if (requiresNetworkId) {
+          continue; // No known networks
+        }
+      }
 
       // Fill server targets from knowledge
       if (requiresServerId && !metadata.serverId) {
@@ -1160,13 +1175,14 @@ ${knowledgeSummary}
 
 What action should you take? Consider:
 - Issue a mission if intel reveals an opportunity
+- Create a story arc if there's a complex multi-step operation worth planning (3-7 step narrative campaign)
 - Send a message if you need to recruit or warn someone
 - Post to forum to spread propaganda or misinformation
 - Do nothing if intel is not actionable
 
 Respond ONLY with JSON:
 {
-  "action": "issue_mission" | "send_message" | "forum_post" | "none",
+  "action": "issue_mission" | "create_story_arc" | "send_message" | "forum_post" | "none",
   "reason": "brief explanation",
   "target": "optional target info"
 }`;
@@ -1330,6 +1346,40 @@ Respond ONLY with JSON: { "title": "...", "description": "..." }`;
             output = { missionId: mission.id, templateId: mTemplate.id };
           }
           break;
+        case "create_story_arc": {
+          // Faction leader creates a multi-step story arc for a faction member
+          if (action.persona.faction) {
+            const factionId = action.persona.faction.id;
+
+            // Find an active faction member to assign the arc to
+            const member = await this.prisma.factionMember.findFirst({
+              where: { factionId },
+              include: { user: { include: { progress: true } } },
+              orderBy: { reputation: "desc" },
+            });
+
+            if (member) {
+              try {
+                const { getService } = await import("../di/container");
+                const storyService = getService<import("./storyMissionService").StoryMissionService>(STORY_MISSION_SERVICE);
+                const playerLevel = member.user.progress?.level ?? 1;
+                const difficulty = Math.min(10, Math.max(3, Math.floor(playerLevel / 10) + 3));
+
+                const result = await storyService.createStoryArc(member.userId, factionId, action.persona.id, difficulty);
+                output = { type: "create_story_arc", ...result };
+                if (result.success) {
+                  this.logger.info({ actionId, arcId: result.arcId, userId: member.userId }, "Faction leader created story arc");
+                }
+              } catch (err) {
+                this.logger.warn({ err }, "StoryMissionService not available for arc creation");
+                output = { type: "create_story_arc", error: "service_unavailable" };
+              }
+            } else {
+              output = { type: "create_story_arc", error: "no_faction_members" };
+            }
+          }
+          break;
+        }
         case "send_message":
           // Use AI to generate message content
           const messageTarget = (action.input as any).target;
@@ -1479,7 +1529,7 @@ Generate a post for underground hacking forums. Stay in character. Respond ONLY 
           break;
         }
         case "plant_discovery": {
-          // Game Master plants a clue/intel file on a server
+          // Game Master plants an AI-generated clue/intel file on a server
           const details = (action.input as any)?.details || {};
 
           // Find a target server — prefer a faction server if targetFaction specified
@@ -1496,7 +1546,6 @@ Generate a post for underground hacking forums. Stay in character. Respond ONLY 
             }
           }
           if (!targetServer) {
-            // Pick a random non-player server (has a faction or no owner)
             targetServer = await this.prisma.gameServer.findFirst({
               where: { factionId: { not: null } },
               orderBy: { securityLevel: "asc" },
@@ -1504,25 +1553,17 @@ Generate a post for underground hacking forums. Stay in character. Respond ONLY 
           }
 
           if (targetServer) {
-            // Create a hidden intel file on the server
-            await this.prisma.fileSystemNode.create({
-              data: {
-                serverId: targetServer.id,
-                name: `.intel_${Date.now().toString(36)}`,
-                type: "file",
-                content: details.content || "Encrypted fragment detected...",
-                isHidden: true,
-                permissions: { owner: 7, group: 4, other: 0 },
-              },
-            });
+            const clueType = details.title || "signal";
+            const clue = await this.generateClue(clueType, targetServer.id);
 
             output = {
               type: "plant_discovery",
               serverId: targetServer.id,
               serverName: targetServer.name,
+              fileId: clue.id,
               title: details.title,
             };
-            this.logger.info({ actionId, serverId: targetServer.id }, "Game Master planted discovery");
+            this.logger.info({ actionId, serverId: targetServer.id, fileId: clue.id }, "Game Master planted discovery via generateClue");
           } else {
             output = { type: "plant_discovery", error: "No suitable server found" };
           }

@@ -513,11 +513,11 @@ export class PlayerPresenceService extends EventEmitter {
   }
 
   /**
-   * Get top players by reputation (online only)
+   * Get top online players by level
    */
   public getTopPlayers(limit: number = 10): OnlinePlayer[] {
     return Array.from(this.onlinePlayers.values())
-      .sort((a, b) => b.reputation - a.reputation)
+      .sort((a, b) => b.level - a.level)
       .slice(0, limit);
   }
 

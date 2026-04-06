@@ -59,6 +59,14 @@ export async function gracefulShutdown(
       logger.info("Warfare monitor stopped");
     } catch { /* Not fatal */ }
 
+    // Stop mission expiration checker
+    try {
+      const { MISSION_SERVICE } = await import("./di/tokens");
+      const missionService = getService<any>(MISSION_SERVICE);
+      missionService.stopExpirationChecker();
+      logger.info("Mission expiration checker stopped");
+    } catch { /* Not fatal */ }
+
     // Stop CSRF cleanup timer
     stopCsrfCleanup();
 

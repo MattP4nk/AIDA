@@ -1,18 +1,12 @@
 import "reflect-metadata";
 import { AIService } from "../services/aiService";
-import { PersonaService } from "../services/personaService";
 import { PrismaClient } from "@prisma/client";
 import pino from "pino";
 import { CacheService } from "../services/cacheService";
-import MissionService from "../services/missionService";
-import { MessageService } from "../services/messageService";
-import ForumService from "../services/forumService";
-import { Server as SocketIOServer } from "socket.io";
-import http from "http";
 
 const prisma = new PrismaClient();
 const logger = pino({ level: "info" });
-const cacheService = new CacheService();
+const cacheService = new CacheService(logger);
 
 async function testOllamaConnection() {
   console.log("🤖 Testing Ollama Integration\n");
@@ -24,6 +18,12 @@ async function testOllamaConnection() {
     console.log("-".repeat(60));
 
     const aiService = new AIService(logger, cacheService);
+    console.log(
+      "Mode:",
+      process.env.AI_API_KEY || process.env.OLLAMA_API_KEY
+        ? "☁️  Cloud"
+        : "💻 Local",
+    );
 
     const prompt =
       "You are a hacker in a cyberpunk game. Describe your latest hack in exactly one sentence.";
@@ -144,10 +144,11 @@ Return ONLY a JSON object with this structure:
     console.log("✅ ALL TESTS PASSED");
     console.log("=".repeat(60));
     console.log("\n📊 Summary:");
-    console.log("  ✓ Basic AI response generation");
+    console.log("  ✓ Basic AI response generation (via /api/chat)");
     console.log("  ✓ System prompt handling");
     console.log("  ✓ Mission generation (if persona exists)");
     console.log("  ✓ Response caching");
+    console.log("  ✓ Cloud model support (AI_API_KEY / OLLAMA_API_KEY)");
     console.log("\n🎮 Ollama is ready for AIDA!");
     console.log("\n💡 AI Features Available:");
     console.log("  - Dynamic mission generation (10% of missions)");
@@ -166,9 +167,14 @@ Return ONLY a JSON object with this structure:
       ) {
         console.error("\n💡 Solution: Make sure Ollama is running:");
         console.error("   ollama serve");
+        console.error("   Or set AI_API_KEY / OLLAMA_API_KEY for cloud mode.");
       } else if (error.message.includes("model")) {
+        const model = process.env.AI_MODEL || "llama3.1:8b";
         console.error("\n💡 Solution: Pull the required model:");
-        console.error("   ollama pull llama3.1:8b");
+        console.error(`   ollama pull ${model}`);
+        console.error(
+          "   Or set AI_API_KEY / OLLAMA_API_KEY to use a cloud-hosted model.",
+        );
       }
     }
 

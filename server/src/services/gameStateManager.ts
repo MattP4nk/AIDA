@@ -509,6 +509,25 @@ class GameStateManager extends EventEmitter {
         }
       }
 
+      // Provision thematic server content on first connect.
+      // Faction servers get AI-generated content via their faction leader persona;
+      // unowned servers (e.g. tutorial network) use The Architect / static templates.
+      // Idempotent: skips automatically if content already exists (fileCount > 8).
+      if (!server.isPlayerHome && server.type !== "player_home") {
+        try {
+          const { getService } = await import("../di/container");
+          const { SERVER_CONTENT_SERVICE } = await import("../di/tokens");
+          const contentService = getService<any>(SERVER_CONTENT_SERVICE);
+          await contentService.provisionServerContent(serverId);
+        } catch (contentErr) {
+          // Fire-and-forget: player can still connect even if provisioning fails
+          this.logger.warn(
+            { err: contentErr, serverId, serverName: server.name },
+            "Server content provisioning failed on connect (non-fatal)",
+          );
+        }
+      }
+
       // Update session
       session.currentServerId = serverId;
 

@@ -6,7 +6,6 @@
     import { apiClient } from "../services/api";
     // New ASCII Dialog system
     import MailDialog from "./MailDialog.svelte";
-    import MessageDialog from "./MessageDialog.svelte";
     import ChatDialog from "./ChatDialog.svelte";
     import ForumDialog from "./ForumDialog.svelte";
     import ShopDialog from "./ShopDialog.svelte";
@@ -14,6 +13,10 @@
     import NotificationPanel from "./NotificationPanel.svelte";
     // Socket service for real-time notifications
     import { liveMessages, socketService } from "../services/socket";
+    import {
+        playerResources,
+        activeHackSession,
+    } from "../services/socketStores";
     // Notification service
     import {
         unreadCounts,
@@ -43,6 +46,114 @@
     let inputElement: HTMLInputElement;
     let terminalElement: HTMLDivElement;
     let outputElement: HTMLDivElement;
+
+    // Autocomplete state
+    const KNOWN_COMMANDS = [
+        "ls",
+        "cd",
+        "pwd",
+        "cat",
+        "rm",
+        "mkdir",
+        "touch",
+        "cp",
+        "mv",
+        "echo",
+        "write",
+        "scan",
+        "servers",
+        "connect",
+        "disconnect",
+        "traceroute",
+        "probe",
+        "netmap",
+        "hack",
+        "crack",
+        "exploit",
+        "backdoor",
+        "rootkit",
+        "firewall.knock",
+        "memory.extract",
+        "hack.hint",
+        "hack.status",
+        "hack.abort",
+        "crack.submit",
+        "backdoor.list",
+        "backdoor.use",
+        "backdoor.remove",
+        "security.scan",
+        "trace.status",
+        "trace.evade",
+        "upload",
+        "download",
+        "encrypt",
+        "decrypt",
+        "analyze",
+        "defenses",
+        "protect",
+        "safevault",
+        "honeypot",
+        "upgrade",
+        "msg",
+        "mail",
+        "inbox",
+        "contact",
+        "chat",
+        "forum",
+        "proxy",
+        "status",
+        "skills",
+        "missions",
+        "mission",
+        "accept",
+        "abandon",
+        "progress",
+        "scripts",
+        "shop",
+        "buy",
+        "sell",
+        "use",
+        "equip",
+        "unequip",
+        "equipment",
+        "players",
+        "who",
+        "whois",
+        "share_intel",
+        "bounties",
+        "bounty",
+        "stories",
+        "story",
+        "help",
+        "man",
+        "history",
+        "stats",
+        "ps",
+        "top",
+        "kill",
+        "free",
+        "uptime",
+        "pkill",
+        "pgrep",
+        "nice",
+        "renice",
+        "calc",
+        "expr",
+        "math",
+        "vars",
+        "set",
+        "unset",
+        "convert",
+        "random",
+        "decode",
+        "subnet",
+        "faction",
+        "alias",
+        "admin",
+    ];
+    let tabMatches: string[] = [];
+    let tabIndex: number = -1;
+    let lastTabPrefix: string = "";
 
     // Multi-terminal tab support - reactive
     $: tabState = $terminalTabsStore;
@@ -85,7 +196,26 @@
     // UI enhancements
     let currentTime = new Date().toLocaleTimeString();
     let connectionQuality = 100;
-    let systemLoad = 0;
+    // Resource data from server (replaces fake systemLoad)
+    let cpuPercent = 0;
+    let ramPercent = 0;
+
+    // Subscribe to real resource data from Socket.IO
+    const unsubResources = playerResources.subscribe(
+        (r: {
+            cpuUsed: number;
+            cpuTotal: number;
+            ramUsed: number;
+            ramTotal: number;
+            bwUsed: number;
+            bwTotal: number;
+        }) => {
+            cpuPercent =
+                r.cpuTotal > 0 ? Math.round((r.cpuUsed / r.cpuTotal) * 100) : 0;
+            ramPercent =
+                r.ramTotal > 0 ? Math.round((r.ramUsed / r.ramTotal) * 100) : 0;
+        },
+    );
     let scanlineEffect = true;
     let glowEffect = true;
 
@@ -133,17 +263,14 @@
             currentTime = new Date().toLocaleTimeString();
         }, 1000);
 
-        // Simulate system load variations
-        const loadInterval = setInterval(() => {
-            systemLoad = Math.floor(Math.random() * 30) + 10; // 10-40%
-        }, 3000);
+        // Resource data updated via Socket.IO subscription (playerResources store)
 
         // Return cleanup function synchronously
         return () => {
             document.removeEventListener("keydown", handleGlobalKeydown);
             unsubscribe();
             clearInterval(clockInterval);
-            clearInterval(loadInterval);
+            unsubResources();
         };
     });
 
@@ -691,11 +818,39 @@
             return;
         }
 
-        // Tab - Auto-complete (future feature)
+        // Tab - Auto-complete
         if (event.key === "Tab") {
             event.preventDefault();
-            // TODO: Implement autocomplete using help command data
+            const input = inputValue.trimStart();
+            const spaceIdx = input.indexOf(" ");
+            const prefix = spaceIdx === -1 ? input : input.slice(0, spaceIdx);
+
+            if (!prefix) return;
+
+            // If prefix changed, rebuild matches
+            if (prefix !== lastTabPrefix) {
+                lastTabPrefix = prefix;
+                tabMatches = KNOWN_COMMANDS.filter((c) =>
+                    c.startsWith(prefix.toLowerCase()),
+                );
+                tabIndex = -1;
+            }
+
+            if (tabMatches.length === 0) return;
+
+            // Cycle through matches
+            tabIndex = (tabIndex + 1) % tabMatches.length;
+            const match = tabMatches[tabIndex];
+            inputValue =
+                spaceIdx === -1 ? match : match + input.slice(spaceIdx);
             return;
+        }
+
+        // Reset tab cycling on any other key
+        if (event.key !== "Shift") {
+            lastTabPrefix = "";
+            tabMatches = [];
+            tabIndex = -1;
         }
     }
 
@@ -960,9 +1115,11 @@
                 <span class="status-icon">📡</span>
                 <span class="status-label">{connectionQuality}%</span>
             </span>
-            <span class="status-item">
-                <span class="status-icon">⚡</span>
-                <span class="status-label">Load: {systemLoad}%</span>
+            <span class="status-item" title="CPU usage">
+                <span class="status-label">CPU:{cpuPercent}%</span>
+            </span>
+            <span class="status-item" title="RAM usage">
+                <span class="status-label">RAM:{ramPercent}%</span>
             </span>
             {#if unreadCount > 0}
                 <button
@@ -999,6 +1156,28 @@
             </div>
         {/each}
     </div>
+
+    <!-- Sticky Hack Challenge Panel -->
+    {#if $activeHackSession?.active && $activeHackSession.challenge}
+        <div class="hack-challenge-panel">
+            <div class="challenge-header">
+                HACK SESSION — {$activeHackSession.targetIp} — Layer {($activeHackSession.currentLayer ||
+                    0) + 1}/{$activeHackSession.totalLayers || "?"}
+            </div>
+            {#if $activeHackSession.challenge.displayText}
+                {#each $activeHackSession.challenge.displayText as line}
+                    <div class="challenge-line">{line}</div>
+                {/each}
+            {/if}
+            {#if $activeHackSession.challenge.hints?.length}
+                <div class="challenge-hints">
+                    {#each $activeHackSession.challenge.hints as hint}
+                        <div class="hint-line">hint: {hint}</div>
+                    {/each}
+                </div>
+            {/if}
+        </div>
+    {/if}
 
     <!-- Input Line -->
     <div class="input-line">
@@ -1050,8 +1229,6 @@
     <ShopDialog visible={true} onClose={closeDialog} />
 {:else if activeDialog === "equipment"}
     <EquipmentDialog visible={true} onClose={closeDialog} />
-{:else if activeDialog === "message"}
-    <MessageDialog visible={true} mode="inbox" on:close={closeDialog} />
 {/if}
 
 <!-- Notification Panel -->
@@ -1508,6 +1685,45 @@
         text-shadow: 0 0 5px rgba(0, 204, 255, 0.5);
         font-style: italic;
         opacity: 0.9;
+    }
+
+    /* ==================== HACK CHALLENGE PANEL ==================== */
+
+    .hack-challenge-panel {
+        border-top: 1px solid #1a3a1a;
+        border-bottom: 1px solid #1a3a1a;
+        background: #0a120a;
+        padding: 8px 40px;
+        font-family: inherit;
+        font-size: 0.85em;
+        color: #00ff41;
+        max-height: 200px;
+        overflow-y: auto;
+    }
+
+    .challenge-header {
+        color: #ff6600;
+        font-weight: bold;
+        margin-bottom: 4px;
+        letter-spacing: 1px;
+    }
+
+    .challenge-line {
+        color: #00cc33;
+        white-space: pre;
+        line-height: 1.3;
+    }
+
+    .challenge-hints {
+        margin-top: 4px;
+        border-top: 1px dashed #1a3a1a;
+        padding-top: 4px;
+    }
+
+    .hint-line {
+        color: #666;
+        font-style: italic;
+        font-size: 0.9em;
     }
 
     /* ==================== INPUT LINE ==================== */

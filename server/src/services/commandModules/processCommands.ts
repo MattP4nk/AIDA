@@ -1,12 +1,17 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
 import {
-  table,
-  panel,
-  render,
-  renderSections,
+  boxTop,
+  boxBottom,
+  boxRow,
+  boxCenter,
+  boxDivider,
+  sBoxTop,
+  sBoxRow,
+  sBoxBottom,
   progressBar,
-  Column,
+  formatDuration,
+  render,
 } from "./asciiBox";
 
 export class ProcessCommandsModule implements CommandModule {
@@ -14,24 +19,12 @@ export class ProcessCommandsModule implements CommandModule {
     "ps",
     "top",
     "kill",
-    "free",
-    "uptime",
     "pkill",
-    "pgrep",
     "nice",
     "renice",
+    "free",
+    "uptime",
   ]);
-
-  /**
-   * Helper to safely get memoryService
-   */
-  private getMemoryService(context: CommandContext) {
-    const memService = context.services.memoryService;
-    if (!memService) {
-      throw new Error("Memory service not available");
-    }
-    return memService;
-  }
 
   public async execute(
     command: Command,
@@ -39,684 +32,386 @@ export class ProcessCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const session = context.gameStateManager.getSession(context.userId);
     if (!session) {
-      return {
-        success: false,
-        output: "No active session",
-        timestamp: new Date(),
-      };
+      return { success: false, output: "No active session", timestamp: new Date() };
     }
 
     try {
       switch (command.command) {
         case "ps":
-          return await this.handlePs(command, context, session.socketId);
-
+          return this.handlePs(context);
         case "top":
-          return await this.handleTop(command, context, session.socketId);
-
+          return this.handleTop(context);
         case "kill":
-          return await this.handleKill(command, context, session.socketId);
-
-        case "free":
-          return await this.handleFree(command, context, session.socketId);
-
-        case "uptime":
-          return await this.handleUptime(command, context, session.socketId);
-
+          return this.handleKill(command, context);
         case "pkill":
-          return await this.handlePkill(command, context, session.socketId);
-
-        case "pgrep":
-          return await this.handlePgrep(command, context, session.socketId);
-
+          return this.handlePkill(command, context);
         case "nice":
-          return await this.handleNice(command, context, session.socketId);
-
+          return this.handleNice(command, context);
         case "renice":
-          return await this.handleRenice(command, context, session.socketId);
-
+          return this.handleRenice(command, context);
+        case "free":
+          return this.handleFree(context);
+        case "uptime":
+          return this.handleUptime(context);
         default:
-          return {
-            success: false,
-            output: `Process command not implemented: ${command.command}`,
-            timestamp: new Date(),
-          };
+          return { success: false, output: `Unknown process command: ${command.command}`, timestamp: new Date() };
       }
     } catch (error) {
-      return {
-        success: false,
-        output: "Process command failed",
-        error: error instanceof Error ? error.message : "Unknown error",
-        timestamp: new Date(),
-      };
+      return { success: false, output: error instanceof Error ? error.message : "Process command failed", timestamp: new Date() };
     }
   }
 
   public getCommandInfo(): import("./interface").CommandInfo[] {
     return [
-      {
-        command: "ps",
-        category: "process",
-        description: "List running processes",
-        usage: "ps",
-        examples: ["ps"],
-      },
-      {
-        command: "top",
-        category: "process",
-        description: "Display system resource usage and top processes",
-        usage: "top",
-        examples: ["top"],
-      },
-      {
-        command: "kill",
-        category: "process",
-        description: "Terminate a process by PID",
-        usage: "kill [-SIGNAL] <pid>",
-        examples: ["kill 1234", "kill -KILL 5678", "kill -TERM 9999"],
-      },
-      {
-        command: "free",
-        category: "process",
-        description: "Display memory usage statistics",
-        usage: "free",
-        examples: ["free"],
-      },
-      {
-        command: "uptime",
-        category: "process",
-        description: "Show system uptime and load average",
-        usage: "uptime",
-        examples: ["uptime"],
-      },
-      {
-        command: "pkill",
-        category: "process",
-        description: "Kill processes by name",
-        usage: "pkill <process_name>",
-        examples: ["pkill apache", "pkill mysql"],
-      },
-      {
-        command: "pgrep",
-        category: "process",
-        description: "Find process IDs by name",
-        usage: "pgrep <process_name>",
-        examples: ["pgrep sshd", "pgrep firewall"],
-      },
-      {
-        command: "nice",
-        category: "process",
-        description: "Run a command with modified priority",
-        usage: "nice [-n priority] <command>",
-        examples: ["nice -n 10 backup.sh"],
-      },
-      {
-        command: "renice",
-        category: "process",
-        description: "Change priority of running process",
-        usage: "renice <priority> <pid>",
-        examples: ["renice 5 1234", "renice -10 5678"],
-      },
+      { command: "ps", category: "process", description: "List running processes and resource usage", usage: "ps", examples: ["ps"] },
+      { command: "top", category: "process", description: "System resource dashboard (CPU, RAM, Bandwidth)", usage: "top", examples: ["top"] },
+      { command: "kill", category: "process", description: "Kill a running process to free resources", usage: "kill <pid>", examples: ["kill 101"] },
+      { command: "pkill", category: "process", description: "Kill all processes of a type", usage: "pkill <type>", examples: ["pkill scan", "pkill hack_prep"] },
+      { command: "nice", category: "process", description: "Run a command at a specific priority (-10=fast/expensive, 10=slow/cheap)", usage: "nice <priority> <command> [args]", examples: ["nice -5 hack 172.16.1.1", "nice 5 scan"] },
+      { command: "renice", category: "process", description: "Change priority of a running process", usage: "renice <priority> <pid>", examples: ["renice -10 101", "renice 5 102"] },
+      { command: "free", category: "process", description: "Show memory usage breakdown", usage: "free", examples: ["free"] },
+      { command: "uptime", category: "process", description: "Show system uptime and resource summary", usage: "uptime", examples: ["uptime"] },
     ];
   }
 
-  private async handlePs(
-    _command: Command,
-    context: CommandContext,
-    sessionId: string,
-  ): Promise<CommandResult> {
-    if (!context.services.memoryService) {
-      return {
-        success: false,
-        output: "Memory service not available",
-        timestamp: new Date(),
-      };
+  // ==================== PS ====================
+
+  private handlePs(context: CommandContext): CommandResult {
+    const memoryService = context.services.memoryService;
+    if (!memoryService) {
+      return { success: false, output: "Resource system unavailable.", timestamp: new Date() };
     }
 
-    const memoryService = this.getMemoryService(context);
-    const processes = memoryService.getProcesses(sessionId);
+    const breakdown = memoryService.getResourceBreakdown(context.userId);
+    const processes = breakdown.processes;
+    const consumers = breakdown.passiveConsumers;
 
-    if (processes.length === 0) {
-      return {
-        success: true,
-        output: "No processes running",
-        timestamp: new Date(),
-      };
+    const W = 62;
+    const lines: string[] = [];
+    lines.push(boxTop(W));
+    lines.push(boxCenter("PROCESSES", W));
+    lines.push(boxDivider(W));
+
+    if (processes.length === 0 && consumers.length === 0) {
+      lines.push(boxRow("  No active processes.", W));
+      lines.push(boxRow("  System idle. OS overhead: CPU 10, RAM 24MB", W));
     }
 
-    const columns: Column[] = [
-      { header: "PID", width: 6, align: "left" },
-      { header: "NAME", width: 16, align: "left" },
-      { header: "USER", width: 9, align: "left" },
-      { header: "CPU%", width: 5, align: "right" },
-      { header: "MEM(KB)", width: 7, align: "right" },
-      { header: "STATUS", width: 9, align: "left" },
-      { header: "TIME", width: 8, align: "left" },
-      { header: "PROGRESS", width: 22, align: "left" },
-    ];
+    // Active game processes (with progress bars)
+    if (processes.length > 0) {
+      lines.push(boxRow(" PID  PROCESS              CPU  RAM    ETA      PROGRESS", W));
+      lines.push(boxDivider(W));
+      for (const p of processes) {
+        const elapsed = Date.now() - p.startedAt;
+        const remaining = Math.max(0, p.duration - elapsed);
+        const etaStr = remaining > 0 ? formatDuration(remaining) : "done";
+        const bar = progressBar(p.progress / 100, 10);
+        const typeLabel = p.type.replace(/_/g, " ");
+        const target = p.targetLabel.length > 12 ? p.targetLabel.substring(0, 12) : p.targetLabel;
 
-    const rows: string[][] = processes.map((proc: any) => {
-      const runtime = Math.floor((Date.now() - proc.startTime) / 1000);
-      const hours = Math.floor(runtime / 3600);
-      const minutes = Math.floor((runtime % 3600) / 60);
-      const seconds = runtime % 60;
-      const time = `${hours.toString().padStart(2, "0")}:${minutes.toString().padStart(2, "0")}:${seconds.toString().padStart(2, "0")}`;
-
-      let progressCol = "";
-      if (proc.isCommand && proc.commandMetadata) {
-        const progress = proc.commandMetadata.progress || 0;
-        progressCol = progressBar(progress / 100, 10);
-        if (proc.commandMetadata.targetInfo) {
-          progressCol += ` > ${proc.commandMetadata.targetInfo}`;
-        }
+        lines.push(boxRow(
+          ` ${String(p.pid).padEnd(4)} ${(typeLabel + " " + target).padEnd(20)} ${String(p.cpuCost).padStart(3)}  ${String(p.ramCost).padStart(4)}MB  ${etaStr.padStart(7)}  ${bar}`,
+          W,
+        ));
       }
-
-      return [
-        proc.pid.toString(),
-        proc.name.substring(0, 16),
-        proc.user.substring(0, 9),
-        proc.cpu.toFixed(1),
-        proc.memory.toString(),
-        proc.status,
-        time,
-        progressCol,
-      ];
-    });
-
-    const lines = table(
-      columns,
-      rows,
-      `PROCESS LIST -- ${processes.length} process(es)`,
-    );
-
-    return {
-      success: true,
-      output: render(lines),
-      timestamp: new Date(),
-    };
-  }
-
-  private async handleTop(
-    _command: Command,
-    context: CommandContext,
-    sessionId: string,
-  ): Promise<CommandResult> {
-    const memoryService = this.getMemoryService(context);
-    const processes = memoryService.getProcesses(sessionId);
-    const memInfo = memoryService.getMemoryInfo(sessionId);
-    const loadAvg = memoryService.getLoadAverage(sessionId);
-
-    const cpuTotal = processes.reduce(
-      (sum: number, p: { cpu: number }) => sum + p.cpu,
-      0,
-    );
-    const runningCount = processes.filter(
-      (p: { status: string }) => p.status === "running",
-    ).length;
-
-    const statsPanel = panel(
-      "SYSTEM MONITOR (top)",
-      [
-        {
-          label: "Load Average:  ",
-          value: `${loadAvg.one.toFixed(2)}, ${loadAvg.five.toFixed(2)}, ${loadAvg.fifteen.toFixed(2)}`,
-        },
-        {
-          label: "Processes:     ",
-          value: `${processes.length} total, ${runningCount} running`,
-        },
-        { label: "CPU:           ", value: `${cpuTotal.toFixed(1)}% total` },
-        {
-          label: "Memory:        ",
-          value: `${memInfo.used}/${memInfo.total} KB (${((memInfo.used / memInfo.total) * 100).toFixed(1)}%)`,
-        },
-        {
-          label: "Swap:          ",
-          value: `${memInfo.swapUsed}/${memInfo.swapTotal} KB`,
-        },
-      ],
-      52,
-    );
-
-    const procColumns: Column[] = [
-      { header: "PID", width: 6, align: "left" },
-      { header: "NAME", width: 16, align: "left" },
-      { header: "CPU%", width: 5, align: "right" },
-      { header: "MEM(KB)", width: 7, align: "right" },
-      { header: "STATUS", width: 9, align: "left" },
-    ];
-
-    // Sort by CPU usage
-    const sorted = [...processes].sort((a, b) => b.cpu - a.cpu).slice(0, 10);
-
-    const procRows: string[][] = sorted.map((proc: any) => [
-      proc.pid.toString(),
-      proc.name.substring(0, 16),
-      proc.cpu.toFixed(1),
-      proc.memory.toString(),
-      proc.status,
-    ]);
-
-    const procTable = table(procColumns, procRows);
-
-    return {
-      success: true,
-      output: renderSections(statsPanel, procTable),
-      timestamp: new Date(),
-    };
-  }
-
-  private async handleKill(
-    command: Command,
-    context: CommandContext,
-    sessionId: string,
-  ): Promise<CommandResult> {
-    const args = command.args || [];
-    if (args.length === 0) {
-      return {
-        success: false,
-        output: "Usage: kill [-SIGNAL] <pid>\nSignals: TERM, KILL, STOP, CONT",
-        timestamp: new Date(),
-      };
     }
 
-    let signal = "TERM";
-    let pidArg = args[0];
-
-    // Check if first arg is a signal
-    if (args[0]?.startsWith("-")) {
-      signal = args[0].substring(1).toUpperCase();
-      if (!args[1]) {
-        return {
-          success: false,
-          output: "Usage: kill [-SIGNAL] <pid>",
-          timestamp: new Date(),
-        };
+    // Passive consumers
+    if (consumers.length > 0) {
+      if (processes.length > 0) lines.push(boxDivider(W));
+      lines.push(boxRow(" PASSIVE CONSUMERS", W));
+      lines.push(boxDivider(W));
+      for (const c of consumers) {
+        const costs: string[] = [];
+        if (c.cpuCost > 0) costs.push(`CPU ${c.cpuCost}`);
+        if (c.ramCost > 0) costs.push(`RAM ${c.ramCost}MB`);
+        if (c.bwCost > 0) costs.push(`BW ${c.bwCost}`);
+        const typeLabel = c.type === "active_trace" ? "trace" : c.type;
+        lines.push(boxRow(` [${typeLabel}] ${c.label.substring(0, 24).padEnd(24)} ${costs.join("  ")}`, W));
       }
-      pidArg = args[1];
     }
 
-    const pid = parseInt(pidArg || "", 10);
+    // OS overhead
+    lines.push(boxDivider(W));
+    lines.push(boxRow(" [system] OS overhead                     CPU 10  RAM 24MB", W));
+
+    lines.push(boxDivider(W));
+    const { spec } = breakdown;
+    lines.push(boxRow(` Total: CPU ${spec.cpuUsed}/${spec.cpuTotal}  RAM ${spec.ramUsed}/${spec.ramTotal}MB  BW ${spec.bwUsed}/${spec.bwTotal}Mbps`, W));
+    lines.push(boxBottom(W));
+
+    return { success: true, output: render(lines), timestamp: new Date() };
+  }
+
+  // ==================== TOP ====================
+
+  private handleTop(context: CommandContext): CommandResult {
+    const memoryService = context.services.memoryService;
+    if (!memoryService) {
+      return { success: false, output: "Resource system unavailable.", timestamp: new Date() };
+    }
+
+    const breakdown = memoryService.getResourceBreakdown(context.userId);
+    const { spec } = breakdown;
+
+    const cpuPct = spec.cpuTotal > 0 ? Math.round((spec.cpuUsed / spec.cpuTotal) * 100) : 0;
+    const ramPct = spec.ramTotal > 0 ? Math.round((spec.ramUsed / spec.ramTotal) * 100) : 0;
+    const bwPct = spec.bwTotal > 0 ? Math.round((spec.bwUsed / spec.bwTotal) * 100) : 0;
+
+    const W = 56;
+    const lines: string[] = [];
+    lines.push(boxTop(W));
+    lines.push(boxCenter("SYSTEM RESOURCES", W));
+    lines.push(boxDivider(W));
+    lines.push(boxRow(` CPU: ${progressBar(cpuPct / 100, 20)}  ${spec.cpuUsed}/${spec.cpuTotal} (${cpuPct}%)`, W));
+    lines.push(boxRow(` RAM: ${progressBar(ramPct / 100, 20)}  ${spec.ramUsed}/${spec.ramTotal}MB (${ramPct}%)`, W));
+    lines.push(boxRow(` BW:  ${progressBar(bwPct / 100, 20)}  ${spec.bwUsed}/${spec.bwTotal}Mbps (${bwPct}%)`, W));
+
+    if (breakdown.processes.length > 0) {
+      lines.push(boxDivider(W));
+      lines.push(boxRow(" PID  PROCESS            CPU  RAM   BW  PROGRESS", W));
+      lines.push(boxDivider(W));
+      for (const p of breakdown.processes) {
+        const bar = progressBar(p.progress / 100, 8);
+        const label = `${p.type.replace(/_/g, " ")} ${p.targetLabel}`.substring(0, 18);
+        lines.push(boxRow(
+          ` ${String(p.pid).padEnd(4)} ${label.padEnd(18)} ${String(p.cpuCost).padStart(3)}  ${String(p.ramCost).padStart(4)}  ${String(p.bwCost).padStart(3)}  ${bar} ${p.progress}%`,
+          W,
+        ));
+      }
+    }
+
+    if (breakdown.passiveConsumers.length > 0) {
+      lines.push(boxDivider(W));
+      lines.push(boxRow(` Passive: ${breakdown.passiveConsumers.length} consumers (${breakdown.passiveConsumers.map(c => c.type).filter((v, i, a) => a.indexOf(v) === i).join(", ")})`, W));
+    }
+
+    lines.push(boxBottom(W));
+    return { success: true, output: render(lines), timestamp: new Date() };
+  }
+
+  // ==================== KILL ====================
+
+  private handleKill(command: Command, context: CommandContext): CommandResult {
+    const memoryService = context.services.memoryService;
+    if (!memoryService) {
+      return { success: false, output: "Resource system unavailable.", timestamp: new Date() };
+    }
+
+    const pidStr = command.args?.[0];
+    if (!pidStr) {
+      return { success: false, output: "Usage: kill <pid>\nUse 'ps' to see running process PIDs.", timestamp: new Date() };
+    }
+
+    const pid = parseInt(pidStr, 10);
     if (isNaN(pid)) {
-      return {
-        success: false,
-        output: `Invalid PID: ${pidArg}`,
-        timestamp: new Date(),
-      };
+      return { success: false, output: `Invalid PID: ${pidStr}`, timestamp: new Date() };
     }
 
-    try {
-      const memoryService = this.getMemoryService(context);
-      const killed = await memoryService.killProcess(sessionId, pid, signal);
-
-      if (!killed) {
-        return {
-          success: false,
-          output: `Process not found: ${pid}`,
-          timestamp: new Date(),
-        };
-      }
-
-      return {
-        success: true,
-        output: `Sent signal ${signal} to process ${pid}`,
-        timestamp: new Date(),
-      };
-    } catch (error) {
-      return {
-        success: false,
-        output:
-          error instanceof Error ? error.message : "Failed to kill process",
-        timestamp: new Date(),
-      };
+    const process = memoryService.getGameProcess(context.userId, pid);
+    if (!process) {
+      return { success: false, output: `No running process with PID ${pid}.`, timestamp: new Date() };
     }
+
+    const cancelled = memoryService.cancelGameProcess(context.userId, pid);
+    if (!cancelled) {
+      return { success: false, output: `Failed to kill process ${pid}.`, timestamp: new Date() };
+    }
+
+    const W = 44;
+    const lines: string[] = [];
+    lines.push(sBoxTop(W));
+    lines.push(sBoxRow(` Process ${pid} terminated.`, W));
+    lines.push(sBoxRow(` Freed: CPU ${process.cpuCost}  RAM ${process.ramCost}MB  BW ${process.bwCost}Mbps`, W));
+    lines.push(sBoxBottom(W));
+
+    return { success: true, output: render(lines), timestamp: new Date() };
   }
 
-  private async handleFree(
-    _command: Command,
-    context: CommandContext,
-    sessionId: string,
-  ): Promise<CommandResult> {
-    const memoryService = this.getMemoryService(context);
-    const memInfo = memoryService.getMemoryInfo(sessionId);
+  // ==================== FREE ====================
 
-    const memColumns: Column[] = [
-      { header: "", width: 8, align: "left" },
-      { header: "TOTAL", width: 9, align: "right" },
-      { header: "USED", width: 9, align: "right" },
-      { header: "FREE", width: 9, align: "right" },
-      { header: "BUFFERS", width: 9, align: "right" },
-      { header: "CACHED", width: 9, align: "right" },
+  private handleFree(context: CommandContext): CommandResult {
+    const memoryService = context.services.memoryService;
+    if (!memoryService) {
+      return { success: false, output: "Resource system unavailable.", timestamp: new Date() };
+    }
+
+    const spec = memoryService.getComputerSpec(context.userId);
+    const ramFree = spec.ramTotal - spec.ramUsed;
+
+    const W = 48;
+    const lines: string[] = [];
+    lines.push(boxTop(W));
+    lines.push(boxCenter("MEMORY USAGE", W));
+    lines.push(boxDivider(W));
+    lines.push(boxRow(` Total:     ${String(spec.ramTotal).padStart(6)} MB`, W));
+    lines.push(boxRow(` Used:      ${String(spec.ramUsed).padStart(6)} MB`, W));
+    lines.push(boxRow(` Free:      ${String(ramFree).padStart(6)} MB`, W));
+    lines.push(boxDivider(W));
+    lines.push(boxRow(` ${progressBar(spec.ramUsed / spec.ramTotal, 30)}  ${Math.round((spec.ramUsed / spec.ramTotal) * 100)}%`, W));
+    lines.push(boxBottom(W));
+
+    return { success: true, output: render(lines), timestamp: new Date() };
+  }
+
+  // ==================== UPTIME ====================
+
+  private handleUptime(context: CommandContext): CommandResult {
+    const memoryService = context.services.memoryService;
+    if (!memoryService) {
+      return { success: false, output: "Resource system unavailable.", timestamp: new Date() };
+    }
+
+    const spec = memoryService.getComputerSpec(context.userId);
+    const processes = memoryService.getGameProcesses(context.userId);
+    const consumers = memoryService.getPassiveConsumers(context.userId);
+    const load = memoryService.getLoadAverage(context.userId);
+
+    const session = context.gameStateManager.getSession(context.userId);
+    const uptime = session ? Date.now() - session.connectedAt.getTime() : 0;
+
+    const lines: string[] = [
+      `up ${formatDuration(uptime)}, ${processes.length} processes, ${consumers.length} passive`,
+      `load average: ${load.one}, ${load.five}, ${load.fifteen}`,
+      `resources: CPU ${spec.cpuUsed}/${spec.cpuTotal}  RAM ${spec.ramUsed}/${spec.ramTotal}MB  BW ${spec.bwUsed}/${spec.bwTotal}Mbps`,
     ];
 
-    const memRows: string[][] = [
-      [
-        "Mem:",
-        memInfo.total.toString(),
-        memInfo.used.toString(),
-        memInfo.free.toString(),
-        memInfo.buffers.toString(),
-        memInfo.cached.toString(),
-      ],
-      [
-        "Swap:",
-        memInfo.swapTotal.toString(),
-        memInfo.swapUsed.toString(),
-        memInfo.swapFree.toString(),
-        "",
-        "",
-      ],
-    ];
-
-    const usagePercent = ((memInfo.used / memInfo.total) * 100).toFixed(1);
-    const lines = table(
-      memColumns,
-      memRows,
-      `MEMORY USAGE -- Available: ${memInfo.available} KB (${(100 - parseFloat(usagePercent)).toFixed(1)}% free)`,
-    );
-
-    return {
-      success: true,
-      output: render(lines),
-      timestamp: new Date(),
-    };
+    return { success: true, output: lines.join("\n"), timestamp: new Date() };
   }
 
-  private async handleUptime(
-    _command: Command,
-    context: CommandContext,
-    sessionId: string,
-  ): Promise<CommandResult> {
-    const memoryService = this.getMemoryService(context);
-    const loadAvg = memoryService.getLoadAverage(sessionId);
-    const processes = memoryService.getProcesses(sessionId);
+  // ==================== PKILL ====================
 
-    // Find the init process to get session start time
-    const initProc = processes.find((p: { pid: number }) => p.pid === 1);
-    if (!initProc) {
-      return {
-        success: false,
-        output: "System not initialized",
-        timestamp: new Date(),
-      };
+  private handlePkill(command: Command, context: CommandContext): CommandResult {
+    const memoryService = context.services.memoryService;
+    if (!memoryService) {
+      return { success: false, output: "Resource system unavailable.", timestamp: new Date() };
     }
 
-    const uptime = Math.floor((Date.now() - initProc.startTime) / 1000);
-    const days = Math.floor(uptime / 86400);
-    const hours = Math.floor((uptime % 86400) / 3600);
-    const minutes = Math.floor((uptime % 3600) / 60);
-
-    const userCount = new Set(processes.map((p: { user: string }) => p.user))
-      .size;
-
-    const uptimeStr =
-      days > 0
-        ? `${days} day${days !== 1 ? "s" : ""}, ${hours}:${minutes.toString().padStart(2, "0")}`
-        : `${hours}:${minutes.toString().padStart(2, "0")}`;
-
-    const lines = panel(
-      "SYSTEM UPTIME",
-      [
-        { label: "Up:            ", value: uptimeStr },
-        { label: "Users:         ", value: `${userCount}` },
-        {
-          label: "Load average:  ",
-          value: `${loadAvg.one.toFixed(2)}, ${loadAvg.five.toFixed(2)}, ${loadAvg.fifteen.toFixed(2)}`,
-        },
-      ],
-      44,
-    );
-
-    return {
-      success: true,
-      output: render(lines),
-      timestamp: new Date(),
-    };
-  }
-
-  private async handlePkill(
-    command: Command,
-    context: CommandContext,
-    sessionId: string,
-  ): Promise<CommandResult> {
-    const args = command.args || [];
-    if (args.length === 0) {
-      return {
-        success: false,
-        output: "Usage: pkill <process_name>",
-        timestamp: new Date(),
-      };
+    const typeName = command.args?.[0];
+    if (!typeName) {
+      return { success: false, output: "Usage: pkill <type>\nTypes: hack_prep, scan, decrypt, download, backdoor_install, traceroute, trace_evade", timestamp: new Date() };
     }
 
-    const processName = args[0];
-    const memoryService = this.getMemoryService(context);
-    const processes = memoryService.getProcesses(sessionId);
-    const matches = processes.filter((p: { name: string }) =>
-      p.name.includes(processName || ""),
-    );
+    const processes = memoryService.getGameProcesses(context.userId);
+    const matching = processes.filter((p) => p.type === typeName || p.type.replace(/_/g, " ") === typeName);
 
-    if (matches.length === 0) {
-      return {
-        success: false,
-        output: `No processes matching '${processName}'`,
-        timestamp: new Date(),
-      };
+    if (matching.length === 0) {
+      return { success: false, output: `No running processes of type: ${typeName}`, timestamp: new Date() };
     }
 
     let killed = 0;
-    const errors: string[] = [];
-
-    for (const proc of matches) {
-      try {
-        if (proc.pid > 3) {
-          // Don't kill critical system processes
-          await memoryService.killProcess(sessionId, proc.pid, "TERM");
-          killed++;
-        }
-      } catch (error) {
-        errors.push(
-          `PID ${proc.pid}: ${error instanceof Error ? error.message : "Unknown error"}`,
-        );
+    let freedCpu = 0, freedRam = 0, freedBw = 0;
+    for (const p of matching) {
+      if (memoryService.cancelGameProcess(context.userId, p.pid)) {
+        killed++;
+        freedCpu += p.cpuCost;
+        freedRam += p.ramCost;
+        freedBw += p.bwCost;
       }
     }
-
-    let output = `Killed ${killed} process${killed !== 1 ? "es" : ""} matching '${processName}'`;
-    if (errors.length > 0) {
-      output += `\n\nErrors:\n${errors.join("\n")}`;
-    }
-
-    return {
-      success: killed > 0,
-      output,
-      timestamp: new Date(),
-    };
-  }
-
-  private async handlePgrep(
-    command: Command,
-    context: CommandContext,
-    sessionId: string,
-  ): Promise<CommandResult> {
-    const args = command.args || [];
-    if (args.length === 0) {
-      return {
-        success: false,
-        output: "Usage: pgrep <process_name>",
-        timestamp: new Date(),
-      };
-    }
-
-    const processName = args[0];
-    const memoryService = this.getMemoryService(context);
-    const processes = memoryService.getProcesses(sessionId);
-    const matches = processes.filter((p: { name: string }) =>
-      p.name.includes(processName || ""),
-    );
-
-    if (matches.length === 0) {
-      return {
-        success: false,
-        output: `No processes matching '${processName}'`,
-        timestamp: new Date(),
-      };
-    }
-
-    const pgrepColumns: Column[] = [
-      { header: "PID", width: 6, align: "left" },
-      { header: "NAME", width: 16, align: "left" },
-      { header: "USER", width: 10, align: "left" },
-    ];
-
-    const pgrepRows: string[][] = matches.map((proc: any) => [
-      proc.pid.toString(),
-      proc.name.substring(0, 16),
-      proc.user,
-    ]);
-
-    const lines = table(
-      pgrepColumns,
-      pgrepRows,
-      `Found ${matches.length} process${matches.length !== 1 ? "es" : ""} matching '${processName}'`,
-    );
 
     return {
       success: true,
-      output: render(lines),
+      output: `Killed ${killed} process${killed !== 1 ? "es" : ""}. Freed: CPU ${freedCpu}, RAM ${freedRam}MB, BW ${freedBw}Mbps`,
       timestamp: new Date(),
     };
   }
 
-  private async handleNice(
-    command: Command,
-    context: CommandContext,
-    sessionId: string,
-  ): Promise<CommandResult> {
+  // ==================== NICE ====================
+
+  private handleNice(command: Command, context: CommandContext): CommandResult {
+    // nice <priority> <command> [args...]
+    // This doesn't execute the command directly — it tells the player what priority to use.
+    // The actual priority is passed when the command spawns its process.
+    // For now, nice stores the priority preference in the session.
     const args = command.args || [];
     if (args.length < 2) {
       return {
         success: false,
-        output: "Usage: nice -n <priority> <command>",
+        output: "Usage: nice <priority> <command> [args...]\nPriority: -10 (fast/expensive) to 10 (slow/cheap). Default: 0.\n\nExample: nice -5 hack 172.16.1.1  (hack 30% faster, uses 20% more CPU)",
         timestamp: new Date(),
       };
     }
 
-    // Parse priority
-    let priority = 0;
-    let commandToRun: string | undefined = args[0];
-
-    if (args[0] === "-n" && args.length >= 3) {
-      priority = parseInt(args[1] || "", 10);
-      commandToRun = args[2];
-
-      if (isNaN(priority)) {
-        return {
-          success: false,
-          output: `Invalid priority: ${args[1]}`,
-          timestamp: new Date(),
-        };
-      }
+    const priority = parseInt(args[0]!, 10);
+    if (isNaN(priority) || priority < -10 || priority > 10) {
+      return { success: false, output: "Priority must be between -10 (highest) and 10 (lowest).", timestamp: new Date() };
     }
 
-    if (!commandToRun) {
-      return {
-        success: false,
-        output: "Usage: nice -n <priority> <command>",
-        timestamp: new Date(),
-      };
+    // Store the priority preference — the next process spawn will pick it up
+    const session = context.gameStateManager.getSession(context.userId);
+    if (session) {
+      (session as any)._nextProcessPriority = priority;
     }
 
-    priority = Math.max(-20, Math.min(19, priority));
+    const cpuEffect = priority < 0 ? `+${Math.abs(priority) * 4}% CPU` : `-${priority * 4}% CPU`;
+    const speedEffect = priority < 0 ? `${Math.abs(priority) * 5}% faster` : `${priority * 5}% slower`;
+    const detEffect = priority < 0 ? `+${Math.abs(priority) * 3}% detection risk` : `-${Math.min(priority * 2, 20)}% detection risk`;
 
-    // Spawn process with specific priority
-    try {
-      const memoryService = this.getMemoryService(context);
-      const pid = await memoryService.spawnProcess(
-        sessionId,
-        commandToRun,
-        args.slice(args[0] === "-n" ? 3 : 1).join(" "),
-        context.userId,
-      );
+    const W = 48;
+    const lines: string[] = [];
+    lines.push(sBoxTop(W));
+    lines.push(sBoxRow(` Priority set to ${priority} for next process.`, W));
+    lines.push(sBoxRow(`   Speed:     ${speedEffect}`, W));
+    lines.push(sBoxRow(`   CPU cost:  ${cpuEffect}`, W));
+    lines.push(sBoxRow(`   Detection: ${detEffect}`, W));
+    lines.push(sBoxRow("", W));
+    lines.push(sBoxRow(" Now run your command.", W));
+    lines.push(sBoxBottom(W));
 
-      await memoryService.setProcessPriority(sessionId, pid, priority);
-
-      return {
-        success: true,
-        output: `Started process ${commandToRun} (PID: ${pid}) with priority ${priority}`,
-        timestamp: new Date(),
-      };
-    } catch (error) {
-      return {
-        success: false,
-        output:
-          error instanceof Error ? error.message : "Failed to start process",
-        timestamp: new Date(),
-      };
-    }
+    return { success: true, output: render(lines), timestamp: new Date() };
   }
 
-  private async handleRenice(
-    command: Command,
-    context: CommandContext,
-    sessionId: string,
-  ): Promise<CommandResult> {
+  // ==================== RENICE ====================
+
+  private handleRenice(command: Command, context: CommandContext): CommandResult {
+    const memoryService = context.services.memoryService;
+    if (!memoryService) {
+      return { success: false, output: "Resource system unavailable.", timestamp: new Date() };
+    }
+
     const args = command.args || [];
     if (args.length < 2) {
       return {
         success: false,
-        output: "Usage: renice <priority> <pid>",
+        output: "Usage: renice <priority> <pid>\nPriority: -10 (fast/expensive) to 10 (slow/cheap).\n\nExample: renice -10 101  (max speed, high CPU cost)",
         timestamp: new Date(),
       };
     }
 
-    const priority = parseInt(args[0] || "", 10);
-    const pid = parseInt(args[1] || "", 10);
+    const priority = parseInt(args[0]!, 10);
+    const pid = parseInt(args[1]!, 10);
 
-    if (isNaN(priority)) {
-      return {
-        success: false,
-        output: `Invalid priority: ${args[0]}`,
-        timestamp: new Date(),
-      };
+    if (isNaN(priority) || priority < -10 || priority > 10) {
+      return { success: false, output: "Priority must be between -10 and 10.", timestamp: new Date() };
     }
-
     if (isNaN(pid)) {
-      return {
-        success: false,
-        output: `Invalid PID: ${args[1]}`,
-        timestamp: new Date(),
-      };
+      return { success: false, output: `Invalid PID: ${args[1]}`, timestamp: new Date() };
     }
 
-    try {
-      const memoryService = this.getMemoryService(context);
-      const success = await memoryService.setProcessPriority(
-        sessionId,
-        pid,
-        priority,
-      );
-
-      if (!success) {
-        return {
-          success: false,
-          output: `Process not found: ${pid}`,
-          timestamp: new Date(),
-        };
-      }
-
-      const normalizedPriority = Math.max(-20, Math.min(19, priority));
-
-      return {
-        success: true,
-        output: `Set priority of process ${pid} to ${normalizedPriority}`,
-        timestamp: new Date(),
-      };
-    } catch (error) {
-      return {
-        success: false,
-        output:
-          error instanceof Error ? error.message : "Failed to set priority",
-        timestamp: new Date(),
-      };
+    const result = memoryService.reniceProcess(context.userId, pid, priority);
+    if (!result.success) {
+      return { success: false, output: result.reason || "Failed to renice.", timestamp: new Date() };
     }
+
+    const process = memoryService.getGameProcess(context.userId, pid);
+    const remaining = process ? Math.max(0, process.duration - (Date.now() - process.startedAt)) : 0;
+
+    const W = 48;
+    const lines: string[] = [];
+    lines.push(sBoxTop(W));
+    lines.push(sBoxRow(` Process ${pid} priority → ${priority}`, W));
+    if (result.cpuDelta && result.cpuDelta > 0) {
+      lines.push(sBoxRow(` CPU: +${result.cpuDelta} (higher priority)`, W));
+    } else if (result.cpuDelta && result.cpuDelta < 0) {
+      lines.push(sBoxRow(` CPU: ${result.cpuDelta} (lower priority, freed)`, W));
+    }
+    if (process) {
+      lines.push(sBoxRow(` New ETA: ${formatDuration(remaining)}`, W));
+      lines.push(sBoxRow(` CPU cost: ${process.cpuCost} (was ${process.baseCpuCost})`, W));
+    }
+    lines.push(sBoxBottom(W));
+
+    return { success: true, output: render(lines), timestamp: new Date() };
   }
 }

@@ -398,6 +398,39 @@ export class SystemCommandsModule implements CommandModule {
 
       let output = result.data?.content || "";
 
+      // DarkNet vault conquest: reading vault_payload.enc triggers reward
+      if (filename === "vault_payload.enc") {
+        try {
+          const { getService } = await import("../../di/container");
+          const { DARKNET_DUNGEON_SERVICE } = await import("../../di/tokens");
+          const dungeonService = getService<
+            import("../darknetDungeonService").DarkNetDungeonService
+          >(DARKNET_DUNGEON_SERVICE);
+          const conquest = await dungeonService.conquerVault(
+            context.userId,
+            serverId,
+          );
+          if (conquest.conquered && conquest.reward) {
+            const rewardLines = [
+              "",
+              "╔══════════════════════════════════════════╗",
+              "║        ⚡ VAULT CONQUERED ⚡             ║",
+              "╠══════════════════════════════════════════╣",
+              `║  Reward: ${String(conquest.reward.type).replace(/_/g, " ").toUpperCase().padEnd(30)}║`,
+              "║                                          ║",
+              "║  The signal shifts. This network will    ║",
+              "║  collapse. A new path will emerge...     ║",
+              "║                                          ║",
+              "║           — The Architect                ║",
+              "╚══════════════════════════════════════════╝",
+            ];
+            output += "\n" + rewardLines.join("\n");
+          }
+        } catch {
+          /* DarkNet dungeon service not available */
+        }
+      }
+
       // DarkNet discovery: reading .aida files triggers discovery check
       if (filename.startsWith(".aida") || filename.endsWith(".aida")) {
         try {

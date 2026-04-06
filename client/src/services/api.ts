@@ -4,9 +4,11 @@ import type {
   ApiResponse,
 } from "../../../shared/types";
 
-// API configuration
-const API_BASE_URL = "http://localhost:3001/api";
-const SOCKET_URL = "http://localhost:3001";
+// API configuration — override via VITE_API_URL / VITE_SOCKET_URL env vars
+const API_BASE_URL =
+  (import.meta.env.VITE_API_URL as string) || "http://localhost:3001/api";
+const SOCKET_URL =
+  (import.meta.env.VITE_SOCKET_URL as string) || "http://localhost:3001";
 
 // Token management
 let authToken: string | null = null;
@@ -80,6 +82,10 @@ class ApiClient {
     }
   }
 
+  public hasCsrfToken(): boolean {
+    return !!csrfToken;
+  }
+
   // HTTP request helper
   private async request<T>(
     endpoint: string,
@@ -115,6 +121,32 @@ class ApiClient {
 
       // Parse JSON response
       const data = await response.json();
+
+      // Handle CSRF token errors — auto-refresh and retry once
+      if (
+        response.status === 403 &&
+        data.error &&
+        typeof data.error === "string" &&
+        data.error.toLowerCase().includes("csrf") &&
+        authToken
+      ) {
+        const newToken = await this.fetchCsrfToken();
+        if (newToken) {
+          // Retry the request with the fresh CSRF token
+          (headers as any)["X-CSRF-Token"] = newToken;
+          const retryResponse = await fetch(url, { ...options, headers });
+          const retryData = await retryResponse.json();
+          if (!retryResponse.ok) {
+            throw new ApiError(
+              retryData.error ||
+                `HTTP ${retryResponse.status}: ${retryResponse.statusText}`,
+              retryResponse.status,
+              retryData,
+            );
+          }
+          return retryData;
+        }
+      }
 
       // Handle HTTP errors
       if (!response.ok) {

@@ -185,6 +185,12 @@ const templates: MissionTemplate[] = [
         descriptionTemplate: "Successfully hack into {target} server",
         target: 1,
       },
+      {
+        type: "hack_stealth",
+        descriptionTemplate: "Bonus: hack without triggering any alarms",
+        target: 1,
+        isBonus: true,
+      },
     ],
     rewards: {
       xp: { base: 50, perLevel: 10 },
@@ -219,6 +225,13 @@ const templates: MissionTemplate[] = [
         descriptionTemplate: "Explore {target} servers on the local network",
         target: 3,
       },
+      {
+        type: "steal_count",
+        descriptionTemplate:
+          "Bonus: read {target} file from a server you visit",
+        target: 1,
+        isBonus: true,
+      },
     ],
     rewards: {
       xp: { base: 75, perLevel: 10 },
@@ -248,6 +261,12 @@ const templates: MissionTemplate[] = [
         type: "message",
         descriptionTemplate: "Send {target} messages to contacts",
         target: 2,
+      },
+      {
+        type: "forum_post",
+        descriptionTemplate: "Bonus: post a message on the forum",
+        target: 1,
+        isBonus: true,
       },
     ],
     rewards: {
@@ -283,6 +302,13 @@ const templates: MissionTemplate[] = [
         descriptionTemplate: "Read {target} files from servers",
         target: 2,
       },
+      {
+        type: "download_file",
+        descriptionTemplate:
+          "Bonus: download a stolen file to your home server",
+        target: true,
+        isBonus: true,
+      },
     ],
     rewards: {
       xp: { base: 60, perLevel: 12 },
@@ -312,6 +338,12 @@ const templates: MissionTemplate[] = [
         type: "earn_credits",
         descriptionTemplate: "Earn {target} credits",
         target: 1000,
+      },
+      {
+        type: "spend_credits",
+        descriptionTemplate: "Bonus: spend 500 credits on equipment",
+        target: 500,
+        isBonus: true,
       },
     ],
     rewards: {
@@ -347,6 +379,13 @@ const templates: MissionTemplate[] = [
         descriptionTemplate: "Hack {target} servers without being detected",
         target: 2,
       },
+      {
+        type: "install_backdoor",
+        descriptionTemplate:
+          "Bonus: install a backdoor on one of the servers for future access",
+        target: 1,
+        isBonus: true,
+      },
     ],
     rewards: {
       xp: { base: 200, perLevel: 20 },
@@ -376,6 +415,13 @@ const templates: MissionTemplate[] = [
         type: "steal_count",
         descriptionTemplate: "Steal {target} files from servers",
         target: 4,
+      },
+      {
+        type: "download_file",
+        descriptionTemplate:
+          "Bonus: download at least one file to your home server",
+        target: true,
+        isBonus: true,
       },
     ],
     rewards: {
@@ -412,6 +458,13 @@ const templates: MissionTemplate[] = [
         descriptionTemplate: "Discover {target} corporate server types",
         target: 2,
         metadata: { serverType: "corporate" },
+      },
+      {
+        type: "decode_content",
+        descriptionTemplate:
+          "Bonus: decode an encoded file found during your sweep",
+        target: true,
+        isBonus: true,
       },
     ],
     rewards: {
@@ -452,6 +505,13 @@ const templates: MissionTemplate[] = [
         descriptionTemplate: "Interact with {target} forum threads",
         target: 4,
       },
+      {
+        type: "message",
+        descriptionTemplate:
+          "Bonus: send a direct message to {target} other players",
+        target: 2,
+        isBonus: true,
+      },
     ],
     rewards: {
       xp: { base: 200, perLevel: 15 },
@@ -488,6 +548,13 @@ const templates: MissionTemplate[] = [
         descriptionTemplate: "Reach {target} reputation with your faction",
         target: 10,
       },
+      {
+        type: "hack",
+        descriptionTemplate:
+          "Bonus: hack {target} server to prove your worth to the faction",
+        target: 1,
+        isBonus: true,
+      },
     ],
     rewards: {
       xp: { base: 350, perLevel: 25 },
@@ -519,6 +586,13 @@ const templates: MissionTemplate[] = [
         type: "gain_xp",
         descriptionTemplate: "Earn {target} XP",
         target: 2000,
+      },
+      {
+        type: "hack",
+        descriptionTemplate:
+          "Bonus: hack {target} server to put those skills to work",
+        target: 1,
+        isBonus: true,
       },
     ],
     rewards: {
@@ -566,11 +640,19 @@ const templates: MissionTemplate[] = [
         target: true,
         metadata: { filePattern: "logs" },
       },
+      {
+        type: "download_file",
+        descriptionTemplate:
+          "Bonus: download evidence files before wiping them",
+        target: true,
+        isBonus: true,
+      },
     ],
     rewards: {
       xp: { base: 600, perLevel: 30 },
       credits: { base: 2000, perLevel: 100 },
       reputation: 10,
+      items: ["Envoy's Cipher Token"],
     },
     timeLimit: { min: 5400, max: 10800 }, // 1.5–3 hours
     tags: ["stealth", "cleanup", "advanced"],
@@ -607,11 +689,18 @@ const templates: MissionTemplate[] = [
         descriptionTemplate: "Steal the target data",
         target: true,
       },
+      {
+        type: "install_backdoor",
+        descriptionTemplate: "Bonus: install a backdoor for persistent access",
+        target: 1,
+        isBonus: true,
+      },
     ],
     rewards: {
       xp: { base: 800, perLevel: 35 },
       credits: { base: 2500, perLevel: 120 },
       reputation: 12,
+      items: ["Envoy's Cipher Token"],
     },
     timeLimit: { min: 5400, max: 10800 },
     tags: ["multi-step", "advanced"],
@@ -644,10 +733,18 @@ const templates: MissionTemplate[] = [
         target: true,
         metadata: { serverId: "drop_server" },
       },
+      {
+        type: "decode_content",
+        descriptionTemplate:
+          "Bonus: decode the file's contents to extract hidden intel",
+        target: true,
+        isBonus: true,
+      },
     ],
     rewards: {
       xp: { base: 700, perLevel: 30 },
       credits: { base: 2000, perLevel: 100 },
+      items: ["Envoy's Cipher Token"],
     },
     timeLimit: { min: 5400, max: 10800 },
     tags: ["theft", "tradecraft", "advanced"],
@@ -679,12 +776,20 @@ const templates: MissionTemplate[] = [
         descriptionTemplate: "Complete {target} faction missions",
         target: 2,
       },
+      {
+        type: "hack",
+        descriptionTemplate:
+          "Bonus: hack {target} rival faction server to intimidate the competition",
+        target: 1,
+        isBonus: true,
+      },
     ],
     rewards: {
       xp: { base: 500, perLevel: 25 },
       credits: { base: 1500, perLevel: 80 },
       reputation: 15,
       skillPoints: 1,
+      items: ["Envoy's Cipher Token"],
     },
     timeLimit: { min: 7200, max: 14400 }, // 2–4 hours
     tags: ["faction", "advanced"],
@@ -721,11 +826,18 @@ const templates: MissionTemplate[] = [
         descriptionTemplate: "Steal {target} files",
         target: 3,
       },
+      {
+        type: "decode_content",
+        descriptionTemplate: "Bonus: decode an encoded file found during recon",
+        target: true,
+        isBonus: true,
+      },
     ],
     rewards: {
       xp: { base: 650, perLevel: 30 },
       credits: { base: 1800, perLevel: 90 },
       reputation: 8,
+      items: ["Envoy's Cipher Token"],
     },
     timeLimit: { min: 5400, max: 10800 },
     tags: ["recon", "exploration", "advanced"],
@@ -761,11 +873,19 @@ const templates: MissionTemplate[] = [
         descriptionTemplate: "Spend {target} credits strategically",
         target: 5000,
       },
+      {
+        type: "contact_player",
+        descriptionTemplate:
+          "Bonus: make a business contact with another player",
+        target: true,
+        isBonus: true,
+      },
     ],
     rewards: {
       xp: { base: 500, perLevel: 25 },
       credits: { base: 1000, perLevel: 50 },
       reputation: 8,
+      items: ["Envoy's Cipher Token"],
     },
     timeLimit: { min: 7200, max: 14400 },
     tags: ["economic", "advanced"],
@@ -811,12 +931,21 @@ const templates: MissionTemplate[] = [
         descriptionTemplate: "Complete {target} stealth hacks",
         target: 3,
       },
+      {
+        type: "hack_method",
+        descriptionTemplate:
+          "Bonus: install a rootkit for deep system persistence",
+        target: 1,
+        metadata: { method: "rootkit" },
+        isBonus: true,
+      },
     ],
     rewards: {
       xp: { base: 1500, perLevel: 40 },
       credits: { base: 5000, perLevel: 200 },
       reputation: 20,
       skillPoints: 2,
+      items: ["Envoy's Cipher Token"],
     },
     timeLimit: { min: 7200, max: 14400 }, // 2–4 hours
     tags: ["backdoor", "stealth", "elite"],
@@ -858,12 +987,20 @@ const templates: MissionTemplate[] = [
         descriptionTemplate: "Delete all log files",
         target: true,
       },
+      {
+        type: "download_file",
+        descriptionTemplate:
+          "Bonus: download the stolen data to your home server for safekeeping",
+        target: true,
+        isBonus: true,
+      },
     ],
     rewards: {
       xp: { base: 2000, perLevel: 45 },
       credits: { base: 6000, perLevel: 250 },
       reputation: 25,
       skillPoints: 2,
+      items: ["Envoy's Cipher Token"],
     },
     timeLimit: { min: 7200, max: 14400 },
     tags: ["stealth", "multi-objective", "elite"],
@@ -900,11 +1037,23 @@ const templates: MissionTemplate[] = [
         descriptionTemplate: "Earn {target} credits for the war effort",
         target: 15000,
       },
+      {
+        type: "install_backdoor",
+        descriptionTemplate:
+          "Bonus: plant a backdoor on a rival server for long-term surveillance",
+        target: 1,
+        isBonus: true,
+      },
     ],
     rewards: {
-      xp: { base: 1800, perLevel: 40 },
-      credits: { base: 5500, perLevel: 200 },
-      reputation: 25,
+      xp: { base: 200, perLevel: 15 },
+      credits: { base: 300, perLevel: 30 },
+      reputation: 5,
+      items: [
+        "Commander Steele's Briefing Token",
+        "gh0st's Dead Drop Token",
+        "Director Chen's Business Card",
+      ],
     },
     timeLimit: { min: 10800, max: 21600 }, // 3–6 hours
     tags: ["faction", "territory", "elite"],
@@ -944,11 +1093,19 @@ const templates: MissionTemplate[] = [
           "Complete {target} stealth hacks to maintain cover",
         target: 2,
       },
+      {
+        type: "decode_content",
+        descriptionTemplate:
+          "Bonus: decode a piece of classified intelligence to deepen your cover",
+        target: true,
+        isBonus: true,
+      },
     ],
     rewards: {
       xp: { base: 2200, perLevel: 50 },
       credits: { base: 7000, perLevel: 300 },
       reputation: 20,
+      items: ["Envoy's Cipher Token"],
     },
     timeLimit: { min: 10800, max: 21600 },
     tags: ["social", "faction", "elite"],
@@ -989,11 +1146,19 @@ const templates: MissionTemplate[] = [
         descriptionTemplate: "Steal {target} files",
         target: 5,
       },
+      {
+        type: "decode_content",
+        descriptionTemplate:
+          "Bonus: decode {target} encoded files from your sweep for additional intel",
+        target: 2,
+        isBonus: true,
+      },
     ],
     rewards: {
       xp: { base: 1600, perLevel: 35 },
       credits: { base: 5000, perLevel: 180 },
       reputation: 18,
+      items: ["Envoy's Cipher Token"],
     },
     timeLimit: { min: 10800, max: 21600 },
     tags: ["recon", "exploration", "elite"],
@@ -1036,12 +1201,20 @@ const templates: MissionTemplate[] = [
         descriptionTemplate: "Delete all log files",
         target: true,
       },
+      {
+        type: "download_file",
+        descriptionTemplate:
+          "Bonus: download the stolen data to your home server for safekeeping",
+        target: true,
+        isBonus: true,
+      },
     ],
     rewards: {
       xp: { base: 2500, perLevel: 50 },
       credits: { base: 8000, perLevel: 300 },
       reputation: 22,
       skillPoints: 2,
+      items: ["Envoy's Cipher Token"],
     },
     timeLimit: { min: 7200, max: 14400 },
     tags: ["precision", "stealth", "elite"],
@@ -1087,12 +1260,20 @@ const templates: MissionTemplate[] = [
         descriptionTemplate: "Complete {target} stealth hacks",
         target: 3,
       },
+      {
+        type: "install_backdoor",
+        descriptionTemplate:
+          "Bonus: plant backdoors on {target} key servers to control the outcome",
+        target: 2,
+        isBonus: true,
+      },
     ],
     rewards: {
       xp: { base: 5000, perLevel: 60 },
       credits: { base: 20000, perLevel: 500 },
       reputation: 40,
       skillPoints: 3,
+      items: ["AIDA Signal Fragment"],
     },
     timeLimit: { min: 14400, max: 28800 }, // 4–8 hours
     tags: ["faction", "war", "endgame"],
@@ -1135,12 +1316,20 @@ const templates: MissionTemplate[] = [
         descriptionTemplate: "Complete {target} stealth hacks",
         target: 4,
       },
+      {
+        type: "decode_content",
+        descriptionTemplate:
+          "Bonus: decode the AIDA fragment to reveal its hidden message",
+        target: true,
+        isBonus: true,
+      },
     ],
     rewards: {
       xp: { base: 6000, perLevel: 70 },
       credits: { base: 15000, perLevel: 400 },
       reputation: 35,
       skillPoints: 4,
+      items: ["AIDA Signal Fragment", "Envoy's Cipher Token"],
       unlocks: ["aida_knowledge"],
     },
     timeLimit: { min: 14400, max: 28800 },
@@ -1188,12 +1377,20 @@ const templates: MissionTemplate[] = [
         descriptionTemplate: "Complete {target} stealth hacks",
         target: 5,
       },
+      {
+        type: "download_file",
+        descriptionTemplate:
+          "Bonus: download the stolen files to your home server before burning the evidence",
+        target: true,
+        isBonus: true,
+      },
     ],
     rewards: {
       xp: { base: 7000, perLevel: 80 },
       credits: { base: 25000, perLevel: 600 },
       reputation: 45,
       skillPoints: 4,
+      items: ["AIDA Signal Fragment"],
     },
     timeLimit: { min: 14400, max: 28800 },
     tags: ["destruction", "stealth", "endgame"],
@@ -1235,12 +1432,20 @@ const templates: MissionTemplate[] = [
         descriptionTemplate: "Complete {target} faction mission",
         target: 1,
       },
+      {
+        type: "decode_content",
+        descriptionTemplate:
+          "Bonus: decode intelligence gathered during the zero-day window",
+        target: true,
+        isBonus: true,
+      },
     ],
     rewards: {
       xp: { base: 5500, perLevel: 65 },
       credits: { base: 18000, perLevel: 450 },
       reputation: 38,
       skillPoints: 3,
+      items: ["AIDA Signal Fragment"],
     },
     timeLimit: { min: 10800, max: 21600 }, // 3–6 hours
     tags: ["dynamic", "ai-generated", "endgame"],
@@ -1283,12 +1488,20 @@ const templates: MissionTemplate[] = [
         descriptionTemplate: "Upload the payload to the target",
         target: true,
       },
+      {
+        type: "survive_trace",
+        descriptionTemplate:
+          "Bonus: evade a trace to demonstrate total operational security",
+        target: 1,
+        isBonus: true,
+      },
     ],
     rewards: {
       xp: { base: 8000, perLevel: 90 },
       credits: { base: 30000, perLevel: 700 },
       reputation: 50,
       skillPoints: 5,
+      items: ["AIDA Signal Fragment"],
     },
     timeLimit: { min: 14400, max: 28800 },
     tags: ["backdoor", "persistence", "endgame"],
@@ -1335,21 +1548,516 @@ const templates: MissionTemplate[] = [
         descriptionTemplate: "Earn {target} credits",
         target: 50000,
       },
+      {
+        type: "decode_content",
+        descriptionTemplate:
+          "Bonus: decode the final AIDA data fragment to unlock its secrets",
+        target: true,
+        isBonus: true,
+      },
     ],
     rewards: {
       xp: { base: 10000, perLevel: 100 },
       credits: { base: 50000, perLevel: 1000 },
       reputation: 50,
       skillPoints: 5,
+      items: ["AIDA Signal Fragment"],
       unlocks: ["endgame_access"],
     },
     timeLimit: { min: 21600, max: 43200 }, // 6–12 hours
     tags: ["story", "finale", "endgame"],
   },
+
+  // ══════════════════════════════════════════════════════════════════════
+  // Network-Aware Templates (30-33)
+  // ══════════════════════════════════════════════════════════════════════
+
+  // ── 30. network_probe ──────────────────────────────────────────────────
+  {
+    id: "network_probe",
+    name: "Network Probe",
+    tier: 2 as const,
+    type: "explore",
+    minLevel: 5,
+    maxLevel: 20,
+    difficulty: { min: 2, max: 4 },
+    titleTemplates: [
+      "Network Reconnaissance",
+      "Mapping the Grid",
+      "Perimeter Scan",
+    ],
+    descriptionTemplates: [
+      "We need eyes on a rival faction's network. Infiltrate their perimeter and map what's inside.",
+      "Intelligence reports suggest interesting infrastructure behind this gateway. Scout it out.",
+    ],
+    objectives: [
+      {
+        type: "infiltrate_network",
+        descriptionTemplate:
+          "Penetrate the target network and reach an internal server",
+        target: true,
+        metadata: {},
+      },
+      {
+        type: "explore",
+        descriptionTemplate: "Discover {target} servers within the network",
+        target: 3,
+      },
+      {
+        type: "decode_content",
+        descriptionTemplate:
+          "Bonus: decode an encoded file found inside the network",
+        target: true,
+        isBonus: true,
+      },
+    ],
+    rewards: {
+      xp: { base: 200, perLevel: 20 },
+      credits: { base: 500, perLevel: 50 },
+      reputation: 5,
+    },
+    timeLimit: { min: 43200, max: 86400 }, // 12-24h
+    tags: ["network", "exploration", "reconnaissance"],
+  },
+
+  // ── 31. deep_extraction ────────────────────────────────────────────────
+  {
+    id: "deep_extraction",
+    name: "Deep Extraction",
+    tier: 3 as const,
+    type: "mixed",
+    minLevel: 15,
+    maxLevel: 40,
+    difficulty: { min: 4, max: 7 },
+    titleTemplates: [
+      "Operation Deep Dive",
+      "Core Extraction",
+      "The Inner Sanctum",
+    ],
+    descriptionTemplates: [
+      "Critical intel is buried deep inside a faction network. Hack through their defenses layer by layer and extract the data.",
+      "The target data is on a database server behind multiple firewalls. No shortcuts — hack your way in.",
+    ],
+    objectives: [
+      {
+        type: "infiltrate_network",
+        descriptionTemplate:
+          "Penetrate the faction network to reach their core servers",
+        target: true,
+        metadata: {},
+      },
+      {
+        type: "exfiltrate_data",
+        descriptionTemplate: "Extract the target data from the deep server",
+        target: true,
+        metadata: {},
+      },
+      {
+        type: "download_file",
+        descriptionTemplate:
+          "Bonus: download the extracted data to your home server",
+        target: true,
+        isBonus: true,
+      },
+    ],
+    rewards: {
+      xp: { base: 600, perLevel: 40 },
+      credits: { base: 2000, perLevel: 150 },
+      reputation: 15,
+      items: ["Envoy's Cipher Token"],
+    },
+    timeLimit: { min: 21600, max: 43200 }, // 6-12h
+    tags: ["network", "stealth", "extraction"],
+  },
+
+  // ── 32. follow_the_trail ───────────────────────────────────────────────
+  {
+    id: "follow_the_trail",
+    name: "Follow the Trail",
+    tier: 3 as const,
+    type: "explore",
+    minLevel: 15,
+    maxLevel: 35,
+    difficulty: { min: 4, max: 6 },
+    titleTemplates: [
+      "Digital Breadcrumbs",
+      "Trace the Signal",
+      "Follow the Money",
+    ],
+    descriptionTemplates: [
+      "We know the target exists but not where. Read files, follow IP references, and trace the connection to the hidden server.",
+      "Intel suggests suspicious activity on a network. Read the logs, follow the clues, and find where the data leads.",
+    ],
+    objectives: [
+      {
+        type: "trace_connection",
+        descriptionTemplate:
+          "Discover the hidden target server by following network clues",
+        target: true,
+        metadata: {},
+      },
+      {
+        type: "steal",
+        descriptionTemplate: "Read the evidence file once you find the target",
+        target: true,
+        metadata: {},
+      },
+      {
+        type: "hack_stealth",
+        descriptionTemplate: "Bonus: reach the target without being detected",
+        target: 1,
+        isBonus: true,
+      },
+    ],
+    rewards: {
+      xp: { base: 500, perLevel: 30 },
+      credits: { base: 1500, perLevel: 100 },
+      reputation: 10,
+      items: ["Envoy's Cipher Token"],
+    },
+    timeLimit: { min: 28800, max: 57600 }, // 8-16h
+    tags: ["network", "investigation", "discovery"],
+  },
+
+  // ── 33. network_siege ──────────────────────────────────────────────────
+  {
+    id: "network_siege",
+    name: "Network Siege",
+    tier: 4 as const,
+    type: "hack",
+    minLevel: 30,
+    maxLevel: 60,
+    difficulty: { min: 6, max: 9 },
+    titleTemplates: [
+      "Full Spectrum Assault",
+      "Network Siege",
+      "Total Compromise",
+    ],
+    descriptionTemplates: [
+      "This is a full network takedown. Hack every server from gateway to core. Leave backdoors for persistent access.",
+      "Command wants total control of this network. Breach every node and install backdoors on the critical infrastructure.",
+    ],
+    objectives: [
+      {
+        type: "infiltrate_network",
+        descriptionTemplate: "Penetrate the target network",
+        target: true,
+        metadata: {},
+      },
+      {
+        type: "hack",
+        descriptionTemplate: "Hack {target} servers within the network",
+        target: 4,
+      },
+      {
+        type: "install_backdoor",
+        descriptionTemplate: "Install a backdoor on a core server",
+        target: true,
+        metadata: {},
+      },
+      {
+        type: "hack_stealth",
+        descriptionTemplate: "Complete at least one hack undetected",
+        target: 1,
+      },
+      {
+        type: "survive_trace",
+        descriptionTemplate: "Bonus: evade a trace during the siege",
+        target: 1,
+        isBonus: true,
+      },
+    ],
+    rewards: {
+      xp: { base: 500, perLevel: 30 },
+      credits: { base: 1500, perLevel: 100 },
+      reputation: 10,
+      items: [
+        "Envoy's Cipher Token",
+        "Commander Steele's Briefing Token",
+        "Director Chen's Business Card",
+      ],
+    },
+    timeLimit: { min: 5, max: 12 },
+    tags: ["network", "siege", "backdoor", "stealth"],
+    factionAffinity: ["garrison", "cybercorp"],
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // NEW SYSTEM INTEGRATION TEMPLATES (6 templates using new objective types)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // ── data_extraction (T2) — hack + download ──
+  {
+    id: "data_extraction",
+    name: "Extract data to home server",
+    tier: 2,
+    type: "steal" as const,
+    minLevel: 5,
+    maxLevel: 20,
+    difficulty: { min: 2, max: 4 },
+    titleTemplates: ["Data Extraction", "Bring It Home", "Secure the Package"],
+    descriptionTemplates: [
+      "Intelligence is useless if it stays on the enemy server. Hack in, find the files, and download them to your home system.",
+      "We need hard evidence, not screenshots. Break into the target server and download the files to your machine.",
+      "Your handler wants copies, not memories. Infiltrate, locate, and extract the data to your home server.",
+    ],
+    objectives: [
+      {
+        type: "hack_target",
+        descriptionTemplate: "Hack the target server",
+        target: true,
+        metadata: { serverId: "{targetServerId}" },
+      },
+      {
+        type: "download_file",
+        descriptionTemplate: "Download the target file to your home server",
+        target: true,
+        metadata: { fileId: "{targetFileId}" },
+      },
+      {
+        type: "hack_stealth",
+        descriptionTemplate: "Bonus: extract without being detected",
+        target: 1,
+        isBonus: true,
+      },
+    ],
+    rewards: {
+      xp: { base: 300, perLevel: 25 },
+      credits: { base: 700, perLevel: 60 },
+    },
+    timeLimit: { min: 3600, max: 7200 },
+    tags: ["download", "hack", "extraction"],
+    factionAffinity: ["cybercorp", "dothackers"],
+  },
+
+  // ── cipher_breaker (T3) — hack + steal + decode ──
+  {
+    id: "cipher_breaker",
+    name: "Crack encoded intelligence",
+    tier: 3,
+    type: "steal" as const,
+    minLevel: 15,
+    maxLevel: 35,
+    difficulty: { min: 4, max: 6 },
+    titleTemplates: [
+      "Cipher Breaker",
+      "Decode the Signal",
+      "Cracking the Vault",
+    ],
+    descriptionTemplates: [
+      "A classified file has been located, but it's encoded. Steal it, then use your decryption skills to extract the intelligence.",
+      "Enemy communications are encoded. Find the source file, grab it, and break the cipher.",
+      "The target file is protected by layered encoding. Your cryptography skills will be put to the test.",
+    ],
+    objectives: [
+      {
+        type: "hack_target",
+        descriptionTemplate: "Hack the target server",
+        target: true,
+        metadata: { serverId: "{targetServerId}" },
+      },
+      {
+        type: "steal",
+        descriptionTemplate: "Steal the encoded file",
+        target: true,
+        metadata: { fileId: "{targetFileId}" },
+      },
+      {
+        type: "decode_content",
+        descriptionTemplate: "Decode the file's contents",
+        target: true,
+        metadata: { encoding: "{encoding}" },
+      },
+      {
+        type: "download_file",
+        descriptionTemplate:
+          "Bonus: download the decoded file to your home server",
+        target: true,
+        isBonus: true,
+      },
+    ],
+    rewards: {
+      xp: { base: 150, perLevel: 20 },
+      credits: { base: 400, perLevel: 40 },
+      skillPoints: 1,
+      items: ["gh0st's Dead Drop Token"],
+    },
+    timeLimit: { min: 3600, max: 7200 },
+    tags: ["decode", "cryptography", "steal"],
+    factionAffinity: ["darknet", "dothackers"],
+  },
+
+  // ── bounty_hunter (T3) — claim and complete a bounty ──
+  {
+    id: "bounty_hunter",
+    name: "Hunt a bounty target",
+    tier: 3,
+    type: "hack" as const,
+    minLevel: 15,
+    maxLevel: 40,
+    difficulty: { min: 4, max: 7 },
+    titleTemplates: ["Bounty Hunter", "Wanted: Dead Link", "Justice for Hire"],
+    descriptionTemplates: [
+      "A bounty has been posted. Track down the target, hack their home server, and collect the reward.",
+      "Someone crossed the wrong faction. Find them, breach their defenses, and make them pay.",
+      "The price on their head is yours for the taking. Accept a bounty and deliver.",
+    ],
+    objectives: [
+      {
+        type: "claim_bounty",
+        descriptionTemplate: "Claim and complete an active bounty",
+        target: true,
+      },
+      {
+        type: "hack_stealth",
+        descriptionTemplate: "Bonus: breach the target without being detected",
+        target: 1,
+        isBonus: true,
+      },
+    ],
+    rewards: {
+      xp: { base: 200, perLevel: 15 },
+      credits: { base: 300, perLevel: 30 },
+      reputation: 5,
+      items: [
+        "Commander Steele's Briefing Token",
+        "Director Chen's Business Card",
+      ],
+    },
+    timeLimit: { min: 7200, max: 14400 },
+    tags: ["bounty", "pvp", "hack"],
+    factionAffinity: ["garrison", "cybercorp"],
+  },
+
+  // ── home_fortification (T2) — upgrade home defenses ──
+  {
+    id: "home_fortification",
+    name: "Fortify your home server",
+    tier: 2,
+    type: "explore" as const,
+    minLevel: 5,
+    maxLevel: 25,
+    difficulty: { min: 1, max: 3 },
+    titleTemplates: ["Home Fortification", "Raise the Walls", "Digital Bunker"],
+    descriptionTemplates: [
+      "Your home server is vulnerable. Purchase and install defenses before someone raids your data.",
+      "A good hacker protects their own turf. Upgrade your home security to keep bounty hunters out.",
+      "Offense wins games, defense wins championships. Fortify your home server.",
+    ],
+    objectives: [
+      {
+        type: "defend_home",
+        descriptionTemplate: "Purchase or upgrade a home defense",
+        target: true,
+        metadata: { defenseType: "any" },
+      },
+      {
+        type: "explore",
+        descriptionTemplate: "Bonus: scan your local network for threats",
+        target: 2,
+        isBonus: true,
+      },
+    ],
+    rewards: {
+      xp: { base: 150, perLevel: 15 },
+      credits: { base: 300, perLevel: 25 },
+    },
+    timeLimit: { min: 3600, max: 7200 },
+    tags: ["defense", "home", "tutorial"],
+  },
+
+  // ── ghost_run (T4) — stealth hack + download + evade trace ──
+  {
+    id: "ghost_run",
+    name: "Stealth extraction under pressure",
+    tier: 4,
+    type: "hack" as const,
+    minLevel: 30,
+    maxLevel: 50,
+    difficulty: { min: 6, max: 8 },
+    titleTemplates: ["Ghost Run", "Silent Extraction", "Phantom Protocol"],
+    descriptionTemplates: [
+      "Get in, grab the data, and get out — all without leaving a trace. If they catch you, evade the trace.",
+      "This is a precision operation. Stealth hack, extract files, and if the alarm trips, disappear.",
+      "You're smoke. Infiltrate undetected, download the package, and ghost out before they trace you.",
+    ],
+    objectives: [
+      {
+        type: "hack_stealth",
+        descriptionTemplate: "Hack servers without detection",
+        target: 1,
+      },
+      {
+        type: "download_file",
+        descriptionTemplate: "Download the target file",
+        target: true,
+        metadata: { fileId: "{targetFileId}" },
+      },
+      {
+        type: "survive_trace",
+        descriptionTemplate: "Successfully evade a trace if detected",
+        target: 1,
+        isBonus: true,
+      },
+    ],
+    rewards: {
+      xp: { base: 800, perLevel: 50 },
+      credits: { base: 2000, perLevel: 100 },
+      reputation: 15,
+      skillPoints: 1,
+      items: ["gh0st's Dead Drop Token", "Envoy's Cipher Token"],
+    },
+    timeLimit: { min: 5400, max: 10800 },
+    tags: ["stealth", "download", "trace", "elite"],
+    factionAffinity: ["dothackers", "darknet"],
+  },
+
+  // ── network_cartographer (T2) — subnet + explore + trace ──
+  {
+    id: "network_cartographer",
+    name: "Map the network",
+    tier: 2,
+    type: "explore" as const,
+    minLevel: 5,
+    maxLevel: 20,
+    difficulty: { min: 2, max: 4 },
+    titleTemplates: ["Network Cartographer", "Map the Grid", "Recon Sweep"],
+    descriptionTemplates: [
+      "Before we can plan an operation, we need to know the terrain. Analyze subnet ranges and discover connected servers.",
+      "Use your networking tools to map the target area. Calculate subnets, scan for servers, and trace connections.",
+      "Intelligence starts with reconnaissance. Map the network topology in the target zone.",
+    ],
+    objectives: [
+      {
+        type: "scan_subnet",
+        descriptionTemplate: "Analyze network subnets",
+        target: 2,
+      },
+      {
+        type: "explore",
+        descriptionTemplate: "Discover new servers",
+        target: 3,
+      },
+      {
+        type: "trace_connection",
+        descriptionTemplate: "Trace a connection to a specific server",
+        target: true,
+        metadata: { serverId: "{targetServerId}" },
+        isBonus: true,
+      },
+    ],
+    rewards: {
+      xp: { base: 250, perLevel: 20 },
+      credits: { base: 400, perLevel: 40 },
+    },
+    timeLimit: { min: 3600, max: 7200 },
+    tags: ["network", "explore", "subnet", "recon"],
+    factionAffinity: ["garrison", "dothackers"],
+  },
 ];
 
 // ────────────────────────────────────────────────────────────────────────────
-// Primary Index — all 29 templates keyed by ID
+// Primary Index — all 35 templates keyed by ID
 // ────────────────────────────────────────────────────────────────────────────
 
 /**

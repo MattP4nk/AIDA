@@ -21,6 +21,9 @@ import type BackdoorService from "../backdoorService";
 import type TraceService from "../traceService";
 import type { FactionKnowledgeService } from "../factionKnowledgeService";
 import type { NetworkTopologyService } from "../networkTopologyService";
+import type MissionIntegrationService from "../missionIntegration";
+import type { LeaderboardService } from "../leaderboardService";
+import type { AchievementService } from "../achievementService";
 
 export interface CommandContext {
   userId: string;
@@ -48,6 +51,9 @@ export interface CommandContext {
     traceService: TraceService;
     factionKnowledgeService?: FactionKnowledgeService;
     networkTopologyService?: NetworkTopologyService;
+    missionIntegrationService?: MissionIntegrationService;
+    leaderboardService?: LeaderboardService;
+    achievementService?: AchievementService;
     [key: string]: any;
   };
 }

@@ -1,7 +1,7 @@
 <script lang="ts">
     import { onMount } from "svelte";
     import { apiClient } from "../services/api";
-    import { socketService } from "../services/socket";
+    // socketService removed — shop data refreshes on buy/sell, no real-time socket events needed
 
     export let visible = false;
     export let onClose: () => void;
@@ -63,11 +63,6 @@
     onMount(async () => {
         await loadShopData();
         await loadPlayerData();
-
-        // Listen for credit updates
-        socketService.on("player:credits_updated", (data: any) => {
-            playerCredits = data.credits;
-        });
     });
 
     async function loadShopData() {

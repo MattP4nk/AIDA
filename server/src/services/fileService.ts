@@ -22,10 +22,12 @@ import {
   CACHE_SERVICE,
   MISSION_INTEGRATION_SERVICE,
   FACTION_KNOWLEDGE_SERVICE,
+  NETWORK_TOPOLOGY_SERVICE,
 } from "../di/tokens";
 import type { CacheService } from "./cacheService";
 import type MissionIntegrationService from "./missionIntegration";
 import type { FactionKnowledgeService } from "./factionKnowledgeService";
+import type { NetworkTopologyService } from "./networkTopologyService";
 import { isPathSafe, isValidFilename } from "../utils/pathSanitizer";
 import { FilePermissions, PermissionLevel } from "../../../shared/types";
 
@@ -49,6 +51,7 @@ export interface FileNode {
   encryptionKey: string | null;
   isHidden: boolean;
   isProtected: boolean;
+  metadata: Record<string, unknown> | null;
 }
 
 // FilePermissions and PermissionLevel are imported from shared/types
@@ -88,6 +91,7 @@ export class FileService {
   private encryptionAlgorithm = "aes-256-cbc";
   private missionIntegration: MissionIntegrationService | null = null;
   private factionKnowledge: FactionKnowledgeService | null = null;
+  private networkTopology: NetworkTopologyService | null = null;
 
   constructor(
     @inject(LOGGER) private logger: Logger,
@@ -97,10 +101,13 @@ export class FileService {
     missionIntegrationService?: MissionIntegrationService,
     @inject(FACTION_KNOWLEDGE_SERVICE)
     factionKnowledgeService?: FactionKnowledgeService,
+    @inject(NETWORK_TOPOLOGY_SERVICE)
+    networkTopologyService?: NetworkTopologyService,
   ) {
     // io parameter kept for DI initialization, will be used for future real-time features
     this.missionIntegration = missionIntegrationService || null;
     this.factionKnowledge = factionKnowledgeService || null;
+    this.networkTopology = networkTopologyService || null;
   }
 
   // ==================== FILE OPERATIONS ====================
@@ -312,6 +319,35 @@ export class FileService {
           .catch((err) =>
             this.logger.error({ err }, "Faction knowledge file discovery error"),
           );
+      }
+
+      // NOTE: Access key detection moved to download command.
+      // cat/read shows content but doesn't extract keys — must download to keep intel.
+
+      // ── Honeypot detection: if attacker reads a decoy file, alert the owner ──
+      const fileMeta = file.metadata as Record<string, unknown> | null;
+      if (fileMeta?.isDecoy === true) {
+        // Find the server owner
+        const ownerServer = await prisma.gameServer.findUnique({
+          where: { id: serverId },
+          select: { ownerId: true, isPlayerHome: true },
+        });
+        if (ownerServer?.isPlayerHome && ownerServer.ownerId && ownerServer.ownerId !== userId) {
+          this.logger.info({ userId, serverId, fileName: file.name }, "Honeypot triggered: attacker read decoy file");
+          // Create a game event alert for the owner
+          await prisma.gameEvent.create({
+            data: {
+              type: "honeypot_triggered",
+              title: "Honeypot Alert",
+              description: `Intruder accessed decoy file '${file.name}' on your home server.`,
+              timestamp: new Date(),
+              affectedUsers: [ownerServer.ownerId],
+              metadata: { serverId, fileName: file.name, attackerId: userId },
+              isGlobal: false,
+              severity: "high",
+            },
+          }).catch(() => {});
+        }
       }
 
       return {
@@ -750,6 +786,44 @@ export class FileService {
             message: `Directory not empty: ${path}. Use --recursive to force delete.`,
             error: "DIRECTORY_NOT_EMPTY",
           };
+        }
+      }
+
+      // ── Before deletion: check for access key revocation + honeypot ──
+      const nodeMeta = node.metadata as Record<string, unknown> | null;
+
+      // If this is a downloaded file, revoke any access keys it granted
+      if (node.type === "file" && nodeMeta?.isDownloaded === true) {
+        const revokeResult = await prisma.serverAccessKey.deleteMany({
+          where: { sourceFileId: node.id },
+        });
+        if (revokeResult.count > 0) {
+          this.logger.info(
+            { userId, fileId: node.id, keysRevoked: revokeResult.count },
+            "Access keys revoked due to downloaded file deletion",
+          );
+        }
+      }
+
+      // If this is a honeypot decoy and deleted by someone other than the owner, alert
+      if (node.type === "file" && nodeMeta?.isDecoy === true) {
+        const ownerServer = await prisma.gameServer.findUnique({
+          where: { id: serverId },
+          select: { ownerId: true, isPlayerHome: true },
+        });
+        if (ownerServer?.isPlayerHome && ownerServer.ownerId && ownerServer.ownerId !== userId) {
+          await prisma.gameEvent.create({
+            data: {
+              type: "honeypot_triggered",
+              title: "Honeypot Alert — File Deleted",
+              description: `Intruder deleted decoy file '${node.name}' from your home server.`,
+              timestamp: new Date(),
+              affectedUsers: [ownerServer.ownerId],
+              metadata: { serverId, fileName: node.name, attackerId: userId, action: "delete" },
+              isGlobal: false,
+              severity: "high",
+            },
+          }).catch(() => {});
         }
       }
 
@@ -1516,6 +1590,60 @@ export class FileService {
     } catch (error) {
       this.logger.error({ err: error }, "Failed to initialize file system");
       throw error;
+    }
+  }
+
+  // ==================== ACCESS KEY DETECTION ====================
+
+  /**
+   * Scan file content for access keys that match other servers' accessKey fields.
+   * When found, automatically grants the player access to those servers.
+   *
+   * Detects patterns like:
+   * - ACCESS_KEY=XYZ or accessKey: XYZ
+   * - PASS=XYZ or password: XYZ in context of a server IP
+   * - Explicit key tokens like GRN-*, FW-*, CL-* (Garrison), or vault keys
+   */
+  async detectAndGrantAccessKeys(
+    userId: string,
+    content: string,
+    serverId: string,
+    filePath: string,
+    sourceFileId?: string,
+  ): Promise<void> {
+    if (!this.networkTopology) return;
+
+    // Find all servers that have an accessKey set
+    const serversWithKeys = await prisma.gameServer.findMany({
+      where: {
+        accessKey: { not: null },
+        id: { not: serverId }, // Don't match the server we're currently on
+      },
+      select: { id: true, name: true, accessKey: true },
+    });
+
+    for (const server of serversWithKeys) {
+      if (!server.accessKey) continue;
+
+      // Check if the file content contains this server's access key
+      if (content.includes(server.accessKey)) {
+        const alreadyHas = await this.networkTopology.playerHasAccessKey(userId, server.id);
+        if (!alreadyHas) {
+          await this.networkTopology.grantAccessKey(
+            userId,
+            server.id,
+            server.accessKey,
+            "file_download",
+            `${serverId}:${filePath}`,
+            sourceFileId,
+          );
+
+          this.logger.info(
+            { userId, serverId: server.id, serverName: server.name, sourceFile: filePath, sourceFileId },
+            "Access key auto-discovered from downloaded file",
+          );
+        }
+      }
     }
   }
 }

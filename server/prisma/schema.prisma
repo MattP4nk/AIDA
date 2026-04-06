@@ -38,6 +38,7 @@ model User {
   createdFiles       FileSystemNode[]
   missions           Mission[]           @relation("MissionAssignee")
   createdMissions    Mission[]           @relation("MissionCreator")
+  storyArcs          StoryArc[]
   hackAttempts       HackLog[]           @relation("HackAttacker")
   hackTargets        HackLog[]           @relation("HackTarget")
   sessions           UserSession[]
@@ -50,6 +51,10 @@ model User {
   proxyConnection  ProxyConnection?
   storyProgress    StoryProgress?
   intelligence     IntelligenceReport[]
+  postReplies      PostReply[]
+  postVotes        PostVote[]
+  reportsMade      PostReport[]         @relation("ReportCreator")
+  reportsResolved  PostReport[]         @relation("ReportResolver")
 
   // Game mechanics
   inventoryItems   InventoryItem[]
@@ -66,11 +71,12 @@ model User {
   darkNetDiscovery DarkNetDiscovery?
 
   // PvP hacking relations
-  hackSessionsAttacking HackSession[] @relation("HackSessionAttacker")
-  hackSessionsDefending HackSession[] @relation("HackSessionTarget")
+  hackSessionsAttacking HackSession[]    @relation("HackSessionAttacker")
+  hackSessionsDefending HackSession[]    @relation("HackSessionTarget")
   backdoors             Backdoor[]
-  tracesAgainst         ActiveTrace[] @relation("TraceTarget")
-  tracesInitiated       ActiveTrace[] @relation("TraceInitiator")
+  tracesAgainst         ActiveTrace[]    @relation("TraceTarget")
+  tracesInitiated       ActiveTrace[]    @relation("TraceInitiator")
+  personaMessages       PersonaMessage[]
 
   @@map("users")
 }
@@ -114,6 +120,12 @@ model PlayerProgress {
   repSwordCorp Int @default(0) @map("rep_sword_corp")
   repAnons     Int @default(0) @map("rep_anons")
   repNeutral   Int @default(0) @map("rep_neutral")
+
+  // Home Server Defenses (0 = not purchased, 1-3 = upgrade level)
+  homeFirewall Int     @default(0) @map("home_firewall") // Increases hack prep time for attackers (adds firewall.knock minigame)
+  homeVault    Int     @default(0) @map("home_vault") // Encrypted vault dir — multi-layer minigame to crack
+  homeIds      Int     @default(0) @map("home_ids") // Intrusion Detection: 1=alert on complete, 2=alert on start, 3=reveal attacker IP
+  homeHoneypot Boolean @default(false) @map("home_honeypot") // Creates decoy downloads folder to waste attacker time
 
   // Inventory and Skills
   inventory Json @default("{}") @map("inventory")
@@ -175,6 +187,11 @@ model GameServer {
   role      String  @default("general") // "gateway" | "router" | "workstation" | "database" | "email" | "firewall" | "dns" | "general"
   networkId String? @map("network_id")
 
+  // Visibility & Access
+  isPublic     Boolean @default(true) @map("is_public") // true = shows in scan, false = must discover IP from files/intel
+  accessMethod String  @default("hackable") @map("access_method") // "open" | "hackable" | "keycard" | "hack_or_key"
+  accessKey    String? @map("access_key") // passkey required for keycard/hack_or_key access (null = no key needed)
+
   // Relations
   owner            User?              @relation(fields: [ownerId], references: [id])
   faction          Faction?           @relation(fields: [factionId], references: [id], onDelete: SetNull)
@@ -189,10 +206,28 @@ model GameServer {
   activeTraces     ActiveTrace[]
   linksOut         ServerLink[]       @relation("LinkSource")
   linksIn          ServerLink[]       @relation("LinkTarget")
+  accessKeys       ServerAccessKey[]
 
   @@index([ownerId])
   @@index([networkId])
   @@map("game_servers")
+}
+
+model ServerAccessKey {
+  id           String   @id @default(cuid())
+  userId       String   @map("user_id")
+  serverId     String   @map("server_id")
+  keyValue     String   @map("key_value") // the passkey the player discovered
+  source       String // "file_download" | "mission_reward" | "shared" | "purchased"
+  sourceDetail String?  @map("source_detail") // e.g. file path or mission ID where key was found
+  sourceFileId String?  @map("source_file_id") // fileSystemNode ID of downloaded file that granted this key
+  discoveredAt DateTime @default(now()) @map("discovered_at")
+
+  server GameServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, serverId])
+  @@index([userId])
+  @@map("server_access_keys")
 }
 
 model FileSystemNode {
@@ -213,6 +248,7 @@ model FileSystemNode {
   encryptionKey  String?   @map("encryption_key")
   isHidden       Boolean   @default(false) @map("is_hidden")
   isProtected    Boolean   @default(false) @map("is_protected")
+  metadata       Json? // { sourceServerId, sourcePath, downloadedAt, isDownloaded }
 
   // Relations
   server   GameServer       @relation(fields: [serverId], references: [id], onDelete: Cascade)
@@ -337,6 +373,7 @@ model Forum {
   posts         Post[]
   members       ForumMember[]
   discoveredBy  ForumDiscovery[]
+  reports       PostReport[]
   createdAt     DateTime         @default(now()) @map("created_at")
   updatedAt     DateTime         @updatedAt @map("updated_at")
 
@@ -354,8 +391,12 @@ model Post {
   authorHandle  String   @map("author_handle")
   title         String
   content       String   @db.Text
+  votes         Int      @default(0)
+  tags          String[] @default([])
   isSticky      Boolean  @default(false) @map("is_sticky")
   isPinned      Boolean  @default(false) @map("is_pinned")
+  isLocked      Boolean  @default(false) @map("is_locked")
+  isHidden      Boolean  @default(false) @map("is_hidden")
   isEncrypted   Boolean  @default(false) @map("is_encrypted")
   viewCount     Int      @default(0) @map("view_count")
   replyCount    Int      @default(0) @map("reply_count")
@@ -364,8 +405,11 @@ model Post {
   createdAt     DateTime @default(now()) @map("created_at")
   updatedAt     DateTime @updatedAt @map("updated_at")
 
-  forum  Forum @relation(fields: [forumId], references: [id], onDelete: Cascade)
-  author User  @relation(fields: [authorId], references: [id])
+  forum     Forum        @relation(fields: [forumId], references: [id], onDelete: Cascade)
+  author    User         @relation(fields: [authorId], references: [id])
+  replies   PostReply[]
+  postVotes PostVote[]
+  reports   PostReport[]
 
   @@index([forumId])
   @@index([authorId])
@@ -420,6 +464,69 @@ model ProxyConnection {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("proxy_connections")
+}
+
+model PostReply {
+  id           String   @id @default(cuid())
+  postId       String   @map("post_id")
+  authorId     String   @map("author_id")
+  authorHandle String   @map("author_handle")
+  content      String   @db.Text
+  votes        Int      @default(0)
+  isHidden     Boolean  @default(false) @map("is_hidden")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  post       Post         @relation(fields: [postId], references: [id], onDelete: Cascade)
+  author     User         @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  replyVotes PostVote[]
+  reports    PostReport[]
+
+  @@index([postId])
+  @@index([authorId])
+  @@map("post_replies")
+}
+
+model PostVote {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  postId    String?  @map("post_id")
+  replyId   String?  @map("reply_id")
+  value     Int // 1 = upvote, -1 = downvote
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user  User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  post  Post?      @relation(fields: [postId], references: [id], onDelete: Cascade)
+  reply PostReply? @relation(fields: [replyId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, postId])
+  @@unique([userId, replyId])
+  @@index([postId])
+  @@index([replyId])
+  @@map("post_votes")
+}
+
+model PostReport {
+  id         String    @id @default(cuid())
+  reporterId String    @map("reporter_id")
+  postId     String?   @map("post_id")
+  replyId    String?   @map("reply_id")
+  forumId    String    @map("forum_id")
+  reason     String
+  status     String    @default("pending") // 'pending', 'reviewed', 'dismissed', 'actioned'
+  createdAt  DateTime  @default(now()) @map("created_at")
+  resolvedAt DateTime? @map("resolved_at")
+  resolvedBy String?   @map("resolved_by")
+
+  reporter User       @relation("ReportCreator", fields: [reporterId], references: [id], onDelete: Cascade)
+  resolver User?      @relation("ReportResolver", fields: [resolvedBy], references: [id])
+  post     Post?      @relation(fields: [postId], references: [id], onDelete: Cascade)
+  reply    PostReply? @relation(fields: [replyId], references: [id], onDelete: Cascade)
+  forum    Forum      @relation(fields: [forumId], references: [id], onDelete: Cascade)
+
+  @@index([forumId])
+  @@index([status])
+  @@map("post_reports")
 }
 
 // ==================== PHASE 3A: STORY SYSTEM ====================
@@ -514,31 +621,62 @@ model KeyFragmentDiscovery {
 // ==================== MISSIONS & EVENTS ====================
 
 model Mission {
-  id             String    @id @default(cuid())
-  title          String
-  description    String
-  type           String // MissionType enum
-  difficulty     Int       @default(1)
-  requiredSkills Json      @default("{}") @map("required_skills")
-  reward         Json      @default("{}") // MissionReward
-  timeLimit      Int?      @map("time_limit")
-  targetServerId String?   @map("target_server_id")
-  targetUserId   String?   @map("target_user_id")
-  objectives     Json      @default("[]")
-  status         String    @default("available") // MissionStatus enum
-  assignedTo     String?   @map("assigned_to")
-  createdBy      String?   @map("created_by") // User ID if created by player
-  issuedBy       String?   @map("issued_by") // AI Persona ID if created by AI
-  factionId      String?   @map("faction_id")
-  createdAt      DateTime  @default(now()) @map("created_at")
-  expiresAt      DateTime? @map("expires_at")
+  id                      String    @id @default(cuid())
+  title                   String
+  description             String
+  type                    String // MissionType enum
+  difficulty              Int       @default(1)
+  requiredSkills          Json      @default("{}") @map("required_skills")
+  reward                  Json      @default("{}") // MissionReward
+  timeLimit               Int?      @map("time_limit")
+  targetServerId          String?   @map("target_server_id")
+  targetUserId            String?   @map("target_user_id")
+  objectives              Json      @default("[]")
+  status                  String    @default("available") // MissionStatus enum
+  assignedTo              String?   @map("assigned_to")
+  createdBy               String?   @map("created_by") // User ID if created by player
+  issuedBy                String?   @map("issued_by") // AI Persona ID if created by AI
+  factionId               String?   @map("faction_id")
+  storyArcId              String?   @map("story_arc_id") // If part of a story arc
+  storyStep               Int?      @map("story_step") // Step number within the story arc
+  prerequisiteTemplateIds Json?     @map("prerequisite_template_ids") // Template IDs player must have completed before accepting
+  createdAt               DateTime  @default(now()) @map("created_at")
+  expiresAt               DateTime? @map("expires_at")
 
   assignee  User?      @relation("MissionAssignee", fields: [assignedTo], references: [id])
   creator   User?      @relation("MissionCreator", fields: [createdBy], references: [id])
   aiPersona AIPersona? @relation(fields: [issuedBy], references: [id])
   faction   Faction?   @relation(fields: [factionId], references: [id])
+  storyArc  StoryArc?  @relation(fields: [storyArcId], references: [id], onDelete: SetNull)
 
+  @@index([storyArcId])
   @@map("missions")
+}
+
+model StoryArc {
+  id               String    @id @default(cuid())
+  title            String // "Operation Shadowfall"
+  description      String // AI-generated narrative premise
+  factionId        String    @map("faction_id")
+  issuedBy         String    @map("issued_by") // AI Persona ID (faction leader or game master)
+  assignedTo       String    @map("assigned_to") // Player ID
+  status           String    @default("active") // active | completed | failed | abandoned
+  currentStep      Int       @default(0) @map("current_step")
+  totalSteps       Int       @map("total_steps")
+  steps            Json      @default("[]") // StoryStep[] — ordered step definitions
+  narrativeContext Json      @default("{}") @map("narrative_context") // Accumulating context for AI continuity
+  difficulty       Int       @default(3) // 1-10, affects template selection
+  createdAt        DateTime  @default(now()) @map("created_at")
+  completedAt      DateTime? @map("completed_at")
+
+  faction  Faction   @relation(fields: [factionId], references: [id])
+  persona  AIPersona @relation(fields: [issuedBy], references: [id])
+  player   User      @relation(fields: [assignedTo], references: [id], onDelete: Cascade)
+  missions Mission[]
+
+  @@index([assignedTo, status])
+  @@index([factionId])
+  @@map("story_arcs")
 }
 
 model GameEvent {
@@ -674,6 +812,9 @@ model Faction {
   // Network topology
   networks Network[]
 
+  // Story arcs
+  storyArcs StoryArc[]
+
   @@map("factions")
 }
 
@@ -762,12 +903,15 @@ model AIPersona {
   knowledge AIKnowledge[]
   actions   AIAction[]
   missions  Mission[]
+  storyArcs StoryArc[]
 
   lastActionAt DateTime? @map("last_action_at")
   actionsToday Int       @default(0) @map("actions_today")
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
+
+  personaMessages PersonaMessage[]
 
   @@map("ai_personas")
 }
@@ -831,19 +975,19 @@ model AidaClue {
 }
 
 model FactionKnowledge {
-  id        String @id @default(cuid())
-  factionId String @map("faction_id")
+  id        String  @id @default(cuid())
+  factionId String  @map("faction_id")
   faction   Faction @relation(fields: [factionId], references: [id], onDelete: Cascade)
 
   assetType String @map("asset_type") // "server", "file", "player"
-  assetId   String @map("asset_id")   // ID of the known asset
+  assetId   String @map("asset_id") // ID of the known asset
   assetMeta Json   @default("{}") @map("asset_meta") // { name, ip, serverType, description, ... }
 
-  source       String  // "server_discovery", "mission_completion", "player_report", "forum_intel", "persona_observation"
+  source       String // "server_discovery", "mission_completion", "player_report", "forum_intel", "persona_observation"
   confidence   Float   @default(0.8) // 0.0-1.0
   discoveredBy String? @map("discovered_by") // userId who contributed this intel
 
-  discoveredAt DateTime @default(now()) @map("discovered_at")
+  discoveredAt DateTime  @default(now()) @map("discovered_at")
   expiresAt    DateTime? @map("expires_at")
 
   @@unique([factionId, assetType, assetId])
@@ -860,17 +1004,48 @@ model Network {
   name        String   @unique
   description String?  @db.Text
   factionId   String?  @map("faction_id")
-  zone        String   // "corporate" | "government" | "underground" | "public" | "darknet"
+  zone        String // "corporate" | "government" | "underground" | "public" | "darknet"
   isHidden    Boolean  @default(false) @map("is_hidden")
   metadata    Json     @default("{}")
   createdAt   DateTime @default(now()) @map("created_at")
 
-  faction Faction?     @relation(fields: [factionId], references: [id], onDelete: SetNull)
-  servers GameServer[]
-  links   ServerLink[]
+  faction         Faction?         @relation(fields: [factionId], references: [id], onDelete: SetNull)
+  servers         GameServer[]
+  links           ServerLink[]
+  darknetInstance DarkNetInstance?
 
   @@index([factionId])
   @@map("networks")
+}
+
+model DarkNetInstance {
+  id            String  @id @default(cuid())
+  name          String // Generated name like "Shadow Nexus Alpha"
+  networkId     String  @unique @map("network_id") // FK to Network (1:1)
+  gatewayIp     String  @map("gateway_ip") // IP of the entry point
+  vaultServerId String? @map("vault_server_id") // ID of the vault server (the goal)
+  passkey       String // Access code needed to enter the gateway
+  depth         Int     @default(4) // Number of servers in the chain
+  difficulty    Int     @default(7) // Base difficulty level (1-10)
+
+  // Vault reward
+  rewardType String @map("reward_type") // "aida_token", "rare_script", "credits_cache", "intel_package"
+  rewardData Json   @default("{}") @map("reward_data") // { tokenName: "AIDA Signal Fragment", amount: 1 }
+
+  // Lifecycle
+  status      String    @default("active") // "active", "conquered", "expired", "regenerating"
+  conqueredBy String?   @map("conquered_by") // userId who reached the vault
+  conqueredAt DateTime? @map("conquered_at")
+  forumClueId String?   @map("forum_clue_id") // ID of the ForumPost containing the riddle
+  createdAt   DateTime  @default(now()) @map("created_at")
+  expiresAt   DateTime? @map("expires_at") // Optional TTL
+
+  // Relations
+  network Network @relation(fields: [networkId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@index([gatewayIp])
+  @@map("darknet_instances")
 }
 
 model ServerLink {
@@ -904,7 +1079,7 @@ model DiscoveredLink {
   userId       String   @map("user_id")
   linkId       String   @map("link_id")
   discoveredAt DateTime @default(now()) @map("discovered_at")
-  source       String   // "scan" | "probe" | "traceroute" | "backdoor" | "mission"
+  source       String // "scan" | "probe" | "traceroute" | "backdoor" | "mission"
 
   link ServerLink @relation(fields: [linkId], references: [id], onDelete: Cascade)
 
@@ -935,6 +1110,9 @@ model ShopItem {
   isStackable  Boolean @default(false) @map("is_stackable")
   maxStack     Int     @default(1) @map("max_stack")
   rarity       String  @default("common") // "common", "uncommon", "rare", "epic", "legendary"
+
+  // Functional effect when used (for consumables/tokens)
+  effect Json? // { type: "persona_message", personaId: "..." } or { type: "unlock_area", areaId: "..." }
 
   // Availability
   isActive    Boolean @default(true) @map("is_active")
@@ -967,6 +1145,10 @@ model InventoryItem {
   // Consumable tracking
   usesRemaining Int?      @map("uses_remaining")
   expiresAt     DateTime? @map("expires_at")
+
+  // Acquisition tracking
+  source   String  @default("shop") // "shop", "mission_reward", "server_loot", "story_event", "admin"
+  sourceId String? @map("source_id") // ID of mission/server/event that granted this item
 
   // Relations
   user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -1214,4 +1396,89 @@ model ActiveTrace {
   @@index([targetId])
   @@index([status])
   @@map("active_traces")
+}
+
+model Bounty {
+  id                String    @id @default(cuid())
+  targetUserId      String    @map("target_user_id") // player with the bounty on their head
+  targetUsername    String    @map("target_username") // cached for display
+  issuedByFactionId String    @map("issued_by_faction_id") // faction that posted the bounty
+  reason            String // "Critical intrusion on CyberCorp Data Vault"
+  rewardCredits     Int       @map("reward_credits") // credits for completing
+  rewardReputation  Int       @map("reward_reputation") // faction rep for completing
+  status            String    @default("active") // "active" | "claimed" | "completed" | "expired"
+  claimedByUserId   String?   @map("claimed_by_user_id") // player who accepted the bounty
+  completedAt       DateTime? @map("completed_at")
+  expiresAt         DateTime  @map("expires_at")
+  serverId          String?   @map("server_id") // server where detection happened
+  evidenceLevel     Int       @default(0) @map("evidence_level")
+  stolenFileIds     Json?     @map("stolen_file_ids") // fileSystemNode IDs of downloaded files to delete
+  createdAt         DateTime  @default(now()) @map("created_at")
+
+  @@index([status])
+  @@index([targetUserId])
+  @@index([issuedByFactionId])
+  @@index([expiresAt])
+  @@map("bounties")
+}
+
+model NarrativeEpoch {
+  id         String    @id @default(cuid())
+  epochNum   Int       @unique @map("epoch_num")
+  title      String // "The Awakening", "Faction Wars", etc.
+  summary    String    @db.Text // AI-generated summary of what defines this epoch
+  worldState Json      @default("{}") @map("world_state") // Snapshot: faction standings, tensions, key events
+  triggers   Json      @default("[]") // What conditions/events triggered this epoch
+  decisions  Json      @default("[]") // Key Architect decisions during this epoch
+  startedAt  DateTime  @default(now()) @map("started_at")
+  endedAt    DateTime? @map("ended_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("narrative_epochs")
+}
+
+model StoryLedger {
+  id          String  @id @default(cuid())
+  type        String // "hack", "faction_war", "territory_shift", "fragment_found", "player_choice", "persona_action", "epoch_change", "token_used"
+  category    String // "combat", "diplomacy", "discovery", "economy", "narrative", "communication"
+  actorId     String  @map("actor_id") // userId or personaId
+  actorType   String  @map("actor_type") // "player" or "persona"
+  summary     String // Human-readable one-liner
+  detail      String? @db.Text // Longer narrative description
+  data        Json    @default("{}") // Structured event payload
+  impact      Json    @default("{}") // { factions: { garrison: -5, dothackers: +10 }, tension: 3, discoveryWeight: 2 }
+  epochNum    Int?    @map("epoch_num") // Which narrative epoch this belongs to
+  weight      Int     @default(1) // How significant (1-10), helps Architect prioritize
+  isProcessed Boolean @default(false) @map("is_processed") // Has the Architect evaluated this?
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([type])
+  @@index([actorId])
+  @@index([epochNum])
+  @@index([isProcessed, createdAt])
+  @@index([category])
+  @@map("story_ledger")
+}
+
+model PersonaMessage {
+  id          String  @id @default(cuid())
+  userId      String  @map("user_id")
+  personaId   String  @map("persona_id")
+  tokenItemId String? @map("token_item_id") // The inventory item consumed
+  direction   String // "outbound" (player→persona) or "inbound" (persona→player)
+  subject     String
+  content     String  @db.Text
+  messageId   String? @map("message_id") // FK to the actual Message record
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user    User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  persona AIPersona @relation(fields: [personaId], references: [id])
+
+  @@index([userId, personaId])
+  @@index([personaId])
+  @@map("persona_messages")
 }

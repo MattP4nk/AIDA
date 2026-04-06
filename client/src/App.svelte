@@ -24,10 +24,19 @@
                 // Verify the token is still valid
                 const response = await apiClient.verifyToken();
                 if (response.success) {
-                    isAuthenticated = true;
-                    user = response.user;
-                    // Initialize socket connection and wait for it to be ready
-                    await initializeSocketAndTerminals();
+                    // Fetch CSRF token before proceeding — required for all commands
+                    await apiClient.ensureCsrfToken();
+                    if (!apiClient.hasCsrfToken()) {
+                        // CSRF token fetch failed — session is invalid
+                        console.warn("CSRF token fetch failed, forcing logout");
+                        await apiClient.logout();
+                        isAuthenticated = false;
+                    } else {
+                        isAuthenticated = true;
+                        user = response.user;
+                        // Initialize socket connection and wait for it to be ready
+                        await initializeSocketAndTerminals();
+                    }
                 } else {
                     isAuthenticated = false;
                 }

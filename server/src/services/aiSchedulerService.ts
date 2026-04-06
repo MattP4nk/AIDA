@@ -128,11 +128,12 @@ export class AISchedulerService {
       return; // ResourceService not available
     }
 
-    // Expire stale faction knowledge entries
+    // Expire stale faction knowledge entries + decay confidence
     let fkService: FactionKnowledgeService | null = null;
     try {
       fkService = getService<FactionKnowledgeService>(FACTION_KNOWLEDGE_SERVICE);
       await fkService.expireEntries();
+      await fkService.decayConfidence();
     } catch {
       // FactionKnowledgeService not available — not fatal
     }
@@ -176,6 +177,41 @@ export class AISchedulerService {
       } catch (error) {
         this.logger.error({ error, factionId: faction.id }, "Error checking faction game state");
       }
+    }
+
+    // Rebalancing check — weight missions toward weak factions
+    try {
+      const factionPower: { id: string; power: number }[] = [];
+      for (const faction of factions) {
+        const resources = await resourceService.getFactionResources(faction.id);
+        const totalResources = (resources.credits ?? 0) + (resources.intel ?? 0) + (resources.compute ?? 0);
+        const serverCount = await this.prisma.gameServer.count({
+          where: { factionId: faction.id, isPlayerHome: false },
+        });
+        const memberCount = await this.prisma.factionMember.count({
+          where: { factionId: faction.id },
+        });
+        factionPower.push({ id: faction.id, power: totalResources + serverCount * 50 + memberCount * 30 });
+      }
+
+      if (factionPower.length >= 2) {
+        const avgPower = factionPower.reduce((s, f) => s + f.power, 0) / factionPower.length;
+        const dominant = factionPower.reduce((a, b) => a.power > b.power ? a : b);
+
+        // If dominant faction is 1.5x average, boost weaker factions
+        if (dominant.power > avgPower * 1.5) {
+          const weakFactions = factionPower.filter(f => f.power < avgPower * 0.8);
+          for (const weak of weakFactions) {
+            await this.personaService.generateDynamicMission(weak.id, { rebalance: true });
+            this.logger.info(
+              { factionId: weak.id, power: weak.power, avgPower, dominantPower: dominant.power },
+              "Generated rebalancing mission for underpowered faction",
+            );
+          }
+        }
+      }
+    } catch (error) {
+      this.logger.error({ error }, "Error in faction rebalancing check");
     }
 
     // Game Master director check — omniscient narrative orchestration

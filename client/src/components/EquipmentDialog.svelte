@@ -1,7 +1,7 @@
 <script lang="ts">
     import { onMount } from "svelte";
     import { apiClient } from "../services/api";
-    import { socketService } from "../services/socket";
+    // socketService removed — equipment data refreshes on equip/unequip, no real-time socket events needed
 
     export let visible = false;
     export let onClose: () => void;
@@ -89,15 +89,6 @@
     onMount(async () => {
         await loadInventory();
         await loadEquipment();
-
-        // Listen for inventory/equipment updates
-        socketService.on("inventory:updated", () => {
-            loadInventory();
-        });
-
-        socketService.on("equipment:updated", () => {
-            loadEquipment();
-        });
     });
 
     async function loadInventory() {
@@ -139,7 +130,9 @@
 
     async function equipItem(item: InventoryItem) {
         try {
-            const response = await apiClient.executeCommand(`equip ${item.itemId}`);
+            const response = await apiClient.executeCommand(
+                `equip ${item.itemId}`,
+            );
 
             if (response.success) {
                 showMessage(`Equipped ${item.item.name}`, "success");
@@ -172,7 +165,9 @@
 
     async function useItem(item: InventoryItem) {
         try {
-            const response = await apiClient.executeCommand(`use ${item.itemId}`);
+            const response = await apiClient.executeCommand(
+                `use ${item.itemId}`,
+            );
 
             if (response.success) {
                 showMessage(response.output || "Item used", "success");
@@ -200,7 +195,7 @@
 
     function canEquip(item: ShopItem): boolean {
         return ["TOOL", "SOFTWARE", "EXPLOIT", "DEFENSE", "UPGRADE"].includes(
-            item.category
+            item.category,
         );
     }
 
@@ -293,16 +288,20 @@
                                 <div class="loading">Loading inventory...</div>
                             {:else if inventory.length === 0}
                                 <div class="no-items">
-                                    Your inventory is empty. Visit the shop to purchase
-                                    items.
+                                    Your inventory is empty. Visit the shop to
+                                    purchase items.
                                 </div>
                             {:else}
                                 {#each inventory as invItem}
                                     <div
                                         class="inventory-item"
-                                        class:selected={selectedItem?.itemId === invItem.itemId}
-                                        class:equipped={isEquipped(invItem.itemId)}
-                                        on:click={() => (selectedItem = invItem)}
+                                        class:selected={selectedItem?.itemId ===
+                                            invItem.itemId}
+                                        class:equipped={isEquipped(
+                                            invItem.itemId,
+                                        )}
+                                        on:click={() =>
+                                            (selectedItem = invItem)}
                                     >
                                         <div
                                             class="item-rarity"
@@ -322,7 +321,9 @@
                                             Qty: {invItem.quantity}
                                         </div>
                                         {#if isEquipped(invItem.itemId)}
-                                            <div class="equipped-badge">EQUIPPED</div>
+                                            <div class="equipped-badge">
+                                                EQUIPPED
+                                            </div>
                                         {/if}
                                     </div>
                                 {/each}
@@ -358,14 +359,18 @@
 
                                     <div class="detail-row">
                                         <span class="label">Quantity:</span>
-                                        <span class="value">{selectedItem.quantity}</span>
+                                        <span class="value"
+                                            >{selectedItem.quantity}</span
+                                        >
                                     </div>
 
                                     {#if formatEffects(selectedItem.item).length > 0}
                                         <div class="effects">
                                             <span class="label">Effects:</span>
                                             {#each formatEffects(selectedItem.item) as effect}
-                                                <div class="effect">{effect}</div>
+                                                <div class="effect">
+                                                    {effect}
+                                                </div>
                                             {/each}
                                         </div>
                                     {/if}
@@ -375,8 +380,11 @@
                                     {#if canEquip(selectedItem.item)}
                                         <button
                                             class="action-btn equip-btn"
-                                            disabled={isEquipped(selectedItem.itemId)}
-                                            on:click={() => equipItem(selectedItem)}
+                                            disabled={isEquipped(
+                                                selectedItem.itemId,
+                                            )}
+                                            on:click={() =>
+                                                equipItem(selectedItem!)}
                                         >
                                             {isEquipped(selectedItem.itemId)
                                                 ? "EQUIPPED"
@@ -386,7 +394,8 @@
                                     {#if selectedItem.item.isConsumable}
                                         <button
                                             class="action-btn use-btn"
-                                            on:click={() => useItem(selectedItem)}
+                                            on:click={() =>
+                                                useItem(selectedItem!)}
                                         >
                                             USE
                                         </button>
@@ -407,7 +416,9 @@
                                 {@const equippedItem = getEquippedItem(slot)}
                                 <div class="equipment-slot">
                                     <div class="slot-header">
-                                        <span class="slot-icon">{slotIcons[slot]}</span>
+                                        <span class="slot-icon"
+                                            >{slotIcons[slot]}</span
+                                        >
                                         <span class="slot-name">{slot}</span>
                                     </div>
                                     <div class="slot-content">
@@ -421,13 +432,19 @@
                                                 <div class="equipped-item-name">
                                                     {equippedItem.name}
                                                 </div>
-                                                <div class="equipped-item-rarity">
+                                                <div
+                                                    class="equipped-item-rarity"
+                                                >
                                                     {equippedItem.rarity}
                                                 </div>
                                                 {#if formatEffects(equippedItem).length > 0}
-                                                    <div class="equipped-effects">
+                                                    <div
+                                                        class="equipped-effects"
+                                                    >
                                                         {#each formatEffects(equippedItem) as effect}
-                                                            <div class="effect-line">
+                                                            <div
+                                                                class="effect-line"
+                                                            >
                                                                 {effect}
                                                             </div>
                                                         {/each}
@@ -435,7 +452,8 @@
                                                 {/if}
                                                 <button
                                                     class="unequip-btn"
-                                                    on:click={() => unequipSlot(slot)}
+                                                    on:click={() =>
+                                                        unequipSlot(slot)}
                                                 >
                                                     UNEQUIP
                                                 </button>
@@ -456,7 +474,8 @@
                             <div class="bonuses-list">
                                 {#if bonuses.hackingBonus}
                                     <div class="bonus-item">
-                                        <span class="bonus-label">Hacking:</span>
+                                        <span class="bonus-label">Hacking:</span
+                                        >
                                         <span class="bonus-value"
                                             >+{bonuses.hackingBonus}</span
                                         >
@@ -464,7 +483,8 @@
                                 {/if}
                                 {#if bonuses.stealthBonus}
                                     <div class="bonus-item">
-                                        <span class="bonus-label">Stealth:</span>
+                                        <span class="bonus-label">Stealth:</span
+                                        >
                                         <span class="bonus-value"
                                             >+{bonuses.stealthBonus}</span
                                         >
@@ -480,7 +500,9 @@
                                 {/if}
                                 {#if bonuses.detectionReduction}
                                     <div class="bonus-item">
-                                        <span class="bonus-label">Detection:</span>
+                                        <span class="bonus-label"
+                                            >Detection:</span
+                                        >
                                         <span class="bonus-value"
                                             >-{bonuses.detectionReduction}%</span
                                         >
@@ -488,7 +510,9 @@
                                 {/if}
                                 {#if bonuses.successRateIncrease}
                                     <div class="bonus-item">
-                                        <span class="bonus-label">Success Rate:</span>
+                                        <span class="bonus-label"
+                                            >Success Rate:</span
+                                        >
                                         <span class="bonus-value"
                                             >+{bonuses.successRateIncrease}%</span
                                         >
@@ -496,9 +520,13 @@
                                 {/if}
                                 {#if bonuses.xpMultiplier !== 1.0}
                                     <div class="bonus-item">
-                                        <span class="bonus-label">XP Multiplier:</span>
+                                        <span class="bonus-label"
+                                            >XP Multiplier:</span
+                                        >
                                         <span class="bonus-value"
-                                            >{bonuses.xpMultiplier.toFixed(2)}x</span
+                                            >{bonuses.xpMultiplier.toFixed(
+                                                2,
+                                            )}x</span
                                         >
                                     </div>
                                 {/if}
@@ -508,13 +536,16 @@
                                             >Credits Multiplier:</span
                                         >
                                         <span class="bonus-value"
-                                            >{bonuses.creditsMultiplier.toFixed(2)}x</span
+                                            >{bonuses.creditsMultiplier.toFixed(
+                                                2,
+                                            )}x</span
                                         >
                                     </div>
                                 {/if}
                                 {#if bonuses.hackingBonus === 0 && bonuses.stealthBonus === 0 && bonuses.speedBonus === 0 && bonuses.detectionReduction === 0 && bonuses.successRateIncrease === 0 && bonuses.xpMultiplier === 1.0 && bonuses.creditsMultiplier === 1.0}
                                     <div class="no-bonuses">
-                                        No active bonuses. Equip items to gain bonuses.
+                                        No active bonuses. Equip items to gain
+                                        bonuses.
                                     </div>
                                 {/if}
                             </div>

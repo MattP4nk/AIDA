@@ -49,7 +49,11 @@ function getUserId(socket: Socket, errorEvent?: string): string | null {
   return userId ?? null;
 }
 
-const ROLE_HIERARCHY: Record<string, number> = { player: 0, moderator: 1, admin: 2 };
+const ROLE_HIERARCHY: Record<string, number> = {
+  player: 0,
+  moderator: 1,
+  admin: 2,
+};
 
 /**
  * Check if a socket's user has at least the given role.
@@ -120,7 +124,10 @@ export function setupSocketHandlers(io: SocketIOServer): void {
     // ── Command execution (unified with REST validation) ─────────
     socket.on("command:execute", (data) => {
       if (!commandRateLimit()) {
-        socket.emit("command:error", { success: false, error: "Rate limit exceeded. Slow down." });
+        socket.emit("command:error", {
+          success: false,
+          error: "Rate limit exceeded. Slow down.",
+        });
         return;
       }
       handleCommandExecute(socket, io, services, data);
@@ -129,7 +136,10 @@ export function setupSocketHandlers(io: SocketIOServer): void {
     // ── Messaging ────────────────────────────────────────────────
     socket.on("message:send", (data) => {
       if (!messageRateLimit()) {
-        socket.emit("message:result", { success: false, error: "Rate limit exceeded." });
+        socket.emit("message:result", {
+          success: false,
+          error: "Rate limit exceeded.",
+        });
         return;
       }
       handleMessageSend(socket, services, data);
@@ -161,10 +171,28 @@ export function setupSocketHandlers(io: SocketIOServer): void {
       handleTerminal(socket, io, services.gameStateManager, "list", {});
     });
 
+    // ── Typing Indicators ────────────────────────────────────────
+    socket.on("typing:start", (data: { recipientId: string }) => {
+      if (!generalRateLimit()) return;
+      const userId = getUserId(socket);
+      if (!userId || !data?.recipientId) return;
+      io.to(`user:${data.recipientId}`).emit("typing:start", {
+        userId,
+        username: socket.data?.user?.username || "Unknown",
+      });
+    });
+
+    socket.on("typing:stop", (data: { recipientId: string }) => {
+      if (!generalRateLimit()) return;
+      const userId = getUserId(socket);
+      if (!userId || !data?.recipientId) return;
+      io.to(`user:${data.recipientId}`).emit("typing:stop", {
+        userId,
+      });
+    });
+
     // ── Disconnection ────────────────────────────────────────────
-    socket.on("disconnect", () =>
-      handleDisconnect(socket, services),
-    );
+    socket.on("disconnect", () => handleDisconnect(socket, services));
   });
 }
 
@@ -219,6 +247,7 @@ async function handleAuthentication(
   try {
     // Join user-specific room
     socket.join(`user:${userId}`);
+    socket.join(`player:${userId}`);
 
     // Create or reuse session
     const existingSession = gameStateManager.getSession(userId);
@@ -238,6 +267,22 @@ async function handleAuthentication(
 
     // Broadcast full game state to client
     await gameStateManager.broadcastStateUpdate(userId);
+
+    // Check if new player needs tutorial
+    try {
+      const { getService: getSvc } = await import("../di/container");
+      const { TUTORIAL_SERVICE } = await import("../di/tokens");
+      const tutorialService =
+        getSvc<import("../services/tutorialService").TutorialService>(
+          TUTORIAL_SERVICE,
+        );
+      const needsTutorial = await tutorialService.shouldStartTutorial(userId);
+      if (needsTutorial) {
+        await tutorialService.startTutorial(userId);
+      }
+    } catch {
+      // Tutorial service not critical — don't fail auth
+    }
 
     // Notify others
     socket.broadcast.emit("user:status_change", {
@@ -305,7 +350,12 @@ async function handleCommandExecute(
   socket: Socket,
   io: SocketIOServer,
   { commandProcessor }: SocketServices,
-  data: { command: string; args?: string[]; serverId?: string; terminalId?: string },
+  data: {
+    command: string;
+    args?: string[];
+    serverId?: string;
+    terminalId?: string;
+  },
 ): Promise<void> {
   const userId = getUserId(socket, "command:error");
   if (!userId) return;
@@ -314,7 +364,10 @@ async function handleCommandExecute(
     const { command, args, serverId, terminalId } = data;
 
     if (!command || typeof command !== "string") {
-      socket.emit("command:error", { success: false, error: "Invalid command format" });
+      socket.emit("command:error", {
+        success: false,
+        error: "Invalid command format",
+      });
       return;
     }
 
@@ -323,7 +376,11 @@ async function handleCommandExecute(
       args && args.length > 0 ? `${command} ${args.join(" ")}` : command;
 
     // Parse
-    const parsed = commandProcessor.parseCommand(userId, commandString, serverId);
+    const parsed = commandProcessor.parseCommand(
+      userId,
+      commandString,
+      serverId,
+    );
     if (!parsed.isValid) {
       socket.emit("command:result", {
         success: false,
@@ -402,8 +459,7 @@ async function handleMessageSend(
     logger.error({ err: error }, "Error sending message via socket");
     socket.emit("message:result", {
       success: false,
-      error:
-        error instanceof Error ? error.message : "Failed to send message",
+      error: error instanceof Error ? error.message : "Failed to send message",
     });
   }
 }
@@ -428,7 +484,10 @@ async function handleTerminal(
         const terminal = gameStateManager.createTerminal(userId, data.label);
         if (terminal) {
           socket.emit("terminal:created", { success: true, ...terminal });
-          io.to(`user:${userId}`).emit("terminal:created", { success: true, ...terminal });
+          io.to(`user:${userId}`).emit("terminal:created", {
+            success: true,
+            ...terminal,
+          });
         } else {
           socket.emit("terminal:error", {
             success: false,
@@ -444,7 +503,10 @@ async function handleTerminal(
           data.terminalId!,
         );
         if (success) {
-          socket.emit("terminal:closed", { success: true, terminalId: data.terminalId });
+          socket.emit("terminal:closed", {
+            success: true,
+            terminalId: data.terminalId,
+          });
           io.to(`user:${userId}`).emit("terminal:closed", {
             success: true,
             terminalId: data.terminalId,
@@ -464,7 +526,10 @@ async function handleTerminal(
           data.terminalId!,
         );
         if (success) {
-          socket.emit("terminal:switched", { success: true, terminalId: data.terminalId });
+          socket.emit("terminal:switched", {
+            success: true,
+            terminalId: data.terminalId,
+          });
         } else {
           socket.emit("terminal:error", {
             success: false,
@@ -483,7 +548,10 @@ async function handleTerminal(
             activeTerminalId: session.activeTerminalId,
           });
         } else {
-          socket.emit("terminal:error", { success: false, error: "No active session" });
+          socket.emit("terminal:error", {
+            success: false,
+            error: "No active session",
+          });
         }
         break;
       }

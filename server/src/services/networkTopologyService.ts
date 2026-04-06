@@ -21,6 +21,8 @@ export interface AdjacentServer {
   securityLevel: number;
   networkId: string | null;
   networkName: string | null;
+  isPublic: boolean;
+  accessMethod: string;
   link: {
     id: string;
     linkType: string;
@@ -134,6 +136,8 @@ export class NetworkTopologyService {
         securityLevel: link.target.securityLevel,
         networkId: link.target.networkId,
         networkName: link.target.network?.name || null,
+        isPublic: link.target.isPublic,
+        accessMethod: link.target.accessMethod,
         link: {
           id: link.id,
           linkType: link.linkType,
@@ -158,6 +162,8 @@ export class NetworkTopologyService {
         securityLevel: link.source.securityLevel,
         networkId: link.source.networkId,
         networkName: link.source.network?.name || null,
+        isPublic: link.source.isPublic,
+        accessMethod: link.source.accessMethod,
         link: {
           id: link.id,
           linkType: link.linkType,
@@ -383,8 +389,10 @@ export class NetworkTopologyService {
   ): Promise<DiscoveryResult[]> {
     const adjacent = await this.getAdjacentServers(serverId);
 
-    // Filter by discovery difficulty — higher scanLevel reveals more
+    // Filter by discovery difficulty and visibility
     const discoverable = adjacent.filter((a) => {
+      // Private servers don't show in scan — must discover IP through files/intel
+      if (!a.isPublic) return false;
       // Hidden links require higher skill
       if (a.link.linkType === "hidden" && scanLevel < 30) return false;
       // VPN links require moderate skill
@@ -662,6 +670,109 @@ export class NetworkTopologyService {
 
     const path = await this.findPath(exchange.id, serverId);
     return path ? path.length - 1 : 0; // -1 because path includes source
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // Server Access Control
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /**
+   * Check if a player can access a server based on its accessMethod.
+   * Returns: { allowed, reason, requiresHack, requiresKey }
+   */
+  async checkServerAccess(
+    userId: string,
+    serverId: string,
+  ): Promise<{ allowed: boolean; reason: string; requiresHack: boolean; requiresKey: boolean }> {
+    const server = await this.prisma.gameServer.findUnique({
+      where: { id: serverId },
+      select: { accessMethod: true, accessKey: true, name: true, isPlayerHome: true, ownerId: true },
+    });
+
+    if (!server) {
+      return { allowed: false, reason: "Server not found.", requiresHack: false, requiresKey: false };
+    }
+
+    // Owner and home servers — always accessible
+    if (server.isPlayerHome || server.ownerId === userId) {
+      return { allowed: true, reason: "Owner access.", requiresHack: false, requiresKey: false };
+    }
+
+    switch (server.accessMethod) {
+      case "open":
+        return { allowed: true, reason: "Open access.", requiresHack: false, requiresKey: false };
+
+      case "hackable":
+        // Check if player has previously hacked (has a ServerConnection with accessLevel > 0)
+        const hackConnection = await this.prisma.serverConnection.findFirst({
+          where: { userId, serverId, accessLevel: { gt: 0 } },
+        });
+        if (hackConnection) {
+          return { allowed: true, reason: "Previously hacked.", requiresHack: false, requiresKey: false };
+        }
+        return { allowed: false, reason: `${server.name} requires hacking to gain access. Use 'hack ${serverId}'.`, requiresHack: true, requiresKey: false };
+
+      case "keycard": {
+        const hasKey = await this.playerHasAccessKey(userId, serverId);
+        if (hasKey) {
+          return { allowed: true, reason: "Access key verified.", requiresHack: false, requiresKey: false };
+        }
+        return { allowed: false, reason: `${server.name} requires an access key. Find it in server files or earn it from missions.`, requiresHack: false, requiresKey: true };
+      }
+
+      case "hack_or_key": {
+        const hasKeyOrHack = await this.playerHasAccessKey(userId, serverId);
+        if (hasKeyOrHack) {
+          return { allowed: true, reason: "Access key verified.", requiresHack: false, requiresKey: false };
+        }
+        const hackConn = await this.prisma.serverConnection.findFirst({
+          where: { userId, serverId, accessLevel: { gt: 0 } },
+        });
+        if (hackConn) {
+          return { allowed: true, reason: "Previously hacked.", requiresHack: false, requiresKey: false };
+        }
+        return { allowed: false, reason: `${server.name} requires an access key or hacking. Find a key in server files or use 'hack'.`, requiresHack: true, requiresKey: true };
+      }
+
+      default:
+        return { allowed: true, reason: "Default access.", requiresHack: false, requiresKey: false };
+    }
+  }
+
+  /**
+   * Check if a player has a stored access key for a server.
+   */
+  async playerHasAccessKey(userId: string, serverId: string): Promise<boolean> {
+    const key = await this.prisma.serverAccessKey.findUnique({
+      where: { userId_serverId: { userId, serverId } },
+    });
+    return !!key;
+  }
+
+  /**
+   * Grant a player an access key for a server.
+   * Called when a player reads a file containing credentials/keys.
+   */
+  async grantAccessKey(
+    userId: string,
+    serverId: string,
+    keyValue: string,
+    source: string,
+    sourceDetail?: string,
+    sourceFileId?: string,
+  ): Promise<boolean> {
+    try {
+      await this.prisma.serverAccessKey.upsert({
+        where: { userId_serverId: { userId, serverId } },
+        create: { userId, serverId, keyValue, source, sourceDetail: sourceDetail ?? null, sourceFileId: sourceFileId ?? null },
+        update: { keyValue, source, sourceDetail: sourceDetail ?? null, sourceFileId: sourceFileId ?? null },
+      });
+      this.logger.info({ userId, serverId, source }, "Access key granted to player");
+      return true;
+    } catch (error) {
+      this.logger.error({ error, userId, serverId }, "Failed to grant access key");
+      return false;
+    }
   }
 }
 

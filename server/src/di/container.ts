@@ -47,6 +47,14 @@ import { FactionKnowledgeService } from "../services/factionKnowledgeService";
 import { NetworkTopologyService } from "../services/networkTopologyService";
 import BackdoorService from "../services/backdoorService";
 import TraceService from "../services/traceService";
+import { DynamicContentService } from "../services/dynamicContentService";
+import { StoryMissionService } from "../services/storyMissionService";
+import { LeaderboardService } from "../services/leaderboardService";
+import { AchievementService } from "../services/achievementService";
+import { TutorialService } from "../services/tutorialService";
+import { StoryProgressionService } from "../services/storyProgressionService";
+import { ArchitectInterventionExecutor } from "../services/architectInterventionExecutor";
+import { DarkNetDungeonService } from "../services/darknetDungeonService";
 
 import * as TOKENS from "./tokens";
 
@@ -135,6 +143,43 @@ export function setupContainer(
   // PvP Hacking Improvements
   container.registerSingleton(TOKENS.BACKDOOR_SERVICE, BackdoorService);
   container.registerSingleton(TOKENS.TRACE_SERVICE, TraceService);
+
+  // Dynamic Content
+  container.registerSingleton(
+    TOKENS.DYNAMIC_CONTENT_SERVICE,
+    DynamicContentService,
+  );
+
+  // Story Missions
+  container.registerSingleton(
+    TOKENS.STORY_MISSION_SERVICE,
+    StoryMissionService,
+  );
+
+  // Leaderboard & Achievements
+  container.registerSingleton(TOKENS.LEADERBOARD_SERVICE, LeaderboardService);
+  container.registerSingleton(TOKENS.ACHIEVEMENT_SERVICE, AchievementService);
+
+  // Tutorial
+  container.registerSingleton(TOKENS.TUTORIAL_SERVICE, TutorialService);
+
+  // Story Progression
+  container.registerSingleton(
+    TOKENS.STORY_PROGRESSION_SERVICE,
+    StoryProgressionService,
+  );
+
+  // Architect Intervention Executor
+  container.registerSingleton(
+    TOKENS.ARCHITECT_INTERVENTION_EXECUTOR,
+    ArchitectInterventionExecutor,
+  );
+
+  // DarkNet Dungeon Service
+  container.registerSingleton(
+    TOKENS.DARKNET_DUNGEON_SERVICE,
+    DarkNetDungeonService,
+  );
 
   logger.info("DI Container initialized with all services");
 }

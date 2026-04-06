@@ -1,10 +1,22 @@
 import { EventEmitter } from "events";
 import { prisma } from "../database/client";
-import type { Forum, Post, ForumMember, ProxyConnection } from "@prisma/client";
+import type {
+  Forum,
+  Post,
+  ForumMember,
+  ProxyConnection,
+  PostReply,
+  PostReport,
+} from "@prisma/client";
 import type { Server as SocketIOServer } from "socket.io";
 import { injectable, inject } from "tsyringe";
 import type { Logger } from "pino";
-import { SOCKET_IO, MISSION_INTEGRATION_SERVICE, LOGGER, FACTION_KNOWLEDGE_SERVICE } from "../di/tokens";
+import {
+  SOCKET_IO,
+  MISSION_INTEGRATION_SERVICE,
+  LOGGER,
+  FACTION_KNOWLEDGE_SERVICE,
+} from "../di/tokens";
 import type MissionIntegrationService from "./missionIntegration";
 import type { FactionKnowledgeService } from "./factionKnowledgeService";
 
@@ -512,7 +524,7 @@ export class ForumService extends EventEmitter {
     userId: string,
     forumId: string,
     postId: string,
-  ): Promise<Post> {
+  ): Promise<Post & { replies?: PostReply[] }> {
     try {
       const post = await prisma.post.findUnique({
         where: { id: postId },
@@ -546,7 +558,14 @@ export class ForumService extends EventEmitter {
         await this.checkKeyFragment(userId, post);
       }
 
-      return post;
+      // Fetch first page of replies
+      const replies = await prisma.postReply.findMany({
+        where: { postId, isHidden: false },
+        take: 10,
+        orderBy: { createdAt: "asc" },
+      });
+
+      return { ...post, replies };
     } catch (error) {
       this.logger.error({ err: error }, "Error reading post");
       throw error;
@@ -561,6 +580,7 @@ export class ForumService extends EventEmitter {
     forumId: string,
     title: string,
     content: string,
+    tags?: string[],
   ): Promise<Post> {
     try {
       // Check membership
@@ -586,13 +606,20 @@ export class ForumService extends EventEmitter {
       let filteredContent = content;
       try {
         const { getService } = await import("../di/container");
-        const censorshipService = getService<import("./censorshipService").default>("CensorshipService");
+        const censorshipService =
+          getService<import("./censorshipService").default>(
+            "CensorshipService",
+          );
         const forum = await prisma.forum.findUnique({ where: { id: forumId } });
-        const ctx: { userId: string; factionId?: string | undefined } = { userId };
+        const ctx: { userId: string; factionId?: string | undefined } = {
+          userId,
+        };
         if (forum?.factionId) ctx.factionId = forum.factionId;
         filteredTitle = await censorshipService.filterAndAlert(title, ctx);
         filteredContent = await censorshipService.filterAndAlert(content, ctx);
-      } catch { /* Censorship service not available — pass through */ }
+      } catch {
+        /* Censorship service not available — pass through */
+      }
 
       // Create post
       const post = await prisma.post.create({
@@ -605,6 +632,7 @@ export class ForumService extends EventEmitter {
           isSticky: false,
           isPinned: false,
           storyRelevant: false,
+          ...(tags && tags.length > 0 ? { tags } : {}),
         },
       });
 
@@ -633,7 +661,10 @@ export class ForumService extends EventEmitter {
       }
 
       // Notify AI personas of forum activity (knowledge pipeline)
-      const forumRecord = await prisma.forum.findUnique({ where: { id: forumId }, select: { factionId: true } });
+      const forumRecord = await prisma.forum.findUnique({
+        where: { id: forumId },
+        select: { factionId: true },
+      });
       this.emit("forum:post_created", {
         forumId,
         postId: post.id,
@@ -1001,9 +1032,16 @@ export class ForumService extends EventEmitter {
           const { getService } = await import("../di/container");
           const { REPUTATION_ENGINE } = await import("../di/tokens");
           const reputationEngine = getService<any>(REPUTATION_ENGINE);
-          await reputationEngine.onCaughtByFaction(userId, forum.factionId, "high");
+          await reputationEngine.onCaughtByFaction(
+            userId,
+            forum.factionId,
+            "high",
+          );
         } catch (error) {
-          this.logger.error({ err: error }, "Failed to apply honeypot reputation");
+          this.logger.error(
+            { err: error },
+            "Failed to apply honeypot reputation",
+          );
         }
 
         this.emit("honeypot:triggered", {
@@ -1070,7 +1108,10 @@ export class ForumService extends EventEmitter {
         title: post.title,
       });
 
-      this.logger.info({ userId, postTitle: post.title }, "Story-relevant post read");
+      this.logger.info(
+        { userId, postTitle: post.title },
+        "Story-relevant post read",
+      );
     } catch (error) {
       this.logger.error({ err: error }, "Error checking story triggers");
     }
@@ -1154,9 +1195,1207 @@ export class ForumService extends EventEmitter {
         });
       }
 
-      this.logger.info({ userId, fragmentName: fragment.name }, "Key fragment found");
+      this.logger.info(
+        { userId, fragmentName: fragment.name },
+        "Key fragment found",
+      );
     } catch (error) {
       this.logger.error({ err: error }, "Error checking key fragment");
+    }
+  }
+
+  // ==================== ADMIN HELPER ====================
+
+  /**
+   * Check if a user is a system-level admin or moderator (User.role).
+   * Returns true for "admin" or "moderator" roles.
+   */
+  private async isSystemAdmin(userId: string): Promise<boolean> {
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { role: true },
+    });
+    return user?.role === "admin" || user?.role === "moderator";
+  }
+
+  /**
+   * Check if a user is an admin of a forum. Throws if not.
+   * Also grants access to system admins/moderators (User.role === "admin" | "moderator")
+   * even if they are not a forum member or forum-level admin.
+   */
+  private async checkAdmin(
+    userId: string,
+    forumId: string,
+  ): Promise<ForumMember | null> {
+    // System admins/moderators always pass
+    if (await this.isSystemAdmin(userId)) {
+      // Return the membership if it exists (may be null for system admins not in the forum)
+      const member = await prisma.forumMember.findUnique({
+        where: {
+          userId_forumId: { userId, forumId },
+        },
+      });
+      return member;
+    }
+
+    const member = await prisma.forumMember.findUnique({
+      where: {
+        userId_forumId: {
+          userId,
+          forumId,
+        },
+      },
+    });
+
+    if (!member) {
+      throw new Error("Must be a forum member");
+    }
+
+    if (!member.isAdmin) {
+      throw new Error("Admin privileges required");
+    }
+
+    return member;
+  }
+
+  /**
+   * Get reports across ALL forums (system admin/moderator only).
+   * Useful for global moderation dashboard.
+   */
+  public async getSystemReports(
+    userId: string,
+    status: string = "pending",
+    page: number = 1,
+    limit: number = 30,
+  ): Promise<{ reports: PostReport[]; total: number; hasMore: boolean }> {
+    try {
+      if (!(await this.isSystemAdmin(userId))) {
+        throw new Error("System admin or moderator privileges required");
+      }
+
+      const skip = (page - 1) * limit;
+
+      const [reports, total] = await Promise.all([
+        prisma.postReport.findMany({
+          where: { status },
+          include: {
+            reporter: {
+              select: {
+                id: true,
+                username: true,
+              },
+            },
+            post: {
+              select: {
+                id: true,
+                title: true,
+                content: true,
+                authorHandle: true,
+              },
+            },
+            reply: {
+              select: {
+                id: true,
+                content: true,
+                authorHandle: true,
+              },
+            },
+            forum: {
+              select: {
+                id: true,
+                name: true,
+                category: true,
+              },
+            },
+          },
+          orderBy: { createdAt: "desc" },
+          skip,
+          take: limit,
+        }),
+        prisma.postReport.count({ where: { status } }),
+      ]);
+
+      return {
+        reports,
+        total,
+        hasMore: skip + reports.length < total,
+      };
+    } catch (error) {
+      this.logger.error({ err: error }, "Error getting system reports");
+      throw error;
+    }
+  }
+
+  // ==================== REPLY SYSTEM ====================
+
+  /**
+   * Create a reply on a post
+   */
+  public async createReply(
+    userId: string,
+    forumId: string,
+    postId: string,
+    content: string,
+  ): Promise<PostReply> {
+    try {
+      // Check membership
+      const member = await prisma.forumMember.findUnique({
+        where: {
+          userId_forumId: {
+            userId,
+            forumId,
+          },
+        },
+      });
+
+      if (!member) {
+        throw new Error("Must be a forum member to reply");
+      }
+
+      if (member.isBanned) {
+        throw new Error("You are banned from this forum");
+      }
+
+      // Check post exists and is not locked
+      const post = await prisma.post.findUnique({
+        where: { id: postId },
+      });
+
+      if (!post) {
+        throw new Error("Post not found");
+      }
+
+      if (post.forumId !== forumId) {
+        throw new Error("Post does not belong to this forum");
+      }
+
+      if (post.isLocked) {
+        throw new Error("This post is locked and cannot receive new replies");
+      }
+
+      // Apply censorship filtering
+      let filteredContent = content;
+      try {
+        const { getService } = await import("../di/container");
+        const censorshipService =
+          getService<import("./censorshipService").default>(
+            "CensorshipService",
+          );
+        const forum = await prisma.forum.findUnique({ where: { id: forumId } });
+        const ctx: { userId: string; factionId?: string | undefined } = {
+          userId,
+        };
+        if (forum?.factionId) ctx.factionId = forum.factionId;
+        filteredContent = await censorshipService.filterAndAlert(content, ctx);
+      } catch {
+        /* Censorship service not available — pass through */
+      }
+
+      // Create reply
+      const reply = await prisma.postReply.create({
+        data: {
+          postId,
+          authorId: userId,
+          authorHandle: member.handle,
+          content: filteredContent,
+        },
+      });
+
+      // Increment post reply count
+      await prisma.post.update({
+        where: { id: postId },
+        data: {
+          replyCount: {
+            increment: 1,
+          },
+        },
+      });
+
+      // Emit event
+      if (this.io) {
+        this.io.to(`forum:${forumId}`).emit("forum:new-reply", {
+          postId,
+          replyId: reply.id,
+          author: member.handle,
+        });
+      }
+
+      // Track for mission objectives
+      if (this.missionIntegration) {
+        await this.missionIntegration.onForumActivity(
+          userId,
+          "reply",
+          forumId,
+          postId,
+        );
+      }
+
+      return reply;
+    } catch (error) {
+      this.logger.error({ err: error }, "Error creating reply");
+      throw error;
+    }
+  }
+
+  /**
+   * Get paginated replies for a post
+   */
+  public async getReplies(
+    postId: string,
+    page: number = 1,
+    limit: number = 20,
+  ): Promise<{ replies: PostReply[]; total: number; hasMore: boolean }> {
+    try {
+      const skip = (page - 1) * limit;
+
+      const [replies, total] = await Promise.all([
+        prisma.postReply.findMany({
+          where: { postId, isHidden: false },
+          skip,
+          take: limit,
+          orderBy: { createdAt: "asc" },
+        }),
+        prisma.postReply.count({
+          where: { postId, isHidden: false },
+        }),
+      ]);
+
+      return {
+        replies,
+        total,
+        hasMore: skip + replies.length < total,
+      };
+    } catch (error) {
+      this.logger.error({ err: error }, "Error getting replies");
+      throw error;
+    }
+  }
+
+  /**
+   * Create a reply from an AI persona (bypasses membership)
+   */
+  public async createAIReply(
+    personaId: string,
+    forumId: string,
+    postId: string,
+    content: string,
+  ): Promise<PostReply> {
+    try {
+      // Get AI persona info
+      const persona = await prisma.aIPersona.findUnique({
+        where: { id: personaId },
+        include: { faction: true },
+      });
+
+      if (!persona) {
+        throw new Error("AI Persona not found");
+      }
+
+      // Check post exists
+      const post = await prisma.post.findUnique({
+        where: { id: postId },
+      });
+
+      if (!post) {
+        throw new Error("Post not found");
+      }
+
+      // Get or create AI user ID
+      const aiUserId = `ai_${personaId}`;
+      let aiUser = await prisma.user.findUnique({ where: { id: aiUserId } });
+
+      if (!aiUser) {
+        // Create AI user account
+        const crypto = await import("crypto");
+        aiUser = await prisma.user.create({
+          data: {
+            id: aiUserId,
+            username: persona.name,
+            email: `${personaId}@ai.aida.internal`,
+            password: crypto.randomBytes(32).toString("hex"),
+            homeIp: "127.0.0.1",
+          },
+        });
+      }
+
+      // Auto-register as forum member if not already
+      const memberKey = {
+        userId: aiUserId,
+        forumId,
+      };
+
+      let member = await prisma.forumMember.findUnique({
+        where: { userId_forumId: memberKey },
+      });
+
+      if (!member) {
+        member = await prisma.forumMember.create({
+          data: {
+            ...memberKey,
+            handle: persona.name,
+            reputation: 100,
+            postCount: 0,
+          },
+        });
+      }
+
+      // Create reply
+      const reply = await prisma.postReply.create({
+        data: {
+          postId,
+          authorId: aiUserId,
+          authorHandle: persona.name,
+          content,
+        },
+      });
+
+      // Increment post reply count
+      await prisma.post.update({
+        where: { id: postId },
+        data: {
+          replyCount: {
+            increment: 1,
+          },
+        },
+      });
+
+      // Emit event
+      if (this.io) {
+        this.io.to(`forum:${forumId}`).emit("forum:new-reply", {
+          postId,
+          replyId: reply.id,
+          author: persona.name,
+          isAI: true,
+        });
+      }
+
+      return reply;
+    } catch (error) {
+      this.logger.error({ err: error }, "Error creating AI reply");
+      throw error;
+    }
+  }
+
+  // ==================== VOTING SYSTEM ====================
+
+  /**
+   * Vote on a post (upvote or downvote, toggle if same value)
+   */
+  public async voteOnPost(
+    userId: string,
+    forumId: string,
+    postId: string,
+    value: 1 | -1,
+  ): Promise<{
+    postId: string;
+    newVoteCount: number;
+    userVote: number | null;
+  }> {
+    try {
+      // Check membership
+      const member = await prisma.forumMember.findUnique({
+        where: {
+          userId_forumId: {
+            userId,
+            forumId,
+          },
+        },
+      });
+
+      if (!member) {
+        throw new Error("Must be a forum member to vote");
+      }
+
+      // Get the post
+      const post = await prisma.post.findUnique({
+        where: { id: postId },
+      });
+
+      if (!post) {
+        throw new Error("Post not found");
+      }
+
+      if (post.forumId !== forumId) {
+        throw new Error("Post does not belong to this forum");
+      }
+
+      // Check for existing vote
+      const existingVote = await prisma.postVote.findUnique({
+        where: {
+          userId_postId: {
+            userId,
+            postId,
+          },
+        },
+      });
+
+      let voteDelta = 0;
+      let userVote: number | null = null;
+
+      if (existingVote) {
+        if (existingVote.value === value) {
+          // Same vote — toggle off (remove)
+          await prisma.postVote.delete({
+            where: { id: existingVote.id },
+          });
+          voteDelta = -value;
+          userVote = null;
+        } else {
+          // Different vote — update (swing is 2x)
+          await prisma.postVote.update({
+            where: { id: existingVote.id },
+            data: { value },
+          });
+          voteDelta = value * 2; // e.g. -1 -> +1 = delta of +2
+          userVote = value;
+        }
+      } else {
+        // No existing vote — create
+        await prisma.postVote.create({
+          data: {
+            userId,
+            postId,
+            value,
+          },
+        });
+        voteDelta = value;
+        userVote = value;
+      }
+
+      // Update post vote count
+      const updatedPost = await prisma.post.update({
+        where: { id: postId },
+        data: {
+          votes: {
+            increment: voteDelta,
+          },
+        },
+      });
+
+      // Update post author's reputation
+      if (post.authorId !== userId) {
+        await prisma.forumMember.updateMany({
+          where: {
+            userId: post.authorId,
+            forumId,
+          },
+          data: {
+            reputation: {
+              increment: voteDelta,
+            },
+          },
+        });
+      }
+
+      return {
+        postId,
+        newVoteCount: updatedPost.votes,
+        userVote,
+      };
+    } catch (error) {
+      this.logger.error({ err: error }, "Error voting on post");
+      throw error;
+    }
+  }
+
+  /**
+   * Vote on a reply (upvote or downvote, toggle if same value)
+   */
+  public async voteOnReply(
+    userId: string,
+    forumId: string,
+    replyId: string,
+    value: 1 | -1,
+  ): Promise<{
+    replyId: string;
+    newVoteCount: number;
+    userVote: number | null;
+  }> {
+    try {
+      // Check membership
+      const member = await prisma.forumMember.findUnique({
+        where: {
+          userId_forumId: {
+            userId,
+            forumId,
+          },
+        },
+      });
+
+      if (!member) {
+        throw new Error("Must be a forum member to vote");
+      }
+
+      // Get the reply
+      const reply = await prisma.postReply.findUnique({
+        where: { id: replyId },
+        include: { post: true },
+      });
+
+      if (!reply) {
+        throw new Error("Reply not found");
+      }
+
+      if (reply.post.forumId !== forumId) {
+        throw new Error("Reply does not belong to this forum");
+      }
+
+      // Check for existing vote
+      const existingVote = await prisma.postVote.findUnique({
+        where: {
+          userId_replyId: {
+            userId,
+            replyId,
+          },
+        },
+      });
+
+      let voteDelta = 0;
+      let userVote: number | null = null;
+
+      if (existingVote) {
+        if (existingVote.value === value) {
+          // Same vote — toggle off (remove)
+          await prisma.postVote.delete({
+            where: { id: existingVote.id },
+          });
+          voteDelta = -value;
+          userVote = null;
+        } else {
+          // Different vote — update
+          await prisma.postVote.update({
+            where: { id: existingVote.id },
+            data: { value },
+          });
+          voteDelta = value * 2;
+          userVote = value;
+        }
+      } else {
+        // No existing vote — create
+        await prisma.postVote.create({
+          data: {
+            userId,
+            replyId,
+            value,
+          },
+        });
+        voteDelta = value;
+        userVote = value;
+      }
+
+      // Update reply vote count
+      const updatedReply = await prisma.postReply.update({
+        where: { id: replyId },
+        data: {
+          votes: {
+            increment: voteDelta,
+          },
+        },
+      });
+
+      // Update reply author's reputation
+      if (reply.authorId !== userId) {
+        await prisma.forumMember.updateMany({
+          where: {
+            userId: reply.authorId,
+            forumId,
+          },
+          data: {
+            reputation: {
+              increment: voteDelta,
+            },
+          },
+        });
+      }
+
+      return {
+        replyId,
+        newVoteCount: updatedReply.votes,
+        userVote,
+      };
+    } catch (error) {
+      this.logger.error({ err: error }, "Error voting on reply");
+      throw error;
+    }
+  }
+
+  // ==================== TAGS ====================
+
+  /**
+   * Get posts filtered by tag with pagination
+   */
+  public async getPostsByTag(
+    forumId: string,
+    tag: string,
+    page: number = 1,
+    limit: number = 20,
+  ): Promise<{ posts: Post[]; total: number; hasMore: boolean }> {
+    try {
+      const skip = (page - 1) * limit;
+
+      const where = {
+        forumId,
+        tags: {
+          has: tag,
+        },
+      };
+
+      const [posts, total] = await Promise.all([
+        prisma.post.findMany({
+          where,
+          skip,
+          take: limit,
+          orderBy: [
+            { isPinned: "desc" as const },
+            { createdAt: "desc" as const },
+          ],
+        }),
+        prisma.post.count({ where }),
+      ]);
+
+      return {
+        posts,
+        total,
+        hasMore: skip + posts.length < total,
+      };
+    } catch (error) {
+      this.logger.error({ err: error }, "Error getting posts by tag");
+      throw error;
+    }
+  }
+
+  // ==================== CONTENT REPORTING ====================
+
+  /**
+   * Report a post or reply
+   */
+  public async reportContent(
+    userId: string,
+    forumId: string,
+    postId: string | undefined,
+    replyId: string | undefined,
+    reason: string,
+  ): Promise<PostReport> {
+    try {
+      // Check membership
+      const member = await prisma.forumMember.findUnique({
+        where: {
+          userId_forumId: {
+            userId,
+            forumId,
+          },
+        },
+      });
+
+      if (!member) {
+        throw new Error("Must be a forum member to report content");
+      }
+
+      // Ensure either postId or replyId is provided
+      if (!postId && !replyId) {
+        throw new Error("Must specify either a post or reply to report");
+      }
+
+      // Create report
+      const report = await prisma.postReport.create({
+        data: {
+          reporterId: userId,
+          forumId,
+          ...(postId ? { postId } : {}),
+          ...(replyId ? { replyId } : {}),
+          reason,
+        },
+      });
+
+      // Emit event to admins
+      if (this.io) {
+        this.io.to(`forum:${forumId}`).emit("forum:content-reported", {
+          reportId: report.id,
+          reporterId: userId,
+          postId: postId || null,
+          replyId: replyId || null,
+          reason,
+        });
+      }
+
+      this.logger.info(
+        { userId, forumId, postId, replyId, reportId: report.id },
+        "Content reported",
+      );
+
+      return report;
+    } catch (error) {
+      this.logger.error({ err: error }, "Error reporting content");
+      throw error;
+    }
+  }
+
+  /**
+   * Get reports for a forum (admin only)
+   */
+  public async getReports(
+    userId: string,
+    forumId: string,
+    status: string = "pending",
+  ): Promise<PostReport[]> {
+    try {
+      // Admin check
+      await this.checkAdmin(userId, forumId);
+
+      const reports = await prisma.postReport.findMany({
+        where: {
+          forumId,
+          status,
+        },
+        include: {
+          reporter: {
+            select: {
+              id: true,
+              username: true,
+            },
+          },
+          post: {
+            select: {
+              id: true,
+              title: true,
+              content: true,
+              authorHandle: true,
+            },
+          },
+          reply: {
+            select: {
+              id: true,
+              content: true,
+              authorHandle: true,
+            },
+          },
+        },
+        orderBy: {
+          createdAt: "desc",
+        },
+      });
+
+      return reports;
+    } catch (error) {
+      this.logger.error({ err: error }, "Error getting reports");
+      throw error;
+    }
+  }
+
+  /**
+   * Resolve a content report (admin only)
+   */
+  public async resolveReport(
+    userId: string,
+    forumId: string,
+    reportId: string,
+    action: "dismiss" | "action",
+  ): Promise<PostReport> {
+    try {
+      // Admin check
+      await this.checkAdmin(userId, forumId);
+
+      const report = await prisma.postReport.findUnique({
+        where: { id: reportId },
+      });
+
+      if (!report) {
+        throw new Error("Report not found");
+      }
+
+      if (report.forumId !== forumId) {
+        throw new Error("Report does not belong to this forum");
+      }
+
+      if (action === "action") {
+        // Hide the reported content
+        if (report.postId) {
+          await prisma.post.update({
+            where: { id: report.postId },
+            data: { isHidden: true },
+          });
+        }
+
+        if (report.replyId) {
+          await prisma.postReply.update({
+            where: { id: report.replyId },
+            data: { isHidden: true },
+          });
+        }
+      }
+
+      // Update report status
+      const updatedReport = await prisma.postReport.update({
+        where: { id: reportId },
+        data: {
+          status: action === "dismiss" ? "dismissed" : "actioned",
+          resolvedAt: new Date(),
+          resolvedBy: userId,
+        },
+      });
+
+      this.logger.info(
+        { userId, forumId, reportId, action },
+        "Report resolved",
+      );
+
+      return updatedReport;
+    } catch (error) {
+      this.logger.error({ err: error }, "Error resolving report");
+      throw error;
+    }
+  }
+
+  // ==================== ADMIN & MODERATION ====================
+
+  /**
+   * Pin/unpin a post (admin only, toggles isPinned)
+   */
+  public async pinPost(
+    userId: string,
+    forumId: string,
+    postId: string,
+  ): Promise<Post> {
+    try {
+      await this.checkAdmin(userId, forumId);
+
+      const post = await prisma.post.findUnique({
+        where: { id: postId },
+      });
+
+      if (!post) {
+        throw new Error("Post not found");
+      }
+
+      if (post.forumId !== forumId) {
+        throw new Error("Post does not belong to this forum");
+      }
+
+      const updatedPost = await prisma.post.update({
+        where: { id: postId },
+        data: { isPinned: !post.isPinned },
+      });
+
+      this.logger.info(
+        { userId, forumId, postId, isPinned: updatedPost.isPinned },
+        "Post pin toggled",
+      );
+
+      return updatedPost;
+    } catch (error) {
+      this.logger.error({ err: error }, "Error pinning post");
+      throw error;
+    }
+  }
+
+  /**
+   * Lock/unlock a post (admin only, toggles isLocked)
+   */
+  public async lockPost(
+    userId: string,
+    forumId: string,
+    postId: string,
+  ): Promise<Post> {
+    try {
+      await this.checkAdmin(userId, forumId);
+
+      const post = await prisma.post.findUnique({
+        where: { id: postId },
+      });
+
+      if (!post) {
+        throw new Error("Post not found");
+      }
+
+      if (post.forumId !== forumId) {
+        throw new Error("Post does not belong to this forum");
+      }
+
+      const updatedPost = await prisma.post.update({
+        where: { id: postId },
+        data: { isLocked: !post.isLocked },
+      });
+
+      this.logger.info(
+        { userId, forumId, postId, isLocked: updatedPost.isLocked },
+        "Post lock toggled",
+      );
+
+      return updatedPost;
+    } catch (error) {
+      this.logger.error({ err: error }, "Error locking post");
+      throw error;
+    }
+  }
+
+  /**
+   * Ban a member from a forum (admin only)
+   */
+  public async banMember(
+    userId: string,
+    forumId: string,
+    targetHandle: string,
+  ): Promise<{ message: string }> {
+    try {
+      await this.checkAdmin(userId, forumId);
+
+      const target = await prisma.forumMember.findFirst({
+        where: {
+          forumId,
+          handle: targetHandle,
+        },
+      });
+
+      if (!target) {
+        throw new Error("Member not found");
+      }
+
+      if (target.isAdmin) {
+        throw new Error("Cannot ban an admin");
+      }
+
+      await prisma.forumMember.update({
+        where: { id: target.id },
+        data: { isBanned: true },
+      });
+
+      this.logger.info({ userId, forumId, targetHandle }, "Member banned");
+
+      return { message: `Member '${targetHandle}' has been banned` };
+    } catch (error) {
+      this.logger.error({ err: error }, "Error banning member");
+      throw error;
+    }
+  }
+
+  /**
+   * Unban a member from a forum (admin only)
+   */
+  public async unbanMember(
+    userId: string,
+    forumId: string,
+    targetHandle: string,
+  ): Promise<{ message: string }> {
+    try {
+      await this.checkAdmin(userId, forumId);
+
+      const target = await prisma.forumMember.findFirst({
+        where: {
+          forumId,
+          handle: targetHandle,
+        },
+      });
+
+      if (!target) {
+        throw new Error("Member not found");
+      }
+
+      await prisma.forumMember.update({
+        where: { id: target.id },
+        data: { isBanned: false },
+      });
+
+      this.logger.info({ userId, forumId, targetHandle }, "Member unbanned");
+
+      return { message: `Member '${targetHandle}' has been unbanned` };
+    } catch (error) {
+      this.logger.error({ err: error }, "Error unbanning member");
+      throw error;
+    }
+  }
+
+  /**
+   * Delete a post (author or admin only)
+   */
+  public async deletePost(
+    userId: string,
+    forumId: string,
+    postId: string,
+  ): Promise<void> {
+    try {
+      const post = await prisma.post.findUnique({
+        where: { id: postId },
+      });
+
+      if (!post) {
+        throw new Error("Post not found");
+      }
+
+      if (post.forumId !== forumId) {
+        throw new Error("Post does not belong to this forum");
+      }
+
+      // Check if user is author or admin
+      const isAuthor = post.authorId === userId;
+
+      if (!isAuthor) {
+        // Must be admin
+        await this.checkAdmin(userId, forumId);
+      }
+
+      // Delete associated replies, votes, and reports first
+      await prisma.postVote.deleteMany({ where: { postId } });
+      await prisma.postReport.deleteMany({ where: { postId } });
+
+      // Delete reply votes and reports, then replies
+      const replyIds = await prisma.postReply.findMany({
+        where: { postId },
+        select: { id: true },
+      });
+      const replyIdList = replyIds.map((r: any) => r.id);
+
+      if (replyIdList.length > 0) {
+        await prisma.postVote.deleteMany({
+          where: { replyId: { in: replyIdList } },
+        });
+        await prisma.postReport.deleteMany({
+          where: { replyId: { in: replyIdList } },
+        });
+      }
+
+      await prisma.postReply.deleteMany({ where: { postId } });
+
+      // Delete the post
+      await prisma.post.delete({
+        where: { id: postId },
+      });
+
+      // Decrement author's post count
+      await prisma.forumMember.updateMany({
+        where: {
+          userId: post.authorId,
+          forumId,
+        },
+        data: {
+          postCount: {
+            decrement: 1,
+          },
+        },
+      });
+
+      this.logger.info({ userId, forumId, postId }, "Post deleted");
+    } catch (error) {
+      this.logger.error({ err: error }, "Error deleting post");
+      throw error;
+    }
+  }
+
+  /**
+   * Edit a post (author only)
+   */
+  public async editPost(
+    userId: string,
+    forumId: string,
+    postId: string,
+    newContent: string,
+  ): Promise<Post> {
+    try {
+      const post = await prisma.post.findUnique({
+        where: { id: postId },
+      });
+
+      if (!post) {
+        throw new Error("Post not found");
+      }
+
+      if (post.forumId !== forumId) {
+        throw new Error("Post does not belong to this forum");
+      }
+
+      if (post.authorId !== userId) {
+        throw new Error("Only the author can edit this post");
+      }
+
+      // Apply censorship filtering
+      let filteredContent = newContent;
+      try {
+        const { getService } = await import("../di/container");
+        const censorshipService =
+          getService<import("./censorshipService").default>(
+            "CensorshipService",
+          );
+        const forum = await prisma.forum.findUnique({ where: { id: forumId } });
+        const ctx: { userId: string; factionId?: string | undefined } = {
+          userId,
+        };
+        if (forum?.factionId) ctx.factionId = forum.factionId;
+        filteredContent = await censorshipService.filterAndAlert(
+          newContent,
+          ctx,
+        );
+      } catch {
+        /* Censorship service not available — pass through */
+      }
+
+      const updatedPost = await prisma.post.update({
+        where: { id: postId },
+        data: { content: filteredContent },
+      });
+
+      this.logger.info({ userId, forumId, postId }, "Post edited");
+
+      return updatedPost;
+    } catch (error) {
+      this.logger.error({ err: error }, "Error editing post");
+      throw error;
+    }
+  }
+
+  /**
+   * Get paginated forum members
+   */
+  public async getForumMembers(
+    forumId: string,
+    page: number = 1,
+    limit: number = 20,
+  ): Promise<{ members: ForumMember[]; total: number; hasMore: boolean }> {
+    try {
+      const skip = (page - 1) * limit;
+
+      const [members, total] = await Promise.all([
+        prisma.forumMember.findMany({
+          where: { forumId },
+          skip,
+          take: limit,
+          orderBy: { reputation: "desc" },
+        }),
+        prisma.forumMember.count({ where: { forumId } }),
+      ]);
+
+      return {
+        members,
+        total,
+        hasMore: skip + members.length < total,
+      };
+    } catch (error) {
+      this.logger.error({ err: error }, "Error getting forum members");
+      throw error;
+    }
+  }
+
+  /**
+   * Get a specific member's profile
+   */
+  public async getMemberProfile(
+    forumId: string,
+    handle: string,
+  ): Promise<ForumMember> {
+    try {
+      const member = await prisma.forumMember.findFirst({
+        where: {
+          forumId,
+          handle,
+        },
+      });
+
+      if (!member) {
+        throw new Error("Member not found");
+      }
+
+      return member;
+    } catch (error) {
+      this.logger.error({ err: error }, "Error getting member profile");
+      throw error;
     }
   }
 }

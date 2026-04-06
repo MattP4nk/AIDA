@@ -23,14 +23,6 @@ pids/
 *.seed
 *.pid.lock
 
-# Documentation
-*.md
-!README.md
-!DOCUMENTATION.md
-
-# SCripts
-*.sh
-
 # OS
 .DS_Store
 Thumbs.db

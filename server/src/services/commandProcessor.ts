@@ -19,6 +19,8 @@ import { MathCommandsModule } from "./commandModules/mathCommands";
 import { FactionCommandsModule } from "./commandModules/factionCommands";
 import { AliasCommandsModule } from "./commandModules/aliasCommands";
 import { AdminCommandsModule } from "./commandModules/adminCommands";
+import { DefenseCommandsModule } from "./commandModules/defenseCommands";
+
 import { CommandModule, CommandContext } from "./commandModules/interface";
 import { checkSkillRequirement } from "./commandModules/skillRequirements";
 import { injectable, inject } from "tsyringe";
@@ -56,6 +58,8 @@ import type BackdoorService from "./backdoorService";
 import type TraceService from "./traceService";
 import type { FactionKnowledgeService } from "./factionKnowledgeService";
 import type { NetworkTopologyService } from "./networkTopologyService";
+import type MissionIntegrationService from "./missionIntegration";
+import type { StoryMissionService } from "./storyMissionService";
 import type { PlayerProgress } from "@prisma/client";
 
 /**
@@ -106,6 +110,7 @@ class CommandProcessor extends EventEmitter {
       new FactionCommandsModule(),
       new AliasCommandsModule(),
       new AdminCommandsModule(),
+      new DefenseCommandsModule(),
     ];
 
     // Build command map from modules
@@ -186,10 +191,22 @@ class CommandProcessor extends EventEmitter {
       this.resolveService<FactionKnowledgeService>(
         TOKENS.FACTION_KNOWLEDGE_SERVICE,
       );
-    const networkTopologyService =
-      this.resolveService<NetworkTopologyService>(
-        TOKENS.NETWORK_TOPOLOGY_SERVICE,
+    const networkTopologyService = this.resolveService<NetworkTopologyService>(
+      TOKENS.NETWORK_TOPOLOGY_SERVICE,
+    );
+    const missionIntegrationService =
+      this.resolveService<MissionIntegrationService>(
+        TOKENS.MISSION_INTEGRATION_SERVICE,
       );
+    const storyMissionService = this.resolveService<StoryMissionService>(
+      TOKENS.STORY_MISSION_SERVICE,
+    );
+    const leaderboardService = this.resolveService<
+      import("./leaderboardService").LeaderboardService
+    >(TOKENS.LEADERBOARD_SERVICE);
+    const achievementService = this.resolveService<
+      import("./achievementService").AchievementService
+    >(TOKENS.ACHIEVEMENT_SERVICE);
 
     // Fetch user role for command-level role gating
     const user = await db.client.user.findUnique({
@@ -223,6 +240,10 @@ class CommandProcessor extends EventEmitter {
         traceService,
         ...(factionKnowledgeService ? { factionKnowledgeService } : {}),
         ...(networkTopologyService ? { networkTopologyService } : {}),
+        ...(missionIntegrationService ? { missionIntegrationService } : {}),
+        ...(storyMissionService ? { storyMissionService } : {}),
+        ...(leaderboardService ? { leaderboardService } : {}),
+        ...(achievementService ? { achievementService } : {}),
       },
     };
   }

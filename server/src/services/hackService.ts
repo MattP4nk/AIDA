@@ -20,6 +20,9 @@ import type MissionIntegrationService from "./missionIntegration";
 import type ProgressService from "./progressService";
 import {
   generateLayersForServer,
+  generateCipherChallenge,
+  generatePortSequenceChallenge,
+  generateMemoryTraceChallenge,
   validateAnswer,
 } from "./hackMinigameGenerator";
 import type { LayerResult } from "../types/game";
@@ -341,6 +344,7 @@ class HackService extends EventEmitter {
           targetServerId,
           evidenceLeft,
           target.id,
+          attackerId,
         );
         traceInitiated = evidenceLeft > 70;
       }
@@ -489,6 +493,7 @@ class HackService extends EventEmitter {
     targetServerId: string,
     method: HackMethod,
     tools: string[],
+    detectionModifier: number = 0,
   ): Promise<{
     success: boolean;
     session?: HackSessionInfo;
@@ -559,6 +564,55 @@ class HackService extends EventEmitter {
     };
     const layers = generateLayersForServer(serverProfile, skills, method);
 
+    // ── Home server defense layers ──
+    // If target is a player home, add extra minigame layers based on owner's defenses
+    if (server.isPlayerHome && server.ownerId) {
+      const ownerProgress = await db.client.playerProgress.findUnique({
+        where: { userId: server.ownerId },
+        select: { homeFirewall: true, homeVault: true, homeIds: true, homeHoneypot: true },
+      });
+
+      if (ownerProgress) {
+        // Firewall defense: adds port_sequence challenges
+        if (ownerProgress.homeFirewall >= 1) {
+          const fwDifficulty = 3 + ownerProgress.homeFirewall * 2; // L1→5, L2→7, L3→9
+          layers.unshift(generatePortSequenceChallenge(fwDifficulty, skills));
+        }
+        if (ownerProgress.homeFirewall >= 3) {
+          // L3 adds a cipher layer on top
+          layers.unshift(generateCipherChallenge(7, skills));
+        }
+
+        // Vault defense: adds minigame layers to protect vault contents
+        // These layers are appended (attacker hits them AFTER base server layers)
+        if (ownerProgress.homeVault >= 1) {
+          // L1: cipher challenge
+          layers.push(generateCipherChallenge(5 + ownerProgress.homeVault, skills));
+        }
+        if (ownerProgress.homeVault >= 2) {
+          // L2: adds memory_trace on top of cipher
+          layers.push(generateMemoryTraceChallenge(6 + ownerProgress.homeVault, skills));
+        }
+        if (ownerProgress.homeVault >= 3) {
+          // L3: adds port_sequence — all 3 minigame types to crack vault
+          layers.push(generatePortSequenceChallenge(9, skills));
+        }
+
+        // IDS Level 2+: alert the owner when hack STARTS
+        if (ownerProgress.homeIds >= 2) {
+          const alertMsg = ownerProgress.homeIds >= 3
+            ? `INTRUSION ALERT: Someone (${attacker.homeIp || "unknown IP"}) is hacking your home server!`
+            : `INTRUSION ALERT: Someone is attempting to hack your home server!`;
+          this.emit("ids_alert", {
+            targetUserId: server.ownerId,
+            message: alertMsg,
+            severity: "high",
+          });
+          this.sendSecurityAlert(server.ownerId, targetServerId, 0, "high").catch(() => {});
+        }
+      }
+    }
+
     // Calculate total time limit (sum of layer limits + 30s buffer)
     const totalTimeLimit = layers.reduce((sum, l) => sum + l.timeLimit, 0) + 30;
     const now = Date.now();
@@ -577,7 +631,7 @@ class HackService extends EventEmitter {
       status: "active",
       layers,
       layerResults: [],
-      detectionAccumulator: 0,
+      detectionAccumulator: detectionModifier * 100, // Priority modifier: aggressive (+) increases detection, stealth (-) reduces it
       startedAt: now,
       expiresAt: now + totalTimeLimit * 1000,
       layerStartedAt: now,
@@ -1055,7 +1109,7 @@ class HackService extends EventEmitter {
     );
     const finalDetectionRate = allFast
       ? Math.max(0.05, detectionRate - 0.15)
-      : detectionRate;
+      : Math.max(0.05, detectionRate); // Floor: even max stealth can't go below 5%
     const detected = Math.random() < finalDetectionRate;
 
     const evidenceLeft = this.calculateEvidence(
@@ -1082,8 +1136,36 @@ class HackService extends EventEmitter {
         session.targetServerId,
         evidenceLeft,
         session.targetOwnerId,
+        userId,
       );
       traceInitiated = evidenceLeft > 70;
+    }
+
+    // ── IDS alerts: notify owner when hack completes ──
+    if (server.isPlayerHome && server.ownerId && overallSuccess) {
+      const ownerDefenses = await db.client.playerProgress.findUnique({
+        where: { userId: server.ownerId },
+        select: { homeIds: true },
+      });
+      if (ownerDefenses && ownerDefenses.homeIds >= 1) {
+        // L1 = alert on completion, L2+ already alerted on start (in initiateHackSession)
+        if (ownerDefenses.homeIds === 1) {
+          this.emit("ids_alert", {
+            targetUserId: server.ownerId,
+            message: `INTRUSION DETECTED: Your home server was breached! Access level: ${accessLevel}`,
+            severity: "critical",
+          });
+        }
+        // L3 = also tell them who did it
+        if (ownerDefenses.homeIds >= 3) {
+          this.emit("ids_alert", {
+            targetUserId: server.ownerId,
+            message: `INTRUSION REPORT: Attacker ${attacker.username} (${attacker.homeIp || "unknown"}) gained access level ${accessLevel}. Evidence: ${evidenceLeft}%`,
+            severity: "critical",
+          });
+        }
+        await this.sendSecurityAlert(server.ownerId, session.targetServerId, evidenceLeft, "critical").catch(() => {});
+      }
     }
 
     // Build result
@@ -1667,59 +1749,400 @@ class HackService extends EventEmitter {
     serverId: string,
     evidenceLevel: number,
     targetUserId: string,
+    attackerId?: string,
   ): Promise<string[]> {
     const counterMeasures: string[] = [];
 
     try {
-      // Low evidence (0-30): Silent logging only
+      const server = await db.client.gameServer.findUnique({
+        where: { id: serverId },
+        select: { id: true, name: true, factionId: true, firewallLevel: true, securityLevel: true, ipAddress: true },
+      });
+      if (!server) return ["error_no_server"];
+
+      // ── Low evidence (0-30): Silent logging only ──
       if (evidenceLevel <= 30) {
         counterMeasures.push("silent_log");
+        // Just logged to HackLog — no active response
       }
 
-      // Medium evidence (31-60): Active monitoring
+      // ── Medium evidence (31-60): Active monitoring + firewall bump ──
       if (evidenceLevel > 30 && evidenceLevel <= 60) {
-        counterMeasures.push("active_monitor", "security_scan");
+        counterMeasures.push("active_monitor", "firewall_bump");
+
+        // Temporarily increase firewall level (+1 for 30 min)
+        await db.client.gameServer.update({
+          where: { id: serverId },
+          data: { firewallLevel: Math.min(10, server.firewallLevel + 1) },
+        });
+        // Schedule firewall reset after 30 min
+        setTimeout(async () => {
+          try {
+            await db.client.gameServer.update({
+              where: { id: serverId },
+              data: { firewallLevel: server.firewallLevel },
+            });
+          } catch { /* server may have been deleted */ }
+        }, 30 * 60 * 1000).unref?.();
+
+        // Notify server owner if online
+        await this.notifyServerOwner(targetUserId, server.name, evidenceLevel, "warning");
       }
 
-      // High evidence (61-80): Defensive measures
+      // ── High evidence (61-80): Defensive measures + faction alert + rep penalty ──
       if (evidenceLevel > 60 && evidenceLevel <= 80) {
-        counterMeasures.push(
-          "firewall_strengthen",
-          "access_restriction",
-          "user_notification",
-        );
+        counterMeasures.push("firewall_strengthen", "faction_alert", "reputation_penalty");
 
-        // Send notification to target
-        await this.sendSecurityAlert(
-          targetUserId,
-          serverId,
-          evidenceLevel,
-          "high",
-        );
+        // Increase firewall by +2 for 1 hour
+        await db.client.gameServer.update({
+          where: { id: serverId },
+          data: {
+            firewallLevel: Math.min(10, server.firewallLevel + 2),
+            securityLevel: Math.min(10, server.securityLevel + 1),
+          },
+        });
+        setTimeout(async () => {
+          try {
+            await db.client.gameServer.update({
+              where: { id: serverId },
+              data: { firewallLevel: server.firewallLevel, securityLevel: server.securityLevel },
+            });
+          } catch { /* ignore */ }
+        }, 60 * 60 * 1000).unref?.();
+
+        // Notify owner
+        await this.notifyServerOwner(targetUserId, server.name, evidenceLevel, "high");
+
+        // Alert faction AI if server belongs to a faction
+        if (server.factionId && attackerId) {
+          await this.alertFactionAI(server.factionId, serverId, server.name, attackerId, evidenceLevel);
+        }
+
+        // Reputation penalty for attacker with the server's faction
+        if (server.factionId && attackerId) {
+          await this.applyDetectionReputationPenalty(attackerId, server.factionId, evidenceLevel);
+        }
       }
 
-      // Critical evidence (81-100): Full lockdown
+      // ── Critical evidence (81-100): Lockdown + trace + access revocation ──
       if (evidenceLevel > 80) {
-        counterMeasures.push(
-          "server_lockdown",
-          "trace_initiated",
-          "faction_alert",
-          "bounty_posted",
-        );
+        counterMeasures.push("server_lockdown", "trace_initiated", "faction_alert", "access_revoked");
 
-        // Send critical notification
-        await this.sendSecurityAlert(
-          targetUserId,
-          serverId,
-          evidenceLevel,
-          "critical",
-        );
+        // Increase security to max for 2 hours
+        await db.client.gameServer.update({
+          where: { id: serverId },
+          data: {
+            firewallLevel: 10,
+            securityLevel: Math.min(10, server.securityLevel + 2),
+          },
+        });
+        setTimeout(async () => {
+          try {
+            await db.client.gameServer.update({
+              where: { id: serverId },
+              data: { firewallLevel: server.firewallLevel, securityLevel: server.securityLevel },
+            });
+          } catch { /* ignore */ }
+        }, 2 * 60 * 60 * 1000).unref?.();
+
+        // Notify owner — critical
+        await this.notifyServerOwner(targetUserId, server.name, evidenceLevel, "critical");
+
+        // Alert faction AI
+        if (server.factionId && attackerId) {
+          await this.alertFactionAI(server.factionId, serverId, server.name, attackerId, evidenceLevel);
+        }
+
+        // Heavy reputation penalty
+        if (server.factionId && attackerId) {
+          await this.applyDetectionReputationPenalty(attackerId, server.factionId, evidenceLevel);
+        }
+
+        // Revoke attacker's access key for this server (if they had one)
+        if (attackerId) {
+          await db.client.serverAccessKey.deleteMany({
+            where: { userId: attackerId, serverId },
+          });
+          counterMeasures.push("access_key_revoked");
+        }
+
+        // Post a bounty on the attacker
+        if (attackerId && server.factionId) {
+          await this.postBounty(attackerId, server.factionId, server.name, serverId, evidenceLevel);
+          counterMeasures.push("bounty_posted");
+        }
+
+        // Initiate trace via TraceService
+        if (attackerId) {
+          try {
+            const { getService } = await import("../di/container");
+            const { TRACE_SERVICE } = await import("../di/tokens");
+            const traceService = getService<any>(TRACE_SERVICE);
+            await traceService.initiateTrace(attackerId, serverId, evidenceLevel);
+            counterMeasures.push("trace_active");
+
+            // Register trace as passive resource drain on attacker
+            const { MEMORY_SERVICE } = await import("../di/tokens");
+            const memoryService = getService<any>(MEMORY_SERVICE);
+            memoryService.registerActiveTrace(attackerId, serverId, `Trace from ${server.name}`);
+          } catch (err) {
+            this.logger.error({ err }, "Failed to initiate trace");
+          }
+        }
       }
+
+      // Create audit log entry for all detection levels
+      await this.sendSecurityAlert(targetUserId, serverId, evidenceLevel,
+        evidenceLevel > 80 ? "critical" : evidenceLevel > 60 ? "high" : "warning");
 
       return counterMeasures;
     } catch (error) {
       this.logger.error({ err: error }, "Countermeasures error");
       return ["error_response"];
+    }
+  }
+
+  /**
+   * Notify server owner via Socket.IO if they're online.
+   */
+  private async notifyServerOwner(
+    ownerId: string,
+    serverName: string,
+    evidenceLevel: number,
+    severity: "warning" | "high" | "critical",
+  ): Promise<void> {
+    try {
+      const { getService } = await import("../di/container");
+      const { SOCKET_IO } = await import("../di/tokens");
+      const io = getService<any>(SOCKET_IO);
+
+      const messages: Record<string, string> = {
+        warning: `[SECURITY] Suspicious activity detected on ${serverName}. Evidence: ${evidenceLevel}%`,
+        high: `[ALERT] Intrusion detected on ${serverName}! Firewall strengthened. Evidence: ${evidenceLevel}%`,
+        critical: `[CRITICAL] ${serverName} under attack! Server locked down. Trace initiated. Evidence: ${evidenceLevel}%`,
+      };
+
+      io.to(`player:${ownerId}`).emit("notification", {
+        type: "security_alert",
+        severity,
+        message: messages[severity],
+        timestamp: new Date(),
+      });
+    } catch (err) {
+      this.logger.warn({ err }, "Failed to notify server owner of security alert");
+    }
+  }
+
+  /**
+   * Alert the faction AI leader about a detected intrusion on their server.
+   * The AI can then generate counter-missions or post warnings.
+   */
+  private async alertFactionAI(
+    factionId: string,
+    serverId: string,
+    serverName: string,
+    attackerId: string,
+    evidenceLevel: number,
+  ): Promise<void> {
+    try {
+      const { getService } = await import("../di/container");
+      const { PERSONA_SERVICE } = await import("../di/tokens");
+      const personaService = getService<any>(PERSONA_SERVICE);
+
+      // Feed knowledge to faction — they now know about the attacker
+      const { FACTION_KNOWLEDGE_SERVICE } = await import("../di/tokens");
+      const fkService = getService<any>(FACTION_KNOWLEDGE_SERVICE);
+      await fkService.addEntry(factionId, {
+        assetType: "player",
+        assetId: attackerId,
+        assetMeta: {
+          threat: true,
+          evidenceLevel,
+          targetServer: serverName,
+          targetServerId: serverId,
+          detectedAt: new Date().toISOString(),
+        },
+        source: "server_discovery",
+        confidence: Math.min(1.0, evidenceLevel / 100),
+        discoveredBy: "security_system",
+      });
+
+      // Notify the faction's AI leader — this can trigger a reactive mission
+      await personaService.onFactionServerHacked({
+        serverId,
+        serverName,
+        factionId,
+        attackerId,
+        evidenceLevel,
+        detected: true,
+      });
+
+      this.logger.info({ factionId, serverId, attackerId, evidenceLevel }, "Faction AI alerted about intrusion");
+    } catch (err) {
+      this.logger.error({ err }, "Failed to alert faction AI");
+    }
+  }
+
+  /**
+   * Post a bounty on a detected attacker. The bounty appears as a claimable task
+   * for any player in good standing with the issuing faction.
+   * Completion: hack the target's home server and read a proof file.
+   */
+  private async postBounty(
+    targetUserId: string,
+    factionId: string,
+    serverName: string,
+    serverId: string,
+    evidenceLevel: number,
+  ): Promise<void> {
+    try {
+      // Get target username for display
+      const target = await db.client.user.findUnique({
+        where: { id: targetUserId },
+        select: { username: true },
+      });
+      if (!target) return;
+
+      // Check if there's already an active bounty on this player from this faction
+      const existing = await db.client.bounty.findFirst({
+        where: {
+          targetUserId,
+          issuedByFactionId: factionId,
+          status: "active",
+        },
+      });
+      if (existing) {
+        this.logger.debug({ targetUserId, factionId }, "Active bounty already exists, skipping");
+        return;
+      }
+
+      // Reward scales with evidence: 81% → 2000c/10rep, 100% → 5000c/25rep
+      const rewardCredits = Math.floor(1000 + (evidenceLevel - 80) * 200);
+      const rewardReputation = Math.floor(5 + (evidenceLevel - 80));
+
+      // Find files the target downloaded from the breached server (stored on their home)
+      const stolenFiles = await db.client.fileSystemNode.findMany({
+        where: {
+          server: { isPlayerHome: true, ownerId: targetUserId },
+          type: "file",
+          metadata: { path: ["sourceServerId"], equals: serverId },
+        },
+        select: { id: true, name: true },
+      });
+      const stolenFileIds = stolenFiles.map((f) => f.id);
+
+      await db.client.bounty.create({
+        data: {
+          targetUserId,
+          targetUsername: target.username,
+          issuedByFactionId: factionId,
+          reason: `Critical intrusion detected on ${serverName}. Evidence level: ${evidenceLevel}%`,
+          rewardCredits,
+          rewardReputation,
+          status: "active",
+          serverId,
+          evidenceLevel,
+          ...(stolenFileIds.length > 0 ? { stolenFileIds } : {}),
+          expiresAt: new Date(Date.now() + 48 * 60 * 60 * 1000), // 48 hours
+        },
+      });
+
+      // Emit event for DynamicContentService (wanted notices on faction servers)
+      this.emit("bounty:posted", {
+        targetUsername: target.username,
+        factionId,
+        reason: `Critical intrusion detected on ${serverName}. Evidence level: ${evidenceLevel}%`,
+        rewardCredits,
+        rewardReputation,
+        expiresAt: new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString(),
+      });
+
+      // Notify faction members via Socket.IO
+      try {
+        const { getService } = await import("../di/container");
+        const { SOCKET_IO } = await import("../di/tokens");
+        const io = getService<any>(SOCKET_IO);
+
+        // Get all faction members to notify
+        const members = await db.client.factionMember.findMany({
+          where: { factionId },
+          select: { userId: true },
+        });
+
+        for (const member of members) {
+          if (member.userId !== targetUserId) {
+            io.to(`player:${member.userId}`).emit("notification", {
+              type: "bounty_posted",
+              message: `BOUNTY: ${target.username} is wanted for hacking ${serverName}. Reward: ${rewardCredits}c + ${rewardReputation} rep. Use 'bounties' to view.`,
+              timestamp: new Date(),
+            });
+          }
+        }
+      } catch (err) {
+        this.logger.warn({ err }, "Failed to send bounty notification to faction members");
+      }
+
+      // Post on faction forum via AI leader
+      try {
+        const { getService } = await import("../di/container");
+
+        const faction = await db.client.faction.findUnique({
+          where: { id: factionId },
+          select: { aiPersonaId: true, name: true },
+        });
+
+        if (faction?.aiPersonaId) {
+          const { FORUM_SERVICE } = await import("../di/tokens");
+          const forumService = getService<any>(FORUM_SERVICE);
+
+          // Find faction forum
+          const forum = await db.client.forum.findFirst({
+            where: { factionId },
+            select: { id: true },
+          });
+
+          if (forum) {
+            await forumService.createAIPost(
+              forum.id,
+              faction.aiPersonaId,
+              `WANTED: ${target.username}`,
+              `Security breach on ${serverName}. Intruder left ${evidenceLevel}% evidence. Bounty: ${rewardCredits} credits + ${rewardReputation} reputation. Hack their home server to claim. Use 'bounties' for details.`,
+            );
+          }
+        }
+      } catch (err) {
+        this.logger.warn({ err }, "Failed to post bounty notice to faction forum");
+      }
+
+      this.logger.info(
+        { targetUserId, targetUsername: target.username, factionId, rewardCredits, evidenceLevel },
+        "Bounty posted on detected attacker",
+      );
+    } catch (error) {
+      this.logger.error({ err: error }, "Failed to post bounty");
+    }
+  }
+
+  /**
+   * Apply reputation penalty to an attacker caught hacking a faction's server.
+   */
+  private async applyDetectionReputationPenalty(
+    attackerId: string,
+    factionId: string,
+    evidenceLevel: number,
+  ): Promise<void> {
+    try {
+      const { getService } = await import("../di/container");
+      const { FACTION_SERVICE } = await import("../di/tokens");
+      const factionService = getService<any>(FACTION_SERVICE);
+
+      // Penalty scales with evidence: 61-80% → -5 rep, 81-100% → -15 rep
+      const penalty = evidenceLevel > 80 ? -15 : -5;
+      await factionService.addReputation(attackerId, factionId, penalty);
+
+      this.logger.info({ attackerId, factionId, penalty, evidenceLevel }, "Detection reputation penalty applied");
+    } catch (err) {
+      this.logger.error({ err }, "Failed to apply detection reputation penalty");
     }
   }
 
@@ -1906,8 +2329,9 @@ class HackService extends EventEmitter {
   /**
    * Apply cooldown to user
    */
-  private applyCooldown(userId: string): void {
-    const cooldownEnd = new Date(Date.now() + this.COOLDOWN_SECONDS * 1000);
+  applyCooldown(userId: string, durationSeconds?: number): void {
+    const seconds = durationSeconds ?? this.COOLDOWN_SECONDS;
+    const cooldownEnd = new Date(Date.now() + seconds * 1000);
     this.cooldowns.set(userId, cooldownEnd);
   }
 

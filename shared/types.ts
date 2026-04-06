@@ -37,6 +37,13 @@ export interface ApiResponse<T = any> {
   timestamp: Date;
 }
 
+/** Lightweight avatar data included in Socket.IO payloads and command responses */
+export interface AvatarInfo {
+  glyph: string; // inline representation: [◉_◉]
+  color: string; // hex color for styling
+  compact?: string[]; // 3-5 line face art (optional, for detailed views)
+}
+
 // ==================== GAME TYPES (From server/src/types/game.ts) ====================
 
 export interface PlayerSession {
@@ -857,6 +864,17 @@ export enum MissionObjectiveType {
   JOIN_FACTION = "join_faction",
   FACTION_REPUTATION = "faction_reputation",
   FACTION_MISSION = "faction_mission",
+  // Network objectives (tracked by onServerConnect / onFileOperation)
+  INFILTRATE_NETWORK = "infiltrate_network",
+  TRACE_CONNECTION = "trace_connection",
+  EXFILTRATE_DATA = "exfiltrate_data",
+  // New system integration objectives
+  DOWNLOAD_FILE = "download_file",
+  DECODE_CONTENT = "decode_content",
+  DEFEND_HOME = "defend_home",
+  CLAIM_BOUNTY = "claim_bounty",
+  SURVIVE_TRACE = "survive_trace",
+  SCAN_SUBNET = "scan_subnet",
 }
 
 // Player Home System

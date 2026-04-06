@@ -133,38 +133,59 @@ router.post(
           },
         });
 
-        // Create home directory
-        const homeRoot = await tx.fileSystemNode.create({
+        // Create root filesystem
+        const root = await tx.fileSystemNode.create({
           data: {
             serverId: homeServer.id,
-            name: "home",
+            parentId: null,
+            name: "/",
             type: "directory",
-            permissions: {
-              owner: 15, // FULL permissions
-              faction: 0,
-              others: 1, // READ only
-            },
+            permissions: { owner: 15, faction: 5, others: 0 },
             createdBy: user.id,
             size: 0,
-            isEncrypted: false,
-            isHidden: false,
-            isProtected: true,
           },
         });
 
-        // Create welcome file
+        // Create standard directories under root
+        const baseDirs = ["home", "etc", "var", "tmp", "logs", "data"];
+        const dirMap: Record<string, string> = {};
+        for (const dirName of baseDirs) {
+          const dir = await tx.fileSystemNode.create({
+            data: {
+              serverId: homeServer.id,
+              parentId: root.id,
+              name: dirName,
+              type: "directory",
+              permissions: { owner: 15, faction: 5, others: 1 },
+              createdBy: user.id,
+              size: 0,
+            },
+          });
+          dirMap[dirName] = dir.id;
+        }
+
+        // Create user home directory under /home
+        const userHome = await tx.fileSystemNode.create({
+          data: {
+            serverId: homeServer.id,
+            parentId: dirMap["home"]!,
+            name: username,
+            type: "directory",
+            permissions: { owner: 15, faction: 0, others: 0 },
+            createdBy: user.id,
+            size: 0,
+          },
+        });
+
+        // Create welcome file in user home
         await tx.fileSystemNode.create({
           data: {
             serverId: homeServer.id,
-            parentId: homeRoot.id,
+            parentId: userHome.id,
             name: "welcome.txt",
             type: "file",
-            content: `Welcome to the AIDA Network, ${username}!\n\nYour personal terminal: ${homeIp}\nSecurity Level: Basic\n\nType 'help' for available commands.\nType 'know_servers' to see available servers.\n\nStay vigilant. Trust no one.`,
-            permissions: {
-              owner: 15,
-              faction: 0,
-              others: 1,
-            },
+            content: `Welcome to the AIDA Network, ${username}!\n\nYour personal terminal: ${homeIp}\nSecurity Level: Basic\n\nType 'help' for available commands.\nType 'scan' to discover nearby servers.\nType 'connect <ip>' to connect to a server.\n\nStay vigilant. Trust no one.`,
+            permissions: { owner: 15, faction: 0, others: 1 },
             createdBy: user.id,
             size: 200,
             isEncrypted: false,
@@ -182,6 +203,22 @@ router.post(
         await factionService.initializeStandings(result.id);
       } catch {
         // Non-critical: standings will be created on first interaction
+      }
+
+      // Link home server to Internet Exchange (fire-and-forget)
+      try {
+        const { NETWORK_TOPOLOGY_SERVICE } = await import("../di/tokens");
+        const topoService = getService<any>(NETWORK_TOPOLOGY_SERVICE);
+        // Find the home server ID from the transaction result
+        const homeServerRecord = await prisma.gameServer.findFirst({
+          where: { ipAddress: homeIp, isPlayerHome: true },
+          select: { id: true },
+        });
+        if (homeServerRecord) {
+          topoService.createHomeLink(homeServerRecord.id).catch(() => {});
+        }
+      } catch {
+        // Non-critical: home link will be created on first session if missed
       }
 
       // Generate JWT token

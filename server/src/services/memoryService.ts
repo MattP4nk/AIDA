@@ -1,769 +1,780 @@
 import { EventEmitter } from "events";
 import { injectable, inject } from "tsyringe";
 import type { Logger } from "pino";
-import { LOGGER } from "../di/tokens";
+import { Server as SocketIOServer } from "socket.io";
+import { LOGGER, SOCKET_IO } from "../di/tokens";
 
 /**
- * Memory Management Service - Backend process and memory tracking
+ * MemoryService — Player Computer Resource Management
  *
- * Tracks real process information per user session including:
- * - Process spawning and lifecycle
- * - Memory allocation and usage
- * - CPU usage tracking
- * - System resource monitoring
- * - Process hierarchy management
+ * Manages the player's virtual computer with limited CPU, RAM, and Bandwidth.
+ * Every significant game action (hacking, scanning, decrypting) becomes a process
+ * that consumes resources and takes real time. Passive consumers (open terminals,
+ * server connections, active backdoors) create ongoing resource drain.
+ *
+ * Players must manage their rig: close unused tabs, disconnect from servers,
+ * kill processes to free resources, and upgrade equipment for more capacity.
  */
 
-export interface Process {
+// ═══════════════════════════════════════════════════════════════════════════
+// Types
+// ═══════════════════════════════════════════════════════════════════════════
+
+export type GameProcessType =
+  | "hack_prep"
+  | "scan"
+  | "decrypt"
+  | "download"
+  | "backdoor_install"
+  | "traceroute"
+  | "trace_evade";
+
+export interface GameProcess {
   pid: number;
-  sessionId: string;
   userId: string;
-  name: string;
-  command: string;
-  memory: number; // Memory in KB
-  cpu: number; // CPU percentage
-  status: "running" | "sleeping" | "stopped" | "zombie";
-  startTime: number;
-  priority: number; // Nice value (-20 to 19)
-  user: string;
-  parent?: number; // Parent PID
-  children: number[]; // Child PIDs
-  
-  // Command process tracking
-  isCommand?: boolean; // True if this is a user command process
-  commandMetadata?: {
-    originalCommand: string;
-    args: string[];
-    targetInfo?: string;
-    progress?: number;
-    estimatedDuration?: number;
-    onCancel?: () => Promise<void>;
+  sessionId: string;
+  type: GameProcessType;
+  targetId?: string | undefined;
+  targetLabel: string;
+  cpuCost: number;        // actual CPU cost (base * priority multiplier)
+  baseCpuCost: number;    // original CPU cost before priority
+  ramCost: number;
+  bwCost: number;
+  priority: number;       // -10 to 10. Negative = high priority (faster, more CPU). Positive = low priority (slower, less CPU). 0 = normal.
+  detectionModifier: number; // -0.20 to +0.30. Added to hack detection rate. Aggressive = easier to detect. Stealth = harder.
+  startedAt: number;
+  duration: number;       // total ms (adjusted by priority)
+  baseDuration: number;   // original duration before priority
+  progress: number;       // 0-100
+  status: "running" | "completed" | "failed" | "cancelled";
+  onComplete?: (() => Promise<void>) | undefined;
+  metadata?: Record<string, unknown> | undefined;
+}
+
+/** Passive resource consumers — ongoing costs that don't have a process timer */
+export interface PassiveConsumer {
+  id: string;
+  type: "terminal" | "connection" | "backdoor" | "active_trace";
+  label: string;
+  cpuCost: number;
+  ramCost: number;
+  bwCost: number;
+}
+
+export interface ComputerSpec {
+  cpuTotal: number;
+  cpuUsed: number;      // sum of active processes + passive consumers
+  ramTotal: number;
+  ramUsed: number;
+  bwTotal: number;
+  bwUsed: number;
+}
+
+export interface ResourceBreakdown {
+  spec: ComputerSpec;
+  processes: GameProcess[];
+  passiveConsumers: PassiveConsumer[];
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Process Cost Table
+// ═══════════════════════════════════════════════════════════════════════════
+
+export interface ProcessCostConfig {
+  cpuCost: number;
+  ramCost: number;
+  bwCost: number;
+  baseDuration: number;     // ms
+  minDuration: number;      // ms (floor — even max-skill players wait a bit)
+  skillName: string;
+  skillScaleFactor: number; // ms saved per skill level
+}
+
+export const PROCESS_COSTS: Record<GameProcessType, ProcessCostConfig> = {
+  hack_prep:        { cpuCost: 80,  ramCost: 128, bwCost: 50, baseDuration: 60000,  minDuration: 12000, skillName: "hacking",      skillScaleFactor: 1000 },
+  scan:             { cpuCost: 40,  ramCost: 32,  bwCost: 80, baseDuration: 15000,  minDuration: 3000,  skillName: "networking",    skillScaleFactor: 500  },
+  decrypt:          { cpuCost: 100, ramCost: 64,  bwCost: 0,  baseDuration: 45000,  minDuration: 9000,  skillName: "cryptography",  skillScaleFactor: 1500 },
+  download:         { cpuCost: 10,  ramCost: 64,  bwCost: 60, baseDuration: 10000,  minDuration: 2000,  skillName: "networking",    skillScaleFactor: 300  },
+  backdoor_install: { cpuCost: 60,  ramCost: 96,  bwCost: 40, baseDuration: 90000,  minDuration: 18000, skillName: "stealth",       skillScaleFactor: 1500 },
+  traceroute:       { cpuCost: 20,  ramCost: 16,  bwCost: 40, baseDuration: 8000,   minDuration: 2000,  skillName: "networking",    skillScaleFactor: 200  },
+  trace_evade:      { cpuCost: 70,  ramCost: 64,  bwCost: 30, baseDuration: 30000,  minDuration: 6000,  skillName: "stealth",       skillScaleFactor: 800  },
+};
+
+/** Passive consumer costs */
+const PASSIVE_COSTS = {
+  terminal:     { cpu: 5,  ram: 16, bw: 0  },
+  connection:   { cpu: 0,  ram: 8,  bw: 15 },
+  backdoor:     { cpu: 5,  ram: 8,  bw: 10 },
+  active_trace: { cpu: 15, ram: 16, bw: 5  },
+};
+
+/** OS overhead — small baseline always reserved */
+const OS_OVERHEAD = { cpu: 10, ram: 24, bw: 0 };
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Helpers
+// ═══════════════════════════════════════════════════════════════════════════
+
+function calculateProcessDuration(type: GameProcessType, skillLevel: number): number {
+  const cost = PROCESS_COSTS[type];
+  const reduced = cost.baseDuration - (skillLevel * cost.skillScaleFactor);
+  return Math.max(cost.minDuration, reduced);
+}
+
+/**
+ * Priority affects CPU cost, duration, and detection risk:
+ *   priority -10 (aggressive): ~1.4x CPU, ~0.5x duration, +30% detection
+ *   priority   0 (normal):     1.0x CPU, 1.0x duration, +0% detection
+ *   priority +10 (stealth):    ~0.6x CPU, ~1.5x duration, -20% detection
+ */
+function applyPriority(baseCpu: number, baseDuration: number, priority: number): { cpuCost: number; duration: number; detectionModifier: number } {
+  const p = Math.max(-10, Math.min(10, priority));
+  const cpuMult = 1.0 + (p * -0.04);      // -10→1.4, 0→1.0, 10→0.6
+  const durMult = 1.0 + (p * 0.05);        // -10→0.5, 0→1.0, 10→1.5
+  const detMod = p * -0.03;                // -10→+0.30, 0→0, 10→-0.30 (capped at -0.20)
+  return {
+    cpuCost: Math.max(1, Math.round(baseCpu * cpuMult)),
+    duration: Math.max(1000, Math.round(baseDuration * durMult)),
+    detectionModifier: Math.max(-0.20, Math.min(0.30, detMod)),
   };
 }
 
-export interface MemoryInfo {
-  total: number; // Total memory in KB
-  used: number; // Used memory in KB
-  free: number; // Free memory in KB
-  available: number; // Available memory in KB
-  buffers: number; // Buffer memory in KB
-  cached: number; // Cache memory in KB
-  swapTotal: number; // Total swap in KB
-  swapUsed: number; // Used swap in KB
-  swapFree: number; // Free swap in KB
+/**
+ * Get the detection modifier for a given priority level.
+ * Exported so HackService can use it when calculating detection rates.
+ */
+export function getDetectionModifierForPriority(priority: number): number {
+  const p = Math.max(-10, Math.min(10, priority));
+  const detMod = p * -0.03;
+  return Math.max(-0.20, Math.min(0.30, detMod));
 }
 
-export interface MemoryAllocation {
-  processId: number;
-  sessionId: string;
-  size: number;
-  type: "heap" | "stack" | "data" | "code";
-  address: number;
-  allocated: boolean;
-  timestamp: number;
+/** Hardware item name → resource bonus mapping */
+const HARDWARE_BONUSES: Record<string, { cpu?: number; ram?: number; bw?: number }> = {
+  "RAM Module Mk1":      { ram: 64 },
+  "RAM Module Mk2":      { ram: 128 },
+  "Quantum RAM":         { ram: 256 },
+  "CPU Fan Upgrade":     { cpu: 50 },
+  "CPU Overclock Kit":   { cpu: 100 },
+  "Neural Coprocessor":  { cpu: 200 },
+  "Network Card Mk1":    { bw: 25 },
+  "Fiber Uplink":        { bw: 100 },
+  "Darknet Relay":       { bw: 200 },
+};
+
+function calculateBaseSpec(playerLevel: number, equipmentBonuses?: { cpu?: number; ram?: number; bw?: number }): { cpuTotal: number; ramTotal: number; bwTotal: number } {
+  return {
+    cpuTotal: 200 + Math.floor(playerLevel / 10) * 100 + (equipmentBonuses?.cpu || 0),
+    ramTotal: 256 + Math.floor(playerLevel / 10) * 128 + (equipmentBonuses?.ram || 0),
+    bwTotal:  100 + Math.floor(playerLevel / 10) * 50  + (equipmentBonuses?.bw  || 0),
+  };
 }
 
-export interface SessionMemoryStats {
-  sessionId: string;
-  userId: string;
-  totalMemory: number;
-  processCount: number;
-  cpuUsage: number;
-  startTime: number;
-  lastActivity: number;
+/** Sum hardware bonuses from a list of equipped item names */
+function sumHardwareBonuses(equippedItemNames: string[]): { cpu: number; ram: number; bw: number } {
+  let cpu = 0, ram = 0, bw = 0;
+  for (const name of equippedItemNames) {
+    const bonus = HARDWARE_BONUSES[name];
+    if (bonus) {
+      cpu += bonus.cpu || 0;
+      ram += bonus.ram || 0;
+      bw += bonus.bw || 0;
+    }
+  }
+  return { cpu, ram, bw };
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Service
+// ═══════════════════════════════════════════════════════════════════════════
 
 @injectable()
 class MemoryService extends EventEmitter {
-  private processes: Map<string, Map<number, Process>> = new Map(); // sessionId -> pid -> Process
-  private allocations: Map<string, MemoryAllocation[]> = new Map(); // sessionId -> allocations
-  private sessionStats: Map<string, SessionMemoryStats> = new Map();
-  private nextPid: Map<string, number> = new Map(); // sessionId -> next PID
-  private memoryFragmentation: Map<string, number> = new Map(); // sessionId -> fragmentation %
-  private backgroundIntervals: NodeJS.Timeout[] = [];
-  private static readonly MAX_PID = 65535;
+  private gameProcesses: Map<string, Map<number, GameProcess>> = new Map(); // userId → pid → GameProcess
+  private passiveConsumers: Map<string, Map<string, PassiveConsumer>> = new Map(); // userId → consumerId → PassiveConsumer
+  private baseSpecs: Map<string, { cpuTotal: number; ramTotal: number; bwTotal: number }> = new Map(); // userId → base totals
+  private nextPid: Map<string, number> = new Map(); // userId → next PID
+  private ticker: NodeJS.Timeout | null = null;
+  private io: SocketIOServer | null = null;
 
-  // Memory limits per session
-  private readonly SESSION_MEMORY_LIMIT = 128 * 1024; // 128 MB per session
-  private readonly SWAP_MEMORY = 4 * 1024 * 1024; // 4 GB swap
-
-  constructor(@inject(LOGGER) private logger: Logger) {
+  constructor(
+    @inject(LOGGER) private logger: Logger,
+    @inject(SOCKET_IO) io?: SocketIOServer,
+  ) {
     super();
-    this.startBackgroundTasks();
-    this.logger.info("Memory Service initialized");
+    this.io = io || null;
+    this.startTicker();
+    this.logger.info("MemoryService initialized (resource management)");
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // Computer Spec
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /**
+   * Initialize or update a player's computer spec from their level + equipment.
+   * Pass equipped item names to apply hardware bonuses.
+   */
+  initComputerSpec(userId: string, playerLevel: number, equippedItemNames?: string[]): void {
+    const equipmentBonuses = equippedItemNames ? sumHardwareBonuses(equippedItemNames) : undefined;
+    this.baseSpecs.set(userId, calculateBaseSpec(playerLevel, equipmentBonuses));
+    if (!this.gameProcesses.has(userId)) this.gameProcesses.set(userId, new Map());
+    if (!this.passiveConsumers.has(userId)) this.passiveConsumers.set(userId, new Map());
+    if (!this.nextPid.has(userId)) this.nextPid.set(userId, 100);
   }
 
   /**
-   * Initialize a new session with system processes
+   * Get a player's current computer spec with real-time usage from all sources.
    */
-  async initializeSession(sessionId: string, userId: string): Promise<void> {
-    if (this.processes.has(sessionId)) {
-      return; // Already initialized
+  getComputerSpec(userId: string): ComputerSpec {
+    const base = this.baseSpecs.get(userId) || calculateBaseSpec(1);
+
+    // Sum all resource usage: OS overhead + passive consumers + active processes
+    let cpuUsed = OS_OVERHEAD.cpu;
+    let ramUsed = OS_OVERHEAD.ram;
+    let bwUsed = OS_OVERHEAD.bw;
+
+    // Passive consumers
+    const consumers = this.passiveConsumers.get(userId);
+    if (consumers) {
+      for (const c of consumers.values()) {
+        cpuUsed += c.cpuCost;
+        ramUsed += c.ramCost;
+        bwUsed += c.bwCost;
+      }
     }
 
-    const sessionProcesses = new Map<number, Process>();
-    this.processes.set(sessionId, sessionProcesses);
-    this.allocations.set(sessionId, []);
-    this.nextPid.set(sessionId, 1000);
-    this.memoryFragmentation.set(sessionId, 0);
-
-    // Create system processes for this session
-    const systemProcs = [
-      {
-        name: "init",
-        command: "/sbin/init",
-        memory: 2048,
-        cpu: 0.1,
-        user: "root",
-      },
-      {
-        name: "kthreadd",
-        command: "[kthreadd]",
-        memory: 0,
-        cpu: 0.0,
-        user: "root",
-      },
-      {
-        name: "kernel",
-        command: "[kernel]",
-        memory: 4096,
-        cpu: 0.3,
-        user: "root",
-      },
-      {
-        name: "neuro-daemon",
-        command: "/usr/bin/neuro-daemon",
-        memory: 8192,
-        cpu: 1.5,
-        user: "root",
-      },
-      {
-        name: "neural-net",
-        command: "/opt/neural/neural-net",
-        memory: 16384,
-        cpu: 3.2,
-        user: "neural",
-      },
-      {
-        name: "terminal",
-        command: "/usr/bin/aida-terminal",
-        memory: 12288,
-        cpu: 2.1,
-        user: userId,
-      },
-    ];
-
-    systemProcs.forEach((proc, index) => {
-      const process: Process = {
-        pid: index + 1,
-        sessionId,
-        userId,
-        name: proc.name,
-        command: proc.command,
-        memory: proc.memory,
-        cpu: proc.cpu,
-        status: "running",
-        startTime: Date.now(),
-        priority: proc.name === "init" ? -10 : 0,
-        user: proc.user,
-        children: [],
-      };
-
-      if (index > 0) {
-        process.parent = 1;
-        sessionProcesses.get(1)?.children.push(process.pid);
+    // Active game processes
+    const processes = this.gameProcesses.get(userId);
+    if (processes) {
+      for (const p of processes.values()) {
+        if (p.status === "running") {
+          cpuUsed += p.cpuCost;
+          ramUsed += p.ramCost;
+          bwUsed += p.bwCost;
+        }
       }
+    }
 
-      sessionProcesses.set(process.pid, process);
-      this.allocateMemory(sessionId, process.pid, process.memory, "heap");
-    });
-
-    this.nextPid.set(sessionId, systemProcs.length + 1);
-
-    // Initialize session stats
-    this.sessionStats.set(sessionId, {
-      sessionId,
-      userId,
-      totalMemory: systemProcs.reduce((sum, p) => sum + p.memory, 0),
-      processCount: systemProcs.length,
-      cpuUsage: systemProcs.reduce((sum, p) => sum + p.cpu, 0),
-      startTime: Date.now(),
-      lastActivity: Date.now(),
-    });
-
-    this.emit("session:initialized", { sessionId, userId });
+    return {
+      cpuTotal: base.cpuTotal,
+      cpuUsed,
+      ramTotal: base.ramTotal,
+      ramUsed,
+      bwTotal: base.bwTotal,
+      bwUsed,
+    };
   }
 
   /**
-   * Cleanup session and all its processes
+   * Get full resource breakdown (spec + all processes + all passive consumers).
+   */
+  getResourceBreakdown(userId: string): ResourceBreakdown {
+    return {
+      spec: this.getComputerSpec(userId),
+      processes: this.getGameProcesses(userId),
+      passiveConsumers: this.getPassiveConsumers(userId),
+    };
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // Passive Consumers (terminals, connections, backdoors, traces)
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /**
+   * Register a passive resource consumer (terminal tab, server connection, etc.)
+   */
+  addPassiveConsumer(userId: string, type: PassiveConsumer["type"], id: string, label: string): void {
+    if (!this.passiveConsumers.has(userId)) this.passiveConsumers.set(userId, new Map());
+    const consumers = this.passiveConsumers.get(userId)!;
+
+    const cost = PASSIVE_COSTS[type];
+    consumers.set(id, {
+      id,
+      type,
+      label,
+      cpuCost: cost.cpu,
+      ramCost: cost.ram,
+      bwCost: cost.bw,
+    });
+  }
+
+  /**
+   * Remove a passive resource consumer (tab closed, disconnected, backdoor expired).
+   */
+  removePassiveConsumer(userId: string, id: string): void {
+    this.passiveConsumers.get(userId)?.delete(id);
+  }
+
+  /**
+   * Get all passive consumers for a user.
+   */
+  getPassiveConsumers(userId: string): PassiveConsumer[] {
+    const consumers = this.passiveConsumers.get(userId);
+    if (!consumers) return [];
+    return [...consumers.values()];
+  }
+
+  /**
+   * Convenience: register a terminal tab as passive consumer.
+   */
+  registerTerminal(userId: string, terminalId: string, label: string): void {
+    this.addPassiveConsumer(userId, "terminal", `term:${terminalId}`, label);
+  }
+
+  /**
+   * Convenience: unregister a terminal tab.
+   */
+  unregisterTerminal(userId: string, terminalId: string): void {
+    this.removePassiveConsumer(userId, `term:${terminalId}`);
+  }
+
+  /**
+   * Convenience: register a server connection as passive consumer.
+   */
+  registerConnection(userId: string, serverId: string, serverName: string): void {
+    this.addPassiveConsumer(userId, "connection", `conn:${serverId}`, serverName);
+  }
+
+  /**
+   * Convenience: unregister a server connection.
+   */
+  unregisterConnection(userId: string, serverId: string): void {
+    this.removePassiveConsumer(userId, `conn:${serverId}`);
+  }
+
+  /**
+   * Convenience: register an active backdoor as passive consumer.
+   */
+  registerBackdoor(userId: string, serverId: string, serverName: string): void {
+    this.addPassiveConsumer(userId, "backdoor", `bdoor:${serverId}`, serverName);
+  }
+
+  /**
+   * Convenience: unregister a backdoor.
+   */
+  unregisterBackdoor(userId: string, serverId: string): void {
+    this.removePassiveConsumer(userId, `bdoor:${serverId}`);
+  }
+
+  /**
+   * Convenience: register an active trace against this player.
+   */
+  registerActiveTrace(userId: string, traceId: string, label: string): void {
+    this.addPassiveConsumer(userId, "active_trace", `trace:${traceId}`, label);
+  }
+
+  /**
+   * Convenience: unregister a trace.
+   */
+  unregisterActiveTrace(userId: string, traceId: string): void {
+    this.removePassiveConsumer(userId, `trace:${traceId}`);
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // Game Processes (hack, scan, decrypt, etc.)
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /**
+   * Check if a player has enough free resources to spawn a process.
+   */
+  canSpawnProcess(userId: string, type: GameProcessType): { allowed: boolean; reason?: string } {
+    const spec = this.getComputerSpec(userId);
+    const cost = PROCESS_COSTS[type];
+
+    const cpuFree = spec.cpuTotal - spec.cpuUsed;
+    const ramFree = spec.ramTotal - spec.ramUsed;
+    const bwFree = spec.bwTotal - spec.bwUsed;
+
+    if (cost.cpuCost > cpuFree) {
+      return { allowed: false, reason: `Insufficient CPU: need ${cost.cpuCost}, have ${cpuFree} free. Use 'kill <pid>' or close tabs.` };
+    }
+    if (cost.ramCost > ramFree) {
+      return { allowed: false, reason: `Insufficient RAM: need ${cost.ramCost}MB, have ${ramFree}MB free.` };
+    }
+    if (cost.bwCost > bwFree) {
+      return { allowed: false, reason: `Insufficient Bandwidth: need ${cost.bwCost}Mbps, have ${bwFree}Mbps free.` };
+    }
+
+    return { allowed: true };
+  }
+
+  /**
+   * Spawn a game process. Returns the process, or null if insufficient resources.
+   */
+  spawnGameProcess(
+    userId: string,
+    sessionId: string,
+    type: GameProcessType,
+    skillLevel: number,
+    targetLabel: string,
+    targetId?: string,
+    onComplete?: () => Promise<void>,
+    metadata?: Record<string, unknown>,
+    priority: number = 0,
+  ): GameProcess | null {
+    const cost = PROCESS_COSTS[type];
+    const baseDuration = calculateProcessDuration(type, skillLevel);
+    const adjusted = applyPriority(cost.cpuCost, baseDuration, priority);
+
+    // Check with adjusted CPU cost
+    const spec = this.getComputerSpec(userId);
+    const cpuFree = spec.cpuTotal - spec.cpuUsed;
+    const ramFree = spec.ramTotal - spec.ramUsed;
+    const bwFree = spec.bwTotal - spec.bwUsed;
+
+    if (adjusted.cpuCost > cpuFree || cost.ramCost > ramFree || cost.bwCost > bwFree) {
+      return null;
+    }
+
+    // Generate PID
+    if (!this.gameProcesses.has(userId)) this.gameProcesses.set(userId, new Map());
+    const userProcesses = this.gameProcesses.get(userId)!;
+    let pid = this.nextPid.get(userId) || 100;
+    while (userProcesses.has(pid)) pid++;
+    this.nextPid.set(userId, pid + 1);
+
+    const process: GameProcess = {
+      pid,
+      userId,
+      sessionId,
+      type,
+      targetId,
+      targetLabel,
+      baseCpuCost: cost.cpuCost,
+      cpuCost: adjusted.cpuCost,
+      ramCost: cost.ramCost,
+      bwCost: cost.bwCost,
+      priority,
+      detectionModifier: adjusted.detectionModifier,
+      startedAt: Date.now(),
+      baseDuration: baseDuration,
+      duration: adjusted.duration,
+      progress: 0,
+      status: "running",
+      onComplete,
+      metadata,
+    };
+
+    userProcesses.set(pid, process);
+
+    // Push Socket.IO event
+    if (this.io) {
+      this.io.to(`player:${userId}`).emit("process:started", {
+        pid,
+        type,
+        targetLabel,
+        eta: Math.ceil(adjusted.duration / 1000),
+        cpuCost: adjusted.cpuCost,
+        ramCost: cost.ramCost,
+        bwCost: cost.bwCost,
+        priority,
+      });
+    }
+
+    this.logger.info({ userId, pid, type, targetLabel, durationSec: Math.ceil(adjusted.duration / 1000), priority }, "Game process spawned");
+    return process;
+  }
+
+  /**
+   * Cancel a running game process. Frees resources immediately.
+   */
+  cancelGameProcess(userId: string, pid: number): boolean {
+    const process = this.gameProcesses.get(userId)?.get(pid);
+    if (!process || process.status !== "running") return false;
+
+    process.status = "cancelled";
+    this.gameProcesses.get(userId)!.delete(pid);
+
+    // Fire onCancel for consequence handling (partial detection, cooldowns)
+    if (process.metadata?.onCancel && typeof process.metadata.onCancel === "function") {
+      (process.metadata.onCancel as () => Promise<void>)().catch((err) =>
+        this.logger.error({ err, pid, type: process.type }, "Process onCancel error"),
+      );
+    }
+
+    if (this.io) {
+      this.io.to(`player:${userId}`).emit("process:cancelled", { pid });
+    }
+
+    this.logger.info({ userId, pid, type: process.type }, "Game process cancelled");
+    return true;
+  }
+
+  /**
+   * Change the priority of a running process.
+   * Adjusts CPU cost and remaining duration proportionally.
+   * Returns the new CPU cost delta (positive = needs more CPU, negative = freed CPU).
+   */
+  reniceProcess(userId: string, pid: number, newPriority: number): { success: boolean; reason?: string; cpuDelta?: number } {
+    const process = this.gameProcesses.get(userId)?.get(pid);
+    if (!process || process.status !== "running") {
+      return { success: false, reason: `No running process with PID ${pid}.` };
+    }
+
+    const oldPriority = process.priority;
+    if (oldPriority === newPriority) {
+      return { success: false, reason: `Process ${pid} is already at priority ${newPriority}.` };
+    }
+
+    // Calculate new costs
+    const newAdj = applyPriority(process.baseCpuCost, process.baseDuration, newPriority);
+    const oldCpuCost = process.cpuCost;
+
+    // Check if we have enough CPU for the increase
+    if (newAdj.cpuCost > oldCpuCost) {
+      const spec = this.getComputerSpec(userId);
+      const cpuFree = spec.cpuTotal - spec.cpuUsed;
+      const cpuNeeded = newAdj.cpuCost - oldCpuCost;
+      if (cpuNeeded > cpuFree) {
+        return { success: false, reason: `Insufficient CPU for higher priority: need ${cpuNeeded} more, have ${cpuFree} free.` };
+      }
+    }
+
+    // Apply new priority — scale remaining duration proportionally
+    const elapsed = Date.now() - process.startedAt;
+    const oldRemaining = Math.max(0, process.duration - elapsed);
+    const ratio = process.baseDuration > 0 ? newAdj.duration / process.baseDuration : 1;
+    const oldRatio = process.baseDuration > 0 ? process.duration / process.baseDuration : 1;
+    const newRemaining = oldRemaining * (ratio / oldRatio);
+
+    process.priority = newPriority;
+    process.cpuCost = newAdj.cpuCost;
+    process.duration = elapsed + newRemaining;
+
+    const cpuDelta = newAdj.cpuCost - oldCpuCost;
+
+    this.logger.info({ userId, pid, oldPriority, newPriority, cpuDelta }, "Process renice");
+    return { success: true, cpuDelta };
+  }
+
+  /**
+   * Get all running game processes for a user.
+   */
+  getGameProcesses(userId: string): GameProcess[] {
+    const procs = this.gameProcesses.get(userId);
+    if (!procs) return [];
+    return [...procs.values()].filter((p) => p.status === "running");
+  }
+
+  /**
+   * Get a specific game process.
+   */
+  getGameProcess(userId: string, pid: number): GameProcess | null {
+    return this.gameProcesses.get(userId)?.get(pid) || null;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // Tick Loop
+  // ═══════════════════════════════════════════════════════════════════════
+
+  private startTicker(): void {
+    if (this.ticker) return;
+    this.ticker = setInterval(() => this.tick(), 1000);
+    this.ticker.unref?.();
+  }
+
+  private tick(): void {
+    const now = Date.now();
+
+    for (const [userId, userProcesses] of this.gameProcesses) {
+      for (const [pid, process] of userProcesses) {
+        if (process.status !== "running") continue;
+
+        const elapsed = now - process.startedAt;
+        process.progress = Math.min(100, Math.floor((elapsed / process.duration) * 100));
+
+        // Push progress every 5 seconds
+        if (this.io && elapsed > 0 && Math.floor(elapsed / 5000) !== Math.floor((elapsed - 1000) / 5000)) {
+          this.io.to(`player:${userId}`).emit("process:progress", {
+            pid,
+            progress: process.progress,
+            eta: Math.max(0, Math.ceil((process.duration - elapsed) / 1000)),
+          });
+        }
+
+        // Check completion
+        if (elapsed >= process.duration) {
+          process.status = "completed";
+          process.progress = 100;
+          userProcesses.delete(pid);
+
+          // Fire callback
+          if (process.onComplete) {
+            process.onComplete().catch((err) =>
+              this.logger.error({ err, pid, type: process.type }, "Process completion callback failed"),
+            );
+          }
+
+          // Push event
+          if (this.io) {
+            this.io.to(`player:${userId}`).emit("process:completed", {
+              pid,
+              type: process.type,
+              targetLabel: process.targetLabel,
+            });
+          }
+
+          this.logger.info({ userId, pid, type: process.type, targetLabel: process.targetLabel }, "Game process completed");
+        }
+      }
+    }
+
+    // Push resource updates to all active players every 5 seconds
+    if (this.io && now % 5000 < 1000) {
+      for (const userId of this.baseSpecs.keys()) {
+        const spec = this.getComputerSpec(userId);
+        this.io.to(`player:${userId}`).emit("resources:update", {
+          cpuUsed: spec.cpuUsed,
+          cpuTotal: spec.cpuTotal,
+          ramUsed: spec.ramUsed,
+          ramTotal: spec.ramTotal,
+          bwUsed: spec.bwUsed,
+          bwTotal: spec.bwTotal,
+        });
+      }
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // Session Lifecycle
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /**
+   * Initialize a session — sets up computer spec and registers first terminal.
+   */
+  async initializeSession(sessionId: string, userId: string, playerLevel: number = 1): Promise<void> {
+    this.initComputerSpec(userId, playerLevel);
+    this.registerTerminal(userId, "default", "Terminal 1");
+    this.logger.debug({ userId, sessionId }, "Session initialized with resource tracking");
+  }
+
+  /**
+   * Clean up everything for a user on disconnect.
    */
   async cleanupSession(sessionId: string): Promise<void> {
-    const sessionProcesses = this.processes.get(sessionId);
-    if (!sessionProcesses) return;
-
-    // Kill all processes
-    for (const pid of sessionProcesses.keys()) {
-      if (pid > 3) {
-        // Don't try to kill critical system processes
-        await this.killProcess(sessionId, pid, "KILL");
+    // Find userId from any process in this session
+    for (const [userId, procs] of this.gameProcesses) {
+      for (const p of procs.values()) {
+        if (p.sessionId === sessionId) {
+          // Cancel all running processes
+          for (const [_pid, proc] of procs) {
+            if (proc.status === "running") {
+              proc.status = "cancelled";
+            }
+          }
+          procs.clear();
+          this.passiveConsumers.delete(userId);
+          this.baseSpecs.delete(userId);
+          this.nextPid.delete(userId);
+          return;
+        }
       }
     }
-
-    // Remove session data
-    this.processes.delete(sessionId);
-    this.allocations.delete(sessionId);
-    this.sessionStats.delete(sessionId);
-    this.nextPid.delete(sessionId);
-    this.memoryFragmentation.delete(sessionId);
-
-    this.emit("session:cleaned", { sessionId });
   }
 
   /**
-   * Spawn a new process
+   * Clean up all game processes for a user (without removing spec/consumers).
    */
+  cleanupGameProcesses(userId: string): void {
+    const procs = this.gameProcesses.get(userId);
+    if (procs) {
+      for (const p of procs.values()) {
+        if (p.status === "running") p.status = "cancelled";
+      }
+      procs.clear();
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // Legacy API compatibility (used by processCommands.ts)
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /** Get memory info formatted for the `free` command (values in KB) */
+  getMemoryInfo(userId: string): { total: number; used: number; free: number; available: number; buffers: number; cached: number; swapTotal: number; swapUsed: number; swapFree: number } {
+    const spec = this.getComputerSpec(userId);
+    const totalKB = spec.ramTotal * 1024;
+    const usedKB = spec.ramUsed * 1024;
+    const freeKB = (spec.ramTotal - spec.ramUsed) * 1024;
+    return {
+      total: totalKB,
+      used: usedKB,
+      free: freeKB,
+      available: freeKB,
+      buffers: 0,
+      cached: 0,
+      swapTotal: 0,
+      swapUsed: 0,
+      swapFree: 0,
+    };
+  }
+
+  /** Get total CPU usage as percentage */
+  getTotalCpuUsage(userId: string): number {
+    const spec = this.getComputerSpec(userId);
+    return spec.cpuTotal > 0 ? (spec.cpuUsed / spec.cpuTotal) * 100 : 0;
+  }
+
+  /** Get uptime based on when spec was initialized */
+  getUptime(_userId: string): number {
+    return Date.now();
+  }
+
+  /** Get load average */
+  getLoadAverage(userId: string): { one: number; five: number; fifteen: number } {
+    const spec = this.getComputerSpec(userId);
+    const load = spec.cpuTotal > 0 ? (spec.cpuUsed / spec.cpuTotal) * 2 : 0;
+    return { one: +load.toFixed(2), five: +(load * 0.9).toFixed(2), fifteen: +(load * 0.8).toFixed(2) };
+  }
+
+  // ── Legacy API shims for hackCommands.ts ──
+  // These bridge the old MemoryService API to the new system.
+  // hackCommands registers hack sessions as "processes" for ps visibility.
+
   async spawnProcess(
     sessionId: string,
-    name: string,
-    command: string,
-    user: string,
-    parentPid?: number,
+    _name: string,
+    _command: string,
+    _memory?: number | string,
+    _cpu?: number,
+    _user?: string,
   ): Promise<number> {
-    const sessionProcesses = this.processes.get(sessionId);
-    if (!sessionProcesses) {
-      throw new Error("Session not initialized");
-    }
-
-    const estimatedMemory = this.estimateMemoryNeeds(name, command);
-
-    if (!this.canAllocateMemory(sessionId, estimatedMemory)) {
-      throw new Error("Insufficient memory to spawn process");
-    }
-
-    const currentPid = this.nextPid.get(sessionId) || 1000;
-    const nextPid = currentPid >= MemoryService.MAX_PID ? 1001 : currentPid + 1;
-    this.nextPid.set(sessionId, nextPid);
-
-    const process: Process = {
-      pid: currentPid,
-      sessionId,
-      userId: user,
-      name,
-      command,
-      memory: estimatedMemory,
-      cpu: 0.1,
-      status: "running",
-      startTime: Date.now(),
-      priority: 0,
-      user,
-      ...(parentPid !== undefined ? { parent: parentPid } : {}),
-      children: [],
-    };
-
-    sessionProcesses.set(process.pid, process);
-    this.allocateMemory(sessionId, process.pid, estimatedMemory, "heap");
-
-    // Add to parent's children
-    if (parentPid && sessionProcesses.has(parentPid)) {
-      sessionProcesses.get(parentPid)!.children.push(process.pid);
-    }
-
-    // Update session stats
-    this.updateSessionStats(sessionId);
-
-    this.emit("process:spawned", {
-      sessionId,
-      pid: process.pid,
-      name,
-      command,
-    });
-
-    return process.pid;
-  }
-
-  /**
-   * Kill a process
-   */
-  async killProcess(
-    sessionId: string,
-    pid: number,
-    signal: string = "TERM",
-  ): Promise<boolean> {
-    const sessionProcesses = this.processes.get(sessionId);
-    if (!sessionProcesses) return false;
-
-    const process = sessionProcesses.get(pid);
-    if (!process) return false;
-
-    // Cannot kill critical system processes
-    if (pid <= 3) {
-      throw new Error("Cannot kill system critical processes");
-    }
-
-    switch (signal) {
-      case "TERM":
-      case "INT":
-        process.status = "stopped";
-        setTimeout(() => this.removeProcess(sessionId, pid), 1000);
-        break;
-      case "KILL":
-        this.removeProcess(sessionId, pid);
-        break;
-      case "STOP":
-        process.status = "stopped";
-        break;
-      case "CONT":
-        process.status = "running";
-        break;
-      default:
-        throw new Error(`Unknown signal: ${signal}`);
-    }
-
-    this.emit("process:killed", { sessionId, pid, signal });
-    return true;
-  }
-
-  /**
-   * Remove a process completely
-   */
-  private removeProcess(sessionId: string, pid: number): void {
-    const sessionProcesses = this.processes.get(sessionId);
-    if (!sessionProcesses) return;
-
-    const process = sessionProcesses.get(pid);
-    if (!process) return;
-
-    // Kill all children first
-    process.children.forEach((childPid) => {
-      this.killProcess(sessionId, childPid, "TERM");
-    });
-
-    // Remove from parent's children list
-    if (process.parent) {
-      const parent = sessionProcesses.get(process.parent);
-      if (parent) {
-        parent.children = parent.children.filter(
-          (childPid) => childPid !== pid,
-        );
+    // Find userId from sessionId (best effort)
+    let userId = sessionId;
+    for (const [uid, procs] of this.gameProcesses) {
+      for (const p of procs.values()) {
+        if (p.sessionId === sessionId) { userId = uid; break; }
       }
     }
-
-    // Free memory
-    this.deallocateMemory(sessionId, pid);
-
-    // Remove process
-    sessionProcesses.delete(pid);
-
-    // Update session stats
-    this.updateSessionStats(sessionId);
-
-    this.emit("process:removed", { sessionId, pid });
+    // Return a fake PID — hack sessions manage their own lifecycle
+    const pid = this.nextPid.get(userId) || 100;
+    this.nextPid.set(userId, pid + 1);
+    return pid;
   }
 
-  /**
-   * Allocate memory for a process
-   */
-  private allocateMemory(
-    sessionId: string,
-    processId: number,
-    size: number,
-    type: "heap" | "stack" | "data" | "code",
-  ): boolean {
-    if (!this.canAllocateMemory(sessionId, size)) {
-      return false;
-    }
+  getProcess(_sessionId: string, _pid: number): any {
+    return null; // Hack commands check for null and handle gracefully
+  }
 
-    const allocations = this.allocations.get(sessionId) || [];
+  async killProcess(_sessionId: string, _pid: number, _signal?: string): Promise<boolean> {
+    return true; // No-op — hack session cleanup is handled by hackService
+  }
 
-    const allocation: MemoryAllocation = {
-      processId,
-      sessionId,
-      size,
-      type,
-      address: this.findFreeAddress(),
-      allocated: true,
-      timestamp: Date.now(),
-    };
+  /** Get processes list (legacy — returns empty, game processes shown via getGameProcesses) */
+  getProcesses(_sessionId: string): any[] {
+    return [];
+  }
 
-    allocations.push(allocation);
-    this.allocations.set(sessionId, allocations);
-
+  /** Set process priority (legacy no-op) */
+  async setProcessPriority(_sessionId: string, _pid: number, _priority: number): Promise<boolean> {
     return true;
-  }
-
-  /**
-   * Deallocate memory for a process
-   */
-  private deallocateMemory(sessionId: string, processId: number): void {
-    const allocations = this.allocations.get(sessionId) || [];
-
-    const remaining = allocations.filter((alloc) => {
-      if (alloc.processId === processId) {
-        alloc.allocated = false;
-        return false;
-      }
-      return true;
-    });
-
-    this.allocations.set(sessionId, remaining);
-  }
-
-  /**
-   * Check if memory can be allocated
-   */
-  private canAllocateMemory(sessionId: string, size: number): boolean {
-    const memInfo = this.getMemoryInfo(sessionId);
-    const availableMemory = memInfo.available;
-    return availableMemory >= size;
-  }
-
-  /**
-   * Find a free memory address (simulated)
-   */
-  private findFreeAddress(): number {
-    return Math.floor(Math.random() * 0xffffffff);
-  }
-
-  /**
-   * Estimate memory needs based on process type
-   */
-  private estimateMemoryNeeds(_name: string, command: string): number {
-    if (command.includes("neural") || command.includes("ai")) {
-      return 8192 + Math.floor(Math.random() * 16384); // 8-24 MB
-    } else if (command.includes("daemon") || command.includes("service")) {
-      return 2048 + Math.floor(Math.random() * 4096); // 2-6 MB
-    } else if (command.includes("shell") || command.includes("terminal")) {
-      return 4096 + Math.floor(Math.random() * 8192); // 4-12 MB
-    } else {
-      return 1024 + Math.floor(Math.random() * 2048); // 1-3 MB
-    }
-  }
-
-  /**
-   * Get memory information for a session
-   */
-  getMemoryInfo(sessionId: string): MemoryInfo {
-    const allocations = this.allocations.get(sessionId) || [];
-    const usedMemory = allocations
-      .filter((alloc) => alloc.allocated)
-      .reduce((total, alloc) => total + alloc.size, 0);
-
-    const totalMemory = this.SESSION_MEMORY_LIMIT;
-    const bufferCache = Math.floor(totalMemory * 0.1); // 10% for buffers/cache
-    const actualUsed = usedMemory + bufferCache;
-    const free = totalMemory - actualUsed;
-    const fragmentation = this.memoryFragmentation.get(sessionId) || 0;
-    const fragmented = Math.floor(free * (fragmentation / 100));
-    const available = Math.max(0, free - fragmented);
-
-    // Simulate swap usage
-    const swapUsed = Math.max(0, usedMemory - totalMemory * 0.8);
-    const swapFree = this.SWAP_MEMORY - swapUsed;
-
-    return {
-      total: totalMemory,
-      used: actualUsed,
-      free,
-      available,
-      buffers: Math.floor(bufferCache * 0.3),
-      cached: Math.floor(bufferCache * 0.7),
-      swapTotal: this.SWAP_MEMORY,
-      swapUsed,
-      swapFree,
-    };
-  }
-
-  /**
-   * Get all processes for a session
-   */
-  getProcesses(sessionId: string): Process[] {
-    const sessionProcesses = this.processes.get(sessionId);
-    if (!sessionProcesses) return [];
-    return Array.from(sessionProcesses.values());
-  }
-
-  /**
-   * Get a specific process
-   */
-  getProcess(sessionId: string, pid: number): Process | undefined {
-    const sessionProcesses = this.processes.get(sessionId);
-    return sessionProcesses?.get(pid);
-  }
-
-  /**
-   * Get processes by user
-   */
-  getProcessesByUser(sessionId: string, user: string): Process[] {
-    return this.getProcesses(sessionId).filter((p) => p.user === user);
-  }
-
-  /**
-   * Set process priority
-   */
-  async setProcessPriority(
-    sessionId: string,
-    pid: number,
-    priority: number,
-  ): Promise<boolean> {
-    const process = this.getProcess(sessionId, pid);
-    if (!process) return false;
-
-    priority = Math.max(-20, Math.min(19, priority));
-    process.priority = priority;
-
-    const baseCpu = this.getBaseCpuUsage(process.name);
-    const priorityFactor = (20 - priority) / 20;
-    process.cpu = baseCpu * priorityFactor;
-
-    this.emit("process:priority_changed", { sessionId, pid, priority });
-    return true;
-  }
-
-  /**
-   * Get base CPU usage for process types
-   */
-  private getBaseCpuUsage(processName: string): number {
-    switch (processName) {
-      case "init":
-        return 0.1;
-      case "kernel":
-        return 0.3;
-      case "neural-net":
-        return 3.0;
-      case "neuro-daemon":
-        return 1.5;
-      case "terminal":
-        return 2.0;
-      default:
-        return 0.1;
-    }
-  }
-
-  /**
-   * Get memory usage for a specific process
-   */
-  getProcessMemoryUsage(sessionId: string, pid: number): number {
-    const allocations = this.allocations.get(sessionId) || [];
-    return allocations
-      .filter((alloc) => alloc.processId === pid && alloc.allocated)
-      .reduce((total, alloc) => total + alloc.size, 0);
-  }
-
-  /**
-   * Get system load average for a session
-   */
-  getLoadAverage(sessionId: string): {
-    one: number;
-    five: number;
-    fifteen: number;
-  } {
-    const runningProcesses = this.getProcesses(sessionId).filter(
-      (p) => p.status === "running",
-    ).length;
-
-    const baseLoad = runningProcesses / 4;
-
-    return {
-      one: Math.max(0, baseLoad + (Math.random() - 0.5) * 0.3),
-      five: Math.max(0, baseLoad + (Math.random() - 0.5) * 0.2),
-      fifteen: Math.max(0, baseLoad + (Math.random() - 0.5) * 0.1),
-    };
-  }
-
-  /**
-   * Get total CPU usage for a session
-   */
-  getTotalCpuUsage(sessionId: string): number {
-    return this.getProcesses(sessionId).reduce(
-      (total, process) => total + process.cpu,
-      0,
-    );
-  }
-
-  /**
-   * Get session statistics
-   */
-  getSessionStats(sessionId: string): SessionMemoryStats | undefined {
-    return this.sessionStats.get(sessionId);
-  }
-
-  /**
-   * Get all active sessions
-   */
-  getAllSessions(): SessionMemoryStats[] {
-    return Array.from(this.sessionStats.values());
-  }
-
-  /**
-   * Update session statistics
-   */
-  private updateSessionStats(sessionId: string): void {
-    const stats = this.sessionStats.get(sessionId);
-    if (!stats) return;
-
-    const processes = this.getProcesses(sessionId);
-    const memInfo = this.getMemoryInfo(sessionId);
-
-    stats.totalMemory = memInfo.used;
-    stats.processCount = processes.length;
-    stats.cpuUsage = this.getTotalCpuUsage(sessionId);
-    stats.lastActivity = Date.now();
-
-    this.sessionStats.set(sessionId, stats);
-  }
-
-  /**
-   * Start background tasks for process simulation
-   */
-  private startBackgroundTasks(): void {
-    // Update process stats every 5 seconds
-    this.backgroundIntervals.push(setInterval(() => {
-      for (const sessionId of this.processes.keys()) {
-        this.updateProcessStats(sessionId);
-        this.simulateMemoryActivity(sessionId);
-      }
-    }, 5000));
-
-    // Cleanup inactive sessions every minute
-    this.backgroundIntervals.push(setInterval(() => {
-      this.cleanupInactiveSessions();
-    }, 60000));
   }
 
   destroy(): void {
-    for (const id of this.backgroundIntervals) {
-      clearInterval(id);
+    if (this.ticker) {
+      clearInterval(this.ticker);
+      this.ticker = null;
     }
-    this.backgroundIntervals = [];
-  }
-
-  /**
-   * Update process statistics for realism
-   */
-  private updateProcessStats(sessionId: string): void {
-    const sessionProcesses = this.processes.get(sessionId);
-    if (!sessionProcesses) return;
-
-    for (const process of sessionProcesses.values()) {
-      // Simulate CPU fluctuations
-      const baseCpu = this.getBaseCpuUsage(process.name);
-      process.cpu = Math.max(0, baseCpu + (Math.random() - 0.5) * 1.5);
-
-      // Simulate memory changes for active processes
-      if (process.name === "neural-net" || process.name === "terminal") {
-        const memoryChange = Math.floor((Math.random() - 0.5) * 1024);
-        process.memory = Math.max(1024, process.memory + memoryChange);
-      }
-
-      // Occasionally change status
-      if (Math.random() < 0.03 && process.name !== "init") {
-        process.status = process.status === "running" ? "sleeping" : "running";
-      }
-    }
-
-    this.updateSessionStats(sessionId);
-  }
-
-  /**
-   * Simulate memory activity and fragmentation
-   */
-  private simulateMemoryActivity(sessionId: string): void {
-    const currentFragmentation = this.memoryFragmentation.get(sessionId) || 0;
-
-    // Increase fragmentation over time
-    let newFragmentation = currentFragmentation + Math.random() * 0.3;
-    newFragmentation = Math.min(newFragmentation, 12); // Max 12% fragmentation
-
-    // Occasionally defragment
-    if (Math.random() < 0.15) {
-      newFragmentation *= 0.7;
-    }
-
-    this.memoryFragmentation.set(sessionId, newFragmentation);
-  }
-
-  /**
-   * Cleanup sessions that have been inactive for too long
-   */
-  private async cleanupInactiveSessions(): Promise<void> {
-    const now = Date.now();
-    const INACTIVE_THRESHOLD = 30 * 60 * 1000; // 30 minutes
-
-    for (const [sessionId, stats] of this.sessionStats.entries()) {
-      if (now - stats.lastActivity > INACTIVE_THRESHOLD) {
-        await this.cleanupSession(sessionId);
-        this.emit("session:timeout", { sessionId, userId: stats.userId });
-      }
-    }
-  }
-
-  /**
-   * Format memory size for display
-   */
-  static formatMemorySize(sizeInKB: number): string {
-    if (sizeInKB < 1024) {
-      return `${sizeInKB.toFixed(1)}K`;
-    } else if (sizeInKB < 1024 * 1024) {
-      return `${(sizeInKB / 1024).toFixed(1)}M`;
-    } else {
-      return `${(sizeInKB / (1024 * 1024)).toFixed(1)}G`;
-    }
-  }
-
-  /**
-   * Format time duration
-   */
-  static formatDuration(milliseconds: number): string {
-    const seconds = Math.floor(milliseconds / 1000);
-    const minutes = Math.floor(seconds / 60);
-    const hours = Math.floor(minutes / 60);
-    const days = Math.floor(hours / 24);
-
-    if (days > 0) {
-      return `${days}d ${hours % 24}h`;
-    } else if (hours > 0) {
-      return `${hours}h ${minutes % 60}m`;
-    } else if (minutes > 0) {
-      return `${minutes}m ${seconds % 60}s`;
-    } else {
-      return `${seconds}s`;
-    }
-  }
-
-  /**
-   * Get detailed process information
-   */
-  getProcessDetails(sessionId: string, pid: number): any {
-    const process = this.getProcess(sessionId, pid);
-    if (!process) return null;
-
-    const allocations = this.allocations.get(sessionId) || [];
-    const processAllocations = allocations.filter(
-      (a) => a.processId === pid && a.allocated,
-    );
-    const memoryUsage = this.getProcessMemoryUsage(sessionId, pid);
-    const uptime = Date.now() - process.startTime;
-
-    return {
-      ...process,
-      memoryUsage,
-      uptime,
-      allocations: processAllocations.length,
-      memoryBreakdown: {
-        heap: processAllocations
-          .filter((a) => a.type === "heap")
-          .reduce((s, a) => s + a.size, 0),
-        stack: processAllocations
-          .filter((a) => a.type === "stack")
-          .reduce((s, a) => s + a.size, 0),
-        data: processAllocations
-          .filter((a) => a.type === "data")
-          .reduce((s, a) => s + a.size, 0),
-        code: processAllocations
-          .filter((a) => a.type === "code")
-          .reduce((s, a) => s + a.size, 0),
-      },
-    };
   }
 }
 

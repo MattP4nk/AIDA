@@ -60,7 +60,7 @@ export interface ObjectiveTypeDefinition {
 }
 
 // ---------------------------------------------------------------------------
-// Canonical Objective Types  (24 total)
+// Canonical Objective Types  (27 total — 24 original + 3 network-aware)
 // ---------------------------------------------------------------------------
 
 /** All 24 canonical objective types, keyed by their unique type string. */
@@ -122,6 +122,18 @@ export const OBJECTIVE_TYPES: Map<string, ObjectiveTypeDefinition> = new Map<
       progressType: "boolean",
       trackedBy: "onHackComplete",
       requiredMetadata: ["serverId", "minLevel"],
+      exampleTarget: true,
+    },
+  ],
+  [
+    "install_backdoor",
+    {
+      type: "install_backdoor",
+      description: "Install a backdoor on a server",
+      progressType: "boolean",
+      trackedBy: "onHackComplete",
+      requiredMetadata: [],
+      optionalMetadata: ["serverId"],
       exampleTarget: true,
     },
   ],
@@ -354,6 +366,116 @@ export const OBJECTIVE_TYPES: Map<string, ObjectiveTypeDefinition> = new Map<
       exampleTarget: 3,
     },
   ],
+
+  // ── Network objectives (tracked by onServerConnect) ──
+  [
+    "infiltrate_network",
+    {
+      type: "infiltrate_network",
+      description: "Reach a server deep inside a specific network",
+      progressType: "boolean",
+      trackedBy: "onServerConnect",
+      requiredMetadata: ["networkId"],
+      optionalMetadata: ["targetRole", "minDepth"],
+      exampleTarget: true,
+    },
+  ],
+  [
+    "trace_connection",
+    {
+      type: "trace_connection",
+      description: "Discover a specific server by following network clues",
+      progressType: "boolean",
+      trackedBy: "onServerConnect",
+      requiredMetadata: ["serverId"],
+      exampleTarget: true,
+    },
+  ],
+  [
+    "exfiltrate_data",
+    {
+      type: "exfiltrate_data",
+      description: "Read specific files from a deep network server",
+      progressType: "boolean",
+      trackedBy: "onFileOperation",
+      requiredMetadata: ["serverId", "fileId"],
+      exampleTarget: true,
+    },
+  ],
+
+  // ── New Systems Integration (tracked by new hooks) ────────────────
+
+  [
+    "download_file",
+    {
+      type: "download_file",
+      description: "Download a file to your home server",
+      progressType: "boolean",
+      trackedBy: "onFileOperation",
+      requiredMetadata: ["fileId"],
+      optionalMetadata: ["serverId"],
+      exampleTarget: true,
+    },
+  ],
+  [
+    "decode_content",
+    {
+      type: "decode_content",
+      description: "Decode encoded content from a file",
+      progressType: "boolean",
+      trackedBy: "onDecodeSuccess",
+      requiredMetadata: ["encoding"],
+      optionalMetadata: ["serverId", "fileId"],
+      exampleTarget: true,
+    },
+  ],
+  [
+    "defend_home",
+    {
+      type: "defend_home",
+      description: "Purchase or upgrade a home defense",
+      progressType: "boolean",
+      trackedBy: "onDefenseEvent",
+      requiredMetadata: ["defenseType"],
+      optionalMetadata: ["minLevel"],
+      exampleTarget: true,
+    },
+  ],
+  [
+    "claim_bounty",
+    {
+      type: "claim_bounty",
+      description: "Claim and complete a bounty",
+      progressType: "boolean",
+      trackedBy: "onBountyCompleted",
+      requiredMetadata: [],
+      optionalMetadata: ["targetFactionId"],
+      exampleTarget: true,
+    },
+  ],
+  [
+    "survive_trace",
+    {
+      type: "survive_trace",
+      description: "Successfully evade a trace",
+      progressType: "count",
+      trackedBy: "onTraceEvaded",
+      requiredMetadata: [],
+      exampleTarget: 1,
+    },
+  ],
+  [
+    "scan_subnet",
+    {
+      type: "scan_subnet",
+      description: "Use subnet analysis on network ranges",
+      progressType: "count",
+      trackedBy: "onSubnetUsed",
+      requiredMetadata: [],
+      optionalMetadata: ["networkZone"],
+      exampleTarget: 2,
+    },
+  ],
 ]);
 
 // ---------------------------------------------------------------------------
@@ -393,13 +515,16 @@ export const MISSION_CATEGORIES: Map<string, string[]> = new Map<
   string,
   string[]
 >([
-  ["action", ["hack", "hack_target", "hack_stealth", "hack_method", "gain_access"]],
+  ["action", ["hack", "hack_target", "hack_stealth", "hack_method", "gain_access", "install_backdoor"]],
   ["file", ["steal", "steal_count", "upload_file", "delete_file"]],
   ["social", ["message", "contact_player"]],
   ["forum", ["forum_post", "forum_reply", "forum_interaction"]],
   ["exploration", ["explore", "connect_server", "discover_server_type"]],
   ["progression", ["skill_level", "gain_xp", "earn_credits", "spend_credits"]],
   ["faction", ["join_faction", "faction_reputation", "faction_mission"]],
+  ["network", ["infiltrate_network", "trace_connection", "exfiltrate_data"]],
+  ["bonus", ["claim_bounty", "survive_trace", "scan_subnet"]],
+  ["defense", ["defend_home", "decode_content", "download_file"]],
 ]);
 
 // ---------------------------------------------------------------------------
@@ -554,6 +679,28 @@ const OBJECTIVE_HINTS: Record<string, string> = {
     "Complete faction tasks and missions to increase your reputation",
   faction_mission:
     "Accept and complete missions issued by the specified faction",
+
+  // Network
+  infiltrate_network:
+    "Hack through a faction's network — use 'scan' to find connected servers, then 'connect' deeper",
+  trace_connection:
+    "Follow clues in server files to discover the target — read logs, emails, and configs for IP hints",
+  exfiltrate_data:
+    "Reach the target server deep in a network and read the specified file",
+
+  // New Systems Integration
+  download_file:
+    "Use 'download <filename>' on a remote server to copy files to your home ~/downloads/",
+  decode_content:
+    "Use 'decode <method> <text> [key]' to decrypt encoded content found in files",
+  defend_home:
+    "Use 'upgrade <defense> <level>' to purchase or upgrade your home server defenses",
+  claim_bounty:
+    "Use 'bounties' to see active bounties, 'bounty claim <id>' to accept, then hack the target's home server",
+  survive_trace:
+    "When traced, use 'trace.evade <id>' to successfully evade before time runs out",
+  scan_subnet:
+    "Use 'subnet <ip/cidr>' to analyze network ranges and discover target addresses",
 };
 
 /**

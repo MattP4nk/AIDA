@@ -64,3 +64,25 @@ export const NETWORK_TOPOLOGY_SERVICE = "NetworkTopologyService";
 // PvP Hacking Improvements
 export const BACKDOOR_SERVICE = "BackdoorService";
 export const TRACE_SERVICE = "TraceService";
+
+// Dynamic Content
+export const DYNAMIC_CONTENT_SERVICE = "DynamicContentService";
+
+// Story Missions
+export const STORY_MISSION_SERVICE = "StoryMissionService";
+
+// Leaderboard & Achievements
+export const LEADERBOARD_SERVICE = "LeaderboardService";
+export const ACHIEVEMENT_SERVICE = "AchievementService";
+
+// Tutorial
+export const TUTORIAL_SERVICE = "TutorialService";
+
+// Story Progression
+export const STORY_PROGRESSION_SERVICE = "StoryProgressionService";
+
+// Architect Intervention Executor
+export const ARCHITECT_INTERVENTION_EXECUTOR = "ArchitectInterventionExecutor";
+
+// DarkNet Dungeon
+export const DARKNET_DUNGEON_SERVICE = "DarkNetDungeonService";

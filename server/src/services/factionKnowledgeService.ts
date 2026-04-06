@@ -215,6 +215,37 @@ export class FactionKnowledgeService {
   }
 
   /**
+   * Decay confidence of all knowledge entries over time.
+   * Entries below the minimum threshold are deleted.
+   * Called periodically alongside expireEntries().
+   */
+  async decayConfidence(decayRate: number = 0.05, minConfidence: number = 0.1): Promise<{ decayed: number; purged: number }> {
+    try {
+      // Decay all entries by the decay rate
+      await this.prisma.$executeRawUnsafe(
+        `UPDATE "faction_knowledge" SET "confidence" = "confidence" * ${1 - decayRate} WHERE "confidence" > ${minConfidence}`,
+      );
+
+      // Purge entries that fell below minimum confidence
+      const purged = await this.prisma.factionKnowledge.deleteMany({
+        where: { confidence: { lt: minConfidence } },
+      });
+
+      if (purged.count > 0) {
+        this.logger.info({ purged: purged.count, decayRate }, "Decayed and purged low-confidence knowledge entries");
+      }
+
+      // Invalidate all snapshot caches
+      this.cacheService.flush();
+
+      return { decayed: 0, purged: purged.count };
+    } catch (error) {
+      this.logger.error(error, "Error decaying knowledge confidence");
+      return { decayed: 0, purged: 0 };
+    }
+  }
+
+  /**
    * Get the faction ID for a player (via their membership).
    * Returns null if the player is not in any faction.
    */

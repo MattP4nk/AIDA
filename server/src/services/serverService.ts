@@ -527,6 +527,78 @@ class ServerService {
   }
 
   /**
+   * Scan for servers matching a partial IP prefix (subnet scan).
+   * Used when players find incomplete IPs and want to scan that subnet
+   * to find the network entrance (gateway).
+   * @param userId - User ID
+   * @param ipPrefix - Partial IP prefix, e.g. "10.10.10." or "192.168."
+   * @param scanLevel - Player's scan level
+   * @returns Array of discovered server info
+   */
+  public async scanByPartialIp(
+    userId: string,
+    ipPrefix: string,
+    scanLevel: number,
+  ): Promise<ServerInfo[]> {
+    try {
+      // Get player's current level
+      const progress = await this.prisma.playerProgress.findUnique({
+        where: { userId },
+      });
+
+      if (!progress) {
+        throw new Error("Player progress not found");
+      }
+
+      const playerLevel = progress.level;
+
+      // Max encryption level the player can detect
+      const maxEncryption = Math.min(100, playerLevel * 10 + scanLevel * 5);
+
+      // Query servers whose IP starts with the given prefix
+      const servers = await this.prisma.gameServer.findMany({
+        where: {
+          ipAddress: { startsWith: ipPrefix },
+          isOnline: true,
+          encryptionLevel: { lte: maxEncryption },
+        },
+        orderBy: [{ role: "asc" }, { encryptionLevel: "asc" }],
+        take: 5 + scanLevel * 3,
+      });
+
+      // Audit log
+      await this.auditLog(userId, "SUBNET_SCAN", {
+        count: servers.length,
+        scanLevel,
+        maxEncryption,
+        ipPrefix,
+      });
+
+      // Emit Socket.IO event
+      if (this.io) {
+        this.io.to(`player:${userId}`).emit("server:subnet-scan", {
+          count: servers.length,
+          prefix: ipPrefix,
+        });
+      }
+
+      return servers.map((server) => ({
+        id: server.id,
+        name: server.name,
+        ipAddress: server.ipAddress,
+        type: server.type,
+        encryptionLevel: server.encryptionLevel,
+        isOnline: server.isOnline,
+      }));
+    } catch (error) {
+      this.logger.error({ err: error }, "Error scanning by partial IP");
+      throw new Error(
+        `Failed to scan by partial IP: ${error instanceof Error ? error.message : "Unknown error"}`,
+      );
+    }
+  }
+
+  /**
    * Connect player to a server
    * @param userId - User ID
    * @param serverId - Server ID
@@ -620,7 +692,10 @@ class ServerService {
       // Track for mission objectives
       if (this.missionIntegration) {
         this.missionIntegration
-          .onServerConnect(userId, server.id, server.type || "unknown")
+          .onServerConnect(userId, server.id, server.type || "unknown", {
+            ...(server.networkId ? { networkId: server.networkId } : {}),
+            ...(server.role ? { role: server.role } : {}),
+          })
           .catch((err) =>
             this.logger.error(
               { err },
@@ -652,7 +727,10 @@ class ServerService {
             }
           })
           .catch((err) =>
-            this.logger.error({ err }, "Faction knowledge server discovery error"),
+            this.logger.error(
+              { err },
+              "Faction knowledge server discovery error",
+            ),
           );
       }
 

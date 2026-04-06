@@ -67,6 +67,18 @@ export const SKILL_REQUIREMENTS: Readonly<Record<string, SkillRequirement>> = {
   traceroute: { skill: "networking", level: 15, label: "Networking" },
   // connect, disconnect → ungated (basic navigation)
 
+  // ── Defense commands ──────────────────────────────────────────────
+  // defenses → ungated (informational)
+  // upgrade → ungated (purchase gate, not skill gate)
+  protect: { skill: "networking", level: 15, label: "Networking" },
+  safevault: { skill: "cryptography", level: 20, label: "Cryptography" },
+  honeypot: { skill: "stealth", level: 25, label: "Stealth" },
+
+  // ── Math commands ─────────────────────────────────────────────────
+  decode: { skill: "cryptography", level: 10, label: "Cryptography" },
+  subnet: { skill: "networking", level: 10, label: "Networking" },
+  // calc, expr, math, vars, set, unset, convert, random → ungated (basic tools)
+
   // ── File commands ──────────────────────────────────────────────────
   encrypt: { skill: "cryptography", level: 10, label: "Cryptography" },
   decrypt: { skill: "cryptography", level: 15, label: "Cryptography" },
@@ -76,6 +88,7 @@ export const SKILL_REQUIREMENTS: Readonly<Record<string, SkillRequirement>> = {
   // ── Social commands ────────────────────────────────────────────────
   forum: { skill: "socialEng", level: 5, label: "Social Engineering" },
   proxy: { skill: "networking", level: 10, label: "Networking" },
+  share_intel: { skill: "socialEng", level: 10, label: "Social Engineering" },
   // msg, mail, inbox, contact, chat → ungated (basic comms)
 
   // ── Alias subcommands (key = "alias:<sub>") ────────────────────────

@@ -48,7 +48,7 @@
                 if (result.success) {
                     dispatch("authenticated", result.user);
                 } else {
-                    error = result.error || "Login failed";
+                    error = result.message || "Login failed";
                 }
             } else {
                 const result = await apiClient.register({
@@ -60,7 +60,7 @@
                 if (result.success) {
                     dispatch("authenticated", result.user);
                 } else {
-                    error = result.error || "Registration failed";
+                    error = result.message || "Registration failed";
                 }
             }
         } catch (err: any) {

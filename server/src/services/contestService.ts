@@ -4,7 +4,7 @@ import { Logger } from "pino";
 import { Server as SocketIOServer } from "socket.io";
 import { ServerContestInfo, FactionResources } from "../../../shared/types";
 import { getService } from "../di/container";
-import { LOGGER, PERSONA_SERVICE } from "../di/tokens";
+import { LOGGER, PERSONA_SERVICE, DYNAMIC_CONTENT_SERVICE } from "../di/tokens";
 
 /** Cost to initiate a contest */
 const CONTEST_COST: Partial<FactionResources> = { credits: 500, compute: 200 };
@@ -412,6 +412,20 @@ export default class ContestService {
       }
     } catch (error) {
       this.logger.warn({ error }, "Could not notify personas of contest resolution");
+    }
+
+    // Inject territory notice on conquered server
+    try {
+      const dynamicContent = getService<import("./dynamicContentService").DynamicContentService>(DYNAMIC_CONTENT_SERVICE);
+      const attackerWon = winnerId === contest.attackingFactionId;
+      await dynamicContent.processEvent("contest:resolved", {
+        serverId: contest.serverId,
+        contestId,
+        winnerName: attackerWon ? contest.attackingFaction.name : (contest.defendingFaction?.name || "defenders"),
+        loserName: attackerWon ? (contest.defendingFaction?.name || "uncontested") : contest.attackingFaction.name,
+      });
+    } catch {
+      // DynamicContentService may not be available
     }
 
     this.logger.info(

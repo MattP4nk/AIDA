@@ -3,7 +3,7 @@ import { PrismaClient, FactionWar } from "@prisma/client";
 import { Logger } from "pino";
 import { FactionWarInfo, WarStatus } from "../../../shared/types";
 import { getService } from "../di/container";
-import { LOGGER, PERSONA_SERVICE, RESOURCE_SERVICE } from "../di/tokens";
+import { LOGGER, PERSONA_SERVICE, RESOURCE_SERVICE, DYNAMIC_CONTENT_SERVICE } from "../di/tokens";
 
 /** War duration safety valve: 14 days */
 const MAX_WAR_DURATION_MS = 14 * 24 * 60 * 60 * 1000;
@@ -122,6 +122,20 @@ export default class WarfareService {
       // PersonaService may not be available
     }
 
+    // Inject war notices into faction servers
+    try {
+      const dynamicContent = getService<import("./dynamicContentService").DynamicContentService>(DYNAMIC_CONTENT_SERVICE);
+      await dynamicContent.processEvent("war:declared", {
+        attackerFactionId,
+        defenderFactionId,
+        attackerName: attacker.name,
+        defenderName: defender.name,
+        warId: war.id,
+      });
+    } catch {
+      // DynamicContentService may not be available
+    }
+
     this.logger.info({ warId: war.id, attacker: attacker.name, defender: defender.name }, "War declared");
 
     return {
@@ -183,6 +197,21 @@ export default class WarfareService {
       await personaService.onWarEnded(warId, winnerId, factionId, "surrender");
     } catch {
       // PersonaService may not be available
+    }
+
+    // Inject ceasefire notices into faction servers
+    try {
+      const dynamicContent = getService<import("./dynamicContentService").DynamicContentService>(DYNAMIC_CONTENT_SERVICE);
+      await dynamicContent.processEvent("war:ended", {
+        winnerFactionId: winnerId,
+        loserFactionId: factionId,
+        winnerName: winnerName,
+        loserName: loserName,
+        reason: "surrendered",
+        warId,
+      });
+    } catch {
+      // DynamicContentService may not be available
     }
 
     this.logger.info({ warId, surrenderedBy: factionId, winnerId }, "War ended by surrender");
@@ -307,6 +336,23 @@ export default class WarfareService {
       await personaService.onWarEnded(war.id, winnerId, null, "ceasefire");
     } catch {
       // PersonaService may not be available
+    }
+
+    // Inject ceasefire notices into faction servers
+    try {
+      const loserId = winnerId === war.attackerFactionId ? war.defenderFactionId : war.attackerFactionId;
+      const loserName = winnerId === war.attackerFactionId ? war.defenderFaction.name : war.attackerFaction.name;
+      const dynamicContent = getService<import("./dynamicContentService").DynamicContentService>(DYNAMIC_CONTENT_SERVICE);
+      await dynamicContent.processEvent("war:ended", {
+        winnerFactionId: winnerId,
+        loserFactionId: loserId,
+        winnerName,
+        loserName,
+        reason: "ceasefire (14-day limit)",
+        warId: war.id,
+      });
+    } catch {
+      // DynamicContentService may not be available
     }
 
     this.logger.info({ warId: war.id, winnerId, winnerName }, "War ended by forced ceasefire (14-day limit)");
