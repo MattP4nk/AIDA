@@ -7,6 +7,7 @@
         socketService,
         liveMessages,
         onlineUsers,
+        typingUsers as typingUsersStore,
     } from "../services/socket";
     import { currentUser } from "../stores/gameState";
 
@@ -28,6 +29,13 @@
         isOnline: boolean;
         lastSeen?: Date;
         unreadCount: number;
+        lastMessage?: string;
+        factionId?: string | null;
+        avatar?: {
+            glyph: string;
+            color: string;
+            compact?: string[];
+        };
     }
 
     interface ChatMessage {
@@ -39,6 +47,11 @@
         content: string;
         timestamp: Date;
         isRead: boolean;
+        isEncrypted?: boolean;
+        avatar?: {
+            glyph: string;
+            color: string;
+        };
     }
 
     // ==================== STATE ====================
@@ -51,11 +64,16 @@
     let messageInput: string = "";
     let inputElement: HTMLInputElement;
     let chatAreaElement: HTMLDivElement;
+    let encryptEnabled: boolean = false;
 
     // UI state
     let loading: boolean = false;
     let error: string = "";
-    let typingUsers: Set<string> = new Set();
+    $: typingUsers = $typingUsersStore;
+
+    // Typing emission state
+    let typingTimeout: ReturnType<typeof setTimeout> | null = null;
+    let isTyping: boolean = false;
 
     // Subscriptions
     let unsubscribeMessages: any;
@@ -75,6 +93,7 @@
     onDestroy(() => {
         if (unsubscribeMessages) unsubscribeMessages();
         if (unsubscribeOnline) unsubscribeOnline();
+        if (typingTimeout) clearTimeout(typingTimeout);
     });
 
     // ==================== REALTIME LISTENERS ====================
@@ -107,6 +126,8 @@
             content: message.content || message.body,
             timestamp: new Date(message.timestamp || Date.now()),
             isRead: message.isRead || false,
+            isEncrypted: message.isEncrypted || false,
+            avatar: message.avatar || null,
         };
 
         // Determine which contact this message belongs to
@@ -155,9 +176,12 @@
                 id: c.id || c.userId,
                 username: c.username || c.handle || "Unknown",
                 handle: c.handle,
-                isOnline: false, // Will be updated by socket
+                isOnline: c.isOnline || false,
                 lastSeen: c.lastSeen ? new Date(c.lastSeen) : undefined,
-                unreadCount: 0,
+                unreadCount: c.unreadCount || 0,
+                lastMessage: c.lastMessage || c.lastMessagePreview || "",
+                factionId: c.factionId || null,
+                avatar: c.avatar || null,
             }));
 
             // Load recent messages for each contact
@@ -236,12 +260,21 @@
     async function sendMessage() {
         if (!messageInput.trim() || !selectedContact) return;
 
+        // Stop typing indicator on send
+        if (selectedContact && isTyping) {
+            isTyping = false;
+            socketService.emitTypingStop(selectedContact.id);
+        }
+        if (typingTimeout) clearTimeout(typingTimeout);
+
         const content = messageInput.trim();
         messageInput = "";
 
         try {
             // Send via backend
-            const command = `msg ${selectedContact.username} ${content}`;
+            const command = encryptEnabled
+                ? `msg ${selectedContact.username} ${content} --encrypt`
+                : `msg ${selectedContact.username} ${content}`;
             const response = await terminalService.executeCommand(command);
 
             if (response.success && response.data?.message) {
@@ -283,6 +316,19 @@
             if (event.key === "Enter" && !event.shiftKey) {
                 event.preventDefault();
                 sendMessage();
+            } else {
+                // Emit typing start (debounced)
+                if (selectedContact && !isTyping) {
+                    isTyping = true;
+                    socketService.emitTypingStart(selectedContact.id);
+                }
+                if (typingTimeout) clearTimeout(typingTimeout);
+                typingTimeout = setTimeout(() => {
+                    if (selectedContact && isTyping) {
+                        isTyping = false;
+                        socketService.emitTypingStop(selectedContact.id);
+                    }
+                }, 3000);
             }
             return;
         }
@@ -330,6 +376,40 @@
             hour: "2-digit",
             minute: "2-digit",
         });
+    }
+
+    function shouldShowDateSeparator(
+        messages: ChatMessage[],
+        index: number,
+    ): boolean {
+        if (index === 0) return true;
+        const current = new Date(messages[index].timestamp);
+        const prev = new Date(messages[index - 1].timestamp);
+        return current.toDateString() !== prev.toDateString();
+    }
+
+    function formatDateSeparator(date: Date): string {
+        const d = new Date(date);
+        const options: Intl.DateTimeFormatOptions = {
+            year: "numeric",
+            month: "short",
+            day: "numeric",
+        };
+        return d.toLocaleDateString(undefined, options);
+    }
+
+    function isGroupedWithPrevious(
+        messages: ChatMessage[],
+        index: number,
+    ): boolean {
+        if (index === 0) return false;
+        const current = messages[index];
+        const prev = messages[index - 1];
+        if (current.senderId !== prev.senderId) return false;
+        const timeDiff =
+            new Date(current.timestamp).getTime() -
+            new Date(prev.timestamp).getTime();
+        return timeDiff < 5 * 60 * 1000; // 5 minutes
     }
 
     function close() {
@@ -390,8 +470,14 @@
                                     role="button"
                                     tabindex="0"
                                 >
-                                    <span class="contact-status"
-                                        >{contact.isOnline ? "●" : "○"}</span
+                                    <span
+                                        class="contact-avatar"
+                                        style="color: {contact.avatar?.color ||
+                                            '#888'}"
+                                        >{contact.avatar?.glyph ||
+                                            (contact.isOnline
+                                                ? "●"
+                                                : "○")}</span
                                     >
                                     <span class="contact-name"
                                         >{contact.username}</span
@@ -424,6 +510,13 @@
                     {:else}
                         <!-- CHAT HEADER -->
                         <div class="chat-header">
+                            <span
+                                class="chat-avatar"
+                                style="color: {selectedContact.avatar?.color ||
+                                    '#00ff41'}"
+                                >{selectedContact.avatar?.glyph ||
+                                    "[◉_◉]"}</span
+                            >
                             <span class="chat-recipient"
                                 >@{selectedContact.username}</span
                             >
@@ -443,27 +536,56 @@
                                     No messages yet. Start the conversation!
                                 </div>
                             {:else}
-                                {#each currentMessages as message}
+                                {#each currentMessages as message, index}
+                                    {#if shouldShowDateSeparator(currentMessages, index)}
+                                        <div class="date-separator">
+                                            ── {formatDateSeparator(
+                                                message.timestamp,
+                                            )} ──
+                                        </div>
+                                    {/if}
                                     <div
                                         class="chat-message"
                                         class:outgoing={message.senderId ===
                                             userId}
                                         class:incoming={message.senderId !==
                                             userId}
+                                        class:grouped={isGroupedWithPrevious(
+                                            currentMessages,
+                                            index,
+                                        )}
                                     >
-                                        <span class="msg-time"
-                                            >[{formatMessageTime(
-                                                message.timestamp,
-                                            )}]</span
-                                        >
-                                        <span class="msg-sender"
-                                            >{message.senderId === userId
-                                                ? "You"
-                                                : message.senderUsername}:</span
-                                        >
-                                        <span class="msg-content"
-                                            >{message.content}</span
-                                        >
+                                        {#if !isGroupedWithPrevious(currentMessages, index)}
+                                            <span class="msg-time"
+                                                >[{formatMessageTime(
+                                                    message.timestamp,
+                                                )}]</span
+                                            >
+                                            {#if message.senderId !== userId}
+                                                <span
+                                                    class="msg-avatar"
+                                                    style="color: {message
+                                                        .avatar?.color ||
+                                                        '#00ff41'}"
+                                                    >{message.avatar?.glyph ||
+                                                        "[◉_◉]"}</span
+                                                >
+                                            {/if}
+                                            <span class="msg-sender"
+                                                >{message.senderId === userId
+                                                    ? "You"
+                                                    : message.senderUsername}:</span
+                                            >
+                                        {/if}
+                                        {#if message.isEncrypted}
+                                            <span class="msg-encrypted"
+                                                >🔒 [ENCRYPTED]</span
+                                            >
+                                        {:else}
+                                            <span class="msg-content"
+                                                >{message.content}</span
+                                            >
+                                        {/if}
                                     </div>
                                 {/each}
                             {/if}
@@ -480,13 +602,27 @@
 
                         <!-- INPUT -->
                         <div class="chat-input-area">
+                            <button
+                                class="encrypt-toggle"
+                                class:active={encryptEnabled}
+                                on:click={() => {
+                                    encryptEnabled = !encryptEnabled;
+                                }}
+                                title={encryptEnabled
+                                    ? "Encryption ON"
+                                    : "Encryption OFF"}
+                            >
+                                {encryptEnabled ? "🔒" : "🔓"}
+                            </button>
                             <span class="input-prompt">></span>
                             <input
                                 bind:this={inputElement}
                                 bind:value={messageInput}
                                 type="text"
                                 class="chat-input"
-                                placeholder="Type your message..."
+                                placeholder={encryptEnabled
+                                    ? "Type encrypted message..."
+                                    : "Type your message..."}
                                 autocomplete="off"
                             />
                         </div>
@@ -499,7 +635,7 @@
     <!-- FOOTER -->
     <div slot="footer" class="chat-footer">
         <pre>
-║ [↑/↓] Select Contact [ENTER] Send Message [ESC] Close                     ║
+║ [↑/↓] Select Contact [ENTER] Send [🔒] Toggle Encrypt [ESC] Close        ║
         </pre>
     </div>
 </AsciiDialog>
@@ -620,6 +756,7 @@
     .contact-status {
         font-size: 0.8em;
         min-width: 1ch;
+        display: none;
     }
 
     .contact-item.online .contact-status {
@@ -629,6 +766,61 @@
 
     .contact-item:not(.online) .contact-status {
         color: #666666;
+    }
+
+    .contact-avatar {
+        font-size: 0.8em;
+        margin-right: 4px;
+        font-family: monospace;
+    }
+
+    .chat-avatar {
+        font-family: monospace;
+        margin-right: 6px;
+    }
+
+    .msg-avatar {
+        font-family: monospace;
+        margin-right: 4px;
+        font-size: 0.85em;
+    }
+
+    .date-separator {
+        text-align: center;
+        color: #555;
+        padding: 6px 0;
+        font-size: 0.75em;
+        font-family: monospace;
+    }
+
+    .chat-message.grouped {
+        padding-top: 0;
+        padding-left: 50px;
+    }
+
+    .msg-encrypted {
+        color: #ff6600;
+        font-style: italic;
+    }
+
+    .encrypt-toggle {
+        background: none;
+        border: 1px solid #333;
+        color: #888;
+        cursor: pointer;
+        padding: 2px 6px;
+        margin-right: 4px;
+        font-size: 0.9em;
+        border-radius: 2px;
+    }
+
+    .encrypt-toggle.active {
+        border-color: #00ff41;
+        color: #00ff41;
+    }
+
+    .encrypt-toggle:hover {
+        border-color: #00ff41;
     }
 
     @keyframes pulse {

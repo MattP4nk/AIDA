@@ -1,12 +1,38 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
-import { container } from "tsyringe";
+import type { ShopItem } from "../shopService";
+import type { InventoryItem } from "../shopService";
+import {
+  boxTop,
+  boxBottom,
+  boxDivider,
+  boxRow,
+  boxLine,
+  boxCenter,
+  sBoxTop,
+  sBoxBottom,
+  sBoxRow,
+  panel,
+  multiPanel,
+  pad,
+  padRight,
+  progressBar,
+  formatDuration,
+  render,
+} from "./asciiBox";
+import { getObjectiveHint } from "../missionObjectiveTypes";
+import { getInlineGlyph } from "../../utils/asciiAvatars";
 
 export class GameCommandsModule implements CommandModule {
+  // Per-player mission index: maps numeric shortcut (1-based) to full mission ID
+  // Refreshed every time the `missions` command runs
+  private missionIndex: Map<string, string[]> = new Map();
+
   public commands: Set<string> = new Set([
     "status",
     "skills",
     "missions",
+    "mission",
     "accept",
     "abandon",
     "progress",
@@ -22,6 +48,13 @@ export class GameCommandsModule implements CommandModule {
     "players",
     "who",
     "whois",
+    "share_intel",
+    "bounties",
+    "bounty",
+    "stories",
+    "story",
+    "leaderboard",
+    "achievements",
   ]);
 
   public async execute(
@@ -36,6 +69,8 @@ export class GameCommandsModule implements CommandModule {
           return await this.handleSkills(command, context);
         case "missions":
           return await this.handleMissions(command, context);
+        case "mission":
+          return await this.handleMissionDetail(command, context);
         case "accept":
           return await this.handleAccept(command, context);
         case "abandon":
@@ -65,6 +100,20 @@ export class GameCommandsModule implements CommandModule {
           return await this.handleWho(command, context);
         case "whois":
           return await this.handleWhois(command, context);
+        case "share_intel":
+          return await this.handleShareIntel(command, context);
+        case "bounties":
+          return await this.handleBounties(command, context);
+        case "bounty":
+          return await this.handleBounty(command, context);
+        case "stories":
+          return await this.handleStories(command, context);
+        case "story":
+          return await this.handleStory(command, context);
+        case "leaderboard":
+          return await this.handleLeaderboard(command, context);
+        case "achievements":
+          return await this.handleAchievements(command, context);
         default:
           return {
             success: false,
@@ -101,21 +150,28 @@ export class GameCommandsModule implements CommandModule {
       {
         command: "missions",
         category: "game",
-        description: "List available missions",
-        usage: "missions",
-        examples: ["missions"],
+        description: "List available and active missions",
+        usage: "missions [active|available|completed]",
+        examples: ["missions", "missions active"],
+      },
+      {
+        command: "mission",
+        category: "game",
+        description: "View detailed mission information",
+        usage: "mission <mission_id>",
+        examples: ["mission abc123"],
       },
       {
         command: "accept",
         category: "game",
-        description: "Accept a mission",
+        description: "Accept a mission and view briefing",
         usage: "accept <mission_id>",
         examples: ["accept mission_001"],
       },
       {
         command: "abandon",
         category: "game",
-        description: "Abandon a mission",
+        description: "Abandon a mission (reputation penalty warning)",
         usage: "abandon <mission_id>",
         examples: ["abandon mission_001"],
       },
@@ -203,6 +259,72 @@ export class GameCommandsModule implements CommandModule {
         usage: "whois <username>",
         examples: ["whois h4x0r", "whois admin"],
       },
+      {
+        command: "bounties",
+        category: "game",
+        description: "View active bounties posted by factions",
+        usage: "bounties",
+        examples: ["bounties"],
+      },
+      {
+        command: "bounty",
+        category: "game",
+        description: "Claim or complete a bounty",
+        usage: "bounty <claim|complete> <bounty_id>",
+        examples: ["bounty claim abc123", "bounty complete abc123"],
+      },
+      {
+        command: "share_intel",
+        category: "game",
+        description:
+          "Share discovered intel with your faction (requires Operative+ rank)",
+        usage: "share_intel <server|file|player> <id>",
+        examples: [
+          "share_intel server srv_abc123",
+          "share_intel file file_xyz789",
+          "share_intel player user_456",
+        ],
+      },
+      {
+        command: "stories",
+        category: "game",
+        description: "List your story arcs",
+        usage: "stories",
+        examples: ["stories"],
+      },
+      {
+        command: "story",
+        category: "game",
+        description: "View or manage a story arc",
+        usage: "story <arc_id> | story abandon <arc_id>",
+        examples: ["story abc123", "story abandon abc123"],
+      },
+      {
+        command: "leaderboard",
+        category: "game",
+        description: "View top players by category",
+        usage:
+          "leaderboard [level|credits|hacking|networking|cryptography|stealth|reputation|achievements|missions]",
+        examples: [
+          "leaderboard",
+          "leaderboard hacking",
+          "leaderboard reputation",
+        ],
+      },
+      {
+        command: "achievements",
+        category: "game",
+        description: "View your achievements and progress",
+        usage: "achievements",
+        examples: ["achievements"],
+      },
+      {
+        command: "gear",
+        category: "game",
+        description: "View your equipped items (alias for equipment)",
+        usage: "gear",
+        examples: ["gear"],
+      },
     ];
   }
 
@@ -223,20 +345,58 @@ export class GameCommandsModule implements CommandModule {
       };
     }
 
-    const output = [
-      "=== PLAYER STATUS ===",
-      `Username: ${user.username}`,
-      `Home IP: ${user.homeIp}`,
-      `Level: ${user.progress.level}`,
-      `Experience: ${user.progress.experience}`,
-      `Credits: $${user.progress.credits}`,
-      "",
-      "=== FACTION REPUTATION ===",
-      `Military: ${user.progress.repMilitary}`,
-      `Sword Corp: ${user.progress.repSwordCorp}`,
-      `Anonymous: ${user.progress.repAnons}`,
-      `Neutral: ${user.progress.repNeutral}`,
-    ].join("\n");
+    // Build dynamic faction standings
+    const standings = await context.services.factionService.getAllStandings(
+      context.userId,
+    );
+    const membership = await context.services.factionService.getUserFaction(
+      context.userId,
+    );
+
+    const factionId = membership?.faction?.id ?? undefined;
+    const playerGlyph = getInlineGlyph("player", factionId);
+
+    const factionRows =
+      standings.length > 0
+        ? standings.map((s) => ({
+            label: pad(s.factionName + ":", 20),
+            value: `${s.reputation}${s.isAllied ? " (Allied)" : s.isHostile ? " (Hostile)" : ""}`,
+          }))
+        : [{ label: "", value: "No faction standings yet." }];
+
+    const output = render(
+      multiPanel(
+        `${playerGlyph} PLAYER STATUS`,
+        [
+          {
+            rows: [
+              { label: pad("Username:", 20), value: user.username },
+              { label: pad("Home IP:", 20), value: user.homeIp },
+              { label: pad("Level:", 20), value: `${user.progress.level}` },
+              {
+                label: pad("Experience:", 20),
+                value: `${user.progress.experience}`,
+              },
+              {
+                label: pad("Credits:", 20),
+                value: `$${user.progress.credits}`,
+              },
+              {
+                label: pad("Faction:", 20),
+                value: membership
+                  ? `${membership.faction.name} [${membership.rank.toUpperCase()}]`
+                  : "None",
+              },
+            ],
+          },
+          {
+            heading: "FACTION STANDINGS",
+            rows: factionRows,
+          },
+        ],
+        44,
+      ),
+    );
 
     return {
       success: true,
@@ -262,15 +422,38 @@ export class GameCommandsModule implements CommandModule {
       };
     }
 
-    const output = [
-      "=== PLAYER SKILLS ===",
-      `Hacking: ${progress.hacking}/100`,
-      `Networking: ${progress.networking}/100`,
-      `Cryptography: ${progress.cryptography}/100`,
-      `Stealth: ${progress.stealth}/100`,
-      `Social Engineering: ${progress.socialEng}/100`,
-      `Forensics: ${progress.forensics}/100`,
-    ].join("\n");
+    const output = render(
+      panel(
+        "PLAYER SKILLS",
+        [
+          {
+            label: pad("Hacking:", 20),
+            value: `${progressBar(progress.hacking / 100)} ${padRight(String(progress.hacking), 3)}/100`,
+          },
+          {
+            label: pad("Networking:", 20),
+            value: `${progressBar(progress.networking / 100)} ${padRight(String(progress.networking), 3)}/100`,
+          },
+          {
+            label: pad("Cryptography:", 20),
+            value: `${progressBar(progress.cryptography / 100)} ${padRight(String(progress.cryptography), 3)}/100`,
+          },
+          {
+            label: pad("Stealth:", 20),
+            value: `${progressBar(progress.stealth / 100)} ${padRight(String(progress.stealth), 3)}/100`,
+          },
+          {
+            label: pad("Social Eng:", 20),
+            value: `${progressBar(progress.socialEng / 100)} ${padRight(String(progress.socialEng), 3)}/100`,
+          },
+          {
+            label: pad("Forensics:", 20),
+            value: `${progressBar(progress.forensics / 100)} ${padRight(String(progress.forensics), 3)}/100`,
+          },
+        ],
+        44,
+      ),
+    );
 
     return {
       success: true,
@@ -280,31 +463,349 @@ export class GameCommandsModule implements CommandModule {
     };
   }
 
+  // ==================== MISSIONS ====================
+
+  /**
+   * Resolve a mission identifier to a mission object.
+   * Supports: numeric index (e.g. "1"), partial ID prefix, or full ID.
+   */
+  private resolveMissionId(
+    missions: any[],
+    input: string,
+    userId?: string,
+  ): any | undefined {
+    // Try numeric index first (1-based)
+    const num = parseInt(input, 10);
+    if (!isNaN(num) && num > 0 && userId) {
+      const indexList = this.missionIndex.get(userId);
+      if (indexList && num <= indexList.length) {
+        const fullId = indexList[num - 1];
+        const found = missions.find(
+          (m: any) => m.missionId === fullId || m.id === fullId,
+        );
+        if (found) return found;
+      }
+    }
+
+    // Try exact match
+    const exact = missions.find(
+      (m: any) => m.missionId === input || m.id === input,
+    );
+    if (exact) return exact;
+
+    // Try prefix match (truncated ID)
+    const prefixMatches = missions.filter(
+      (m: any) =>
+        (m.missionId && m.missionId.startsWith(input)) ||
+        (m.id && m.id.startsWith(input)),
+    );
+    if (prefixMatches.length === 1) return prefixMatches[0];
+
+    return undefined;
+  }
+
   private async handleMissions(
-    _command: Command,
+    command: Command,
     context: CommandContext,
   ): Promise<CommandResult> {
     const missionService = context.services.missionService;
     const missionGenerator = context.services.missionGenerator;
+    const filter = command.args?.[0] as string | undefined;
 
     let missions = await missionService.getPlayerMissions(context.userId);
 
     // Auto-generate missions if list is empty
     if (missions.length === 0 && missionGenerator) {
       try {
-        await missionGenerator.generateMissionsForPlayer(context.userId, 5);
-        missions = await missionService.getPlayerMissions(context.userId);
-      } catch (error) {
-        // Silent fail - just show empty list
+        const generated = await missionGenerator.generateMissionsForPlayer(
+          context.userId,
+          5,
+        );
+        if (generated.length > 0) {
+          missions = await missionService.getPlayerMissions(context.userId);
+        }
+      } catch (err) {
+        console.error("[missions] Auto-generation failed:", err);
       }
     }
 
+    // Filter by status if requested
+    const statusFilter = filter?.toLowerCase();
+    if (
+      statusFilter &&
+      ["active", "available", "completed", "assigned"].includes(statusFilter)
+    ) {
+      missions = missions.filter((m: any) => m.status === statusFilter);
+    }
+
+    const W = 56;
+    const lines: string[] = [];
+    lines.push(boxTop(W));
+    lines.push(boxCenter("MISSIONS", W));
+    lines.push(boxDivider(W));
+
+    if (missions.length === 0) {
+      lines.push(boxRow("  No missions found.", W));
+      lines.push(boxRow("  Check back later or explore the network.", W));
+      lines.push(boxBottom(W));
+      return { success: true, output: render(lines), timestamp: new Date() };
+    }
+
+    // Group by status
+    const active = missions.filter(
+      (m: any) => m.status === "active" || m.status === "assigned",
+    );
+    const available = missions.filter((m: any) => m.status === "available");
+    const completed = missions.filter((m: any) => m.status === "completed");
+
+    // Build ordered index: active first, then available, then completed
+    // so numbers are stable and intuitive
+    const indexList: string[] = [];
+    let globalNum = 0;
+
+    if (active.length > 0) {
+      lines.push(boxRow(` ACTIVE (${active.length})`, W));
+      lines.push(boxDivider(W));
+      for (const m of active as any[]) {
+        globalNum++;
+        indexList.push(m.missionId || m.id);
+        const diff = m.difficulty ? "*".repeat(Math.min(m.difficulty, 10)) : "";
+        const objDone = (m.objectives || []).filter(
+          (o: any) => o.completed,
+        ).length;
+        const objTotal = (m.objectives || []).length;
+        lines.push(
+          boxRow(
+            ` ${globalNum}. ${(m.title || "Untitled").substring(0, 34)}`,
+            W,
+          ),
+        );
+        lines.push(boxRow(`    Diff: ${diff}  [${objDone}/${objTotal}]`, W));
+        if (m.expiresAt) {
+          const remaining = new Date(m.expiresAt).getTime() - Date.now();
+          if (remaining > 0) {
+            lines.push(
+              boxRow(`    Time left: ${formatDuration(remaining)}`, W),
+            );
+          } else {
+            lines.push(boxRow(`    TIME EXPIRED`, W));
+          }
+        }
+        lines.push(boxRow("", W));
+      }
+    }
+
+    if (available.length > 0) {
+      if (active.length > 0) lines.push(boxDivider(W));
+      lines.push(boxRow(` AVAILABLE (${available.length})`, W));
+      lines.push(boxDivider(W));
+      for (const m of available.slice(0, 10) as any[]) {
+        globalNum++;
+        indexList.push(m.missionId || m.id);
+        const diff = m.difficulty ? "*".repeat(Math.min(m.difficulty, 10)) : "";
+        const reward = m.reward;
+        const rewardStr = reward
+          ? `${reward.credits || 0}c ${reward.xp || 0}xp`
+          : "";
+        lines.push(
+          boxRow(
+            ` ${globalNum}. ${(m.title || "Untitled").substring(0, 34)}`,
+            W,
+          ),
+        );
+        lines.push(boxRow(`    ${diff}  ${rewardStr}`, W));
+      }
+      if (available.length > 10) {
+        lines.push(boxRow(`   ... +${available.length - 10} more`, W));
+      }
+    }
+
+    if (
+      completed.length > 0 &&
+      (!statusFilter || statusFilter === "completed")
+    ) {
+      lines.push(boxDivider(W));
+      lines.push(boxRow(` COMPLETED (${completed.length})`, W));
+      lines.push(boxDivider(W));
+      for (const m of completed.slice(0, 5) as any[]) {
+        globalNum++;
+        indexList.push(m.missionId || m.id);
+        lines.push(
+          boxRow(
+            ` ${globalNum}. [x] ${(m.title || "Untitled").substring(0, 32)}`,
+            W,
+          ),
+        );
+      }
+      if (completed.length > 5) {
+        lines.push(boxRow(`   ... +${completed.length - 5} more`, W));
+      }
+    }
+
+    // Store index for this player so mission/accept/abandon can use numbers
+    this.missionIndex.set(context.userId, indexList);
+
+    lines.push(boxDivider(W));
+    lines.push(boxRow("  'mission 1' for details", W));
+    lines.push(boxRow("  'accept 1' to take a mission", W));
+    lines.push(boxRow("  'progress' to track active objectives", W));
+    lines.push(boxBottom(W));
+
     return {
       success: true,
-      output: this.formatMissionList(missions),
+      output: render(lines),
       data: missions,
       timestamp: new Date(),
     };
+  }
+
+  private async handleMissionDetail(
+    command: Command,
+    context: CommandContext,
+  ): Promise<CommandResult> {
+    const missionId = command.args?.[0];
+    if (!missionId) {
+      return {
+        success: false,
+        output: "Usage: mission <mission_id>",
+        timestamp: new Date(),
+      };
+    }
+
+    const missionService = context.services.missionService;
+    const missions = await missionService.getPlayerMissions(context.userId);
+    const mission = this.resolveMissionId(
+      missions,
+      missionId,
+      context.userId,
+    ) as any;
+
+    if (!mission) {
+      return {
+        success: false,
+        output: `Mission not found: ${missionId}`,
+        timestamp: new Date(),
+      };
+    }
+
+    const W = 56;
+    const lines: string[] = [];
+    lines.push(boxTop(W));
+    lines.push(boxCenter("MISSION BRIEFING", W));
+    lines.push(boxDivider(W));
+
+    // Title and status
+    lines.push(boxRow(` ${mission.title || "Untitled Mission"}`, W));
+    lines.push(boxRow("", W));
+
+    // Info rows
+    const diff = mission.difficulty || 0;
+    lines.push(
+      boxRow(` Status:     ${(mission.status || "unknown").toUpperCase()}`, W),
+    );
+    lines.push(
+      boxRow(
+        ` Difficulty: ${"*".repeat(Math.min(diff, 10))}${"·".repeat(Math.max(0, 10 - diff))} (${diff}/10)`,
+        W,
+      ),
+    );
+    lines.push(boxRow(` Type:       ${mission.type || "unknown"}`, W));
+
+    // Issuer/Faction
+    if (mission.factionId || mission.issuedBy) {
+      const issuer = mission.issuedBy
+        ? `AI Persona ${(mission.issuedBy as string).substring(0, 12)}`
+        : "System";
+      lines.push(boxRow(` Issued by:  ${issuer}`, W));
+    }
+
+    // Rewards
+    const reward = mission.reward || {};
+    const rewardParts: string[] = [];
+    if (reward.xp) rewardParts.push(`${reward.xp} XP`);
+    if (reward.credits) rewardParts.push(`${reward.credits} Credits`);
+    if (reward.reputation) rewardParts.push(`${reward.reputation} Rep`);
+    if (reward.skillPoints) rewardParts.push(`${reward.skillPoints} SP`);
+    if (rewardParts.length > 0) {
+      lines.push(boxRow(` Rewards:    ${rewardParts.join(", ")}`, W));
+    }
+
+    // Time limit
+    if (mission.expiresAt) {
+      const remaining = new Date(mission.expiresAt).getTime() - Date.now();
+      if (remaining > 0) {
+        lines.push(boxRow(` Time left:  ${formatDuration(remaining)}`, W));
+      } else {
+        lines.push(boxRow(` Time left:  EXPIRED`, W));
+      }
+    }
+
+    // Description
+    if (mission.description) {
+      lines.push(boxDivider(W));
+      const desc = String(mission.description);
+      // Word-wrap description to fit box
+      const words = desc.split(" ");
+      let line = "";
+      for (const word of words) {
+        if ((line + " " + word).length > W - 4) {
+          lines.push(boxRow(` ${line}`, W));
+          line = word;
+        } else {
+          line = line ? line + " " + word : word;
+        }
+      }
+      if (line) lines.push(boxRow(` ${line}`, W));
+    }
+
+    // Objectives
+    if (mission.objectives && mission.objectives.length > 0) {
+      lines.push(boxDivider(W));
+      lines.push(boxRow(" OBJECTIVES", W));
+      lines.push(boxRow("", W));
+
+      for (const obj of mission.objectives as any[]) {
+        const done = obj.completed;
+        const marker = done ? "[x]" : "[ ]";
+        const current = obj.current ?? 0;
+        const target = obj.target;
+        const desc = obj.description || obj.type || "???";
+
+        lines.push(boxRow(` ${marker} ${desc.substring(0, W - 8)}`, W));
+
+        if (typeof target === "number" && target > 1) {
+          const ratio = Math.min(current / target, 1);
+          const bar = progressBar(ratio, 20);
+          lines.push(boxRow(`     ${bar}  ${current}/${target}`, W));
+        }
+
+        // Hint for incomplete objectives
+        if (!done) {
+          const hint = getObjectiveHint(obj.type || "");
+          if (hint && hint.length < W - 8) {
+            lines.push(boxRow(`     Hint: ${hint.substring(0, W - 14)}`, W));
+          }
+        }
+      }
+    }
+
+    lines.push(boxDivider(W));
+    if (mission.status === "available") {
+      // Find the numeric shortcut for this mission
+      const idx = this.missionIndex.get(context.userId);
+      const num = idx ? idx.indexOf(mission.missionId || missionId) + 1 : 0;
+      const ref = num > 0 ? String(num) : missionId.substring(0, 16);
+      lines.push(boxRow(`  'accept ${ref}' to start`, W));
+    } else if (mission.status === "active" || mission.status === "assigned") {
+      const idx = this.missionIndex.get(context.userId);
+      const num = idx ? idx.indexOf(mission.missionId || missionId) + 1 : 0;
+      const ref = num > 0 ? String(num) : missionId.substring(0, 16);
+      lines.push(boxRow("  'progress' to track objectives", W));
+      lines.push(boxRow(`  'abandon ${ref}' to drop`, W));
+    }
+    lines.push(boxBottom(W));
+
+    return { success: true, output: render(lines), timestamp: new Date() };
   }
 
   private async handleAccept(
@@ -312,7 +813,6 @@ export class GameCommandsModule implements CommandModule {
     context: CommandContext,
   ): Promise<CommandResult> {
     const missionId = command.args?.[0];
-
     if (!missionId) {
       return {
         success: false,
@@ -322,13 +822,89 @@ export class GameCommandsModule implements CommandModule {
     }
 
     const missionService = context.services.missionService;
-    await missionService.acceptMission(context.userId, missionId);
 
-    return {
-      success: true,
-      output: "Mission accepted",
-      timestamp: new Date(),
-    };
+    try {
+      // Resolve numeric/partial ID to full ID before calling service
+      const allMissions = await missionService.getPlayerMissions(
+        context.userId,
+      );
+      const resolved = this.resolveMissionId(
+        allMissions,
+        missionId,
+        context.userId,
+      );
+      const fullMissionId = resolved?.missionId || missionId;
+
+      await missionService.acceptMission(context.userId, fullMissionId);
+
+      const missions = await missionService.getPlayerMissions(
+        context.userId,
+        "active",
+      );
+      const accepted = this.resolveMissionId(missions, fullMissionId) as any;
+
+      const W = 52;
+      const lines: string[] = [];
+      lines.push(boxTop(W));
+      lines.push(boxCenter("MISSION ACCEPTED", W));
+      lines.push(boxDivider(W));
+
+      lines.push(boxRow(` ${accepted?.title || missionId}`, W));
+
+      if (accepted?.difficulty) {
+        const d = accepted.difficulty;
+        lines.push(
+          boxRow(
+            ` Difficulty: ${"*".repeat(Math.min(d, 10))}${"·".repeat(Math.max(0, 10 - d))}`,
+            W,
+          ),
+        );
+      }
+
+      if (accepted?.expiresAt) {
+        const remaining = new Date(accepted.expiresAt).getTime() - Date.now();
+        if (remaining > 0) {
+          lines.push(boxRow(` Time limit: ${formatDuration(remaining)}`, W));
+        }
+      }
+
+      const reward = accepted?.reward || {};
+      const rParts: string[] = [];
+      if (reward.xp) rParts.push(`${reward.xp} XP`);
+      if (reward.credits) rParts.push(`${reward.credits}c`);
+      if (rParts.length > 0) {
+        lines.push(boxRow(` Rewards:    ${rParts.join(" + ")}`, W));
+      }
+
+      if (accepted?.objectives && Array.isArray(accepted.objectives)) {
+        lines.push(boxDivider(W));
+        lines.push(boxRow(" OBJECTIVES", W));
+        for (const obj of accepted.objectives) {
+          const target =
+            typeof obj.target === "number" ? `0/${obj.target}` : "";
+          lines.push(
+            boxRow(` [ ] ${obj.description || obj.type} ${target}`, W),
+          );
+          const hint = getObjectiveHint(obj.type || "");
+          if (hint) {
+            lines.push(boxRow(`     > ${hint.substring(0, W - 10)}`, W));
+          }
+        }
+      }
+
+      lines.push(boxDivider(W));
+      lines.push(boxRow(" Use 'progress' to track objectives.", W));
+      lines.push(boxBottom(W));
+
+      return { success: true, output: render(lines), timestamp: new Date() };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : "Unknown error";
+      return {
+        success: false,
+        output: `Failed to accept mission: ${msg}`,
+        timestamp: new Date(),
+      };
+    }
   }
 
   private async handleAbandon(
@@ -336,7 +912,6 @@ export class GameCommandsModule implements CommandModule {
     context: CommandContext,
   ): Promise<CommandResult> {
     const missionId = command.args?.[0];
-
     if (!missionId) {
       return {
         success: false,
@@ -346,13 +921,44 @@ export class GameCommandsModule implements CommandModule {
     }
 
     const missionService = context.services.missionService;
-    await missionService.abandonMission(context.userId, missionId);
 
-    return {
-      success: true,
-      output: "Mission abandoned",
-      timestamp: new Date(),
-    };
+    try {
+      const missions = await missionService.getPlayerMissions(context.userId);
+      const target = this.resolveMissionId(
+        missions,
+        missionId,
+        context.userId,
+      ) as any;
+      const fullMissionId = target?.missionId || missionId;
+      const title = target?.title || missionId;
+      const factionName = target?.factionId ? "faction" : null;
+
+      await missionService.abandonMission(context.userId, fullMissionId);
+
+      const W = 52;
+      const lines: string[] = [];
+      lines.push(sBoxTop(W));
+      lines.push(sBoxRow(" [!] MISSION ABANDONED", W));
+      lines.push(sBoxRow("", W));
+      lines.push(sBoxRow(` Mission: ${title.substring(0, W - 12)}`, W));
+      lines.push(sBoxRow("", W));
+      if (factionName) {
+        lines.push(sBoxRow(" WARNING: Abandoning faction missions", W));
+        lines.push(sBoxRow(" may reduce your standing with them.", W));
+      } else {
+        lines.push(sBoxRow(" No reputation penalty for this mission.", W));
+      }
+      lines.push(sBoxBottom(W));
+
+      return { success: true, output: render(lines), timestamp: new Date() };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : "Unknown error";
+      return {
+        success: false,
+        output: `Failed to abandon mission: ${msg}`,
+        timestamp: new Date(),
+      };
+    }
   }
 
   private async handleProgress(
@@ -362,12 +968,86 @@ export class GameCommandsModule implements CommandModule {
     const missionService = context.services.missionService;
     const missions = await missionService.getPlayerMissions(
       context.userId,
-      "assigned",
+      "active",
     );
+
+    if (!missions || missions.length === 0) {
+      return {
+        success: true,
+        output:
+          "No active missions. Use 'missions' to browse available missions.",
+        timestamp: new Date(),
+      };
+    }
+
+    const W = 56;
+    const lines: string[] = [];
+    lines.push(boxTop(W));
+    lines.push(boxCenter("ACTIVE MISSIONS", W));
+    lines.push(boxDivider(W));
+
+    for (let mi = 0; mi < missions.length; mi++) {
+      const m = missions[mi] as any;
+      if (mi > 0) lines.push(boxDivider(W));
+
+      lines.push(boxRow(` ${m.title || "Untitled"}`, W));
+
+      // Time remaining
+      if (m.expiresAt) {
+        const remaining = new Date(m.expiresAt).getTime() - Date.now();
+        if (remaining > 0) {
+          const urgency = remaining < 3600000 ? " [!]" : "";
+          lines.push(
+            boxRow(` Time: ${formatDuration(remaining)}${urgency}`, W),
+          );
+        } else {
+          lines.push(boxRow(` Time: EXPIRED`, W));
+        }
+      }
+
+      // Objectives with progress bars
+      if (m.objectives && m.objectives.length > 0) {
+        const doneCount = m.objectives.filter((o: any) => o.completed).length;
+        const totalCount = m.objectives.length;
+        const overallRatio = totalCount > 0 ? doneCount / totalCount : 0;
+        lines.push(
+          boxRow(
+            ` Overall: ${progressBar(overallRatio, 20)}  ${doneCount}/${totalCount}`,
+            W,
+          ),
+        );
+        lines.push(boxRow("", W));
+
+        for (const obj of m.objectives as any[]) {
+          const done = obj.completed;
+          const marker = done ? "[x]" : "[ ]";
+          const desc = (obj.description || obj.type || "???").substring(
+            0,
+            W - 8,
+          );
+          lines.push(boxRow(` ${marker} ${desc}`, W));
+
+          if (!done && typeof obj.target === "number" && obj.target > 0) {
+            const current = obj.current ?? 0;
+            const ratio = Math.min(current / obj.target, 1);
+            lines.push(
+              boxRow(
+                `     ${progressBar(ratio, 18)}  ${current}/${obj.target}`,
+                W,
+              ),
+            );
+          }
+        }
+      }
+    }
+
+    lines.push(boxDivider(W));
+    lines.push(boxRow("  'mission <id>' for full details", W));
+    lines.push(boxBottom(W));
 
     return {
       success: true,
-      output: this.formatMissionProgress(missions),
+      output: render(lines),
       data: missions,
       timestamp: new Date(),
     };
@@ -389,11 +1069,11 @@ export class GameCommandsModule implements CommandModule {
       };
     }
 
-    let output = "=== SCRIPTS ===\n\n";
+    const W = 48;
 
     // Group by category
     const categories = new Map<string, typeof inventory>();
-    inventory.forEach((item: any) => {
+    inventory.forEach((item: InventoryItem) => {
       const cat = item.item.category;
       if (!categories.has(cat)) {
         categories.set(cat, []);
@@ -401,32 +1081,54 @@ export class GameCommandsModule implements CommandModule {
       categories.get(cat)!.push(item);
     });
 
+    // Build sections for multiPanel
+    const sections: Array<{
+      heading?: string;
+      rows: Array<{ label: string; value: string }>;
+    }> = [];
+
     categories.forEach((items, category) => {
-      output += `--- ${category} ---\n`;
-      items.forEach((invItem: any) => {
+      const rows: Array<{ label: string; value: string }> = [];
+      items.forEach((invItem: InventoryItem) => {
         const qty = invItem.quantity > 1 ? ` (x${invItem.quantity})` : "";
-        output += `• ${invItem.item.name}${qty}\n`;
-        output += `  ${invItem.item.description}\n`;
+        rows.push({ label: `• ${invItem.item.name}${qty}`, value: "" });
+        rows.push({ label: `  ${invItem.item.description}`, value: "" });
         if (invItem.item.effects) {
           const effects = Object.entries(invItem.item.effects)
             .filter(([_, val]) => val && (val as number) > 0)
             .map(([key, val]) => `${key}: +${val}`)
             .join(", ");
-          if (effects) output += `  Effects: ${effects}\n`;
+          if (effects) rows.push({ label: `  Effects: ${effects}`, value: "" });
         }
-        output += "\n";
       });
+      sections.push({ heading: category, rows });
     });
 
-    // Show total bonuses
-    output += "=== TOTAL BONUSES ===\n";
-    if (bonuses.hackingBonus) output += `Hacking: +${bonuses.hackingBonus}\n`;
-    if (bonuses.stealthBonus) output += `Stealth: +${bonuses.stealthBonus}\n`;
-    if (bonuses.speedBonus) output += `Speed: +${bonuses.speedBonus}\n`;
+    // Total bonuses section
+    const bonusRows: Array<{ label: string; value: string }> = [];
+    if (bonuses.hackingBonus)
+      bonusRows.push({ label: "Hacking:", value: `+${bonuses.hackingBonus}` });
+    if (bonuses.stealthBonus)
+      bonusRows.push({ label: "Stealth:", value: `+${bonuses.stealthBonus}` });
+    if (bonuses.speedBonus)
+      bonusRows.push({ label: "Speed:", value: `+${bonuses.speedBonus}` });
     if (bonuses.detectionReduction)
-      output += `Detection Reduction: -${(bonuses.detectionReduction * 100).toFixed(0)}%\n`;
+      bonusRows.push({
+        label: "Detection Reduction:",
+        value: `-${(bonuses.detectionReduction * 100).toFixed(0)}%`,
+      });
     if (bonuses.successRateIncrease)
-      output += `Success Rate: +${(bonuses.successRateIncrease * 100).toFixed(0)}%\n`;
+      bonusRows.push({
+        label: "Success Rate:",
+        value: `+${(bonuses.successRateIncrease * 100).toFixed(0)}%`,
+      });
+    if (bonusRows.length === 0) {
+      bonusRows.push({ label: "No active bonuses.", value: "" });
+    }
+    sections.push({ heading: "TOTAL BONUSES", rows: bonusRows });
+
+    const lines = multiPanel("SCRIPTS", sections, W);
+    const output = render(lines);
 
     return {
       success: true,
@@ -459,11 +1161,13 @@ export class GameCommandsModule implements CommandModule {
     let items = shopService.getAllItems();
 
     // Filter by player level
-    items = items.filter((item: any) => item.requiredLevel <= progress.level);
+    items = items.filter(
+      (item: ShopItem) => item.requiredLevel <= progress.level,
+    );
 
     // Filter by category if provided
     if (category) {
-      items = items.filter((item: any) => item.category === category);
+      items = items.filter((item: ShopItem) => item.category === category);
     }
 
     // Search if provided
@@ -479,17 +1183,22 @@ export class GameCommandsModule implements CommandModule {
       };
     }
 
-    let output = "=== DARKNET MARKETPLACE ===\n\n";
-    output += `Credits Available: ${progress.credits}\n`;
-    output += `Level: ${progress.level}\n\n`;
+    const W = 52;
+    const lines: string[] = [];
+
+    lines.push(boxTop(W));
+    lines.push(boxCenter("DARKNET MARKETPLACE", W));
+    lines.push(boxDivider(W));
+    lines.push(boxLine("Credits:", `${progress.credits}`, W));
+    lines.push(boxLine("Level:", `${progress.level}`, W));
 
     if (category) {
-      output += `Category: ${category}\n\n`;
+      lines.push(boxLine("Category:", category, W));
     }
 
     // Group by category
     const categories = new Map<string, typeof items>();
-    items.forEach((item: any) => {
+    items.forEach((item: ShopItem) => {
       const cat = item.category;
       if (!categories.has(cat)) {
         categories.set(cat, []);
@@ -498,28 +1207,35 @@ export class GameCommandsModule implements CommandModule {
     });
 
     categories.forEach((catItems, cat) => {
-      output += `--- ${cat} ---\n`;
-      catItems.forEach((item: any) => {
+      lines.push(boxDivider(W));
+      lines.push(boxRow(cat, W));
+      lines.push(boxDivider(W));
+      catItems.forEach((item: ShopItem) => {
         const canBuy = progress.credits >= item.price;
         const price = canBuy
           ? `${item.price}¢`
-          : `${item.price}¢ [INSUFFICIENT FUNDS]`;
-        output += `[${item.id}] ${item.name} - ${price}\n`;
-        output += `  ${item.description}\n`;
-        output += `  Rarity: ${item.rarity} | Level: ${item.requiredLevel}\n`;
+          : `${item.price}¢ [INSUFFICIENT]`;
+        lines.push(boxRow(`[${item.id}] ${item.name} - ${price}`, W));
+        lines.push(boxRow(`  ${item.description}`, W));
+        lines.push(
+          boxRow(`  Rarity: ${item.rarity} | Level: ${item.requiredLevel}`, W),
+        );
         if (item.effects) {
           const effects = Object.entries(item.effects)
             .filter(([_, val]) => val && (val as number) > 0)
             .map(([key, val]) => `${key}: +${val}`)
             .join(", ");
-          if (effects) output += `  Effects: ${effects}\n`;
+          if (effects) lines.push(boxRow(`  Effects: ${effects}`, W));
         }
-        output += "\n";
       });
     });
 
-    output += "Usage: buy <item_id> [quantity]\n";
-    output += "       shop <category> - Filter by category\n";
+    lines.push(boxDivider(W));
+    lines.push(boxRow("buy <item_id> [qty]  Purchase item", W));
+    lines.push(boxRow("shop <category>      Filter by category", W));
+    lines.push(boxBottom(W));
+
+    const output = render(lines);
 
     return {
       success: true,
@@ -601,7 +1317,7 @@ export class GameCommandsModule implements CommandModule {
       };
     }
 
-    const shopService = container.resolve<any>("ShopService");
+    const shopService = context.services.shopService;
     const result = await shopService.useItem(context.userId, itemId);
 
     return {
@@ -626,8 +1342,8 @@ export class GameCommandsModule implements CommandModule {
       };
     }
 
-    const shopService = container.resolve<any>("ShopService");
-    const inventoryService = container.resolve<any>("InventoryService");
+    const shopService = context.services.shopService;
+    const inventoryService = context.services.inventoryService;
 
     // Get the item from catalog
     const item = shopService.getItem(itemId);
@@ -669,14 +1385,14 @@ export class GameCommandsModule implements CommandModule {
       };
     }
 
-    const inventoryService = container.resolve<any>("InventoryService");
+    const inventoryService = context.services.inventoryService;
 
     // Check if arg is a valid slot name
     const validSlots = ["TOOL", "SOFTWARE", "EXPLOIT", "DEFENSE", "UPGRADE"];
     if (validSlots.includes(arg.toUpperCase())) {
       const result = await inventoryService.unequipItem(
         context.userId,
-        arg.toUpperCase(),
+        arg.toUpperCase() as import("../inventoryService").EquipmentSlot,
       );
       return {
         success: result.success,
@@ -698,8 +1414,8 @@ export class GameCommandsModule implements CommandModule {
     _command: Command,
     context: CommandContext,
   ): Promise<CommandResult> {
-    const shopService = container.resolve<any>("ShopService");
-    const inventoryService = container.resolve<any>("InventoryService");
+    const shopService = context.services.shopService;
+    const inventoryService = context.services.inventoryService;
 
     // Get equipped items
     const equipment = await inventoryService.getEquipment(context.userId);
@@ -713,18 +1429,19 @@ export class GameCommandsModule implements CommandModule {
       catalog,
     );
 
-    let output = "\n=== EQUIPPED ITEMS ===\n\n";
+    const W = 44;
 
     const slots = ["TOOL", "SOFTWARE", "EXPLOIT", "DEFENSE", "UPGRADE"];
+    const equipRows: Array<{ label: string; value: string }> = [];
     let hasEquipped = false;
 
     for (const slot of slots) {
-      const itemId = equipment[slot];
+      const itemId = (equipment as Record<string, string | undefined>)[slot];
       if (itemId) {
         hasEquipped = true;
-        const item = catalog.find((i: any) => i.id === itemId);
+        const item = catalog.find((i: ShopItem) => i.id === itemId);
         if (item) {
-          output += `[${slot}] ${item.name}\n`;
+          equipRows.push({ label: `[${slot}]`, value: item.name });
           if (item.effects) {
             const effects = [];
             if (item.effects.hackingBonus)
@@ -746,44 +1463,63 @@ export class GameCommandsModule implements CommandModule {
                 `${(item.effects.creditsMultiplier * 100).toFixed(0)}% Credits`,
               );
             if (effects.length > 0) {
-              output += `  Effects: ${effects.join(", ")}\n`;
+              equipRows.push({
+                label: `  Effects: ${effects.join(", ")}`,
+                value: "",
+              });
             }
           }
-          output += "\n";
         }
       } else {
-        output += `[${slot}] (empty)\n\n`;
+        equipRows.push({ label: `[${slot}]`, value: "(empty)" });
       }
     }
 
     if (!hasEquipped) {
-      output += "No items equipped.\n\n";
+      equipRows.length = 0;
+      equipRows.push({ label: "No items equipped.", value: "" });
     }
 
-    // Show total bonuses
-    output += "=== TOTAL BONUSES ===\n\n";
-    const bonusLines = [];
+    // Build total bonuses rows
+    const bonusRows: Array<{ label: string; value: string }> = [];
     if (bonuses.hackingBonus)
-      bonusLines.push(`Hacking: +${bonuses.hackingBonus}`);
+      bonusRows.push({ label: "Hacking:", value: `+${bonuses.hackingBonus}` });
     if (bonuses.stealthBonus)
-      bonusLines.push(`Stealth: +${bonuses.stealthBonus}`);
-    if (bonuses.speedBonus) bonusLines.push(`Speed: +${bonuses.speedBonus}%`);
+      bonusRows.push({ label: "Stealth:", value: `+${bonuses.stealthBonus}` });
+    if (bonuses.speedBonus)
+      bonusRows.push({ label: "Speed:", value: `+${bonuses.speedBonus}%` });
     if (bonuses.detectionReduction)
-      bonusLines.push(`Detection: -${bonuses.detectionReduction}%`);
+      bonusRows.push({
+        label: "Detection:",
+        value: `-${bonuses.detectionReduction}%`,
+      });
     if (bonuses.successRateIncrease)
-      bonusLines.push(`Success Rate: +${bonuses.successRateIncrease}%`);
+      bonusRows.push({
+        label: "Success Rate:",
+        value: `+${bonuses.successRateIncrease}%`,
+      });
     if (bonuses.xpMultiplier !== 1.0)
-      bonusLines.push(`XP Multiplier: ${bonuses.xpMultiplier.toFixed(2)}x`);
+      bonusRows.push({
+        label: "XP Multiplier:",
+        value: `${bonuses.xpMultiplier.toFixed(2)}x`,
+      });
     if (bonuses.creditsMultiplier !== 1.0)
-      bonusLines.push(
-        `Credits Multiplier: ${bonuses.creditsMultiplier.toFixed(2)}x`,
-      );
+      bonusRows.push({
+        label: "Credits Multiplier:",
+        value: `${bonuses.creditsMultiplier.toFixed(2)}x`,
+      });
 
-    if (bonusLines.length > 0) {
-      output += bonusLines.join("\n");
-    } else {
-      output += "No active bonuses.";
+    if (bonusRows.length === 0) {
+      bonusRows.push({ label: "No active bonuses.", value: "" });
     }
+
+    const lines = multiPanel(
+      "EQUIPPED ITEMS",
+      [{ rows: equipRows }, { heading: "TOTAL BONUSES", rows: bonusRows }],
+      W,
+    );
+
+    const output = render(lines);
 
     return {
       success: true,
@@ -798,9 +1534,41 @@ export class GameCommandsModule implements CommandModule {
     context: CommandContext,
   ): Promise<CommandResult> {
     const presenceService = context.services.playerPresenceService;
+    if (!presenceService) {
+      return {
+        success: false,
+        output: "Presence service unavailable.",
+        timestamp: new Date(),
+      };
+    }
 
-    const output = presenceService.formatOnlinePlayersList();
     const players = presenceService.getOnlinePlayers();
+
+    if (players.length === 0) {
+      return {
+        success: true,
+        output: render(
+          panel(
+            "PLAYERS ONLINE (0)",
+            [{ label: "", value: "No players currently online." }],
+            48,
+          ),
+        ),
+        data: { players: [], count: 0 },
+        timestamp: new Date(),
+      };
+    }
+
+    const rows = players.map((p: any) => {
+      const glyph = getInlineGlyph("player");
+      const name = (p.username || "Unknown").padEnd(18);
+      const level = `Lv.${String(p.level || "??").padEnd(4)}`;
+      return { label: `${glyph} ${name}`, value: `${level}  ON` };
+    });
+
+    const output = render(
+      panel(`PLAYERS ONLINE (${players.length})`, rows, 48),
+    );
 
     return {
       success: true,
@@ -837,6 +1605,13 @@ export class GameCommandsModule implements CommandModule {
     }
 
     const presenceService = context.services.playerPresenceService;
+    if (!presenceService) {
+      return {
+        success: false,
+        output: "Presence service unavailable.",
+        timestamp: new Date(),
+      };
+    }
     const output = presenceService.formatServerOccupancy(connection.serverId);
 
     return {
@@ -865,6 +1640,13 @@ export class GameCommandsModule implements CommandModule {
     }
 
     const presenceService = context.services.playerPresenceService;
+    if (!presenceService) {
+      return {
+        success: false,
+        output: "Presence service unavailable.",
+        timestamp: new Date(),
+      };
+    }
 
     // Find player by username
     const player = presenceService.findPlayerByUsername(targetUsername);
@@ -880,6 +1662,8 @@ export class GameCommandsModule implements CommandModule {
     // Get detailed info
     const details = await presenceService.getPlayerDetails(player.userId);
 
+    const playerGlyph = getInlineGlyph("player");
+
     if (!details) {
       return {
         success: false,
@@ -889,37 +1673,83 @@ export class GameCommandsModule implements CommandModule {
     }
 
     // Format output
-    let output = `=== PLAYER INFO: ${details.username} ===\n\n`;
-    output += `Level: ${details.level}\n`;
-    output += `Reputation: ${details.reputation}\n`;
-    output += `Credits: ${details.credits}\n`;
-    output += `Member Since: ${details.joinedAt.toLocaleDateString()}\n\n`;
+    const successRate =
+      details.totalHacks > 0
+        ? Math.round((details.successfulHacks / details.totalHacks) * 100)
+        : 0;
 
-    output += `--- Skills ---\n`;
-    output += `Hacking: ${details.skills.hacking}\n`;
-    output += `Stealth: ${details.skills.stealth}\n`;
-    output += `Networking: ${details.skills.networking}\n`;
-    output += `Cryptography: ${details.skills.cryptography}\n`;
-    output += `Social Engineering: ${details.skills.socialEng}\n`;
-    output += `Forensics: ${details.skills.forensics}\n\n`;
-
-    output += `--- Stats ---\n`;
-    output += `Total Hacks: ${details.totalHacks}\n`;
-    output += `Successful: ${details.successfulHacks}\n`;
-    output += `Success Rate: ${details.totalHacks > 0 ? Math.round((details.successfulHacks / details.totalHacks) * 100) : 0}%\n\n`;
-
-    if (details.currentServerName) {
-      output += `Current Location: ${details.currentServerName}\n`;
-    } else {
-      output += `Current Location: Not connected\n`;
-    }
+    const sections: Array<{
+      heading?: string;
+      rows: Array<{ label: string; value: string }>;
+    }> = [
+      {
+        rows: [
+          { label: pad("Level:", 20), value: `${details.level}` },
+          { label: pad("Reputation:", 20), value: `${details.reputation}` },
+          { label: pad("Credits:", 20), value: `${details.credits}` },
+          {
+            label: pad("Member Since:", 20),
+            value: details.joinedAt.toLocaleDateString(),
+          },
+          {
+            label: pad("Location:", 20),
+            value: details.currentServerName || "Not connected",
+          },
+        ],
+      },
+      {
+        heading: "SKILLS",
+        rows: [
+          { label: pad("Hacking:", 20), value: `${details.skills.hacking}` },
+          { label: pad("Stealth:", 20), value: `${details.skills.stealth}` },
+          {
+            label: pad("Networking:", 20),
+            value: `${details.skills.networking}`,
+          },
+          {
+            label: pad("Cryptography:", 20),
+            value: `${details.skills.cryptography}`,
+          },
+          {
+            label: pad("Social Eng:", 20),
+            value: `${details.skills.socialEng}`,
+          },
+          {
+            label: pad("Forensics:", 20),
+            value: `${details.skills.forensics}`,
+          },
+        ],
+      },
+      {
+        heading: "STATS",
+        rows: [
+          { label: pad("Total Hacks:", 20), value: `${details.totalHacks}` },
+          {
+            label: pad("Successful:", 20),
+            value: `${details.successfulHacks}`,
+          },
+          { label: pad("Success Rate:", 20), value: `${successRate}%` },
+        ],
+      },
+    ];
 
     if (details.achievements.length > 0) {
-      output += `\n--- Achievements ---\n`;
-      details.achievements.forEach((ach: string) => {
-        output += `• ${ach}\n`;
+      sections.push({
+        heading: "ACHIEVEMENTS",
+        rows: details.achievements.map((ach: string) => ({
+          label: "",
+          value: `• ${ach}`,
+        })),
       });
     }
+
+    const output = render(
+      multiPanel(
+        `${playerGlyph} PLAYER INFO: ${details.username}`,
+        sections,
+        44,
+      ),
+    );
 
     return {
       success: true,
@@ -930,56 +1760,820 @@ export class GameCommandsModule implements CommandModule {
   }
 
   // Helper methods
-  private formatMissionList(missions: any[]): string {
-    if (!missions || missions.length === 0) {
-      return "No missions available";
+  // Old formatMissionList/formatMissionProgress removed — formatting is now inline in handlers
+
+  // ==================== SHARE INTEL ====================
+
+  private async handleShareIntel(
+    command: Command,
+    context: CommandContext,
+  ): Promise<CommandResult> {
+    const fkService = context.services.factionKnowledgeService;
+    if (!fkService) {
+      return {
+        success: false,
+        output: "Intel sharing system unavailable.",
+        timestamp: new Date(),
+      };
     }
 
-    let output = "📋 Missions:\n\n";
+    const assetType = command.args?.[0] as "server" | "file" | "player";
+    const assetId = command.args?.[1];
 
-    missions.forEach((mission: any) => {
-      output += `[${mission.id}] ${mission.title}\n`;
-      output += `  Status: ${mission.status}\n`;
-      output += `  Difficulty: ${mission.difficulty}\n`;
+    if (!assetType || !assetId) {
+      const W = 52;
+      const lines: string[] = [];
+      lines.push(boxTop(W));
+      lines.push(boxCenter("SHARE INTEL", W));
+      lines.push(boxDivider(W));
+      lines.push(boxRow("Usage: share_intel <type> <id>", W));
+      lines.push(boxRow("", W));
+      lines.push(boxRow("Types:", W));
+      lines.push(boxRow("  server  - Share a discovered server", W));
+      lines.push(boxRow("  file    - Share a discovered file", W));
+      lines.push(boxRow("  player  - Share info about a player", W));
+      lines.push(boxRow("", W));
+      lines.push(boxRow("Example: share_intel server srv_abc123", W));
+      lines.push(boxBottom(W));
+      return { success: true, output: render(lines), timestamp: new Date() };
+    }
 
-      if (mission.reward) {
-        output += `  Reward: ${mission.reward.credits} credits, ${mission.reward.experience} XP\n`;
+    if (!["server", "file", "player"].includes(assetType)) {
+      return {
+        success: false,
+        output: `Invalid intel type: ${assetType}. Use: server, file, or player`,
+        timestamp: new Date(),
+      };
+    }
+
+    // Check faction membership
+    const factionId = await fkService.getPlayerFactionId(context.userId);
+    if (!factionId) {
+      return {
+        success: false,
+        output: "You must be in a faction to share intel.",
+        timestamp: new Date(),
+      };
+    }
+
+    // Check faction rank — must be at least operative
+    const member = await context.db.client.factionMember.findFirst({
+      where: { userId: context.userId, factionId },
+    });
+    const allowedRanks = ["operative", "elite", "council_member"];
+    if (!member || !allowedRanks.includes(member.rank)) {
+      const currentRank = member?.rank?.toUpperCase() ?? "UNKNOWN";
+      return {
+        success: false,
+        output: `Insufficient faction rank. You must be at least OPERATIVE rank to share intel. Current rank: ${currentRank}`,
+        timestamp: new Date(),
+      };
+    }
+
+    // Verify the asset exists
+    let assetMeta: Record<string, unknown> = {};
+    if (assetType === "server") {
+      const server = await context.db.client.gameServer.findUnique({
+        where: { id: assetId },
+        select: {
+          id: true,
+          name: true,
+          ipAddress: true,
+          type: true,
+          securityLevel: true,
+          ownerId: true,
+        },
+      });
+      if (!server) {
+        return {
+          success: false,
+          output: `Server not found: ${assetId}`,
+          timestamp: new Date(),
+        };
       }
-
-      if (mission.expiresAt) {
-        const expires = new Date(mission.expiresAt);
-        output += `  Expires: ${expires.toLocaleString()}\n`;
+      assetMeta = {
+        name: server.name,
+        ip: server.ipAddress,
+        serverType: server.type,
+        securityLevel: server.securityLevel,
+        ownerId: server.ownerId,
+      };
+    } else if (assetType === "file") {
+      const file = await context.db.client.fileSystemNode.findUnique({
+        where: { id: assetId },
+        select: {
+          id: true,
+          name: true,
+          serverId: true,
+          type: true,
+          isHidden: true,
+          isEncrypted: true,
+        },
+      });
+      if (!file) {
+        return {
+          success: false,
+          output: `File not found: ${assetId}`,
+          timestamp: new Date(),
+        };
       }
+      assetMeta = {
+        name: file.name,
+        serverId: file.serverId,
+        isHidden: file.isHidden,
+        isEncrypted: file.isEncrypted,
+      };
+    } else if (assetType === "player") {
+      const player = await context.db.client.user.findUnique({
+        where: { id: assetId },
+        select: { id: true, username: true },
+      });
+      if (!player) {
+        return {
+          success: false,
+          output: `Player not found: ${assetId}`,
+          timestamp: new Date(),
+        };
+      }
+      assetMeta = { username: player.username };
+    }
 
-      output += "\n";
+    await fkService.addEntry(factionId, {
+      assetType,
+      assetId,
+      assetMeta,
+      source: "player_report",
+      confidence: 0.9,
+      discoveredBy: context.userId,
     });
 
-    return output;
+    const W = 52;
+    const lines: string[] = [];
+    lines.push(sBoxTop(W));
+    lines.push(sBoxRow(" [+] Intel shared with your faction", W));
+    lines.push(sBoxRow(`     Type: ${assetType}`, W));
+    lines.push(sBoxRow(`     ID:   ${assetId.substring(0, 20)}...`, W));
+    lines.push(sBoxRow("     Confidence: HIGH (player report)", W));
+    lines.push(sBoxBottom(W));
+
+    return { success: true, output: render(lines), timestamp: new Date() };
   }
 
-  private formatMissionProgress(missions: any[]): string {
-    if (!missions || missions.length === 0) {
-      return "No active missions";
+  // ==================== BOUNTIES ====================
+
+  private async handleBounties(
+    _command: Command,
+    context: CommandContext,
+  ): Promise<CommandResult> {
+    // Show active bounties — all public, plus highlight ones from player's faction
+    const bounties = await context.db.client.bounty.findMany({
+      where: {
+        status: "active",
+        expiresAt: { gt: new Date() },
+      },
+      orderBy: { rewardCredits: "desc" },
+      take: 20,
+    });
+
+    if (bounties.length === 0) {
+      return {
+        success: true,
+        output: "No active bounties. The network is quiet... for now.",
+        timestamp: new Date(),
+      };
     }
 
-    let output = "📊 Mission Progress:\n\n";
+    // Get player's faction for highlighting
+    const membership = await context.db.client.factionMember.findFirst({
+      where: { userId: context.userId },
+      select: { factionId: true },
+    });
 
-    missions.forEach((mission: any) => {
-      output += `${mission.title}\n`;
+    // Get faction names
+    const factionIds = [...new Set(bounties.map((b) => b.issuedByFactionId))];
+    const factions = await context.db.client.faction.findMany({
+      where: { id: { in: factionIds } },
+      select: { id: true, name: true, shortName: true },
+    });
+    const factionMap = new Map(
+      factions.map((f) => [f.id, f.shortName || f.name]),
+    );
 
-      if (mission.objectives && mission.objectives.length > 0) {
-        output += "Objectives:\n";
-        mission.objectives.forEach((obj: any) => {
-          const status = obj.completed ? "✅" : "⏳";
-          const progress =
-            obj.current && obj.target ? ` (${obj.current}/${obj.target})` : "";
-          output += `  ${status} ${obj.description}${progress}\n`;
+    const W = 58;
+    const lines: string[] = [];
+    lines.push(boxTop(W));
+    lines.push(boxCenter("ACTIVE BOUNTIES", W));
+    lines.push(boxDivider(W));
+
+    for (const b of bounties) {
+      const fName = factionMap.get(b.issuedByFactionId) || "unknown";
+      const remaining = b.expiresAt.getTime() - Date.now();
+      const isMine = membership?.factionId === b.issuedByFactionId;
+      const tag = isMine ? " [YOUR FACTION]" : "";
+      const claimed = b.claimedByUserId ? " [CLAIMED]" : "";
+
+      lines.push(boxRow(` TARGET: ${b.targetUsername}${tag}${claimed}`, W));
+      lines.push(
+        boxRow(`   ID: ${b.id.substring(0, 16)}  Faction: ${fName}`, W),
+      );
+      lines.push(
+        boxRow(`   Reward: ${b.rewardCredits}c + ${b.rewardReputation} rep`, W),
+      );
+      lines.push(boxRow(`   Expires: ${formatDuration(remaining)}`, W));
+      lines.push(boxRow(`   Reason: ${b.reason.substring(0, W - 12)}`, W));
+      lines.push(boxRow("", W));
+    }
+
+    lines.push(boxDivider(W));
+    lines.push(boxRow("  'bounty claim <id>' to accept a bounty", W));
+    lines.push(boxRow("  Hack the target's home server to complete", W));
+    lines.push(boxBottom(W));
+
+    return { success: true, output: render(lines), timestamp: new Date() };
+  }
+
+  private async handleBounty(
+    command: Command,
+    context: CommandContext,
+  ): Promise<CommandResult> {
+    const action = command.args?.[0];
+    const bountyId = command.args?.[1];
+
+    if (!action || !bountyId) {
+      return {
+        success: false,
+        output:
+          "Usage: bounty <claim|complete> <bounty_id>\n'bounties' to see active bounties.",
+        timestamp: new Date(),
+      };
+    }
+
+    const bounty = await context.db.client.bounty.findUnique({
+      where: { id: bountyId },
+    });
+
+    if (!bounty) {
+      return {
+        success: false,
+        output: `Bounty not found: ${bountyId}`,
+        timestamp: new Date(),
+      };
+    }
+
+    if (action === "claim") {
+      // Claim a bounty — assign it to this player
+      if (bounty.status !== "active") {
+        return {
+          success: false,
+          output: `Bounty is ${bounty.status}, cannot claim.`,
+          timestamp: new Date(),
+        };
+      }
+      if (bounty.claimedByUserId) {
+        return {
+          success: false,
+          output: "Bounty already claimed by another player.",
+          timestamp: new Date(),
+        };
+      }
+      if (bounty.targetUserId === context.userId) {
+        return {
+          success: false,
+          output: "You can't claim a bounty on yourself.",
+          timestamp: new Date(),
+        };
+      }
+
+      await context.db.client.bounty.update({
+        where: { id: bountyId },
+        data: { claimedByUserId: context.userId, status: "claimed" },
+      });
+
+      // Get target's home IP for the player
+      const target = await context.db.client.user.findUnique({
+        where: { id: bounty.targetUserId },
+        select: { homeIp: true, username: true },
+      });
+
+      const W = 52;
+      const lines: string[] = [];
+      lines.push(boxTop(W));
+      lines.push(boxCenter("BOUNTY CLAIMED", W));
+      lines.push(boxDivider(W));
+      lines.push(boxRow(` Target: ${bounty.targetUsername}`, W));
+      lines.push(
+        boxRow(
+          ` Reward: ${bounty.rewardCredits}c + ${bounty.rewardReputation} rep`,
+          W,
+        ),
+      );
+      lines.push(boxDivider(W));
+      lines.push(boxRow(" OBJECTIVE:", W));
+      lines.push(boxRow(` Hack ${bounty.targetUsername}'s home server`, W));
+      if (target?.homeIp) {
+        lines.push(boxRow(` Home IP: ${target.homeIp}`, W));
+      }
+      lines.push(boxRow(" Read /home/*/proof.log to verify access", W));
+      lines.push(
+        boxRow(" Then run: bounty complete " + bountyId.substring(0, 16), W),
+      );
+      lines.push(boxBottom(W));
+
+      return { success: true, output: render(lines), timestamp: new Date() };
+    }
+
+    if (action === "complete") {
+      // Complete a bounty — verify the player has hacked the target's home
+      if (bounty.status !== "claimed") {
+        return {
+          success: false,
+          output: "Bounty must be claimed first. Use 'bounty claim <id>'.",
+          timestamp: new Date(),
+        };
+      }
+      if (bounty.claimedByUserId !== context.userId) {
+        return {
+          success: false,
+          output: "This bounty was claimed by someone else.",
+          timestamp: new Date(),
+        };
+      }
+
+      // Verify: player must have a ServerConnection with accessLevel > 0 on target's home server
+      const targetUser = await context.db.client.user.findUnique({
+        where: { id: bounty.targetUserId },
+        select: { homeServerId: true, homeIp: true },
+      });
+
+      if (!targetUser?.homeServerId) {
+        return {
+          success: false,
+          output: "Target has no home server.",
+          timestamp: new Date(),
+        };
+      }
+
+      const hasAccess = await context.db.client.serverConnection.findFirst({
+        where: {
+          userId: context.userId,
+          serverId: targetUser.homeServerId,
+          accessLevel: { gt: 0 },
+        },
+      });
+
+      if (!hasAccess) {
+        return {
+          success: false,
+          output: `You haven't hacked ${bounty.targetUsername}'s home server yet. Hack ${targetUser.homeIp} first.`,
+          timestamp: new Date(),
+        };
+      }
+
+      // ── Delete stolen files from target's home server ──
+      let filesDeleted = 0;
+      let keysRevoked = 0;
+      let decoysHit = 0;
+      const stolenFileIds = (bounty as any).stolenFileIds as string[] | null;
+
+      if (
+        stolenFileIds &&
+        stolenFileIds.length > 0 &&
+        targetUser.homeServerId
+      ) {
+        // Find the stolen files and their content (for key revocation)
+        const stolenFiles = await context.db.client.fileSystemNode.findMany({
+          where: {
+            id: { in: stolenFileIds },
+            serverId: targetUser.homeServerId,
+          },
+          select: { id: true, name: true, content: true, metadata: true },
+        });
+
+        for (const file of stolenFiles) {
+          const meta = file.metadata as any;
+
+          // Track honeypot decoy hits
+          if (meta?.isDecoy === true) {
+            decoysHit++;
+            await context.db.client.fileSystemNode
+              .delete({ where: { id: file.id } })
+              .catch(() => {});
+            filesDeleted++;
+            continue; // Decoy files have no access keys to revoke
+          }
+
+          // Revoke access keys that came from this file's content
+          if (meta?.sourceServerId) {
+            const revoked = await context.db.client.serverAccessKey.deleteMany({
+              where: {
+                userId: bounty.targetUserId,
+                sourceFileId: file.id,
+              },
+            });
+            keysRevoked += revoked.count;
+          }
+
+          // Delete the stolen file
+          await context.db.client.fileSystemNode
+            .delete({ where: { id: file.id } })
+            .catch(() => {});
+          filesDeleted++;
+        }
+      }
+
+      // Complete the bounty — grant rewards
+      await context.db.client.bounty.update({
+        where: { id: bountyId },
+        data: { status: "completed", completedAt: new Date() },
+      });
+
+      // Grant credits
+      await context.db.client.playerProgress.update({
+        where: { userId: context.userId },
+        data: { credits: { increment: bounty.rewardCredits } },
+      });
+
+      // Grant reputation with issuing faction
+      try {
+        await context.services.factionService.addReputation(
+          context.userId,
+          bounty.issuedByFactionId,
+          bounty.rewardReputation,
+        );
+      } catch {
+        // Rep grant failure non-fatal
+      }
+
+      // Notify the target that their files were deleted
+      if (context.io && filesDeleted > 0) {
+        context.io.to(`player:${bounty.targetUserId}`).emit("command:result", {
+          success: false,
+          output: `⚠ SECURITY BREACH: ${filesDeleted} file(s) deleted from your home server by a bounty hunter.${keysRevoked > 0 ? ` ${keysRevoked} access key(s) revoked.` : ""}`,
+          timestamp: new Date(),
         });
       }
 
-      output += "\n";
-    });
+      const W = 52;
+      const lines: string[] = [];
+      lines.push(boxTop(W));
+      lines.push(boxCenter("BOUNTY COMPLETED", W));
+      lines.push(boxDivider(W));
+      lines.push(boxRow(` Target: ${bounty.targetUsername}`, W));
+      lines.push(boxDivider(W));
+      if (filesDeleted > 0) {
+        lines.push(boxRow(` Stolen files purged: ${filesDeleted}`, W));
+      }
+      if (decoysHit > 0) {
+        lines.push(boxRow(` Honeypot decoys found: ${decoysHit}`, W));
+      }
+      if (keysRevoked > 0) {
+        lines.push(boxRow(` Access keys revoked: ${keysRevoked}`, W));
+      }
+      lines.push(boxDivider(W));
+      lines.push(boxRow(` + ${bounty.rewardCredits} credits`, W));
+      lines.push(boxRow(` + ${bounty.rewardReputation} faction reputation`, W));
+      if (decoysHit > 0 && decoysHit === filesDeleted) {
+        lines.push(boxDivider(W));
+        lines.push(boxRow(" Target used honeypot. All files were decoys.", W));
+        lines.push(boxRow(" No real intel was destroyed.", W));
+      }
+      lines.push(boxDivider(W));
+      lines.push(boxRow(" Well done, hunter.", W));
+      lines.push(boxBottom(W));
 
-    return output;
+      // Fire mission integration hook
+      if (context.services.missionIntegrationService) {
+        context.services.missionIntegrationService
+          .onBountyCompleted(context.userId, bounty.issuedByFactionId)
+          .catch(() => {});
+      }
+
+      return { success: true, output: render(lines), timestamp: new Date() };
+    }
+
+    return {
+      success: false,
+      output: "Usage: bounty <claim|complete> <bounty_id>",
+      timestamp: new Date(),
+    };
+  }
+
+  // ══════════════════════════════════════════════════════════════════
+  // STORY ARC COMMANDS
+  // ══════════════════════════════════════════════════════════════════
+
+  private async handleStories(
+    _command: Command,
+    context: CommandContext,
+  ): Promise<CommandResult> {
+    const storyService = context.services.storyMissionService;
+    if (!storyService) {
+      return {
+        success: false,
+        output: "Story system unavailable.",
+        timestamp: new Date(),
+      };
+    }
+
+    const arcs = await storyService.getPlayerStoryArcs(context.userId);
+
+    if (arcs.length === 0) {
+      return {
+        success: true,
+        output:
+          "No story arcs available.\nStory arcs are offered by faction leaders — increase your faction standing to unlock them.",
+        timestamp: new Date(),
+      };
+    }
+
+    const W = 58;
+    const lines: string[] = [];
+    lines.push(boxTop(W));
+    lines.push(boxCenter("STORY ARCS", W));
+    lines.push(boxDivider(W));
+
+    for (const arc of arcs) {
+      const statusIcon =
+        arc.status === "active"
+          ? "[ACTIVE]"
+          : arc.status === "completed"
+            ? "[DONE]"
+            : arc.status === "failed"
+              ? "[FAILED]"
+              : "[ABANDONED]";
+      lines.push(boxRow(` ${statusIcon} ${arc.title}`, W));
+      lines.push(
+        boxRow(
+          `   Faction: ${arc.faction?.name || "Unknown"} | Step ${arc.currentStep + 1}/${arc.totalSteps}`,
+          W,
+        ),
+      );
+      lines.push(boxRow(`   ID: ${arc.id.substring(0, 16)}...`, W));
+      lines.push(boxRow("", W));
+    }
+
+    lines.push(boxDivider(W));
+    lines.push(boxRow(" 'story <id>' for details", W));
+    lines.push(boxRow(" 'story abandon <id>' to abandon", W));
+    lines.push(boxBottom(W));
+
+    return { success: true, output: render(lines), timestamp: new Date() };
+  }
+
+  private async handleStory(
+    command: Command,
+    context: CommandContext,
+  ): Promise<CommandResult> {
+    const storyService = context.services.storyMissionService;
+    if (!storyService) {
+      return {
+        success: false,
+        output: "Story system unavailable.",
+        timestamp: new Date(),
+      };
+    }
+
+    const action = command.args?.[0];
+    if (!action) {
+      return {
+        success: false,
+        output: "Usage: story <arc_id>\n       story abandon <arc_id>",
+        timestamp: new Date(),
+      };
+    }
+
+    // Handle abandon
+    if (action === "abandon") {
+      const arcId = command.args?.[1];
+      if (!arcId) {
+        return {
+          success: false,
+          output: "Usage: story abandon <arc_id>",
+          timestamp: new Date(),
+        };
+      }
+      const result = await storyService.abandonStoryArc(context.userId, arcId);
+      if (!result.success) {
+        return {
+          success: false,
+          output: result.error || "Failed to abandon story arc.",
+          timestamp: new Date(),
+        };
+      }
+      return {
+        success: true,
+        output:
+          "Story arc abandoned. Any active missions from this arc have been cancelled.",
+        timestamp: new Date(),
+      };
+    }
+
+    // View story arc details
+    const arcId = action;
+    const arc = await storyService.getStoryArc(arcId);
+
+    if (!arc) {
+      return {
+        success: false,
+        output: `Story arc not found: ${arcId}`,
+        timestamp: new Date(),
+      };
+    }
+
+    const steps = arc.steps as any[];
+    const W = 58;
+    const lines: string[] = [];
+    lines.push(boxTop(W));
+    lines.push(boxCenter(arc.title.toUpperCase(), W));
+    lines.push(boxDivider(W));
+    lines.push(boxRow(` Faction: ${arc.faction?.name || "Unknown"}`, W));
+    lines.push(boxRow(` Issued by: ${arc.persona?.name || "Unknown"}`, W));
+    lines.push(boxRow(` Status: ${arc.status.toUpperCase()}`, W));
+    lines.push(boxRow(` Difficulty: ${arc.difficulty}/10`, W));
+    lines.push(boxDivider(W));
+    lines.push(boxRow(` ${arc.description}`, W));
+    lines.push(boxDivider(W));
+    lines.push(boxCenter("STEPS", W));
+    lines.push(boxDivider(W));
+
+    for (let i = 0; i < steps.length; i++) {
+      const step = steps[i];
+      const icon =
+        step.status === "completed"
+          ? "[+]"
+          : step.status === "active"
+            ? "[>]"
+            : step.status === "failed"
+              ? "[X]"
+              : step.status === "skipped"
+                ? "[-]"
+                : "[ ]";
+      lines.push(boxRow(` ${icon} Step ${i + 1}: ${step.title}`, W));
+      if (step.status === "active" && step.missionId) {
+        lines.push(
+          boxRow(`     Mission: ${step.missionId.substring(0, 16)}...`, W),
+        );
+      }
+    }
+
+    lines.push(boxBottom(W));
+    return { success: true, output: render(lines), timestamp: new Date() };
+  }
+
+  // ==================== LEADERBOARD ====================
+
+  private async handleLeaderboard(
+    command: Command,
+    context: CommandContext,
+  ): Promise<CommandResult> {
+    const service = context.services.leaderboardService;
+    if (!service) {
+      return {
+        success: false,
+        output: "Leaderboard service unavailable.",
+        timestamp: new Date(),
+      };
+    }
+
+    const category = (command.args[0]?.toLowerCase() || "level") as any;
+    const validCategories = [
+      "level",
+      "credits",
+      "hacking",
+      "networking",
+      "cryptography",
+      "stealth",
+      "reputation",
+      "achievements",
+      "missions",
+    ];
+    if (!validCategories.includes(category)) {
+      return {
+        success: true,
+        output: `Usage: leaderboard [${validCategories.join("|")}]\n\nCategories:\n  level        - Highest level players\n  credits      - Wealthiest players\n  hacking      - Top hackers\n  networking   - Network specialists\n  cryptography - Cipher masters\n  stealth      - Ghost operatives\n  reputation   - Faction heroes\n  achievements - Most achievements\n  missions     - Most missions completed`,
+        timestamp: new Date(),
+      };
+    }
+
+    const W = 60;
+    const entries = await service.getLeaderboard(category, 15);
+    const lines: string[] = [];
+
+    lines.push(boxTop(W));
+    lines.push(boxRow(` LEADERBOARD: ${category.toUpperCase()}`, W));
+    lines.push(boxRow("", W));
+
+    if (entries.length === 0) {
+      lines.push(boxRow("  No entries yet.", W));
+    } else {
+      lines.push(
+        boxRow(
+          ` ${"#".padEnd(4)}${"PLAYER".padEnd(22)}${"SCORE".padStart(10)}${"".padStart(10)}`,
+          W,
+        ),
+      );
+      lines.push(boxRow(` ${"─".repeat(W - 4)}`, W));
+
+      for (const e of entries) {
+        const medal =
+          e.rank === 1
+            ? "[1st]"
+            : e.rank === 2
+              ? "[2nd]"
+              : e.rank === 3
+                ? "[3rd]"
+                : `#${e.rank}`;
+        const detail = e.detail ? ` (${e.detail})` : "";
+        const isMe = e.userId === context.userId;
+        const marker = isMe ? " <-YOU" : "";
+        lines.push(
+          boxRow(
+            ` ${medal.padEnd(6)}${e.username.padEnd(20)}${String(e.value).padStart(10)}${detail}${marker}`,
+            W,
+          ),
+        );
+      }
+    }
+
+    // Show player's own rank if not in top
+    const myRank = await service.getPlayerRank(context.userId, category);
+    const inTop = entries.some((e) => e.userId === context.userId);
+    if (myRank && !inTop) {
+      lines.push(boxRow(` ${"─".repeat(W - 4)}`, W));
+      lines.push(boxRow(` Your rank: #${myRank}`, W));
+    }
+
+    lines.push(boxBottom(W));
+    return { success: true, output: render(lines), timestamp: new Date() };
+  }
+
+  // ==================== ACHIEVEMENTS ====================
+
+  private async handleAchievements(
+    _command: Command,
+    context: CommandContext,
+  ): Promise<CommandResult> {
+    const service = context.services.achievementService;
+    if (!service) {
+      return {
+        success: false,
+        output: "Achievement service unavailable.",
+        timestamp: new Date(),
+      };
+    }
+
+    // Check for new achievements first
+    const newlyAwarded = await service.checkAndAward(context.userId);
+
+    const all = await service.getPlayerAchievements(context.userId);
+    const unlocked = all.filter((a) => a.unlocked);
+    const locked = all.filter((a) => !a.unlocked);
+
+    const W = 65;
+    const lines: string[] = [];
+
+    lines.push(boxTop(W));
+    lines.push(boxRow(` ACHIEVEMENTS  [${unlocked.length}/${all.length}]`, W));
+
+    if (newlyAwarded.length > 0) {
+      lines.push(boxRow("", W));
+      for (const id of newlyAwarded) {
+        const def = all.find((a) => a.def.id === id);
+        if (def) {
+          lines.push(
+            boxRow(` *** NEW: ${def.def.name} — ${def.def.description} ***`, W),
+          );
+        }
+      }
+    }
+
+    lines.push(boxRow("", W));
+    lines.push(boxRow(` UNLOCKED:`, W));
+    lines.push(boxRow(` ${"─".repeat(W - 4)}`, W));
+    if (unlocked.length === 0) {
+      lines.push(boxRow("  None yet. Keep playing!", W));
+    } else {
+      for (const a of unlocked) {
+        lines.push(
+          boxRow(` [+] ${a.def.name.padEnd(24)} ${a.def.description}`, W),
+        );
+      }
+    }
+
+    lines.push(boxRow("", W));
+    lines.push(boxRow(` LOCKED:`, W));
+    lines.push(boxRow(` ${"─".repeat(W - 4)}`, W));
+    const shownLocked = locked.slice(0, 10);
+    for (const a of shownLocked) {
+      lines.push(
+        boxRow(` [ ] ${a.def.name.padEnd(24)} ${a.def.description}`, W),
+      );
+    }
+    if (locked.length > 10) {
+      lines.push(boxRow(`     ...and ${locked.length - 10} more`, W));
+    }
+
+    lines.push(boxBottom(W));
+    return { success: true, output: render(lines), timestamp: new Date() };
   }
 }

@@ -7,7 +7,6 @@ import type {
   CommandResult,
   ValidationResult,
 } from "../types/game";
-import { progressService } from "./progressService";
 import { SystemCommandsModule } from "./commandModules/systemCommands";
 import { NetworkCommandsModule } from "./commandModules/networkCommands";
 import { HackCommandsModule } from "./commandModules/hackCommands";
@@ -18,15 +17,50 @@ import { HelpCommandsModule } from "./commandModules/helpCommands";
 import { ProcessCommandsModule } from "./commandModules/processCommands";
 import { MathCommandsModule } from "./commandModules/mathCommands";
 import { FactionCommandsModule } from "./commandModules/factionCommands";
+import { AliasCommandsModule } from "./commandModules/aliasCommands";
+import { AdminCommandsModule } from "./commandModules/adminCommands";
+import { DefenseCommandsModule } from "./commandModules/defenseCommands";
+
 import { CommandModule, CommandContext } from "./commandModules/interface";
-import { memoryService } from "./memoryService";
+import { checkSkillRequirement } from "./commandModules/skillRequirements";
 import { injectable, inject } from "tsyringe";
-import { SOCKET_IO } from "../di/tokens";
+import type { Logger } from "pino";
+import {
+  LOGGER,
+  SOCKET_IO,
+  PROGRESS_SERVICE,
+  GAME_STATE_MANAGER,
+} from "../di/tokens";
+import { getService } from "../di/container";
+import * as TOKENS from "../di/tokens";
 import {
   validateCommand,
   validateArgs,
   validateUserId,
 } from "../utils/validators";
+
+import type ProgressService from "./progressService";
+import type GameStateManager from "./gameStateManager";
+import type FileService from "./fileService";
+import type ShopService from "./shopService";
+import type MissionService from "./missionService";
+import type MissionGeneratorService from "./missionGenerator";
+import type ServerService from "./serverService";
+import type MemoryService from "./memoryService";
+import type ProcessStateService from "./processStateService";
+import type HackService from "./hackService";
+import type MessageService from "./messageService";
+import type ForumService from "./forumService";
+import type { FactionService } from "./factionService";
+import type InventoryService from "./inventoryService";
+import type PlayerPresenceService from "./playerPresenceService";
+import type BackdoorService from "./backdoorService";
+import type TraceService from "./traceService";
+import type { FactionKnowledgeService } from "./factionKnowledgeService";
+import type { NetworkTopologyService } from "./networkTopologyService";
+import type MissionIntegrationService from "./missionIntegration";
+import type { StoryMissionService } from "./storyMissionService";
+import type { PlayerProgress } from "@prisma/client";
 
 /**
  * CommandProcessor - Server-side command processing and execution
@@ -52,7 +86,12 @@ class CommandProcessor extends EventEmitter {
   private modules: CommandModule[] = [];
   private commandMap: Map<string, CommandModule> = new Map();
 
-  constructor(@inject(SOCKET_IO) private io: SocketIOServer) {
+  constructor(
+    @inject(LOGGER) private logger: Logger,
+    @inject(SOCKET_IO) private io: SocketIOServer,
+    @inject(PROGRESS_SERVICE) private progressService: ProgressService,
+    @inject(GAME_STATE_MANAGER) private gameStateManager: GameStateManager,
+  ) {
     super();
     this.commandHistory = new Map();
     this.rateLimitMap = new Map();
@@ -69,11 +108,14 @@ class CommandProcessor extends EventEmitter {
       new ProcessCommandsModule(),
       new MathCommandsModule(),
       new FactionCommandsModule(),
+      new AliasCommandsModule(),
+      new AdminCommandsModule(),
+      new DefenseCommandsModule(),
     ];
 
     // Build command map from modules
     this.buildCommandMap();
-    console.log("⚙️ Command Processor initialized");
+    this.logger.info("Command Processor initialized");
   }
 
   /**
@@ -89,44 +131,119 @@ class CommandProcessor extends EventEmitter {
         this.commandMap.set(cmd, module);
       }
     }
-    console.log(`🧩 Initialized ${this.modules.length} command modules`);
+    this.logger.info(
+      { moduleCount: this.modules.length },
+      "Initialized command modules",
+    );
+  }
+
+  /** Resolve a service from DI, returning undefined on failure instead of throwing. */
+  private resolveService<T>(token: string): T | undefined {
+    try {
+      return getService<T>(token);
+    } catch {
+      this.logger.warn({ token }, "Service not available");
+      return undefined;
+    }
   }
 
   private async buildCommandContext(userId: string): Promise<CommandContext> {
-    // Get services via Registry
-    const gameStateManager = ServiceRegistry.gameStateManager;
-    const fileService = ServiceRegistry.fileService;
-    const processStateService = ServiceRegistry.processStateService;
-    const shopService = ServiceRegistry.shopService;
-    const missionService = ServiceRegistry.missionService;
-    const missionGenerator = ServiceRegistry.missionGenerator;
-    const serverService = ServiceRegistry.serverService;
+    const fileService = this.resolveService<FileService>(TOKENS.FILE_SERVICE)!;
+    const shopService = this.resolveService<ShopService>(TOKENS.SHOP_SERVICE)!;
+    const missionService = this.resolveService<MissionService>(
+      TOKENS.MISSION_SERVICE,
+    )!;
+    const missionGenerator = this.resolveService<MissionGeneratorService>(
+      TOKENS.MISSION_GENERATOR_SERVICE,
+    )!;
+    const serverService = this.resolveService<ServerService>(
+      TOKENS.SERVER_SERVICE,
+    )!;
+    const memoryService = this.resolveService<MemoryService>(
+      TOKENS.MEMORY_SERVICE,
+    )!;
+    const processStateService = this.resolveService<ProcessStateService>(
+      TOKENS.PROCESS_STATE_SERVICE,
+    )!;
+    const hackService = this.resolveService<HackService>(TOKENS.HACK_SERVICE)!;
+    const messageService = this.resolveService<MessageService>(
+      TOKENS.MESSAGE_SERVICE,
+    )!;
+    const forumService = this.resolveService<ForumService>(
+      TOKENS.FORUM_SERVICE,
+    )!;
+    const factionService = this.resolveService<FactionService>(
+      TOKENS.FACTION_SERVICE,
+    )!;
+    const inventoryService = this.resolveService<InventoryService>(
+      TOKENS.INVENTORY_SERVICE,
+    )!;
+    const playerPresenceService = this.resolveService<PlayerPresenceService>(
+      TOKENS.PLAYER_PRESENCE_SERVICE,
+    );
+    const backdoorService = this.resolveService<BackdoorService>(
+      TOKENS.BACKDOOR_SERVICE,
+    )!;
+    const traceService = this.resolveService<TraceService>(
+      TOKENS.TRACE_SERVICE,
+    )!;
+    const factionKnowledgeService =
+      this.resolveService<FactionKnowledgeService>(
+        TOKENS.FACTION_KNOWLEDGE_SERVICE,
+      );
+    const networkTopologyService = this.resolveService<NetworkTopologyService>(
+      TOKENS.NETWORK_TOPOLOGY_SERVICE,
+    );
+    const missionIntegrationService =
+      this.resolveService<MissionIntegrationService>(
+        TOKENS.MISSION_INTEGRATION_SERVICE,
+      );
+    const storyMissionService = this.resolveService<StoryMissionService>(
+      TOKENS.STORY_MISSION_SERVICE,
+    );
+    const leaderboardService = this.resolveService<
+      import("./leaderboardService").LeaderboardService
+    >(TOKENS.LEADERBOARD_SERVICE);
+    const achievementService = this.resolveService<
+      import("./achievementService").AchievementService
+    >(TOKENS.ACHIEVEMENT_SERVICE);
 
-    // Safely get presence service
-    let playerPresenceService;
-    try {
-      playerPresenceService = ServiceRegistry.playerPresenceService;
-    } catch (e) {
-      // Service might not be initialized yet
-      console.warn("PlayerPresenceService not initialized for command context");
-    }
+    // Fetch user role for command-level role gating
+    const user = await db.client.user.findUnique({
+      where: { id: userId },
+      select: { role: true },
+    });
 
     return {
       userId,
+      role: user?.role ?? "player",
       db,
       fileService,
       ...(this.io ? { io: this.io } : {}),
       commandHistory: this.commandHistory,
-      gameStateManager,
+      gameStateManager: this.gameStateManager,
       modules: this.modules,
       services: {
         shopService,
         missionService,
         missionGenerator,
-        playerPresenceService,
+        ...(playerPresenceService ? { playerPresenceService } : {}),
         serverService,
         memoryService,
         processStateService,
+        hackService,
+        messageService,
+        forumService,
+        factionService,
+        inventoryService,
+        backdoorService,
+        traceService,
+        ...(factionKnowledgeService ? { factionKnowledgeService } : {}),
+        ...(networkTopologyService ? { networkTopologyService } : {}),
+        ...(missionIntegrationService ? { missionIntegrationService } : {}),
+        ...(storyMissionService ? { storyMissionService } : {}),
+        ...(leaderboardService ? { leaderboardService } : {}),
+        ...(achievementService ? { achievementService } : {}),
       },
     };
   }
@@ -259,8 +376,7 @@ class CommandProcessor extends EventEmitter {
       }
 
       // Check if user is online (has active session)
-      const { gameStateManager } = await import("../index");
-      const session = gameStateManager?.getSession(userId);
+      const session = this.gameStateManager?.getSession(userId);
       if (!session) {
         return { valid: false, error: "No active session" };
       }
@@ -273,7 +389,12 @@ class CommandProcessor extends EventEmitter {
 
       // Network commands require network access (being connected to a server)
       if (module instanceof NetworkCommandsModule) {
-        if (!session.currentServerId && command !== "connect") {
+        if (
+          !session.currentServerId &&
+          command !== "connect" &&
+          command !== "scan" &&
+          command !== "servers"
+        ) {
           return {
             valid: false,
             error: "Network access required. Connect to a server first.",
@@ -281,10 +402,15 @@ class CommandProcessor extends EventEmitter {
         }
       }
 
-      // Hack commands require specific skills and tools
-      if (module instanceof HackCommandsModule) {
-        const validation = await this.validateHackCommand(
-          userId,
+      // Skill-gated commands (hack, network, file, social, alias modules)
+      if (
+        module instanceof HackCommandsModule ||
+        module instanceof NetworkCommandsModule ||
+        module instanceof FileCommandsModule ||
+        module instanceof SocialCommandsModule ||
+        module instanceof AliasCommandsModule
+      ) {
+        const validation = await this.validateSkillRequirements(
           parsedCommand,
           user.progress,
         );
@@ -303,7 +429,7 @@ class CommandProcessor extends EventEmitter {
 
       return { valid: true };
     } catch (error) {
-      console.error("Command validation error:", error);
+      this.logger.error({ err: error }, "Command validation error");
       return {
         valid: false,
         error:
@@ -346,32 +472,34 @@ class CommandProcessor extends EventEmitter {
   }
 
   /**
-   * Validate hack-specific commands
+   * Validate skill requirements for any command across all gated modules.
+   *
+   * Delegates to the shared SKILL_REQUIREMENTS map in skillRequirements.ts
+   * which is also consumed by HelpCommandsModule for progressive discovery.
    */
-  private async validateHackCommand(
-    _userId: string,
+  private async validateSkillRequirements(
     parsedCommand: ParsedCommand,
-    progress: any,
+    progress: PlayerProgress | null,
   ): Promise<ValidationResult> {
     if (!progress) {
       return { valid: false, error: "Player progress not found" };
     }
 
-    const requiredSkills: Record<string, number> = {
-      hack: 20,
-      crack: 30,
-      exploit: 40,
-      backdoor: 50,
-      rootkit: 60,
-    };
+    const result = checkSkillRequirement(
+      parsedCommand.command,
+      parsedCommand.args,
+      progress as unknown as Record<string, unknown>,
+    );
 
-    const required = requiredSkills[parsedCommand.command] || 0;
-
-    if (progress.hacking < required) {
+    if (result) {
       return {
         valid: false,
-        error: `Insufficient hacking skill. Required: ${required}, Current: ${progress.hacking}`,
-        details: { requiredSkill: required, currentSkill: progress.hacking },
+        error: result.error,
+        details: {
+          requiredSkill: result.requiredSkill,
+          currentSkill: result.currentSkill,
+          skillName: result.skillName,
+        },
       };
     }
 
@@ -450,17 +578,17 @@ class CommandProcessor extends EventEmitter {
 
       // Log to database (async, don't wait)
       this.logCommandExecution(userId, command, result).catch((err) =>
-        console.error("Failed to log command:", err),
+        this.logger.error({ err }, "Failed to log command"),
       );
 
       // Trigger progress save if needed
       if (result.success && this.shouldTriggerSave(command.command)) {
-        progressService.saveOnEvent(userId, "command_executed");
+        this.progressService.saveOnEvent(userId, "command_executed");
       }
 
       return result;
     } catch (error) {
-      console.error("Command execution error:", error);
+      this.logger.error({ err: error }, "Command execution error");
       return {
         success: false,
         output: "Command execution failed",
@@ -523,7 +651,7 @@ class CommandProcessor extends EventEmitter {
         },
       });
     } catch (error) {
-      console.error("Failed to log command execution:", error);
+      this.logger.error({ err: error }, "Failed to log command execution");
     }
   }
 
@@ -763,14 +891,3 @@ class CommandProcessor extends EventEmitter {
 }
 
 export default CommandProcessor;
-
-// Backward compatibility
-import { container } from "../di/container";
-import { COMMAND_PROCESSOR } from "../di/tokens";
-import { ServiceRegistry } from "../di/serviceRegistry";
-export const commandProcessor = new Proxy({} as CommandProcessor, {
-  get(_target, prop) {
-    const instance = container.resolve(COMMAND_PROCESSOR as any);
-    return (instance as any)[prop];
-  },
-});

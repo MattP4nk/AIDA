@@ -1,4 +1,5 @@
 import { PrismaClient } from "@prisma/client";
+import logger from "../logger";
 import { config } from "../config/environment";
 
 // Custom Prisma client with logging and error handling
@@ -10,40 +11,41 @@ class DatabaseClient {
     this.prisma = new PrismaClient({
       datasources: {
         db: {
-          url: config.DATABASE_URL,
+          url: this.buildConnectionUrl(),
         },
       },
-      log:
-        config.NODE_ENV === "development"
-          ? ["info", "warn", "error"]
-          : ["error"],
+      // Suppress "info" noise; lifecycle.ts handles shutdown logging
+      log: config.NODE_ENV === "development" ? ["warn", "error"] : ["error"],
       errorFormat: "pretty",
     });
 
-    // Prisma middleware: log only create, update, delete actions
-    this.prisma.$use(async (params, next) => {
-      const start = Date.now();
-      const result = await next(params);
-      const duration = Date.now() - start;
+    // Development only: log slow writes without dumping args (args may contain secrets)
+    if (config.NODE_ENV === "development") {
+      this.prisma.$use(async (params, next) => {
+        const start = Date.now();
+        const result = await next(params);
+        const duration = Date.now() - start;
+        if (
+          (params.action === "create" ||
+            params.action === "update" ||
+            params.action === "delete") &&
+          duration > 100
+        ) {
+          logger.info({ model: params.model, action: params.action, duration }, "Slow Prisma query");
+        }
+        return result;
+      });
+    }
+    // Note: SIGINT/SIGTERM are handled by lifecycle.ts — do NOT register them here
+  }
 
-      // Only log writes (create, update, delete)
-      if (
-        params.action === "create" ||
-        params.action === "update" ||
-        params.action === "delete"
-      ) {
-        console.log(
-          `[Prisma] ${params.model}.${params.action} (${duration}ms)`,
-          JSON.stringify(params.args, null, 2),
-        );
-      }
-
-      return result;
-    });
-
-    // Handle graceful shutdown
-    process.on("SIGINT", this.disconnect.bind(this));
-    process.on("SIGTERM", this.disconnect.bind(this));
+  // Append connection pool params to DATABASE_URL if not already configured
+  private buildConnectionUrl(): string {
+    const url = config.DATABASE_URL;
+    if (url.includes("connection_limit")) return url;
+    const poolSize = process.env.DATABASE_POOL_SIZE ?? "20";
+    const sep = url.includes("?") ? "&" : "?";
+    return `${url}${sep}connection_limit=${poolSize}&pool_timeout=20`;
   }
 
   static getInstance(): DatabaseClient {
@@ -60,9 +62,9 @@ class DatabaseClient {
   async connect(): Promise<void> {
     try {
       await this.prisma.$connect();
-      console.log("🗄️  Database connected successfully");
+      logger.info("Database connected successfully");
     } catch (error) {
-      console.error("❌ Database connection failed:", error);
+      logger.error({ err: error }, "Database connection failed");
       throw error;
     }
   }
@@ -70,9 +72,9 @@ class DatabaseClient {
   async disconnect(): Promise<void> {
     try {
       await this.prisma.$disconnect();
-      console.log("🗄️  Database disconnected");
+      logger.info("Database disconnected");
     } catch (error) {
-      console.error("❌ Error disconnecting from database:", error);
+      logger.error({ err: error }, "Error disconnecting from database");
     }
   }
 
@@ -81,7 +83,7 @@ class DatabaseClient {
       await this.prisma.$queryRaw`SELECT 1`;
       return true;
     } catch (error) {
-      console.error("❌ Database health check failed:", error);
+      logger.error({ err: error }, "Database health check failed");
       return false;
     }
   }
@@ -113,7 +115,7 @@ class DatabaseClient {
     try {
       return await queryFn();
     } catch (error) {
-      console.error("Database query error:", error);
+      logger.error({ err: error }, "Database query error");
       return defaultValue || null;
     }
   }

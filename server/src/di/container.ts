@@ -30,11 +30,31 @@ import MemoryService from "../services/memoryService";
 import ProcessStateService from "../services/processStateService";
 import CommandProcessor from "../services/commandProcessor";
 import { FactionService } from "../services/factionService";
+import { ReputationEngine } from "../services/reputationEngine";
 import { AIService } from "../services/aiService";
 import { PersonaService } from "../services/personaService";
 import AISchedulerService from "../services/aiSchedulerService";
 import MissionIntegrationService from "../services/missionIntegration";
 import MissionGeneratorService from "../services/missionGenerator";
+import { ServerContentService } from "../services/serverContentService";
+import ResourceService from "../services/resourceService";
+import ContestService from "../services/contestService";
+import WarfareService from "../services/warfareService";
+import AliasService from "../services/aliasService";
+import DarkNetDiscoveryService from "../services/darknetDiscoveryService";
+import CensorshipService from "../services/censorshipService";
+import { FactionKnowledgeService } from "../services/factionKnowledgeService";
+import { NetworkTopologyService } from "../services/networkTopologyService";
+import BackdoorService from "../services/backdoorService";
+import TraceService from "../services/traceService";
+import { DynamicContentService } from "../services/dynamicContentService";
+import { StoryMissionService } from "../services/storyMissionService";
+import { LeaderboardService } from "../services/leaderboardService";
+import { AchievementService } from "../services/achievementService";
+import { TutorialService } from "../services/tutorialService";
+import { StoryProgressionService } from "../services/storyProgressionService";
+import { ArchitectInterventionExecutor } from "../services/architectInterventionExecutor";
+import { DarkNetDungeonService } from "../services/darknetDungeonService";
 
 import * as TOKENS from "./tokens";
 
@@ -47,7 +67,7 @@ export function setupContainer(
   logger: Logger,
 ): void {
   // Register external dependencies
-  container.registerInstance("Logger", logger);
+  container.registerInstance(TOKENS.LOGGER, logger);
   container.registerInstance(TOKENS.SOCKET_IO, io);
   container.registerInstance(TOKENS.PRISMA_CLIENT, prismaClient);
 
@@ -70,6 +90,10 @@ export function setupContainer(
     TOKENS.MISSION_GENERATOR_SERVICE,
     MissionGeneratorService,
   );
+  container.registerSingleton(
+    TOKENS.SERVER_CONTENT_SERVICE,
+    ServerContentService,
+  );
   container.registerSingleton(TOKENS.SERVER_SERVICE, ServerService);
   container.registerSingleton(TOKENS.HACK_SERVICE, HackService);
   container.registerSingleton(TOKENS.FILE_SERVICE, FileService);
@@ -86,11 +110,78 @@ export function setupContainer(
   );
   container.registerSingleton(TOKENS.COMMAND_PROCESSOR, CommandProcessor);
   container.registerSingleton(TOKENS.FACTION_SERVICE, FactionService);
+  container.registerSingleton(TOKENS.REPUTATION_ENGINE, ReputationEngine);
   container.registerSingleton(TOKENS.AI_SERVICE, AIService);
   container.registerSingleton(TOKENS.PERSONA_SERVICE, PersonaService);
   container.registerSingleton(TOKENS.AI_SCHEDULER_SERVICE, AISchedulerService);
 
-  console.log("✅ DI Container initialized with all services");
+  // Territory & Resources (Phase 3)
+  container.registerSingleton(TOKENS.RESOURCE_SERVICE, ResourceService);
+  container.registerSingleton(TOKENS.CONTEST_SERVICE, ContestService);
+
+  // Phase 5: Warfare, Alias, DarkNet, Censorship
+  container.registerSingleton(TOKENS.WARFARE_SERVICE, WarfareService);
+  container.registerSingleton(TOKENS.ALIAS_SERVICE, AliasService);
+  container.registerSingleton(
+    TOKENS.DARKNET_DISCOVERY_SERVICE,
+    DarkNetDiscoveryService,
+  );
+  container.registerSingleton(TOKENS.CENSORSHIP_SERVICE, CensorshipService);
+
+  // Faction Knowledge
+  container.registerSingleton(
+    TOKENS.FACTION_KNOWLEDGE_SERVICE,
+    FactionKnowledgeService,
+  );
+
+  // Network Topology
+  container.registerSingleton(
+    TOKENS.NETWORK_TOPOLOGY_SERVICE,
+    NetworkTopologyService,
+  );
+
+  // PvP Hacking Improvements
+  container.registerSingleton(TOKENS.BACKDOOR_SERVICE, BackdoorService);
+  container.registerSingleton(TOKENS.TRACE_SERVICE, TraceService);
+
+  // Dynamic Content
+  container.registerSingleton(
+    TOKENS.DYNAMIC_CONTENT_SERVICE,
+    DynamicContentService,
+  );
+
+  // Story Missions
+  container.registerSingleton(
+    TOKENS.STORY_MISSION_SERVICE,
+    StoryMissionService,
+  );
+
+  // Leaderboard & Achievements
+  container.registerSingleton(TOKENS.LEADERBOARD_SERVICE, LeaderboardService);
+  container.registerSingleton(TOKENS.ACHIEVEMENT_SERVICE, AchievementService);
+
+  // Tutorial
+  container.registerSingleton(TOKENS.TUTORIAL_SERVICE, TutorialService);
+
+  // Story Progression
+  container.registerSingleton(
+    TOKENS.STORY_PROGRESSION_SERVICE,
+    StoryProgressionService,
+  );
+
+  // Architect Intervention Executor
+  container.registerSingleton(
+    TOKENS.ARCHITECT_INTERVENTION_EXECUTOR,
+    ArchitectInterventionExecutor,
+  );
+
+  // DarkNet Dungeon Service
+  container.registerSingleton(
+    TOKENS.DARKNET_DUNGEON_SERVICE,
+    DarkNetDungeonService,
+  );
+
+  logger.info("DI Container initialized with all services");
 }
 
 // Alias for backward compatibility

@@ -1,7 +1,9 @@
-import { singleton } from "tsyringe";
-import { prisma } from "../database/client";
+import { injectable, inject } from "tsyringe";
+import { prisma, Prisma } from "../database/client";
 import { EventEmitter } from "events";
 import { ShopItem, ItemCategory, ItemEffects } from "./shopService";
+import type { Logger } from "pino";
+import { LOGGER } from "../di/tokens";
 
 /**
  * Equipment slots based on item categories
@@ -52,9 +54,9 @@ export interface CombinedBonuses {
 /**
  * Service for managing player inventory and equipment
  */
-@singleton()
+@injectable()
 export class InventoryService extends EventEmitter {
-  constructor() {
+  constructor(@inject(LOGGER) private logger: Logger) {
     super();
   }
 
@@ -71,10 +73,10 @@ export class InventoryService extends EventEmitter {
         return {};
       }
 
-      const equipment = progress.equipment as any as Equipment;
+      const equipment = progress.equipment as unknown as Equipment;
       return equipment || {};
     } catch (error) {
-      console.error("Error getting equipment:", error);
+      this.logger.error({ err: error }, "Error getting equipment");
       return {};
     }
   }
@@ -88,27 +90,6 @@ export class InventoryService extends EventEmitter {
     item: ShopItem,
   ): Promise<EquipmentResult> {
     try {
-      // Get player progress
-      const progress = await prisma.playerProgress.findUnique({
-        where: { userId },
-      });
-
-      if (!progress) {
-        return {
-          success: false,
-          message: "Player progress not found",
-        };
-      }
-
-      // Check if player owns the item
-      const inventory = progress.inventory as Record<string, number>;
-      if (!inventory[itemId] || inventory[itemId] <= 0) {
-        return {
-          success: false,
-          message: `You don't own ${item.name}`,
-        };
-      }
-
       // Check if item can be equipped (only certain categories)
       const equipableCategories = [
         ItemCategory.TOOL,
@@ -128,38 +109,52 @@ export class InventoryService extends EventEmitter {
       // Determine equipment slot
       const slot = item.category as unknown as EquipmentSlot;
 
-      // Get current equipment
-      const equipment = (progress.equipment as any as Equipment) || {};
+      // Atomic transaction: verify ownership + equip
+      const txResult = await prisma.$transaction(async (tx) => {
+        const progress = await tx.playerProgress.findUnique({
+          where: { userId },
+        });
 
-      // Check if slot is already occupied
-      const currentItemId = equipment[slot];
-      if (currentItemId === itemId) {
-        return {
-          success: false,
-          message: `${item.name} is already equipped`,
-        };
+        if (!progress) {
+          return { success: false as const, message: "Player progress not found" };
+        }
+
+        // Check if player owns the item
+        const inventory = progress.inventory as Record<string, number>;
+        if (!inventory[itemId] || inventory[itemId] <= 0) {
+          return { success: false as const, message: `You don't own ${item.name}` };
+        }
+
+        // Get current equipment
+        const equipment = (progress.equipment as unknown as Equipment) || {};
+
+        // Check if slot is already occupied by same item
+        const currentItemId = equipment[slot];
+        if (currentItemId === itemId) {
+          return { success: false as const, message: `${item.name} is already equipped` };
+        }
+
+        // Equip the item
+        equipment[slot] = itemId;
+
+        await tx.playerProgress.update({
+          where: { userId },
+          data: { equipment: equipment as Prisma.JsonObject },
+        });
+
+        return { success: true as const, currentItemId };
+      });
+
+      if (!txResult.success) {
+        return { success: false, message: txResult.message };
       }
 
-      // Equip the item
-      equipment[slot] = itemId;
-
-      // Update database
-      await prisma.playerProgress.update({
-        where: { userId },
-        data: { equipment: equipment as any },
-      });
-
       // Emit event
-      this.emit("item:equipped", {
-        userId,
-        itemId,
-        slot,
-        item,
-      });
+      this.emit("item:equipped", { userId, itemId, slot, item });
 
       const result: EquipmentResult = {
         success: true,
-        message: currentItemId
+        message: txResult.currentItemId
           ? `Equipped ${item.name}, replacing previous item`
           : `Equipped ${item.name}`,
         slot,
@@ -172,7 +167,7 @@ export class InventoryService extends EventEmitter {
 
       return result;
     } catch (error) {
-      console.error("Error equipping item:", error);
+      this.logger.error({ err: error }, "Error equipping item");
       return {
         success: false,
         message: "Failed to equip item",
@@ -201,7 +196,7 @@ export class InventoryService extends EventEmitter {
       }
 
       // Get current equipment
-      const equipment = (progress.equipment as any as Equipment) || {};
+      const equipment = (progress.equipment as unknown as Equipment) || {};
 
       // Check if slot has an item
       const itemId = equipment[slot];
@@ -218,7 +213,7 @@ export class InventoryService extends EventEmitter {
       // Update database
       await prisma.playerProgress.update({
         where: { userId },
-        data: { equipment: equipment as any },
+        data: { equipment: equipment as Prisma.JsonObject },
       });
 
       // Emit event
@@ -235,7 +230,7 @@ export class InventoryService extends EventEmitter {
         itemId,
       };
     } catch (error) {
-      console.error("Error unequipping item:", error);
+      this.logger.error({ err: error }, "Error unequipping item");
       return {
         success: false,
         message: "Failed to unequip item",
@@ -264,7 +259,7 @@ export class InventoryService extends EventEmitter {
       }
 
       // Get current equipment
-      const equipment = (progress.equipment as any as Equipment) || {};
+      const equipment = (progress.equipment as unknown as Equipment) || {};
 
       // Find the slot containing this item
       let foundSlot: EquipmentSlot | null = null;
@@ -285,7 +280,7 @@ export class InventoryService extends EventEmitter {
       // Unequip using the slot
       return await this.unequipItem(userId, foundSlot);
     } catch (error) {
-      console.error("Error unequipping item by ID:", error);
+      this.logger.error({ err: error }, "Error unequipping item by ID");
       return {
         success: false,
         message: "Failed to unequip item",
@@ -339,7 +334,7 @@ export class InventoryService extends EventEmitter {
 
       return bonuses;
     } catch (error) {
-      console.error("Error calculating equipment bonuses:", error);
+      this.logger.error({ err: error }, "Error calculating equipment bonuses");
       return defaultBonuses;
     }
   }
@@ -352,7 +347,7 @@ export class InventoryService extends EventEmitter {
       const equipment = await this.getEquipment(userId);
       return Object.values(equipment).includes(itemId);
     } catch (error) {
-      console.error("Error checking if item is equipped:", error);
+      this.logger.error({ err: error }, "Error checking if item is equipped");
       return false;
     }
   }
@@ -375,7 +370,7 @@ export class InventoryService extends EventEmitter {
 
       return null;
     } catch (error) {
-      console.error("Error getting equipped slot:", error);
+      this.logger.error({ err: error }, "Error getting equipped slot");
       return null;
     }
   }
@@ -391,7 +386,7 @@ export class InventoryService extends EventEmitter {
 
       if (!progress) return;
 
-      const equipment = (progress.equipment as any as Equipment) || {};
+      const equipment = (progress.equipment as unknown as Equipment) || {};
       const inventory = progress.inventory as Record<string, number>;
       let modified = false;
 
@@ -417,11 +412,11 @@ export class InventoryService extends EventEmitter {
       if (modified) {
         await prisma.playerProgress.update({
           where: { userId },
-          data: { equipment: equipment as any },
+          data: { equipment: equipment as Prisma.JsonObject },
         });
       }
     } catch (error) {
-      console.error("Error validating equipment:", error);
+      this.logger.error({ err: error }, "Error validating equipment");
     }
   }
 
@@ -432,7 +427,7 @@ export class InventoryService extends EventEmitter {
     try {
       await prisma.playerProgress.update({
         where: { userId },
-        data: { equipment: {} as any },
+        data: { equipment: {} as Prisma.JsonObject },
       });
 
       this.emit("equipment:cleared", { userId });
@@ -442,7 +437,7 @@ export class InventoryService extends EventEmitter {
         message: "Unequipped all items",
       };
     } catch (error) {
-      console.error("Error unequipping all items:", error);
+      this.logger.error({ err: error }, "Error unequipping all items");
       return {
         success: false,
         message: "Failed to unequip all items",
@@ -451,5 +446,4 @@ export class InventoryService extends EventEmitter {
   }
 }
 
-// Export singleton instance
-export const inventoryService = new InventoryService();
+export default InventoryService;

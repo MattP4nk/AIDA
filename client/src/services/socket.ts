@@ -1,9 +1,11 @@
 import { io, Socket } from "socket.io-client";
-import { writable, type Writable } from "svelte/store";
+import { writable, get, type Writable } from "svelte/store";
 import { apiClient } from "./api";
+import { terminalTabsStore } from "./terminalTabs";
 
-// Socket connection configuration
-const SOCKET_URL = "http://localhost:3001";
+// Socket connection configuration — override via VITE_SOCKET_URL env var
+const SOCKET_URL =
+  (import.meta.env.VITE_SOCKET_URL as string) || "http://localhost:3001";
 
 // Connection state stores
 export const socketConnected = writable(false);
@@ -15,6 +17,65 @@ export const serverActivity = writable<any[]>([]);
 export const liveMessages = writable<any[]>([]);
 export const hackAttempts = writable<any[]>([]);
 const gameEvents = writable<any[]>([]);
+export const typingUsers = writable<Map<string, string>>(new Map());
+export const newMailNotifications: Writable<any[]> = writable([]);
+
+// Resource/process stores (updated by server push)
+export const playerResources = writable<{
+  cpuUsed: number;
+  cpuTotal: number;
+  ramUsed: number;
+  ramTotal: number;
+  bwUsed: number;
+  bwTotal: number;
+}>({
+  cpuUsed: 0,
+  cpuTotal: 200,
+  ramUsed: 0,
+  ramTotal: 256,
+  bwUsed: 0,
+  bwTotal: 100,
+});
+
+export const activeProcesses = writable<any[]>([]);
+
+// Active hack session store (for sticky challenge panel)
+export const activeHackSession = writable<{
+  active: boolean;
+  targetIp?: string;
+  currentLayer?: number;
+  totalLayers?: number;
+  challenge?: any;
+} | null>(null);
+
+// Lazy notification service reference (avoids circular import)
+let _notifService: any = null;
+// Kick off dynamic import so _notifService is populated asynchronously
+import("./notifications")
+  .then((mod) => {
+    _notifService = mod.notificationService;
+  })
+  .catch(() => {
+    /* ignore */
+  });
+function getNotifService() {
+  return _notifService;
+}
+
+// Lazy gameState reference (avoids circular import: gameState → socket → gameState)
+let _addOutput:
+  | ((
+      text: string,
+      type?: "info" | "error" | "warning" | "success" | "system",
+    ) => void)
+  | null = null;
+import("../stores/gameState")
+  .then((mod) => {
+    _addOutput = mod.addOutput;
+  })
+  .catch(() => {
+    /* ignore */
+  });
 
 class SocketService {
   private socket: Socket | null = null;
@@ -88,13 +149,32 @@ class SocketService {
     this.socket.off("hack:result");
     this.socket.off("hack:error");
     this.socket.off("game:event");
-    this.socket.off("game:event:public");
     this.socket.off("system:announcement");
-    this.socket.off("mission:assigned");
-    this.socket.off("mission:updated");
     this.socket.off("mission:completed");
+    this.socket.off("mission:expired");
+    this.socket.off("mission:updated");
+    this.socket.off("mission:objective:updated");
+    this.socket.off("process:started");
+    this.socket.off("process:completed");
+    this.socket.off("process:cancelled");
+    this.socket.off("process:progress");
+    this.socket.off("process:failed");
+    this.socket.off("player:levelup");
+    this.socket.off("rewards:xp_granted");
+    this.socket.off("rewards:credits_granted");
+    this.socket.off("command:result");
+    this.socket.off("notification");
+    this.socket.off("resources:update");
     this.socket.off("game:notification");
     this.socket.off("game:state_update");
+    this.socket.off("forum:new-post");
+    this.socket.off("forum:new-reply");
+    this.socket.off("faction:event");
+    this.socket.off("discovery:made");
+    this.socket.off("achievement:unlocked");
+    this.socket.off("error");
+    this.socket.off("game:event:public");
+    this.socket.off("mission:assigned");
   }
 
   // ==================== EVENT HANDLERS ====================
@@ -190,9 +270,31 @@ class SocketService {
       );
     });
 
+    this.socket.on("message:new_mail", (data: any) => {
+      newMailNotifications.update((list) => {
+        return [data, ...list];
+      });
+    });
+
     this.socket.on("message:error", (data: any) => {
       console.error("💬 Message error:", data);
       socketError.set(`Message error: ${data.message}`);
+    });
+
+    // ==================== FORUM EVENTS ====================
+
+    this.socket.on("forum:new-post", (data: any) => {
+      this.showNotification(
+        "New Forum Post",
+        `${data.authorHandle || "Someone"} posted in ${data.forumName || "a forum"}: ${data.title || ""}`,
+      );
+    });
+
+    this.socket.on("forum:new-reply", (data: any) => {
+      this.showNotification(
+        "Forum Reply",
+        `${data.authorHandle || "Someone"} replied to "${data.postTitle || "your post"}"`,
+      );
     });
 
     // ==================== HACKING EVENTS ====================
@@ -275,19 +377,312 @@ class SocketService {
     });
 
     this.socket.on("faction:event", (data: any) => {
-      console.log("🏛️ Faction event:", data);
-      // Handle faction events
+      const ns = getNotifService();
+      if (ns) {
+        ns.add({
+          type: "game",
+          title: "Faction Event",
+          message: data.message || data.type || "Faction activity",
+          priority: "normal",
+          data,
+        });
+      }
     });
 
     this.socket.on("discovery:made", (data: any) => {
-      console.log("🔍 Discovery made:", data);
       this.showNotification("Discovery", `New discovery: ${data.title}`);
+      const ns = getNotifService();
+      if (ns) {
+        ns.add({
+          type: "game",
+          title: "Discovery",
+          message: data.title || "New discovery",
+          priority: "normal",
+          data,
+        });
+      }
+    });
+
+    // ==================== PROCESS EVENTS ====================
+
+    this.socket.on("process:started", (data: any) => {
+      activeProcesses.update((procs) => [...procs, data]);
+    });
+
+    this.socket.on("process:completed", (data: any) => {
+      console.log(
+        "[process:completed] PID:",
+        data.pid,
+        "type:",
+        data.type,
+        "hasOutput:",
+        !!data.output,
+      );
+      activeProcesses.update((procs) =>
+        procs.filter((p) => p.pid !== data.pid),
+      );
+
+      // If the process completion includes output, render it to the terminal
+      if (data.output) {
+        const activeTab = terminalTabsStore.getActiveTerminal();
+        if (activeTab) {
+          terminalTabsStore.addOutputLine(
+            activeTab.id,
+            data.output,
+            data.success === false ? "error" : "output",
+          );
+        } else if (_addOutput) {
+          _addOutput(data.output, data.success === false ? "error" : "info");
+        }
+      }
+
+      const ns = getNotifService();
+      if (ns) {
+        ns.add({
+          type: "game",
+          title: "Process Complete",
+          message: `${data.targetLabel || data.type || "Process"} finished (PID ${data.pid})`,
+          priority: "high",
+          data,
+        });
+      }
+    });
+
+    this.socket.on("process:cancelled", (data: any) => {
+      activeProcesses.update((procs) =>
+        procs.filter((p) => p.pid !== data.pid),
+      );
+    });
+
+    this.socket.on("process:progress", (data: any) => {
+      activeProcesses.update((procs) =>
+        procs.map((p) =>
+          p.pid === data.pid ? { ...p, progress: data.progress } : p,
+        ),
+      );
+    });
+
+    this.socket.on("process:failed", (data: any) => {
+      activeProcesses.update((procs) =>
+        procs.filter((p) => p.pid !== data.pid),
+      );
+      const ns = getNotifService();
+      if (ns) {
+        ns.add({
+          type: "game",
+          title: "Process Failed",
+          message: data.error || `Process ${data.pid} failed`,
+          priority: "high",
+          data,
+        });
+      }
+    });
+
+    // ==================== MISSION EVENTS ====================
+
+    this.socket.on("mission:objective:updated", (data: any) => {
+      const ns = getNotifService();
+      if (ns) {
+        ns.add({
+          type: "game",
+          title: "Objective Progress",
+          message: `${data.completed ? "Objective completed!" : "Objective progress updated"}`,
+          priority: data.completed ? "high" : "normal",
+          data,
+        });
+      }
+    });
+
+    this.socket.on("mission:completed", (data: any) => {
+      const ns = getNotifService();
+      if (ns) {
+        ns.add({
+          type: "game",
+          title: "Mission Complete!",
+          message: data.title || "Mission completed successfully",
+          priority: "high",
+          data,
+        });
+      }
+    });
+
+    this.socket.on("mission:expired", (data: any) => {
+      const ns = getNotifService();
+      if (ns) {
+        ns.add({
+          type: "game",
+          title: "Mission Expired",
+          message: data.title || "A mission has expired",
+          priority: "normal",
+          data,
+        });
+      }
+    });
+
+    this.socket.on("mission:updated", (data: any) => {
+      const ns = getNotifService();
+      if (ns) {
+        ns.add({
+          type: "game",
+          title: "Mission Updated",
+          message: data.title || "A mission has been updated",
+          priority: "normal",
+          data,
+        });
+      }
+    });
+
+    this.socket.on("game:state_update", (data: any) => {
+      const ns = getNotifService();
+      if (ns && data.message) {
+        ns.add({
+          type: "system",
+          title: "Game State",
+          message: data.message,
+          priority: "normal",
+          data,
+        });
+      }
+    });
+
+    // ==================== PLAYER PROGRESSION EVENTS ====================
+
+    this.socket.on("player:levelup", (data: any) => {
+      const ns = getNotifService();
+      if (ns) {
+        ns.add({
+          type: "game",
+          title: "Level Up!",
+          message: `You reached level ${data.newLevel || data.level}!`,
+          priority: "urgent",
+          data,
+        });
+      }
+    });
+
+    this.socket.on("rewards:xp_granted", (data: any) => {
+      // Silent — XP rewards don't need a popup, shown in command output
+    });
+
+    this.socket.on("rewards:credits_granted", (data: any) => {
+      // Silent — credit rewards shown in command output
+    });
+
+    this.socket.on("achievement:unlocked", (data: any) => {
+      const ns = getNotifService();
+      if (ns) {
+        ns.add({
+          type: "game",
+          title: "Achievement Unlocked!",
+          message: `${data.name}: ${data.description}`,
+          priority: "urgent",
+          data,
+        });
+      }
+    });
+
+    // ==================== SECURITY EVENTS ====================
+
+    this.socket.on("command:result", (data: any) => {
+      console.log("[command:result] Received:", {
+        hasOutput: !!data.output,
+        outputLength: data.output?.length,
+        success: data.success,
+        terminalId: data.terminalId,
+        hasData: !!data.data,
+      });
+
+      // Check if this is a hack session start (contains session data with challenge)
+      if (data.data?.sessionId && data.data?.targetIp) {
+        // Hack session started — parse the challenge from the output
+        activeHackSession.set({
+          active: true,
+          targetIp: data.data.targetIp,
+          currentLayer: 0,
+          totalLayers: data.data.totalLayers,
+          challenge: data.data.challenge,
+        });
+      }
+      // Render output text from background processes (hack prep, scan, traceroute, etc.)
+      if (data.output) {
+        const activeTab = terminalTabsStore.getActiveTerminal();
+        const targetTab = data.terminalId || activeTab?.id;
+        console.log(
+          "[command:result] Routing output to tab:",
+          targetTab,
+          "activeTab:",
+          activeTab?.id,
+        );
+        if (targetTab) {
+          terminalTabsStore.addOutputLine(
+            targetTab,
+            data.output,
+            data.success ? "output" : "error",
+          );
+        } else if (_addOutput) {
+          console.log("[command:result] Falling back to legacy addOutput");
+          _addOutput(data.output, data.success ? "info" : "error");
+        } else {
+          console.warn(
+            "[command:result] No output channel available! Output lost:",
+            data.output.substring(0, 100),
+          );
+        }
+      }
+    });
+
+    this.socket.on("notification", (data: any) => {
+      // Generic server notification (used by bounty system, IDS, etc.)
+      const ns = getNotifService();
+      if (ns) {
+        ns.add({
+          type: "game",
+          title: data.title || "Alert",
+          message: data.message || data.description || "Server notification",
+          priority: data.severity === "critical" ? "urgent" : "high",
+          data,
+        });
+      }
+    });
+
+    // ==================== RESOURCE UPDATES ====================
+
+    this.socket.on("resources:update", (data: any) => {
+      if (data) {
+        playerResources.set({
+          cpuUsed: data.cpuUsed ?? 0,
+          cpuTotal: data.cpuTotal ?? 200,
+          ramUsed: data.ramUsed ?? 0,
+          ramTotal: data.ramTotal ?? 256,
+          bwUsed: data.bwUsed ?? 0,
+          bwTotal: data.bwTotal ?? 100,
+        });
+      }
+    });
+
+    // ==================== TYPING INDICATORS ====================
+
+    this.socket.on(
+      "typing:start",
+      (data: { userId: string; username: string }) => {
+        typingUsers.update((map) => {
+          map.set(data.userId, data.username);
+          return new Map(map);
+        });
+      },
+    );
+
+    this.socket.on("typing:stop", (data: { userId: string }) => {
+      typingUsers.update((map) => {
+        map.delete(data.userId);
+        return new Map(map);
+      });
     });
 
     // ==================== ERROR HANDLING ====================
 
     this.socket.on("error", (data: any) => {
-      console.error("🚨 Socket error:", data);
+      console.error("Socket error:", data);
       socketError.set(data.message || "Unknown socket error");
     });
   }
@@ -340,6 +735,14 @@ class SocketService {
     tools: string[];
   }): void {
     this.socket?.emit("hack:attempt", data);
+  }
+
+  public emitTypingStart(recipientId: string): void {
+    this.socket?.emit("typing:start", { recipientId });
+  }
+
+  public emitTypingStop(recipientId: string): void {
+    this.socket?.emit("typing:stop", { recipientId });
   }
 
   public emitJoinRoom(room: string): void {
@@ -416,6 +819,10 @@ export const emitHackAttempt = (data: {
   method: string;
   tools: string[];
 }) => socketService.emitHackAttempt(data);
+export const emitTypingStart = (recipientId: string) =>
+  socketService.emitTypingStart(recipientId);
+export const emitTypingStop = (recipientId: string) =>
+  socketService.emitTypingStop(recipientId);
 
 // Export game event store
 export { gameEvents };

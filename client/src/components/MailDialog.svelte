@@ -1,8 +1,10 @@
 <script lang="ts">
-    import { onMount } from "svelte";
+    import { onMount, onDestroy } from "svelte";
     import { createEventDispatcher } from "svelte";
     import AsciiDialog from "./AsciiDialog.svelte";
     import { terminalService } from "../services/terminal";
+    import { newMailNotifications } from "../services/socketStores";
+    import { currentUser } from "../stores/gameState";
 
     // ==================== PROPS ====================
 
@@ -28,6 +30,12 @@
         isEncrypted: boolean;
         encryptionLevel?: number;
         messageType: string;
+        avatar?: {
+            glyph: string;
+            color: string;
+            compact?: string[];
+        };
+        decryptedContent?: string;
     }
 
     interface Contact {
@@ -41,9 +49,18 @@
 
     type ViewMode = "list" | "read" | "compose";
     type MailboxType = "inbox" | "sent";
+    type MessageCategory =
+        | "all"
+        | "private"
+        | "system"
+        | "mission"
+        | "faction"
+        | "alert";
 
     let mode: ViewMode = "list";
     let mailboxType: MailboxType = "inbox";
+    let activeCategory: MessageCategory = "all";
+    let decrypting: Set<string> = new Set();
     let messages: Message[] = [];
     let selectedMessage: Message | null = null;
     let selectedIndex: number = 0;
@@ -64,11 +81,45 @@
     let recipientInput: HTMLInputElement;
     let bodyTextarea: HTMLTextAreaElement;
 
+    // Real-time mail subscription
+    let unsubscribeNewMail: any;
+
     // ==================== LIFECYCLE ====================
 
     onMount(() => {
         loadMessages();
         loadContacts();
+        // Subscribe to real-time mail notifications
+        unsubscribeNewMail = newMailNotifications.subscribe(
+            (notifications: any[]) => {
+                if (notifications.length > 0) {
+                    // Add new mail to messages if in inbox view
+                    for (const notif of notifications) {
+                        const exists = messages.some((m) => m.id === notif.id);
+                        if (!exists) {
+                            const newMsg: Message = {
+                                id: notif.id,
+                                senderId: notif.senderId,
+                                senderUsername: notif.senderUsername,
+                                recipientId: "",
+                                subject: notif.subject,
+                                content: "[New Mail]",
+                                timestamp: new Date(notif.timestamp),
+                                isRead: false,
+                                isEncrypted: notif.isEncrypted || false,
+                                messageType: notif.messageType || "private",
+                                avatar: notif.avatar || null,
+                            };
+                            messages = [newMsg, ...messages];
+                        }
+                    }
+                }
+            },
+        );
+    });
+
+    onDestroy(() => {
+        if (unsubscribeNewMail) unsubscribeNewMail();
     });
 
     // ==================== API CALLS ====================
@@ -126,9 +177,10 @@
 
         try {
             // Use 'mail' command if subject is provided, otherwise 'msg'
+            const encryptFlag = isEncrypted ? " --encrypt" : "";
             const command = composeSubject.trim()
-                ? `mail ${composeRecipient} ${composeSubject} ${composeBody}`
-                : `msg ${composeRecipient} ${composeBody}`;
+                ? `mail ${composeRecipient} ${composeSubject} ${composeBody}${encryptFlag}`
+                : `msg ${composeRecipient} ${composeBody}${encryptFlag}`;
             const response = await terminalService.executeCommand(command);
 
             if (response.success) {
@@ -182,6 +234,51 @@
         } catch (err) {
             error = "Failed to delete message";
             console.error(err);
+        }
+    }
+
+    // ==================== DECRYPT / CATEGORY ====================
+
+    async function decryptMessage(messageId: string) {
+        decrypting = new Set([...decrypting, messageId]);
+        try {
+            // For authorized recipients, use requestDecryption
+            const response = await terminalService.executeCommand(
+                `crack ${messageId}`,
+            );
+            if (response.success && response.data?.content) {
+                // Update the message content
+                const msg = messages.find((m) => m.id === messageId);
+                if (msg) {
+                    msg.decryptedContent = response.data.content;
+                    messages = messages; // trigger reactivity
+                }
+                if (selectedMessage && selectedMessage.id === messageId) {
+                    selectedMessage = {
+                        ...selectedMessage,
+                        decryptedContent: response.data.content,
+                    };
+                }
+            } else {
+                error = response.data?.message || "Failed to decrypt message";
+            }
+        } catch (err) {
+            error = "Decryption failed";
+            console.error(err);
+        } finally {
+            decrypting.delete(messageId);
+            decrypting = decrypting;
+        }
+    }
+
+    function setCategory(cat: string) {
+        activeCategory = cat as MessageCategory;
+        selectedIndex = 0;
+    }
+
+    function handleDecryptClick() {
+        if (selectedMessage) {
+            decryptMessage(selectedMessage.id);
         }
     }
 
@@ -278,14 +375,17 @@
                     break;
                 case "ArrowDown":
                     event.preventDefault();
-                    if (selectedIndex < messages.length - 1) {
+                    if (selectedIndex < filteredMessages.length - 1) {
                         selectedIndex++;
                     }
                     break;
                 case "Enter":
                     event.preventDefault();
-                    if (messages[selectedIndex]) {
-                        openMessage(messages[selectedIndex], selectedIndex);
+                    if (filteredMessages[selectedIndex]) {
+                        openMessage(
+                            filteredMessages[selectedIndex],
+                            selectedIndex,
+                        );
                     }
                     break;
                 case "c":
@@ -314,10 +414,10 @@
                     if (
                         !event.ctrlKey &&
                         !event.metaKey &&
-                        messages[selectedIndex]
+                        filteredMessages[selectedIndex]
                     ) {
                         event.preventDefault();
-                        deleteMessage(messages[selectedIndex].id);
+                        deleteMessage(filteredMessages[selectedIndex].id);
                     }
                     break;
             }
@@ -371,6 +471,11 @@
 
     // ==================== REACTIVE ====================
 
+    $: filteredMessages =
+        activeCategory === "all"
+            ? messages
+            : messages.filter((m) => m.messageType === activeCategory);
+    $: userId = $currentUser?.id || "";
     $: unreadCount = messages.filter((m) => !m.isRead).length;
     $: dialogTitle =
         mode === "list" ? "INBOX" : mode === "read" ? "MESSAGE" : "COMPOSE";
@@ -429,7 +534,26 @@
                     >
                     <span class="mailbox-hint">Press [T] to toggle</span>
                 </div>
-                {#if messages.length === 0}
+
+                <!-- Category Tabs -->
+                <div class="category-tabs">
+                    {#each [["all", "ALL"], ["private", "PRIV"], ["system", "SYS"], ["mission", "MISSION"], ["faction", "FACTION"], ["alert", "ALERT"]] as [cat, label]}
+                        <button
+                            class="category-tab"
+                            class:active={activeCategory === cat}
+                            on:click={() => setCategory(cat)}
+                        >
+                            {label}{#if cat !== "all"}{@const count =
+                                    messages.filter(
+                                        (m) =>
+                                            m.messageType === cat && !m.isRead,
+                                    ).length}{#if count > 0}
+                                    ({count}){/if}{/if}
+                        </button>
+                    {/each}
+                </div>
+
+                {#if filteredMessages.length === 0}
                     <div class="empty-state">
                         <pre>
 ╔═════════════════════════════════════════════════╗
@@ -446,7 +570,7 @@
                     </div>
                 {:else}
                     <div class="message-list">
-                        {#each messages as message, index}
+                        {#each filteredMessages as message, index}
                             <div
                                 class="message-item"
                                 class:selected={index === selectedIndex}
@@ -465,6 +589,12 @@
                                 <span class="msg-status"
                                     >{message.isRead ? " " : "►"}</span
                                 >
+                                <span
+                                    class="msg-avatar"
+                                    style="color: {message.avatar?.color ||
+                                        '#888'}"
+                                    >{message.avatar?.glyph || "[•_•]"}</span
+                                >
                                 <span class="msg-from"
                                     >{truncate(
                                         mailboxType === "inbox"
@@ -472,17 +602,21 @@
                                                   "Unknown"
                                             : message.recipientUsername ||
                                                   "Unknown",
-                                        15,
+                                        12,
                                     )}</span
                                 >
-                                <span class="msg-subject">
-                                    >{truncate(message.subject, 35)}</span
+                                <span class="msg-subject"
+                                    >{truncate(message.subject, 30)}</span
                                 >
                                 <span class="msg-date"
                                     >{formatDate(message.timestamp)}</span
                                 >
                                 {#if message.isEncrypted}
-                                    <span class="msg-encrypt">🔒</span>
+                                    <span class="msg-encrypt"
+                                        >{message.decryptedContent
+                                            ? "🔓"
+                                            : "🔒"}</span
+                                    >
                                 {/if}
                             </div>
                         {/each}
@@ -491,9 +625,12 @@
                     <div class="list-footer">
                         ══════════════════════════════════════════════════════════════════════<br
                         />
-                        TOTAL: {messages.length} MESSAGE{messages.length !== 1
+                        TOTAL: {filteredMessages.length} MESSAGE{filteredMessages.length !==
+                        1
                             ? "S"
-                            : ""} │ UNREAD: {unreadCount}
+                            : ""} │ UNREAD: {filteredMessages.filter(
+                            (m) => !m.isRead,
+                        ).length}
                     </div>
                 {/if}
             </div>
@@ -503,6 +640,12 @@
                 <div class="read-header">
                     <div class="read-line">
                         <span class="read-label">FROM:</span>
+                        <span
+                            class="read-avatar"
+                            style="color: {selectedMessage.avatar?.color ||
+                                '#888'}"
+                            >{selectedMessage.avatar?.glyph || ""}</span
+                        >
                         <span class="read-value"
                             >{selectedMessage.senderUsername || "Unknown"}</span
                         >
@@ -528,9 +671,26 @@
                         <div class="read-line">
                             <span class="read-label">ENCRYPT:</span>
                             <span class="read-value encrypt"
-                                >🔒 Level {selectedMessage.encryptionLevel ||
+                                >{selectedMessage.decryptedContent
+                                    ? "🔓"
+                                    : "🔒"} Level {selectedMessage.encryptionLevel ||
                                     1}</span
                             >
+                            {#if !selectedMessage.decryptedContent}
+                                <button
+                                    class="decrypt-btn"
+                                    on:click={handleDecryptClick}
+                                    disabled={decrypting.has(
+                                        selectedMessage.id,
+                                    )}
+                                >
+                                    {#if decrypting.has(selectedMessage.id)}
+                                        DECRYPTING...
+                                    {:else}
+                                        [DECRYPT]
+                                    {/if}
+                                </button>
+                            {/if}
                         </div>
                     {/if}
                     <div class="read-divider">
@@ -539,7 +699,13 @@
                 </div>
 
                 <div class="message-body">
-                    <pre>{selectedMessage.content}</pre>
+                    {#if selectedMessage.isEncrypted && !selectedMessage.decryptedContent}
+                        <pre
+                            class="encrypted-content">{selectedMessage.content}</pre>
+                    {:else}
+                        <pre>{selectedMessage.decryptedContent ||
+                                selectedMessage.content}</pre>
+                    {/if}
                 </div>
             </div>
         {:else if mode === "compose"}
@@ -771,6 +937,14 @@
         margin-left: 0.5ch;
     }
 
+    .msg-avatar {
+        font-family: monospace;
+        font-size: 0.8em;
+        margin-right: 4px;
+        min-width: 50px;
+        display: inline-block;
+    }
+
     .list-footer {
         margin-top: 0;
         padding: 0.5em;
@@ -813,6 +987,11 @@
 
     .read-value.encrypt {
         color: #00ffff;
+    }
+
+    .read-avatar {
+        font-family: monospace;
+        margin-right: 6px;
     }
 
     .read-divider {
@@ -943,6 +1122,67 @@
         font-weight: bold;
     }
 
+    /* ==================== CATEGORY TABS ==================== */
+
+    .category-tabs {
+        display: flex;
+        gap: 2px;
+        padding: 4px 0;
+        border-bottom: 1px solid #333;
+        margin-bottom: 4px;
+        flex-wrap: wrap;
+    }
+
+    .category-tab {
+        background: none;
+        border: 1px solid #333;
+        color: #666;
+        font-family: "Courier New", monospace;
+        font-size: 0.7em;
+        padding: 1px 6px;
+        cursor: pointer;
+        transition: all 0.15s;
+    }
+
+    .category-tab:hover {
+        border-color: #00ff41;
+        color: #00ff41;
+    }
+
+    .category-tab.active {
+        background: #00ff41;
+        color: #000;
+        border-color: #00ff41;
+    }
+
+    /* ==================== DECRYPT ==================== */
+
+    .decrypt-btn {
+        background: none;
+        border: 1px solid #ff6600;
+        color: #ff6600;
+        font-family: "Courier New", monospace;
+        font-size: 0.75em;
+        padding: 1px 8px;
+        cursor: pointer;
+        margin-left: 10px;
+    }
+
+    .decrypt-btn:hover:not(:disabled) {
+        background: #ff6600;
+        color: #000;
+    }
+
+    .decrypt-btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+    }
+
+    .encrypted-content {
+        color: #ff6600;
+        font-style: italic;
+    }
+
     /* ==================== FOOTER ==================== */
 
     .mail-footer {
@@ -965,11 +1205,11 @@
             font-size: 12px;
         }
 
-        .message-sender {
+        .msg-from {
             min-width: 10ch;
         }
 
-        .message-subject {
+        .msg-subject {
             display: none;
         }
     }

@@ -1,5 +1,5 @@
 <script lang="ts">
-    import { onMount, createEventDispatcher } from "svelte";
+    import { onMount, tick, createEventDispatcher } from "svelte";
     import AsciiDialog from "./AsciiDialog.svelte";
     import { terminalService } from "../services/terminal";
 
@@ -14,285 +14,368 @@
 
     // ==================== TYPES ====================
 
-    interface ForumPost {
-        id: string;
-        title: string;
-        author: string;
-        date: string;
-        replies: number;
-        views: number;
-        content?: string;
-    }
+    type Mode = "browse" | "input" | "compose";
+    type InputAction = "reply" | "post" | "search" | "register" | "vote" | "report" | "tag" | "command";
 
-    type ViewState = "sections" | "threads" | "post";
+    interface NavState {
+        forumId: string;
+        forumName: string;
+        postId: string;
+        postTitle: string;
+    }
 
     // ==================== STATE ====================
 
-    let view: ViewState = "sections";
-    let sections: string[] = ["General", "Marketplace", "Hacking", "Intel"];
-    let currentSection: string = "";
-    let threads: ForumPost[] = [];
-    let currentPost: ForumPost | null = null;
-    let postReplies: any[] = []; // If we support replies viewing
+    let mode: Mode = "browse";
+    let inputAction: InputAction = "command";
+    let inputPrompt: string = ">";
+    let inputValue: string = "";
+    let inputStep: number = 0; // For multi-step inputs (post: title then content)
+    let inputStash: string = ""; // Stash first step (e.g., post title)
 
+    let outputLines: string[] = [];
     let loading: boolean = false;
-    let error: string = "";
-    let selectedIndex: number = 0;
+    let nav: NavState = { forumId: "", forumName: "", postId: "", postTitle: "" };
+
+    let outputEl: HTMLDivElement;
+    let inputEl: HTMLInputElement;
 
     // ==================== LIFECYCLE ====================
 
     onMount(() => {
-        if (initialData?.section) {
-            loadSection(initialData.section);
-        } else if (initialData?.postId) {
-            loadPost(initialData.postId);
+        if (initialData?.forumId && initialData?.postId) {
+            runCommand(`forum read ${initialData.forumId} ${initialData.postId}`);
+            nav.forumId = initialData.forumId;
+            nav.postId = initialData.postId;
+        } else if (initialData?.forumId) {
+            runCommand(`forum access ${initialData.forumId}`);
+            nav.forumId = initialData.forumId;
         } else {
-            // Default to sections view
-            view = "sections";
+            runCommand("forum");
         }
     });
 
-    // ==================== NAVIGATION ====================
+    // ==================== COMMAND EXECUTION ====================
+
+    async function runCommand(cmd: string) {
+        loading = true;
+        try {
+            const result = await terminalService.executeCommand(cmd);
+            const text = Array.isArray(result.output) ? result.output.join("\n") : String(result.output);
+            outputLines = text.split("\n");
+
+            // Extract nav context from successful responses
+            extractNavContext(cmd, result);
+        } catch {
+            outputLines = ["ERROR: Command failed. Try again or press ESC."];
+        } finally {
+            loading = false;
+            await tick();
+            scrollToBottom();
+        }
+    }
+
+    function extractNavContext(cmd: string, result: any) {
+        const parts = cmd.trim().split(/\s+/);
+        if (parts[0] !== "forum") return;
+        const sub = parts[1];
+
+        if (sub === "access" && parts[2]) {
+            nav.forumId = parts[2];
+            nav.postId = "";
+            nav.postTitle = "";
+        } else if (sub === "read" && parts[2] && parts[3]) {
+            nav.forumId = parts[2];
+            nav.postId = parts[3];
+        } else if (!sub || sub === "scan") {
+            nav.forumId = "";
+            nav.postId = "";
+        }
+    }
+
+    function scrollToBottom() {
+        if (outputEl) {
+            outputEl.scrollTop = outputEl.scrollHeight;
+        }
+    }
+
+    // ==================== INPUT HANDLING ====================
+
+    function startInput(action: InputAction, prompt: string) {
+        mode = "input";
+        inputAction = action;
+        inputPrompt = prompt;
+        inputValue = "";
+        inputStep = 0;
+        inputStash = "";
+        tick().then(() => inputEl?.focus());
+    }
+
+    function startCompose(action: InputAction) {
+        mode = "compose";
+        inputAction = action;
+        inputValue = "";
+        inputStep = 0;
+        inputStash = "";
+        tick().then(() => inputEl?.focus());
+    }
+
+    async function submitInput() {
+        const val = inputValue.trim();
+        if (!val) return;
+
+        if (inputAction === "reply") {
+            if (!nav.forumId || !nav.postId) {
+                outputLines = [...outputLines, "", "ERROR: Navigate to a post first (forum read <forumId> <postId>)"];
+                mode = "browse";
+                return;
+            }
+            await runCommand(`forum reply ${nav.forumId} ${nav.postId} ${val}`);
+            // Refresh post to show new reply
+            await runCommand(`forum read ${nav.forumId} ${nav.postId}`);
+            mode = "browse";
+        } else if (inputAction === "post") {
+            if (!nav.forumId) {
+                outputLines = [...outputLines, "", "ERROR: Access a forum first (forum access <forumId>)"];
+                mode = "browse";
+                return;
+            }
+            if (inputStep === 0) {
+                // Step 1: got title, now ask for content
+                inputStash = val;
+                inputPrompt = "CONTENT >";
+                inputValue = "";
+                inputStep = 1;
+                return;
+            }
+            // Step 2: got content, submit
+            await runCommand(`forum post ${nav.forumId} "${inputStash}" "${val}"`);
+            await runCommand(`forum access ${nav.forumId}`);
+            mode = "browse";
+        } else if (inputAction === "search") {
+            if (nav.forumId) {
+                await runCommand(`forum search ${nav.forumId} ${val}`);
+            } else {
+                await runCommand(`forum search ${val}`);
+            }
+            mode = "browse";
+        } else if (inputAction === "register") {
+            if (!nav.forumId) {
+                outputLines = [...outputLines, "", "ERROR: Access a forum first."];
+                mode = "browse";
+                return;
+            }
+            await runCommand(`forum register ${nav.forumId} ${val}`);
+            mode = "browse";
+        } else if (inputAction === "vote") {
+            // val should be "up" or "down"
+            const dir = val.toLowerCase().startsWith("u") ? "up" : "down";
+            if (nav.postId) {
+                await runCommand(`forum vote ${nav.forumId} ${nav.postId} ${dir}`);
+                await runCommand(`forum read ${nav.forumId} ${nav.postId}`);
+            }
+            mode = "browse";
+        } else if (inputAction === "report") {
+            if (nav.postId) {
+                await runCommand(`forum report ${nav.forumId} ${nav.postId} ${val}`);
+            }
+            mode = "browse";
+        } else if (inputAction === "tag") {
+            if (nav.forumId) {
+                await runCommand(`forum tag ${nav.forumId} ${val}`);
+            }
+            mode = "browse";
+        } else if (inputAction === "command") {
+            // Raw command mode
+            await runCommand(val);
+            mode = "browse";
+        }
+
+        inputValue = "";
+    }
+
+    // ==================== KEYBOARD ====================
 
     function handleKeydown(event: KeyboardEvent) {
         if (!visible) return;
 
+        // In input/compose mode, only handle Escape and Enter
+        if (mode !== "browse") {
+            if (event.key === "Escape") {
+                event.preventDefault();
+                event.stopPropagation();
+                mode = "browse";
+                inputValue = "";
+            }
+            return;
+        }
+
+        // Browse mode shortcuts
         switch (event.key) {
             case "Escape":
                 event.preventDefault();
-                if (view === "post") {
-                    view = "threads";
-                    selectedIndex = 0;
-                } else if (view === "threads") {
-                    view = "sections";
-                    selectedIndex = sections.indexOf(currentSection);
-                    currentSection = "";
+                event.stopPropagation();
+                if (nav.postId) {
+                    // Back to forum threads
+                    nav.postId = "";
+                    nav.postTitle = "";
+                    if (nav.forumId) runCommand(`forum access ${nav.forumId}`);
+                } else if (nav.forumId) {
+                    // Back to forum list
+                    nav.forumId = "";
+                    nav.forumName = "";
+                    runCommand("forum");
                 } else {
                     close();
                 }
                 break;
-            case "ArrowUp":
-                event.preventDefault();
-                navigate(-1);
+            case "r":
+            case "R":
+                if (nav.postId) {
+                    event.preventDefault();
+                    startInput("reply", "REPLY >");
+                }
                 break;
-            case "ArrowDown":
-                event.preventDefault();
-                navigate(1);
+            case "n":
+            case "N":
+                if (nav.forumId) {
+                    event.preventDefault();
+                    startInput("post", "TITLE >");
+                }
                 break;
-            case "Enter":
+            case "/":
                 event.preventDefault();
-                selectCurrent();
+                startInput("search", "SEARCH >");
+                break;
+            case "v":
+            case "V":
+                if (nav.postId) {
+                    event.preventDefault();
+                    startInput("vote", "VOTE (up/down) >");
+                }
+                break;
+            case "j":
+            case "J":
+                if (nav.forumId && !nav.postId) {
+                    event.preventDefault();
+                    startInput("register", "HANDLE >");
+                }
+                break;
+            case "!":
+                if (nav.postId) {
+                    event.preventDefault();
+                    startInput("report", "REASON >");
+                }
+                break;
+            case "t":
+            case "T":
+                if (nav.forumId) {
+                    event.preventDefault();
+                    startInput("tag", "TAG >");
+                }
+                break;
+            case ":":
+                event.preventDefault();
+                startInput("command", "CMD >");
+                break;
+            case "m":
+            case "M":
+                if (nav.forumId) {
+                    event.preventDefault();
+                    runCommand(`forum members ${nav.forumId}`);
+                }
+                break;
+            case "f":
+            case "F":
+                event.preventDefault();
+                runCommand("forum");
+                nav.forumId = "";
+                nav.postId = "";
+                break;
+            case "s":
+            case "S":
+                event.preventDefault();
+                runCommand("forum scan");
                 break;
         }
     }
 
-    function navigate(direction: number) {
-        if (view === "sections") {
-            selectedIndex = (selectedIndex + direction + sections.length) % sections.length;
-        } else if (view === "threads") {
-            if (threads.length === 0) return;
-            selectedIndex = (selectedIndex + direction + threads.length) % threads.length;
-        }
-        // Post view scrolling handled natively by div overflow
-    }
-
-    function selectCurrent() {
-        if (view === "sections") {
-            loadSection(sections[selectedIndex]);
-        } else if (view === "threads") {
-            if (threads[selectedIndex]) {
-                loadPost(threads[selectedIndex].id);
-            }
+    function handleInputKeydown(event: KeyboardEvent) {
+        if (event.key === "Enter") {
+            event.preventDefault();
+            submitInput();
         }
     }
 
-    // ==================== DATA LOADING ====================
-
-    async function loadSection(section: string) {
-        loading = true;
-        error = "";
-        currentSection = section;
-        
-        try {
-            const response = await terminalService.executeCommand(`forum ${section}`);
-            if (response.success && response.data?.posts) {
-                threads = response.data.posts.map((p: any) => ({
-                    id: p.id,
-                    title: p.title,
-                    author: p.author,
-                    date: new Date(p.createdAt).toLocaleDateString(),
-                    replies: p._count?.replies || 0,
-                    views: p.views || 0
-                }));
-                view = "threads";
-                selectedIndex = 0;
-            } else {
-                error = "Failed to load section";
-            }
-        } catch (err) {
-            error = "Error loading section";
-            console.error(err);
-        } finally {
-            loading = false;
-        }
-    }
-
-    async function loadPost(postId: string) {
-        loading = true;
-        error = "";
-        
-        try {
-            const response = await terminalService.executeCommand(`forum read ${postId}`);
-            if (response.success && response.data?.post) {
-                const p = response.data.post;
-                currentPost = {
-                    id: p.id,
-                    title: p.title,
-                    author: p.author.username,
-                    date: new Date(p.createdAt).toLocaleString(),
-                    replies: p.replies?.length || 0,
-                    views: p.views,
-                    content: p.content
-                };
-                postReplies = p.replies || [];
-                view = "post";
-            } else {
-                error = "Failed to load post";
-            }
-        } catch (err) {
-            error = "Error loading post";
-            console.error(err);
-        } finally {
-            loading = false;
-        }
-    }
+    // ==================== HELPERS ====================
 
     function close() {
         dispatch("close");
+    }
+
+    function getBreadcrumb(): string {
+        let parts = ["FORUMS"];
+        if (nav.forumId) parts.push(nav.forumName || nav.forumId);
+        if (nav.postId) parts.push("POST:" + nav.postId.slice(0, 8));
+        return parts.join(" > ");
+    }
+
+    function getShortcuts(): string {
+        if (mode !== "browse") return "[ENTER] Submit  [ESC] Cancel";
+        if (nav.postId) return "[R]eply [V]ote [!]Report [ESC]Back [/]Search [:]Cmd";
+        if (nav.forumId) return "[N]ew post [J]oin [M]embers [T]ag [/]Search [ESC]Back [:]Cmd";
+        return "[S]can [F]orums [/]Search [ESC]Close [:]Cmd";
     }
 </script>
 
 <svelte:window on:keydown={handleKeydown} />
 
-<AsciiDialog {visible} title="FORUM" width={90} height={28} on:close={close}>
+<AsciiDialog {visible} title="FORUM NETWORK" width={96} height={30} on:close={close}>
     <div class="forum-container">
-        {#if loading}
-            <div class="loading">
-                <pre>
-╔═════════════════════════════════════════════════╗
-║                                                 ║
-║           ACCESSING FORUM NETWORK...            ║
-║                                                 ║
-║              [████████░░░░░░░░]                 ║
-║                                                 ║
-╚═════════════════════════════════════════════════╝
-                </pre>
-            </div>
-        {:else if error}
-            <div class="error-message">
-                <pre>
-╔═══════════════════════════════════════════════════╗
-║  ⚠️  ERROR                                        ║
-╠═══════════════════════════════════════════════════╣
-║  {error.padEnd(48)}║
-╚═══════════════════════════════════════════════════╝
-                </pre>
-                <div class="error-hint">Press ESC to go back</div>
-            </div>
-        {:else}
-            <!-- BREADCRUMBS -->
-            <div class="breadcrumbs">
-                <span class:active={view === "sections"}>ROOT</span>
-                {#if currentSection}
-                    <span class="separator">></span>
-                    <span class:active={view === "threads"}>{currentSection.toUpperCase()}</span>
-                {/if}
-                {#if currentPost}
-                    <span class="separator">></span>
-                    <span class:active={view === "post"}>POST</span>
-                {/if}
-            </div>
-            
-            <div class="divider">{"═".repeat(88)}</div>
-
-            <!-- SECTIONS VIEW -->
-            {#if view === "sections"}
-                <div class="list-view">
-                    <div class="list-header">
-                        <span class="col-name">SECTION NAME</span>
-                        <span class="col-status">STATUS</span>
-                    </div>
-                    {#each sections as section, i}
-                        <div 
-                            class="list-item" 
-                            class:selected={i === selectedIndex}
-                            on:click={() => loadSection(section)}
-                        >
-                            <span class="col-name">[{section}]</span>
-                            <span class="col-status">ONLINE</span>
-                        </div>
-                    {/each}
-                </div>
-
-            <!-- THREADS VIEW -->
-            {:else if view === "threads"}
-                <div class="list-view">
-                    {#if threads.length === 0}
-                        <div class="empty-state">No threads in this section.</div>
-                    {:else}
-                        <div class="list-header">
-                            <span class="col-title">TOPIC</span>
-                            <span class="col-author">AUTHOR</span>
-                            <span class="col-stats">REPLIES</span>
-                        </div>
-                        {#each threads as thread, i}
-                            <div 
-                                class="list-item" 
-                                class:selected={i === selectedIndex}
-                                on:click={() => loadPost(thread.id)}
-                            >
-                                <span class="col-title">{thread.title}</span>
-                                <span class="col-author">{thread.author}</span>
-                                <span class="col-stats">{thread.replies}</span>
-                            </div>
-                        {/each}
-                    {/if}
-                </div>
-
-            <!-- POST VIEW -->
-            {:else if view === "post" && currentPost}
-                <div class="post-view">
-                    <div class="post-header">
-                        <div class="post-title">{currentPost.title}</div>
-                        <div class="post-meta">
-                            By: {currentPost.author} | {currentPost.date}
-                        </div>
-                    </div>
-                    <div class="divider-dashed">{"-".repeat(88)}</div>
-                    <div class="post-content">
-                        {currentPost.content}
-                    </div>
-                    
-                    {#if postReplies.length > 0}
-                        <div class="replies-section">
-                            <div class="replies-header">REPLIES ({postReplies.length})</div>
-                            {#each postReplies as reply}
-                                <div class="reply-item">
-                                    <div class="reply-meta">{reply.author.username} says:</div>
-                                    <div class="reply-content">{reply.content}</div>
-                                </div>
-                            {/each}
-                        </div>
-                    {/if}
-                </div>
+        <!-- BREADCRUMB BAR -->
+        <div class="breadcrumb-bar">
+            <span class="breadcrumb-text">{getBreadcrumb()}</span>
+            {#if loading}
+                <span class="status-indicator blink">LOADING...</span>
+            {:else}
+                <span class="status-indicator">ONLINE</span>
             {/if}
+        </div>
+
+        <div class="divider">{"─".repeat(94)}</div>
+
+        <!-- ASCII OUTPUT VIEWPORT -->
+        <div class="output-viewport" bind:this={outputEl}>
+            {#if loading && outputLines.length === 0}
+                <pre class="loading-text">
+  Establishing secure connection...
+  Routing through proxy network...
+  Decrypting forum headers...
+  ████████████░░░░░░░░ 60%</pre>
+            {:else}
+                <pre class="output-text">{outputLines.join("\n")}</pre>
+            {/if}
+        </div>
+
+        <!-- INPUT BAR -->
+        {#if mode !== "browse"}
+            <div class="divider">{"─".repeat(94)}</div>
+            <div class="input-bar">
+                <span class="input-prompt">{inputPrompt}</span>
+                <input
+                    bind:this={inputEl}
+                    bind:value={inputValue}
+                    on:keydown={handleInputKeydown}
+                    class="input-field"
+                    spellcheck="false"
+                    autocomplete="off"
+                />
+            </div>
         {/if}
     </div>
 
-    <div slot="footer" class="footer-help">
-        <pre>
-║ [↑/↓] Navigate  [ENTER] Select  [ESC] Back/Close                                  ║
-        </pre>
+    <div slot="footer" class="footer-bar">
+        <span class="shortcuts">{getShortcuts()}</span>
     </div>
 </AsciiDialog>
 
@@ -301,132 +384,127 @@
         height: 100%;
         display: flex;
         flex-direction: column;
-        font-family: "IBM Plex Mono", monospace;
+        font-family: "IBM Plex Mono", "Courier New", monospace;
         color: #00bcd4;
     }
 
-    .loading, .error-message {
-        flex: 1;
+    /* BREADCRUMB BAR */
+    .breadcrumb-bar {
         display: flex;
-        flex-direction: column;
+        justify-content: space-between;
         align-items: center;
-        justify-content: center;
+        padding: 0.4em 1em;
+        background: rgba(0, 39, 67, 0.3);
     }
 
-    .error-hint {
-        margin-top: 1em;
-        color: #008800;
-    }
-
-    .breadcrumbs {
-        padding: 0.5em 1em;
-        font-weight: bold;
-    }
-
-    .separator {
-        margin: 0 0.5em;
-        color: #008800;
-    }
-
-    .active {
+    .breadcrumb-text {
         color: #ffff00;
-        text-decoration: underline;
+        font-weight: bold;
+        font-size: 0.9em;
+        letter-spacing: 0.05em;
+    }
+
+    .status-indicator {
+        color: #00ff41;
+        font-size: 0.8em;
+    }
+
+    .blink {
+        animation: blinkAnim 0.8s step-end infinite;
+    }
+
+    @keyframes blinkAnim {
+        50% { opacity: 0; }
     }
 
     .divider {
-        color: #004400;
+        color: #003344;
         line-height: 1;
         overflow: hidden;
+        padding: 0 0.2em;
     }
 
-    .divider-dashed {
-        color: #004400;
-        margin: 0.5em 0;
-    }
-
-    /* LIST VIEW */
-    .list-view {
+    /* OUTPUT VIEWPORT */
+    .output-viewport {
         flex: 1;
         overflow-y: auto;
-        padding: 0.5em 0;
-    }
-
-    .list-header {
-        display: flex;
+        overflow-x: hidden;
         padding: 0.5em 1em;
-        color: #008800;
-        border-bottom: 1px solid #004400;
-        margin-bottom: 0.5em;
+        min-height: 200px;
+        scrollbar-width: thin;
+        scrollbar-color: #00bcd4 #001a2b;
     }
 
-    .list-item {
-        display: flex;
-        padding: 0.3em 1em;
-        cursor: pointer;
+    .output-viewport::-webkit-scrollbar {
+        width: 6px;
+    }
+    .output-viewport::-webkit-scrollbar-track {
+        background: #001a2b;
+    }
+    .output-viewport::-webkit-scrollbar-thumb {
+        background: #004455;
+        border-radius: 3px;
+    }
+    .output-viewport::-webkit-scrollbar-thumb:hover {
+        background: #00bcd4;
     }
 
-    .list-item:hover {
-        background: rgba(0, 255, 0, 0.1);
-    }
-
-    .list-item.selected {
-        background: rgba(0, 255, 0, 0.2);
-        color: #ffff00;
-    }
-
-    .col-name { flex: 1; }
-    .col-status { width: 100px; text-align: right; }
-    
-    .col-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .col-author { width: 150px; }
-    .col-stats { width: 80px; text-align: right; }
-
-    /* POST VIEW */
-    .post-view {
-        flex: 1;
-        overflow-y: auto;
-        padding: 1em;
-    }
-
-    .post-title {
-        font-size: 1.2em;
-        font-weight: bold;
-        color: #ffff00;
-        margin-bottom: 0.2em;
-    }
-
-    .post-meta {
-        color: #008800;
-        font-size: 0.9em;
-    }
-
-    .post-content {
-        white-space: pre-wrap;
+    .output-text {
+        margin: 0;
+        font-family: inherit;
+        font-size: 0.95em;
         line-height: 1.4;
-        margin-bottom: 2em;
+        color: #00bcd4;
+        white-space: pre-wrap;
+        word-break: break-word;
     }
 
-    .replies-header {
-        color: #008800;
-        border-bottom: 1px solid #004400;
-        margin-bottom: 1em;
+    .loading-text {
+        margin: 0;
+        font-family: inherit;
+        color: #008899;
+        animation: blinkAnim 1.2s step-end infinite;
     }
 
-    .reply-item {
-        margin-bottom: 1em;
-        padding-left: 1em;
-        border-left: 2px solid #004400;
+    /* INPUT BAR */
+    .input-bar {
+        display: flex;
+        align-items: center;
+        padding: 0.4em 1em;
+        background: rgba(0, 60, 80, 0.25);
+        gap: 0.5em;
     }
 
-    .reply-meta {
-        color: #00aa00;
+    .input-prompt {
+        color: #ffff00;
         font-weight: bold;
-        margin-bottom: 0.2em;
+        white-space: nowrap;
+        font-size: 0.95em;
     }
 
-    .empty-state {
-        padding: 2em;
-        text-align: center;
-        color: #006600;
+    .input-field {
+        flex: 1;
+        background: transparent;
+        border: none;
+        outline: none;
+        color: #00ff41;
+        font-family: inherit;
+        font-size: 0.95em;
+        caret-color: #00ff41;
+    }
+
+    .input-field::placeholder {
+        color: #004455;
+    }
+
+    /* FOOTER */
+    .footer-bar {
+        padding: 0.3em 0;
+    }
+
+    .shortcuts {
+        color: #006677;
+        font-size: 0.85em;
+        letter-spacing: 0.02em;
     }
 </style>

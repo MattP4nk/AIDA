@@ -1,8 +1,9 @@
 import { injectable, inject } from "tsyringe";
-import { MISSION_SERVICE, GAME_STATE_MANAGER } from "../di/tokens";
+import { MISSION_SERVICE, LOGGER, FACTION_KNOWLEDGE_SERVICE } from "../di/tokens";
 import MissionService from "./missionService";
-import type GameStateManager from "./gameStateManager";
+import type { Logger } from "pino";
 import { Server as SocketIOServer } from "socket.io";
+import type { FactionKnowledgeService } from "./factionKnowledgeService";
 
 /**
  * MissionIntegration Service
@@ -27,11 +28,88 @@ interface ObjectiveValidationResult {
 @injectable()
 export class MissionIntegrationService {
   private io: SocketIOServer | null = null;
+  private factionKnowledge: FactionKnowledgeService | null = null;
 
   constructor(
+    @inject(LOGGER) private logger: Logger,
     @inject(MISSION_SERVICE) private missionService: MissionService,
-    @inject(GAME_STATE_MANAGER) _gameStateManager: GameStateManager,
-  ) {}
+    @inject(FACTION_KNOWLEDGE_SERVICE)
+    factionKnowledgeService?: FactionKnowledgeService,
+  ) {
+    this.factionKnowledge = factionKnowledgeService || null;
+    // Subscribe to MissionService reward events for objective tracking
+    this.missionService.on(
+      "rewards:xp_granted",
+      (data: {
+        userId: string;
+        skillName: string;
+        newLevel: number;
+        xpGained: number;
+      }) => {
+        this.onSkillUpdate(
+          data.userId,
+          data.skillName,
+          data.newLevel,
+          data.xpGained,
+        ).catch((err) =>
+          this.logger.error(
+            { err, hook: "rewards:xp_granted" },
+            "Mission integration event listener error",
+          ),
+        );
+      },
+    );
+
+    this.missionService.on(
+      "rewards:credits_granted",
+      (data: { userId: string; amount: number; type: "earned" | "spent" }) => {
+        this.onCreditsTransaction(data.userId, data.amount, data.type).catch(
+          (err) =>
+            this.logger.error(
+              { err, hook: "rewards:credits_granted" },
+              "Mission integration event listener error",
+            ),
+        );
+      },
+    );
+
+    this.missionService.on(
+      "mission:completed",
+      (data: {
+        userId: string;
+        missionId: string;
+        missionTitle: string;
+        factionId?: string;
+        targetServerId?: string;
+        objectives?: Array<{ type: string; metadata?: Record<string, unknown> }>;
+      }) => {
+        if (data.factionId) {
+          this.onFactionEvent(data.userId, "mission_complete", data.factionId, {
+            missionId: data.missionId,
+          }).catch((err) =>
+            this.logger.error(
+              { err, hook: "mission:completed→faction" },
+              "Mission integration event listener error",
+            ),
+          );
+
+          // Feed mission discoveries into faction knowledge
+          if (this.factionKnowledge) {
+            this.trackMissionKnowledge(
+              data.factionId,
+              data.userId,
+              data.objectives || [],
+            ).catch((err) =>
+              this.logger.error(
+                { err, hook: "mission:completed→knowledge" },
+                "Faction knowledge mission tracking error",
+              ),
+            );
+          }
+        }
+      },
+    );
+  }
 
   /**
    * Set Socket.IO instance for real-time notifications
@@ -101,6 +179,16 @@ export class MissionIntegrationService {
               newProgress = true;
               shouldUpdate = true;
             }
+          } else if (objType === "install_backdoor") {
+            // Install backdoor on specific server (method must be backdoor or rootkit)
+            if (
+              success &&
+              (method === "backdoor" || method === "rootkit") &&
+              (!objective.target || objective.target === targetId)
+            ) {
+              newProgress = true;
+              shouldUpdate = true;
+            }
           }
 
           if (shouldUpdate) {
@@ -114,7 +202,10 @@ export class MissionIntegrationService {
         }
       }
     } catch (error) {
-      // Silent error - mission tracking shouldn't break gameplay
+      this.logger.error(
+        { err: error, userId, targetId, hook: "onHackComplete" },
+        "Mission integration error",
+      );
     }
   }
 
@@ -169,6 +260,24 @@ export class MissionIntegrationService {
               newProgress = true;
               shouldUpdate = true;
             }
+          } else if (objType === "download_file") {
+            // Download specific file to home server
+            if (operation === "download") {
+              const meta = (objective as any).metadata;
+              if (meta?.fileId === fileId || !meta?.fileId) {
+                newProgress = true;
+                shouldUpdate = true;
+              }
+            }
+          } else if (objType === "exfiltrate_data") {
+            // Download specific file from a specific server
+            if (operation === "download") {
+              const meta = (objective as any).metadata;
+              if (meta?.serverId === serverId && meta?.fileId === fileId) {
+                newProgress = true;
+                shouldUpdate = true;
+              }
+            }
           }
 
           if (shouldUpdate) {
@@ -182,7 +291,10 @@ export class MissionIntegrationService {
         }
       }
     } catch (error) {
-      // Silent error
+      this.logger.error(
+        { err: error, userId, operation, fileId, hook: "onFileOperation" },
+        "Mission integration error",
+      );
     }
   }
 
@@ -231,7 +343,10 @@ export class MissionIntegrationService {
         }
       }
     } catch (error) {
-      // Silent error
+      this.logger.error(
+        { err: error, userId, recipientId, hook: "onMessageSent" },
+        "Mission integration error",
+      );
     }
   }
 
@@ -243,6 +358,7 @@ export class MissionIntegrationService {
     userId: string,
     serverId: string,
     serverType: string,
+    serverMeta?: { networkId?: string; role?: string },
   ): Promise<void> {
     try {
       const missions = await this.missionService.getPlayerMissions(userId);
@@ -273,6 +389,27 @@ export class MissionIntegrationService {
               newProgress = (objective.current as number) + 1;
               shouldUpdate = true;
             }
+          } else if (objType === "infiltrate_network") {
+            // Reach a server deep inside a specific network
+            const meta = (objective as any).metadata;
+            if (
+              serverMeta?.networkId &&
+              meta?.networkId === serverMeta.networkId
+            ) {
+              // Check optional targetRole constraint
+              const roleMatch = !meta.targetRole || serverMeta.role === meta.targetRole;
+              if (roleMatch) {
+                newProgress = true;
+                shouldUpdate = true;
+              }
+            }
+          } else if (objType === "trace_connection") {
+            // Discover a specific server by following network clues
+            const meta = (objective as any).metadata;
+            if (meta?.serverId === serverId) {
+              newProgress = true;
+              shouldUpdate = true;
+            }
           }
 
           if (shouldUpdate) {
@@ -286,7 +423,10 @@ export class MissionIntegrationService {
         }
       }
     } catch (error) {
-      // Silent error
+      this.logger.error(
+        { err: error, userId, serverId, hook: "onServerConnect" },
+        "Mission integration error",
+      );
     }
   }
 
@@ -342,7 +482,10 @@ export class MissionIntegrationService {
         }
       }
     } catch (error) {
-      // Silent error
+      this.logger.error(
+        { err: error, userId, activityType, hook: "onForumActivity" },
+        "Mission integration error",
+      );
     }
   }
 
@@ -395,7 +538,10 @@ export class MissionIntegrationService {
         }
       }
     } catch (error) {
-      // Silent error
+      this.logger.error(
+        { err: error, userId, skillName, hook: "onSkillUpdate" },
+        "Mission integration error",
+      );
     }
   }
 
@@ -446,7 +592,10 @@ export class MissionIntegrationService {
         }
       }
     } catch (error) {
-      // Silent error
+      this.logger.error(
+        { err: error, userId, amount, type, hook: "onCreditsTransaction" },
+        "Mission integration error",
+      );
     }
   }
 
@@ -511,7 +660,10 @@ export class MissionIntegrationService {
         }
       }
     } catch (error) {
-      // Silent error
+      this.logger.error(
+        { err: error, userId, eventType, factionId, hook: "onFactionEvent" },
+        "Mission integration error",
+      );
     }
   }
 
@@ -546,6 +698,10 @@ export class MissionIntegrationService {
 
       return results;
     } catch (error) {
+      this.logger.error(
+        { err: error, userId, missionId, hook: "validateMissionObjectives" },
+        "Mission integration error",
+      );
       return [];
     }
   }
@@ -555,12 +711,16 @@ export class MissionIntegrationService {
    */
   private async sendNotification(
     userId: string,
-    type: "objective_complete" | "mission_complete" | "mission_available",
+    type:
+      | "objective_complete"
+      | "mission_complete"
+      | "mission_available"
+      | "mission_expired",
     data: any,
   ): Promise<void> {
     if (!this.io) return;
 
-    this.io.to(`user:${userId}`).emit("mission:notification", {
+    this.io.to(`player:${userId}`).emit("mission:notification", {
       type,
       data,
       timestamp: new Date(),
@@ -580,7 +740,7 @@ export class MissionIntegrationService {
         // Check expiration
         if (mission.expiresAt && new Date(mission.expiresAt) < new Date()) {
           await this.missionService.expireMission(userId, mission.missionId);
-          await this.sendNotification(userId, "mission_complete", {
+          await this.sendNotification(userId, "mission_expired", {
             missionId: mission.missionId,
             status: "expired",
             message: `Mission "${(mission as any).title}" has expired`,
@@ -591,7 +751,201 @@ export class MissionIntegrationService {
         await this.validateMissionObjectives(userId, mission.missionId);
       }
     } catch (error) {
-      // Silent error
+      this.logger.error(
+        { err: error, userId, hook: "checkAllActiveMissions" },
+        "Mission integration error",
+      );
+    }
+  }
+
+  // ==================== FACTION KNOWLEDGE TRACKING ====================
+
+  /**
+   * Extract server/file targets from mission objectives and feed them into faction knowledge.
+   * Called after a mission is completed — the targets the player interacted with become faction intel.
+   */
+  private async trackMissionKnowledge(
+    factionId: string,
+    userId: string,
+    objectives: Array<{ type: string; metadata?: Record<string, unknown> }>,
+  ): Promise<void> {
+    if (!this.factionKnowledge) return;
+
+    for (const obj of objectives) {
+      const meta = obj.metadata || {};
+
+      // Track servers referenced in objectives
+      if (meta.serverId && typeof meta.serverId === "string") {
+        await this.factionKnowledge.addEntry(factionId, {
+          assetType: "server",
+          assetId: meta.serverId as string,
+          assetMeta: {
+            name: meta.serverName || null,
+            ip: meta.serverIp || null,
+            serverType: meta.serverType || null,
+            fromMissionObjective: obj.type,
+          },
+          source: "mission_completion",
+          confidence: 0.9,
+          discoveredBy: userId,
+        });
+      }
+
+      // Track files referenced in objectives
+      if (meta.fileId && typeof meta.fileId === "string") {
+        await this.factionKnowledge.addEntry(factionId, {
+          assetType: "file",
+          assetId: meta.fileId as string,
+          assetMeta: {
+            name: meta.fileName || null,
+            serverId: meta.serverId || null,
+            fromMissionObjective: obj.type,
+          },
+          source: "mission_completion",
+          confidence: 0.9,
+          discoveredBy: userId,
+        });
+      }
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════
+  // New System Integration Hooks
+  // ══════════════════════════════════════════════════════════════════
+
+  /**
+   * Handle successful decode command
+   * Updates objectives: decode_content
+   */
+  public async onDecodeSuccess(
+    userId: string,
+    encoding: string,
+    _decodedText: string,
+  ): Promise<void> {
+    try {
+      const missions = await this.missionService.getPlayerMissions(userId);
+      const activeMissions = missions.filter((m: any) => m.status === "active");
+
+      for (const mission of activeMissions) {
+        if (!mission.objectives || !Array.isArray(mission.objectives)) continue;
+
+        for (const objective of mission.objectives) {
+          if ((objective.type as string) !== "decode_content") continue;
+          const meta = (objective as any).metadata;
+          // Match if encoding matches or no specific encoding required
+          if (!meta?.encoding || meta.encoding === encoding) {
+            await this.missionService.updateObjective(userId, mission.missionId, objective.id, true);
+          }
+        }
+      }
+    } catch (error) {
+      this.logger.error({ err: error, userId, hook: "onDecodeSuccess" }, "Mission integration error");
+    }
+  }
+
+  /**
+   * Handle defense purchase/upgrade
+   * Updates objectives: defend_home
+   */
+  public async onDefenseEvent(
+    userId: string,
+    defenseType: string,
+    level: number,
+  ): Promise<void> {
+    try {
+      const missions = await this.missionService.getPlayerMissions(userId);
+      const activeMissions = missions.filter((m: any) => m.status === "active");
+
+      for (const mission of activeMissions) {
+        if (!mission.objectives || !Array.isArray(mission.objectives)) continue;
+
+        for (const objective of mission.objectives) {
+          if ((objective.type as string) !== "defend_home") continue;
+          const meta = (objective as any).metadata;
+          // Match if defense type matches (or any defense)
+          if (!meta?.defenseType || meta.defenseType === defenseType) {
+            if (!meta?.minLevel || level >= meta.minLevel) {
+              await this.missionService.updateObjective(userId, mission.missionId, objective.id, true);
+            }
+          }
+        }
+      }
+    } catch (error) {
+      this.logger.error({ err: error, userId, hook: "onDefenseEvent" }, "Mission integration error");
+    }
+  }
+
+  /**
+   * Handle bounty completion
+   * Updates objectives: claim_bounty
+   */
+  public async onBountyCompleted(
+    userId: string,
+    targetFactionId?: string,
+  ): Promise<void> {
+    try {
+      const missions = await this.missionService.getPlayerMissions(userId);
+      const activeMissions = missions.filter((m: any) => m.status === "active");
+
+      for (const mission of activeMissions) {
+        if (!mission.objectives || !Array.isArray(mission.objectives)) continue;
+
+        for (const objective of mission.objectives) {
+          if ((objective.type as string) !== "claim_bounty") continue;
+          const meta = (objective as any).metadata;
+          if (!meta?.targetFactionId || meta.targetFactionId === targetFactionId) {
+            await this.missionService.updateObjective(userId, mission.missionId, objective.id, true);
+          }
+        }
+      }
+    } catch (error) {
+      this.logger.error({ err: error, userId, hook: "onBountyCompleted" }, "Mission integration error");
+    }
+  }
+
+  /**
+   * Handle trace evasion success
+   * Updates objectives: survive_trace
+   */
+  public async onTraceEvaded(userId: string): Promise<void> {
+    try {
+      const missions = await this.missionService.getPlayerMissions(userId);
+      const activeMissions = missions.filter((m: any) => m.status === "active");
+
+      for (const mission of activeMissions) {
+        if (!mission.objectives || !Array.isArray(mission.objectives)) continue;
+
+        for (const objective of mission.objectives) {
+          if ((objective.type as string) !== "survive_trace") continue;
+          const newProgress = ((objective.current as number) || 0) + 1;
+          await this.missionService.updateObjective(userId, mission.missionId, objective.id, newProgress);
+        }
+      }
+    } catch (error) {
+      this.logger.error({ err: error, userId, hook: "onTraceEvaded" }, "Mission integration error");
+    }
+  }
+
+  /**
+   * Handle subnet command usage
+   * Updates objectives: scan_subnet
+   */
+  public async onSubnetUsed(userId: string): Promise<void> {
+    try {
+      const missions = await this.missionService.getPlayerMissions(userId);
+      const activeMissions = missions.filter((m: any) => m.status === "active");
+
+      for (const mission of activeMissions) {
+        if (!mission.objectives || !Array.isArray(mission.objectives)) continue;
+
+        for (const objective of mission.objectives) {
+          if ((objective.type as string) !== "scan_subnet") continue;
+          const newProgress = ((objective.current as number) || 0) + 1;
+          await this.missionService.updateObjective(userId, mission.missionId, objective.id, newProgress);
+        }
+      }
+    } catch (error) {
+      this.logger.error({ err: error, userId, hook: "onSubnetUsed" }, "Mission integration error");
     }
   }
 }

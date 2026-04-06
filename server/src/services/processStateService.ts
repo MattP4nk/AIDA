@@ -1,6 +1,8 @@
 import { EventEmitter } from "events";
 import { CommandResult } from "../../../shared/types";
-import { injectable } from "tsyringe";
+import { injectable, inject } from "tsyringe";
+import type { Logger } from "pino";
+import { LOGGER } from "../di/tokens";
 
 /**
  * ProcessStateService - Manages command execution state and process lifecycle
@@ -48,10 +50,11 @@ export interface ProcessRegistrationOptions {
 @injectable()
 class ProcessStateService extends EventEmitter {
   private processes: Map<number, CommandProcess> = new Map();
+  private pendingCleanups: Map<number, NodeJS.Timeout> = new Map();
 
-  constructor() {
+  constructor(@inject(LOGGER) private logger: Logger) {
     super();
-    console.log("⚙️ Process State Service initialized");
+    this.logger.info("Process State Service initialized");
   }
 
   /**
@@ -137,7 +140,7 @@ class ProcessStateService extends EventEmitter {
       try {
         await process.onCancel();
       } catch (error) {
-        console.error(`Error in cancel handler for PID ${pid}:`, error);
+        this.logger.error({ err: error, pid }, "Error in cancel handler");
       }
     }
 
@@ -166,9 +169,11 @@ class ProcessStateService extends EventEmitter {
     });
 
     // Clean up after a delay to allow status to be read
-    setTimeout(() => {
+    const timer = setTimeout(() => {
       this.processes.delete(pid);
+      this.pendingCleanups.delete(pid);
     }, 5000);
+    this.pendingCleanups.set(pid, timer);
   }
 
   /**
@@ -187,9 +192,11 @@ class ProcessStateService extends EventEmitter {
     });
 
     // Clean up after a delay
-    setTimeout(() => {
+    const timer = setTimeout(() => {
       this.processes.delete(pid);
+      this.pendingCleanups.delete(pid);
     }, 5000);
+    this.pendingCleanups.set(pid, timer);
   }
 
   /**
@@ -231,9 +238,15 @@ class ProcessStateService extends EventEmitter {
     const sessionProcesses = this.getSessionProcesses(sessionId);
 
     for (const process of sessionProcesses) {
+      // Cancel any pending delayed cleanup timer
+      const pendingTimer = this.pendingCleanups.get(process.pid);
+      if (pendingTimer) {
+        clearTimeout(pendingTimer);
+        this.pendingCleanups.delete(process.pid);
+      }
       if (process.cancellable) {
         this.cancelProcess(process.pid).catch((err) => {
-          console.error(`Error cancelling process ${process.pid}:`, err);
+          this.logger.error({ err, pid: process.pid }, "Error cancelling process");
         });
       }
       this.processes.delete(process.pid);
@@ -282,13 +295,3 @@ class ProcessStateService extends EventEmitter {
 }
 
 export default ProcessStateService;
-
-// Backward compatibility
-import { container } from "../di/container";
-import { PROCESS_STATE_SERVICE } from "../di/tokens";
-export const processStateService = new Proxy({} as ProcessStateService, {
-  get(_target, prop) {
-    const instance = container.resolve(PROCESS_STATE_SERVICE as any);
-    return (instance as any)[prop];
-  }
-});

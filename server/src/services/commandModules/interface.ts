@@ -1,21 +1,61 @@
 import { Command, CommandResult } from "../../../../shared/types";
-import { FileService } from "../fileService";
 import { PrismaClient } from "@prisma/client";
 import { Server as SocketIOServer } from "socket.io";
 
+// Use type-only imports to avoid circular dependency issues
+import type FileService from "../fileService";
+import type ShopService from "../shopService";
+import type MissionService from "../missionService";
+import type MissionGeneratorService from "../missionGenerator";
+import type ServerService from "../serverService";
+import type MemoryService from "../memoryService";
+import type ProcessStateService from "../processStateService";
+import type PlayerPresenceService from "../playerPresenceService";
+import type HackService from "../hackService";
+import type MessageService from "../messageService";
+import type ForumService from "../forumService";
+import type { FactionService } from "../factionService";
+import type { InventoryService } from "../inventoryService";
+import type GameStateManager from "../gameStateManager";
+import type BackdoorService from "../backdoorService";
+import type TraceService from "../traceService";
+import type { FactionKnowledgeService } from "../factionKnowledgeService";
+import type { NetworkTopologyService } from "../networkTopologyService";
+import type MissionIntegrationService from "../missionIntegration";
+import type { LeaderboardService } from "../leaderboardService";
+import type { AchievementService } from "../achievementService";
+
 export interface CommandContext {
   userId: string;
-  db: { client: PrismaClient }; // Matching the structure used in existing code (db.client)
+  role: string;
+  db: { client: PrismaClient };
   fileService: FileService;
   io?: SocketIOServer;
   commandHistory: Map<string, Command[]>;
-  gameStateManager?: any; // Typed as any for now to avoid circular imports, or use a shared interface if available
+  gameStateManager: GameStateManager;
+  modules: CommandModule[];
   services: {
-    memoryService?: typeof import("../memoryService").memoryService;
-    processStateService?: typeof import("../processStateService").processStateService;
-    [key: string]: any; // For other services like shopService, missionService, etc.
+    shopService: ShopService;
+    missionService: MissionService;
+    missionGenerator: MissionGeneratorService;
+    serverService: ServerService;
+    memoryService: MemoryService;
+    processStateService: ProcessStateService;
+    playerPresenceService?: PlayerPresenceService;
+    hackService: HackService;
+    messageService: MessageService;
+    forumService: ForumService;
+    factionService: FactionService;
+    inventoryService: InventoryService;
+    backdoorService: BackdoorService;
+    traceService: TraceService;
+    factionKnowledgeService?: FactionKnowledgeService;
+    networkTopologyService?: NetworkTopologyService;
+    missionIntegrationService?: MissionIntegrationService;
+    leaderboardService?: LeaderboardService;
+    achievementService?: AchievementService;
+    [key: string]: any;
   };
-  modules: import("./interface").CommandModule[];
 }
 
 export interface CommandInfo {

@@ -23,6 +23,8 @@ import { FactionService } from "../services/factionService";
 import { AIService } from "../services/aiService";
 import { PersonaService } from "../services/personaService";
 import MissionGeneratorService from "../services/missionGenerator";
+import BackdoorService from "../services/backdoorService";
+import TraceService from "../services/traceService";
 
 /**
  * Service Registry
@@ -124,5 +126,14 @@ export class ServiceRegistry {
 
   static get commandProcessor(): CommandProcessor {
     return container.resolve<CommandProcessor>(TOKENS.COMMAND_PROCESSOR);
+  }
+
+  // PvP Hacking Improvements
+  static get backdoorService(): BackdoorService {
+    return container.resolve<BackdoorService>(TOKENS.BACKDOOR_SERVICE);
+  }
+
+  static get traceService(): TraceService {
+    return container.resolve<TraceService>(TOKENS.TRACE_SERVICE);
   }
 }

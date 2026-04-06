@@ -1,6 +1,24 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
-import { sanitizeMessageContent, validateMessageContent } from "../../utils/validators";
+import {
+  sanitizeMessageContent,
+  validateMessageContent,
+} from "../../utils/validators";
+import {
+  render,
+  list,
+  multiPanel,
+  infoBox,
+  helpPanel,
+  statusCard,
+  HelpEntry,
+} from "./asciiBox";
+import { getInlineGlyph } from "../../utils/asciiAvatars";
+import {
+  isAIPersonaUsername,
+  resolvePersonaName,
+  shouldRequireToken,
+} from "../../utils/tokenConsumption";
 
 export class SocialCommandsModule implements CommandModule {
   public commands: Set<string> = new Set([
@@ -48,13 +66,16 @@ export class SocialCommandsModule implements CommandModule {
         category: "social",
         description: "Send a quick private message to another player",
         usage: "msg <username> <message>",
-        examples: ["msg alice Hey, how are you?", "msg bob Check out this hack!"],
+        examples: [
+          "msg alice Hey, how are you?",
+          "msg bob Check out this hack!",
+        ],
       },
       {
         command: "mail",
         category: "social",
         description: "Send a formal email with subject",
-        usage: "mail <username> <subject> <message>",
+        usage: "mail <username> <subject> <message> [--encrypt|-e]",
         examples: [
           "mail admin Report Found a bug in the system",
           "mail colleague Meeting Tomorrow's briefing at 10AM",
@@ -72,11 +93,7 @@ export class SocialCommandsModule implements CommandModule {
         category: "social",
         description: "Manage your contact list",
         usage: "contact [list|add|remove] [username]",
-        examples: [
-          "contact list",
-          "contact add alice",
-          "contact remove bob",
-        ],
+        examples: ["contact list", "contact add alice", "contact remove bob"],
       },
       {
         command: "chat",
@@ -88,14 +105,26 @@ export class SocialCommandsModule implements CommandModule {
       {
         command: "forum",
         category: "social",
-        description: "Access darknet forums and underground networks",
-        usage: "forum [scan|access|register|post|read|search]",
-        examples: ["forum scan", "forum access hackthenet", "forum post <id> <title> <content>"],
+        description:
+          "[Social 5] Access darknet forums and underground networks",
+        usage:
+          "forum [scan|access|register|post|read|search|reply|vote|tag|report|reports|resolve|pin|lock|ban|unban|delete|edit|members|profile]",
+        examples: [
+          "forum scan",
+          "forum access hackthenet",
+          "forum post <id> <title> <content> [--tags tag1,tag2]",
+          "forum reply <id> <postId> Great post!",
+          "forum vote <id> <postId> up",
+          "forum members <id>",
+          "forum pin <id> <postId>",
+          "forum report <id> <postId> Spam content",
+        ],
       },
       {
         command: "proxy",
         category: "social",
-        description: "Manage proxy connections for secure darkweb access",
+        description:
+          "[Network 10] Manage proxy connections for secure darkweb access",
         usage: "proxy [list|connect|disconnect|status]",
         examples: ["proxy list", "proxy connect proxy1", "proxy status"],
       },
@@ -107,13 +136,18 @@ export class SocialCommandsModule implements CommandModule {
     context: CommandContext,
   ): Promise<CommandResult> {
     const { userId } = context;
-    const recipientUsername = command.args[0];
-    const content = command.args.slice(1).join(" ");
+    const args = command.args || [];
+    const encrypt = args.includes("--encrypt") || args.includes("-e");
+    const filteredArgs = args.filter(
+      (a: string) => a !== "--encrypt" && a !== "-e",
+    );
+    const recipientUsername = filteredArgs[0];
+    const content = filteredArgs.slice(1).join(" ");
 
     if (!recipientUsername || !content) {
       return {
         success: false,
-        output: "Usage: msg <username> <message>",
+        output: "Usage: msg <username> <message> [--encrypt]",
         timestamp: new Date(),
       };
     }
@@ -127,7 +161,7 @@ export class SocialCommandsModule implements CommandModule {
         timestamp: new Date(),
       };
     }
-    
+
     const sanitizedContent = sanitizeMessageContent(content);
 
     const { db } = context;
@@ -143,20 +177,63 @@ export class SocialCommandsModule implements CommandModule {
       };
     }
 
-    const { messageService } = await import("../messageService");
+    const messageService = context.services.messageService;
+
+    // ── AI Persona token-gated routing ──────────────────────────
+    // If the recipient is a known AI persona and the player is NOT
+    // in an active tutorial with The Architect, require a token.
+    if (isAIPersonaUsername(recipientUsername)) {
+      const requiresToken = await shouldRequireToken(
+        db.client,
+        userId,
+        recipientUsername,
+      );
+
+      if (requiresToken) {
+        const personaName = resolvePersonaName(recipientUsername)!;
+        const tokenResult = await messageService.sendTokenMessage(
+          userId,
+          personaName,
+          "", // msg command has no subject
+          sanitizedContent,
+        );
+
+        const personaGlyph = getInlineGlyph("ai");
+        if (!tokenResult.success) {
+          return {
+            success: false,
+            output: tokenResult.error || "Failed to send token message",
+            timestamp: new Date(),
+          };
+        }
+
+        return {
+          success: true,
+          output: `${personaGlyph} Message sent to ${personaName} (1 token consumed). They will reply shortly.`,
+          data: { messageId: tokenResult.messageId },
+          timestamp: new Date(),
+        };
+      }
+    }
+
     const result = await messageService.sendPrivateMessage(
       userId,
       recipient.id,
       {
         content: sanitizedContent,
-        subject: "", // Empty subject for chat/msg
+        subject: "",
         messageType: "private",
+        encrypt: encrypt || false,
       },
     );
 
+    const recipientGlyph = getInlineGlyph("player");
     return {
       success: result.success,
-      output: result.message,
+      output: result.success
+        ? `${recipientGlyph} ${result.message}`
+        : result.message,
+      data: result.data,
       timestamp: new Date(),
     };
   }
@@ -170,9 +247,11 @@ export class SocialCommandsModule implements CommandModule {
 
     // Handle subcommands
     if (subCommand === "sent") {
-      const { messageService } = await import("../messageService");
-      const result = await messageService.getSentMessages(userId, { limit: 20 });
-      
+      const messageService = context.services.messageService;
+      const result = await messageService.getSentMessages(userId, {
+        limit: 20,
+      });
+
       if (!result.success || !result.data) {
         return {
           success: false,
@@ -191,14 +270,14 @@ export class SocialCommandsModule implements CommandModule {
         };
       }
 
-      const output = messages.map(
+      const items = messages.map(
         (msg: any) =>
           `To ${msg.recipientUsername}: ${msg.subject || "(No Subject)"} - ${msg.content.substring(0, 30)}...`,
       );
 
       return {
         success: true,
-        output: ["Sent Messages:", ...output],
+        output: render(list("SENT MESSAGES", items, 50)).split("\n"),
         data: result.data,
         timestamp: new Date(),
       };
@@ -214,9 +293,9 @@ export class SocialCommandsModule implements CommandModule {
         };
       }
 
-      const { messageService } = await import("../messageService");
+      const messageService = context.services.messageService;
       const result = await messageService.markAsRead(messageId, userId);
-      
+
       return {
         success: result.success,
         output: result.message,
@@ -234,9 +313,9 @@ export class SocialCommandsModule implements CommandModule {
         };
       }
 
-      const { messageService } = await import("../messageService");
+      const messageService = context.services.messageService;
       const result = await messageService.deleteMessage(messageId, userId);
-      
+
       return {
         success: result.success,
         output: result.message,
@@ -245,19 +324,24 @@ export class SocialCommandsModule implements CommandModule {
     }
 
     // Default: Send mail
-    // Usage: mail <username> <subject> <message>
-    const recipientUsername = command.args[0];
-    const subject = command.args[1];
-    const content = command.args.slice(2).join(" ");
+    // Usage: mail <username> <subject> <message> [--encrypt|-e]
+    const args = command.args || [];
+    const encrypt = args.includes("--encrypt") || args.includes("-e");
+    const filteredArgs = args.filter(
+      (a: string) => a !== "--encrypt" && a !== "-e",
+    );
+    const recipientUsername = filteredArgs[0];
+    const subject = filteredArgs[1];
+    const content = filteredArgs.slice(2).join(" ");
 
     if (!recipientUsername || !subject || !content) {
       return {
         success: false,
         output: [
-          "Usage: mail <username> <subject> <message>",
+          "Usage: mail <username> <subject> <message> [--encrypt|-e]",
           "       mail sent",
           "       mail read <id>",
-          "       mail delete <id>"
+          "       mail delete <id>",
         ],
         timestamp: new Date(),
       };
@@ -272,7 +356,7 @@ export class SocialCommandsModule implements CommandModule {
         timestamp: new Date(),
       };
     }
-    
+
     const sanitizedContent = sanitizeMessageContent(content);
     const sanitizedSubject = sanitizeMessageContent(subject);
 
@@ -289,7 +373,43 @@ export class SocialCommandsModule implements CommandModule {
       };
     }
 
-    const { messageService } = await import("../messageService");
+    const messageService = context.services.messageService;
+
+    // ── AI Persona token-gated routing ──────────────────────────
+    if (isAIPersonaUsername(recipientUsername)) {
+      const requiresToken = await shouldRequireToken(
+        db.client,
+        userId,
+        recipientUsername,
+      );
+
+      if (requiresToken) {
+        const personaName = resolvePersonaName(recipientUsername)!;
+        const tokenResult = await messageService.sendTokenMessage(
+          userId,
+          personaName,
+          sanitizedSubject,
+          sanitizedContent,
+        );
+
+        const personaGlyph = getInlineGlyph("ai");
+        if (!tokenResult.success) {
+          return {
+            success: false,
+            output: tokenResult.error || "Failed to send token message",
+            timestamp: new Date(),
+          };
+        }
+
+        return {
+          success: true,
+          output: `${personaGlyph} Mail sent to ${personaName} (1 token consumed). They will reply shortly.`,
+          data: { messageId: tokenResult.messageId },
+          timestamp: new Date(),
+        };
+      }
+    }
+
     const result = await messageService.sendPrivateMessage(
       userId,
       recipient.id,
@@ -297,12 +417,17 @@ export class SocialCommandsModule implements CommandModule {
         content: sanitizedContent,
         subject: sanitizedSubject,
         messageType: "private",
+        encrypt: encrypt || false,
       },
     );
 
+    const mailGlyph = getInlineGlyph("player");
     return {
       success: result.success,
-      output: result.message,
+      output: result.success
+        ? `${mailGlyph} ${result.message}`
+        : result.message,
+      data: result.data,
       timestamp: new Date(),
     };
   }
@@ -312,7 +437,7 @@ export class SocialCommandsModule implements CommandModule {
     context: CommandContext,
   ): Promise<CommandResult> {
     const { userId } = context;
-    const { messageService } = await import("../messageService");
+    const messageService = context.services.messageService;
     const result = await messageService.getInbox(userId, { limit: 10 });
 
     if (!result.success || !result.data) {
@@ -332,14 +457,14 @@ export class SocialCommandsModule implements CommandModule {
       };
     }
 
-    const output = messages.map(
+    const items = messages.map(
       (msg: any) =>
         `[${msg.isRead ? " " : "*"}] ${msg.senderUsername}: ${msg.subject || "(No Subject)"} - ${msg.content.substring(0, 30)}...`,
     );
 
     return {
       success: true,
-      output: ["Inbox:", ...output],
+      output: render(list("INBOX", items, 50)).split("\n"),
       data: result.data,
       openDialog: "mail",
       timestamp: new Date(),
@@ -368,12 +493,12 @@ export class SocialCommandsModule implements CommandModule {
         };
       }
 
-      const output = contacts.map(
-        (c: any) => `- ${c.contact?.username || c.handle} (${c.status})`,
+      const items = contacts.map(
+        (c: any) => `${c.contact?.username || c.handle} (${c.status})`,
       );
       return {
         success: true,
-        output: ["Contacts:", ...output],
+        output: render(list("CONTACTS", items, 44)).split("\n"),
         openDialog: "chat", // Contacts often managed in chat UI
         timestamp: new Date(),
       };
@@ -475,7 +600,7 @@ export class SocialCommandsModule implements CommandModule {
     const { userId } = context;
     const subCommand = command.args[0]?.toLowerCase();
 
-    const { forumService } = await import("../forumService");
+    const forumService = context.services.forumService;
 
     try {
       // forum (no args) - list discovered forums
@@ -493,20 +618,25 @@ export class SocialCommandsModule implements CommandModule {
           };
         }
 
-        const output = ["═══════════════════════════════════════", "          DISCOVERED FORUMS", "═══════════════════════════════════════"];
-        
-        forums.forEach((forum: any) => {
-          output.push(`[${forum.id}] ${forum.name}`);
-          output.push(`  ${forum.description}`);
-          output.push(`  Security: ${forum.securityLevel} | Members: ${forum._count?.members || 0} | Posts: ${forum._count?.posts || 0}`);
-          if (forum.requiresProxy) output.push(`  ⚠️  Requires proxy connection`);
-          if (forum.isHoneypot) output.push(`  🍯 WARNING: Potential honeypot`);
-          output.push("");
+        const sections = forums.map((forum: any) => {
+          const rows: Array<{ label: string; value: string }> = [
+            { label: "Description:  ", value: forum.description },
+            { label: "Security:     ", value: `${forum.securityLevel}` },
+            { label: "Members:      ", value: `${forum._count?.members || 0}` },
+            { label: "Posts:        ", value: `${forum._count?.posts || 0}` },
+          ];
+          if (forum.requiresProxy)
+            rows.push({ label: "", value: "[!] Requires proxy connection" });
+          if (forum.isHoneypot)
+            rows.push({ label: "", value: "[!] WARNING: Potential honeypot" });
+          return { heading: `[${forum.id}] ${forum.name}`, rows };
         });
+
+        const output = multiPanel("DISCOVERED FORUMS", sections, 46);
 
         return {
           success: true,
-          output,
+          output: render(output).split("\n"),
           data: { forums },
           openDialog: "forum",
           timestamp: new Date(),
@@ -518,21 +648,27 @@ export class SocialCommandsModule implements CommandModule {
         const useProxy = command.args.includes("--proxy");
         const result = await forumService.scanForForums(userId, useProxy);
 
-        const output = [
-          "Scanning for forums...",
-          "",
-          `Found ${result.forums.length} forums`,
-          `New discoveries: ${result.newDiscoveries}`,
+        const rows: Array<{ label: string; value: string }> = [
+          {
+            label: "Found:           ",
+            value: `${result.forums.length} forums`,
+          },
+          { label: "New discoveries:  ", value: `${result.newDiscoveries}` },
         ];
 
         if (result.requiresHigherSkills.length > 0) {
-          output.push("", "Requires higher skills:");
-          result.requiresHigherSkills.forEach((f: string) => output.push(`  - ${f}`));
+          rows.push({ label: "", value: "" });
+          rows.push({ label: "Requires higher skills:", value: "" });
+          result.requiresHigherSkills.forEach((f: string) =>
+            rows.push({ label: "  - ", value: f }),
+          );
         }
+
+        const output = infoBox("FORUM SCAN RESULTS", rows, 44);
 
         return {
           success: true,
-          output,
+          output: render(output).split("\n"),
           data: { scanResult: result },
           openDialog: "forum",
           timestamp: new Date(),
@@ -551,42 +687,73 @@ export class SocialCommandsModule implements CommandModule {
         }
 
         const useProxy = command.args.includes("--proxy");
-        const access = await forumService.accessForum(userId, forumId, useProxy);
+        const access = await forumService.accessForum(
+          userId,
+          forumId,
+          useProxy,
+        );
 
-        const output = [
-          `═══════════════════════════════════════`,
-          `  ${access.forum.name}`,
-          `═══════════════════════════════════════`,
-          access.forum.description,
-          "",
-          `Members: ${access.forum._count?.members || 0} | Posts: ${access.forum._count?.posts || 0}`,
-          `Member Status: ${access.isMember ? "✓ Registered" : "✗ Not registered"}`,
+        const infoRows: Array<{ label: string; value: string }> = [
+          { label: "", value: access.forum.description },
+          {
+            label: "Members:       ",
+            value: `${access.forum._count?.members || 0}`,
+          },
+          {
+            label: "Posts:         ",
+            value: `${access.forum._count?.posts || 0}`,
+          },
+          {
+            label: "Member Status: ",
+            value: access.isMember ? "✓ Registered" : "✗ Not registered",
+          },
         ];
 
         if (access.requiresProxy) {
-          output.push(`⚠️  This forum requires a proxy connection`);
+          infoRows.push({ label: "", value: "[!] Requires proxy connection" });
         }
 
         if (access.isHoneypot) {
-          output.push(`🍯 WARNING: This may be a honeypot!`);
+          infoRows.push({
+            label: "",
+            value: "[!] WARNING: This may be a honeypot!",
+          });
         }
 
-        output.push("", "Recent posts:");
+        const postRows: Array<{ label: string; value: string }> = [];
         access.posts.slice(0, 5).forEach((post: any) => {
-          output.push(`  [${post.id}] ${post.title} (by ${post.authorHandle})`);
+          postRows.push({
+            label: `  [${post.id}] `,
+            value: `${post.title} (by ${post.authorHandle})`,
+          });
         });
 
-        output.push("", "Commands:");
-        output.push("  forum read <postId> - Read a post");
+        const cmdRows: Array<{ label: string; value: string }> = [
+          { label: "forum read <postId>", value: "  Read a post" },
+        ];
         if (access.isMember) {
-          output.push("  forum post <title> <content> - Create a post");
+          cmdRows.push({
+            label: "forum post <title> <content>",
+            value: "  Create a post",
+          });
         } else {
-          output.push(`  forum register ${forumId} <handle> - Register an account`);
+          cmdRows.push({
+            label: `forum register ${forumId} <handle>`,
+            value: "  Register",
+          });
         }
+
+        const sections = [
+          { rows: infoRows },
+          { heading: "RECENT POSTS", rows: postRows },
+          { heading: "COMMANDS", rows: cmdRows },
+        ];
+
+        const output = multiPanel(access.forum.name, sections, 48);
 
         return {
           success: true,
-          output,
+          output: render(output).split("\n"),
           data: { access },
           openDialog: "forum",
           timestamp: new Date(),
@@ -617,21 +784,42 @@ export class SocialCommandsModule implements CommandModule {
         };
       }
 
-      // forum post <forumId> <title> <content> - create a post
+      // forum post <forumId> <title> <content> [--tags tag1,tag2] - create a post
       if (subCommand === "post") {
         const forumId = command.args[1];
         const title = command.args[2];
-        const content = command.args.slice(3).join(" ");
+
+        const tagsIndex = command.args.indexOf("--tags");
+        let tags: string[] | undefined;
+        const tagsValue =
+          tagsIndex !== -1 ? command.args[tagsIndex + 1] : undefined;
+        if (tagsValue) {
+          tags = tagsValue.split(",");
+        }
+        const contentParts = command.args
+          .slice(3)
+          .filter((_: string, i: number) => {
+            const absIdx = i + 3;
+            return absIdx !== tagsIndex && absIdx !== tagsIndex + 1;
+          });
+        const content = contentParts.join(" ");
 
         if (!forumId || !title || !content) {
           return {
             success: false,
-            output: "Usage: forum post <forumId> <title> <content>",
+            output:
+              "Usage: forum post <forumId> <title> <content> [--tags tag1,tag2]",
             timestamp: new Date(),
           };
         }
 
-        const post = await forumService.createPost(userId, forumId, title, content);
+        const post = await forumService.createPost(
+          userId,
+          forumId,
+          title,
+          content,
+          tags,
+        );
 
         return {
           success: true,
@@ -661,27 +849,46 @@ export class SocialCommandsModule implements CommandModule {
 
         const post = await forumService.readPost(userId, forumId, postId);
 
-        const output = [
-          "═══════════════════════════════════════",
-          post.title,
-          "═══════════════════════════════════════",
-          `By: ${post.authorHandle} | ${new Date(post.createdAt).toLocaleString()}`,
-          `Views: ${post.viewCount}`,
-          "",
-          post.content,
+        const authorGlyph = getInlineGlyph("player");
+        const metaRows: Array<{ label: string; value: string }> = [
+          { label: "Author:  ", value: `${authorGlyph} ${post.authorHandle}` },
+          {
+            label: "Date:    ",
+            value: new Date(post.createdAt).toLocaleString(),
+          },
+          { label: "Views:   ", value: `${post.viewCount}` },
+        ];
+
+        const contentRows: Array<{ label: string; value: string }> = [
+          { label: "", value: post.content },
         ];
 
         if (post.storyRelevant) {
-          output.push("", "💡 This post contains story-relevant information");
+          contentRows.push({ label: "", value: "" });
+          contentRows.push({
+            label: "",
+            value: "[*] This post contains story-relevant information",
+          });
         }
 
         if (post.keyFragmentId) {
-          output.push("", "🔑 This post contains a key fragment!");
+          contentRows.push({ label: "", value: "" });
+          contentRows.push({
+            label: "",
+            value: "[KEY] This post contains a key fragment!",
+          });
         }
+
+        const sections = [
+          { rows: metaRows },
+          { heading: "CONTENT", rows: contentRows },
+        ];
+
+        const output = multiPanel(post.title, sections, 48);
 
         return {
           success: true,
-          output,
+          output: render(output).split("\n"),
           data: { post },
           openDialog: "forum",
           timestamp: new Date(),
@@ -711,35 +918,608 @@ export class SocialCommandsModule implements CommandModule {
           };
         }
 
-        const output = [`Found ${posts.length} posts:`, ""];
-        posts.forEach((post: any) => {
-          output.push(`[${post.id}] ${post.title} (by ${post.authorHandle})`);
-          output.push(`  ${post.content.substring(0, 60)}...`);
-          output.push("");
-        });
+        const items = posts.map(
+          (post: any) =>
+            `[${post.id}] ${post.title} (by ${post.authorHandle}) - ${post.content.substring(0, 40)}...`,
+        );
+
+        const output = list(
+          `SEARCH RESULTS (${posts.length} found)`,
+          items,
+          50,
+        );
 
         return {
           success: true,
-          output,
+          output: render(output).split("\n"),
           data: { posts },
           openDialog: "forum",
           timestamp: new Date(),
         };
       }
 
+      // forum reply <forumId> <postId> <content...> - reply to a post
+      if (subCommand === "reply") {
+        const forumId = command.args[1];
+        const postId = command.args[2];
+        const content = command.args.slice(3).join(" ");
+
+        if (!forumId || !postId || !content) {
+          return {
+            success: false,
+            output: "Usage: forum reply <forumId> <postId> <content>",
+            timestamp: new Date(),
+          };
+        }
+
+        const reply = await forumService.createReply(
+          userId,
+          forumId,
+          postId,
+          content,
+        );
+
+        return {
+          success: true,
+          output: `✓ Reply posted successfully`,
+          data: { reply },
+          openDialog: "forum",
+          timestamp: new Date(),
+        };
+      }
+
+      // forum vote <forumId> <postId> up|down - vote on a post or reply
+      if (subCommand === "vote") {
+        const forumId = command.args[1];
+
+        if (command.args.length >= 5) {
+          // Reply vote: forum vote <forumId> <postId> <replyId> up|down
+          const replyId = command.args[3];
+          const direction = command.args[4]?.toLowerCase();
+
+          if (
+            !forumId ||
+            !replyId ||
+            (direction !== "up" && direction !== "down")
+          ) {
+            return {
+              success: false,
+              output: "Usage: forum vote <forumId> <postId> <replyId> up|down",
+              timestamp: new Date(),
+            };
+          }
+
+          const value = direction === "up" ? 1 : -1;
+          const result = await forumService.voteOnReply(
+            userId,
+            forumId,
+            replyId,
+            value as 1 | -1,
+          );
+
+          return {
+            success: true,
+            output: `✓ Vote recorded. Reply now has ${result.newVoteCount} votes`,
+            data: { vote: result },
+            openDialog: "forum",
+            timestamp: new Date(),
+          };
+        } else {
+          // Post vote: forum vote <forumId> <postId> up|down
+          const postId = command.args[2];
+          const direction = command.args[3]?.toLowerCase();
+
+          if (
+            !forumId ||
+            !postId ||
+            (direction !== "up" && direction !== "down")
+          ) {
+            return {
+              success: false,
+              output: "Usage: forum vote <forumId> <postId> up|down",
+              timestamp: new Date(),
+            };
+          }
+
+          const value = direction === "up" ? 1 : -1;
+          const result = await forumService.voteOnPost(
+            userId,
+            forumId,
+            postId,
+            value as 1 | -1,
+          );
+
+          return {
+            success: true,
+            output: `✓ Vote recorded. Post now has ${result.newVoteCount} votes`,
+            data: { vote: result },
+            openDialog: "forum",
+            timestamp: new Date(),
+          };
+        }
+      }
+
+      // forum tag <forumId> <tag> - browse posts by tag
+      if (subCommand === "tag") {
+        const forumId = command.args[1];
+        const tag = command.args[2];
+
+        if (!forumId || !tag) {
+          return {
+            success: false,
+            output: "Usage: forum tag <forumId> <tag>",
+            timestamp: new Date(),
+          };
+        }
+
+        const result = await forumService.getPostsByTag(forumId, tag);
+
+        if (result.posts.length === 0) {
+          return {
+            success: true,
+            output: `No posts found with tag '${tag}'.`,
+            timestamp: new Date(),
+          };
+        }
+
+        const items = result.posts.map(
+          (post: any) => `[${post.id}] ${post.title} (by ${post.authorHandle})`,
+        );
+
+        const output = list(
+          `POSTS TAGGED [${tag}] (${result.total} total)`,
+          items,
+          50,
+        );
+
+        return {
+          success: true,
+          output: render(output).split("\n"),
+          data: {
+            posts: result.posts,
+            total: result.total,
+            hasMore: result.hasMore,
+          },
+          openDialog: "forum",
+          timestamp: new Date(),
+        };
+      }
+
+      // forum report <forumId> <postId> <reason...> - report a post
+      if (subCommand === "report") {
+        const forumId = command.args[1];
+        const postId = command.args[2];
+        const reason = command.args.slice(3).join(" ");
+
+        if (!forumId || !postId || !reason) {
+          return {
+            success: false,
+            output: "Usage: forum report <forumId> <postId> <reason>",
+            timestamp: new Date(),
+          };
+        }
+
+        const report = await forumService.reportContent(
+          userId,
+          forumId,
+          postId,
+          undefined,
+          reason,
+        );
+
+        return {
+          success: true,
+          output: `✓ Report submitted`,
+          data: { report },
+          openDialog: "forum",
+          timestamp: new Date(),
+        };
+      }
+
+      // forum reports [forumId] - view pending reports (forum admin or system admin)
+      // Without forumId: shows reports across ALL forums (system admin/moderator only)
+      // With forumId: shows reports for that forum (forum admin or system admin)
+      if (subCommand === "reports") {
+        const forumId = command.args[1];
+
+        if (!forumId) {
+          // System-wide reports (system admin/moderator only)
+          const result = await forumService.getSystemReports(userId);
+
+          if (result.reports.length === 0) {
+            return {
+              success: true,
+              output: "No pending reports across any forum.",
+              timestamp: new Date(),
+            };
+          }
+
+          const items = result.reports.map(
+            (report: any) =>
+              `[${report.id}] [${report.forum?.name || "unknown"}] ${report.reason} (by ${report.reporter?.username || "?"}) — ${report.post ? `post: ${report.post.title}` : `reply by ${report.reply?.authorHandle || "?"}`}`,
+          );
+
+          const output = list(
+            `SYSTEM REPORTS (${result.total} pending)`,
+            items,
+            70,
+          );
+
+          return {
+            success: true,
+            output: render(output).split("\n"),
+            data: {
+              reports: result.reports,
+              total: result.total,
+              hasMore: result.hasMore,
+            },
+            openDialog: "forum",
+            timestamp: new Date(),
+          };
+        }
+
+        const reports = await forumService.getReports(userId, forumId);
+
+        if (reports.length === 0) {
+          return {
+            success: true,
+            output: "No pending reports.",
+            timestamp: new Date(),
+          };
+        }
+
+        const items = reports.map(
+          (report: any) =>
+            `[${report.id}] ${report.reason} (by ${report.reporter?.username || "?"}) — ${report.post ? `post: ${report.post.title}` : `reply by ${report.reply?.authorHandle || "?"}`}`,
+        );
+
+        const output = list(`REPORTS (${reports.length} total)`, items, 60);
+
+        return {
+          success: true,
+          output: render(output).split("\n"),
+          data: { reports },
+          openDialog: "forum",
+          timestamp: new Date(),
+        };
+      }
+
+      // forum resolve <forumId> <reportId> dismiss|action - resolve a report
+      if (subCommand === "resolve") {
+        const forumId = command.args[1];
+        const reportId = command.args[2];
+        const action = command.args[3]?.toLowerCase();
+
+        if (
+          !forumId ||
+          !reportId ||
+          (action !== "dismiss" && action !== "action")
+        ) {
+          return {
+            success: false,
+            output: "Usage: forum resolve <forumId> <reportId> dismiss|action",
+            timestamp: new Date(),
+          };
+        }
+
+        const report = await forumService.resolveReport(
+          userId,
+          forumId,
+          reportId,
+          action as "dismiss" | "action",
+        );
+
+        return {
+          success: true,
+          output: `✓ Report resolved`,
+          data: { report },
+          openDialog: "forum",
+          timestamp: new Date(),
+        };
+      }
+
+      // forum pin <forumId> <postId> - toggle pin on a post
+      if (subCommand === "pin") {
+        const forumId = command.args[1];
+        const postId = command.args[2];
+
+        if (!forumId || !postId) {
+          return {
+            success: false,
+            output: "Usage: forum pin <forumId> <postId>",
+            timestamp: new Date(),
+          };
+        }
+
+        const post = await forumService.pinPost(userId, forumId, postId);
+
+        return {
+          success: true,
+          output: `✓ Post ${post.isPinned ? "pinned" : "unpinned"}`,
+          data: { post },
+          openDialog: "forum",
+          timestamp: new Date(),
+        };
+      }
+
+      // forum lock <forumId> <postId> - toggle lock on a thread
+      if (subCommand === "lock") {
+        const forumId = command.args[1];
+        const postId = command.args[2];
+
+        if (!forumId || !postId) {
+          return {
+            success: false,
+            output: "Usage: forum lock <forumId> <postId>",
+            timestamp: new Date(),
+          };
+        }
+
+        const post = await forumService.lockPost(userId, forumId, postId);
+
+        return {
+          success: true,
+          output: `✓ Thread ${(post as any).isLocked ? "locked" : "unlocked"}`,
+          data: { post },
+          openDialog: "forum",
+          timestamp: new Date(),
+        };
+      }
+
+      // forum ban <forumId> <handle> - ban a member
+      if (subCommand === "ban") {
+        const forumId = command.args[1];
+        const handle = command.args[2];
+
+        if (!forumId || !handle) {
+          return {
+            success: false,
+            output: "Usage: forum ban <forumId> <handle>",
+            timestamp: new Date(),
+          };
+        }
+
+        await forumService.banMember(userId, forumId, handle);
+
+        return {
+          success: true,
+          output: `✓ Member '${handle}' banned`,
+          openDialog: "forum",
+          timestamp: new Date(),
+        };
+      }
+
+      // forum unban <forumId> <handle> - unban a member
+      if (subCommand === "unban") {
+        const forumId = command.args[1];
+        const handle = command.args[2];
+
+        if (!forumId || !handle) {
+          return {
+            success: false,
+            output: "Usage: forum unban <forumId> <handle>",
+            timestamp: new Date(),
+          };
+        }
+
+        await forumService.unbanMember(userId, forumId, handle);
+
+        return {
+          success: true,
+          output: `✓ Member '${handle}' unbanned`,
+          openDialog: "forum",
+          timestamp: new Date(),
+        };
+      }
+
+      // forum delete <forumId> <postId> - delete a post
+      if (subCommand === "delete") {
+        const forumId = command.args[1];
+        const postId = command.args[2];
+
+        if (!forumId || !postId) {
+          return {
+            success: false,
+            output: "Usage: forum delete <forumId> <postId>",
+            timestamp: new Date(),
+          };
+        }
+
+        await forumService.deletePost(userId, forumId, postId);
+
+        return {
+          success: true,
+          output: `✓ Post deleted`,
+          openDialog: "forum",
+          timestamp: new Date(),
+        };
+      }
+
+      // forum edit <forumId> <postId> <content...> - edit a post
+      if (subCommand === "edit") {
+        const forumId = command.args[1];
+        const postId = command.args[2];
+        const newContent = command.args.slice(3).join(" ");
+
+        if (!forumId || !postId || !newContent) {
+          return {
+            success: false,
+            output: "Usage: forum edit <forumId> <postId> <content>",
+            timestamp: new Date(),
+          };
+        }
+
+        const post = await forumService.editPost(
+          userId,
+          forumId,
+          postId,
+          newContent,
+        );
+
+        return {
+          success: true,
+          output: `✓ Post updated`,
+          data: { post },
+          openDialog: "forum",
+          timestamp: new Date(),
+        };
+      }
+
+      // forum members <forumId> - list forum members
+      if (subCommand === "members") {
+        const forumId = command.args[1];
+
+        if (!forumId) {
+          return {
+            success: false,
+            output: "Usage: forum members <forumId>",
+            timestamp: new Date(),
+          };
+        }
+
+        const result = await forumService.getForumMembers(forumId);
+
+        if (result.members.length === 0) {
+          return {
+            success: true,
+            output: "No members found.",
+            timestamp: new Date(),
+          };
+        }
+
+        const rows: Array<{ label: string; value: string }> =
+          result.members.map((member: any) => ({
+            label: `  ${member.handle} `,
+            value: `Role: ${member.role || "member"} | Joined: ${new Date(member.joinedAt).toLocaleDateString()}`,
+          }));
+
+        const output = infoBox(
+          `FORUM MEMBERS (${result.total} total)`,
+          rows,
+          54,
+        );
+
+        return {
+          success: true,
+          output: render(output).split("\n"),
+          data: {
+            members: result.members,
+            total: result.total,
+            hasMore: result.hasMore,
+          },
+          openDialog: "forum",
+          timestamp: new Date(),
+        };
+      }
+
+      // forum profile <forumId> [handle] - view member profile
+      if (subCommand === "profile") {
+        const forumId = command.args[1];
+        const handle = command.args[2];
+
+        if (!forumId) {
+          return {
+            success: false,
+            output: "Usage: forum profile <forumId> [handle]",
+            timestamp: new Date(),
+          };
+        }
+
+        const member = await forumService.getMemberProfile(
+          forumId,
+          handle ?? forumId,
+        );
+
+        const rows: Array<{ label: string; value: string }> = [
+          { label: "Handle:      ", value: member.handle },
+          {
+            label: "Role:        ",
+            value: member.isAdmin ? "admin" : "member",
+          },
+          {
+            label: "Joined:      ",
+            value: new Date(member.joinedAt).toLocaleDateString(),
+          },
+          { label: "Posts:       ", value: `${member.postCount || 0}` },
+          { label: "Reputation:  ", value: `${member.reputation || 0}` },
+        ];
+
+        const output = infoBox(`MEMBER PROFILE`, rows, 44);
+
+        return {
+          success: true,
+          output: render(output).split("\n"),
+          data: { member },
+          openDialog: "forum",
+          timestamp: new Date(),
+        };
+      }
+
       // Unknown subcommand
+      const entries: HelpEntry[] = [
+        { command: "forum", description: "List discovered forums" },
+        { command: "forum scan [--proxy]", description: "Scan for forums" },
+        { command: "forum access <id>", description: "Access a forum" },
+        {
+          command: "forum register <id> <handle>",
+          description: "Register on a forum",
+        },
+        {
+          command: "forum post <id> <title> <content>",
+          description: "Create a post (--tags tag1,tag2)",
+        },
+        { command: "forum read <id> <postId>", description: "Read a post" },
+        { command: "forum search <id> <query>", description: "Search posts" },
+        {
+          command: "forum reply <id> <postId> <content>",
+          description: "Reply to a post",
+        },
+        {
+          command: "forum vote <id> <postId> up|down",
+          description: "Vote on a post",
+        },
+        {
+          command: "forum vote <id> <postId> <replyId> up|down",
+          description: "Vote on a reply",
+        },
+        { command: "forum tag <id> <tag>", description: "Browse posts by tag" },
+        {
+          command: "forum report <id> <postId> <reason>",
+          description: "Report a post",
+        },
+        {
+          command: "forum reports [id]",
+          description: "View reports (no id = all forums, system admin only)",
+        },
+        {
+          command: "forum resolve <id> <reportId> dismiss|action",
+          description: "Resolve a report",
+        },
+        {
+          command: "forum pin <id> <postId>",
+          description: "Toggle pin on a post",
+        },
+        {
+          command: "forum lock <id> <postId>",
+          description: "Toggle lock on a thread",
+        },
+        { command: "forum ban <id> <handle>", description: "Ban a member" },
+        { command: "forum unban <id> <handle>", description: "Unban a member" },
+        { command: "forum delete <id> <postId>", description: "Delete a post" },
+        {
+          command: "forum edit <id> <postId> <content>",
+          description: "Edit a post",
+        },
+        { command: "forum members <id>", description: "List forum members" },
+        {
+          command: "forum profile <id> [handle]",
+          description: "View member profile",
+        },
+      ];
+
       return {
         success: false,
-        output: [
-          "Unknown forum command. Available commands:",
-          "  forum               - List discovered forums",
-          "  forum scan [--proxy] - Scan for forums",
-          "  forum access <id>   - Access a forum",
-          "  forum register <id> <handle> - Register on a forum",
-          "  forum post <id> <title> <content> - Create a post",
-          "  forum read <id> <postId> - Read a post",
-          "  forum search <id> <query> - Search posts",
-        ],
+        output: render(helpPanel("FORUM COMMANDS", entries, 50)).split("\n"),
         timestamp: new Date(),
       };
     } catch (error) {
@@ -751,7 +1531,6 @@ export class SocialCommandsModule implements CommandModule {
     }
   }
 
-
   private async handleProxy(
     command: Command,
     context: CommandContext,
@@ -759,38 +1538,42 @@ export class SocialCommandsModule implements CommandModule {
     const { userId } = context;
     const subCommand = command.args[0]?.toLowerCase();
 
-    const { forumService } = await import("../forumService");
+    const forumService = context.services.forumService;
 
     try {
       // proxy list - show available proxy servers
       if (subCommand === "list" || !subCommand) {
         const proxies = await forumService.listProxyServers(userId);
 
-        const output = [
-          "═══════════════════════════════════════",
-          "        AVAILABLE PROXY SERVERS",
-          "═══════════════════════════════════════",
-          "",
-        ];
+        const speedMap: Record<string, string> = {
+          slow: "Slow",
+          medium: "Medium",
+          fast: "Fast",
+        };
 
-        proxies.forEach((proxy: any) => {
-          const status = proxy.status === "active" ? "🟢 ONLINE" : "🔴 OFFLINE";
-          const speedMap: Record<string, string> = { slow: "🐌 Slow", medium: "⚡ Medium", fast: "🚀 Fast" };
+        const sections = proxies.map((proxy: any) => {
+          const status = proxy.status === "active" ? "ONLINE" : "OFFLINE";
           const speed = speedMap[proxy.speed] || "Unknown";
-          
-          output.push(`[${proxy.id}] ${proxy.name}`);
-          output.push(`  Location: ${proxy.location}`);
-          output.push(`  Status: ${status}`);
-          output.push(`  Anonymity: ${"█".repeat(proxy.anonymityLevel)}${"░".repeat(5 - proxy.anonymityLevel)} (${proxy.anonymityLevel}/5)`);
-          output.push(`  Speed: ${speed}`);
-          output.push("");
+          return {
+            heading: `[${proxy.id}] ${proxy.name}`,
+            rows: [
+              { label: "Location:   ", value: proxy.location },
+              { label: "Status:     ", value: status },
+              {
+                label: "Anonymity:  ",
+                value: `${"█".repeat(proxy.anonymityLevel)}${"░".repeat(5 - proxy.anonymityLevel)} (${proxy.anonymityLevel}/5)`,
+              },
+              { label: "Speed:      ", value: speed },
+            ],
+          };
         });
 
-        output.push("Use 'proxy connect <id>' to establish connection");
+        const output = multiPanel("AVAILABLE PROXY SERVERS", sections, 46);
+        output.push(" Use 'proxy connect <id>' to establish connection");
 
         return {
           success: true,
-          output,
+          output: render(output).split("\n"),
           data: { proxies },
           timestamp: new Date(),
         };
@@ -799,7 +1582,7 @@ export class SocialCommandsModule implements CommandModule {
       // proxy connect <id> - connect to a proxy
       if (subCommand === "connect") {
         const proxyId = command.args[1];
-        
+
         if (!proxyId) {
           return {
             success: false,
@@ -810,16 +1593,25 @@ export class SocialCommandsModule implements CommandModule {
 
         const connection = await forumService.connectToProxy(userId, proxyId);
 
+        const lines = infoBox(
+          "PROXY CONNECTED",
+          [
+            { label: "Status:    ", value: "✓ Connected" },
+            { label: "Server:    ", value: connection.proxyServer },
+            { label: "Location:  ", value: connection.location },
+            {
+              label: "Expires:   ",
+              value: new Date(connection.expiresAt).toLocaleString(),
+            },
+            { label: "", value: "" },
+            { label: "", value: "You can now access proxy-required forums." },
+          ],
+          46,
+        );
+
         return {
           success: true,
-          output: [
-            "✓ Proxy connection established",
-            `Server: ${connection.proxyServer}`,
-            `Location: ${connection.location}`,
-            `Expires: ${new Date(connection.expiresAt).toLocaleString()}`,
-            "",
-            "You can now access proxy-required forums safely.",
-          ],
+          output: render(lines).split("\n"),
           data: { connection },
           timestamp: new Date(),
         };
@@ -841,41 +1633,59 @@ export class SocialCommandsModule implements CommandModule {
         const status = await forumService.getProxyStatus(userId);
 
         if (!status.connected) {
+          const lines = statusCard(
+            "PROXY STATUS",
+            [
+              { label: "Connected:  ", value: "✗ No" },
+              { label: "", value: "" },
+              { label: "", value: "Use 'proxy list' to see available servers" },
+            ],
+            44,
+          );
+
           return {
             success: true,
-            output: [
-              "Proxy Status: ✗ Not connected",
-              "",
-              "Use 'proxy list' to see available servers",
-            ],
+            output: render(lines).split("\n"),
             data: { status },
             timestamp: new Date(),
           };
         }
 
+        const lines = statusCard(
+          "PROXY STATUS",
+          [
+            { label: "Connected:  ", value: "✓ Yes" },
+            { label: "Server:     ", value: `${status.proxyServer || "N/A"}` },
+            { label: "Location:   ", value: `${status.location || "N/A"}` },
+            {
+              label: "Expires:    ",
+              value: status.expiresAt
+                ? new Date(status.expiresAt).toLocaleString()
+                : "N/A",
+            },
+          ],
+          44,
+        );
+
         return {
           success: true,
-          output: [
-            "Proxy Status: ✓ Connected",
-            `Server: ${status.proxyServer}`,
-            `Location: ${status.location}`,
-            `Expires: ${status.expiresAt ? new Date(status.expiresAt).toLocaleString() : 'N/A'}`,
-          ],
+          output: render(lines).split("\n"),
           data: { status },
           timestamp: new Date(),
         };
       }
 
       // Unknown subcommand
+      const entries: HelpEntry[] = [
+        { command: "proxy list", description: "Show available proxy servers" },
+        { command: "proxy connect <id>", description: "Connect to a proxy" },
+        { command: "proxy disconnect", description: "Disconnect from proxy" },
+        { command: "proxy status", description: "Check connection status" },
+      ];
+
       return {
         success: false,
-        output: [
-          "Unknown proxy command. Available commands:",
-          "  proxy list       - Show available proxy servers",
-          "  proxy connect <id> - Connect to a proxy",
-          "  proxy disconnect - Disconnect from proxy",
-          "  proxy status     - Check connection status",
-        ],
+        output: render(helpPanel("PROXY COMMANDS", entries, 50)).split("\n"),
         timestamp: new Date(),
       };
     } catch (error) {
@@ -891,12 +1701,11 @@ export class SocialCommandsModule implements CommandModule {
     command: Command,
     context: CommandContext,
   ): Promise<CommandResult> {
-    const { userId, db } = context;
+    const { userId } = context;
     const subCommand = command.args[0]?.toLowerCase();
 
     if (subCommand === "history") {
       const contactId = command.args[1];
-
       if (!contactId) {
         return {
           success: false,
@@ -906,74 +1715,29 @@ export class SocialCommandsModule implements CommandModule {
       }
 
       try {
-        // Get current user data
-        const currentUser = await db.client.user.findUnique({
-          where: { id: userId },
-          select: { username: true },
-        });
+        const messageService = context.services.messageService;
+        const historyResult = await messageService.getChatHistory(
+          userId,
+          contactId,
+        );
 
-        const allMessages = await db.client.message.findMany({
-          where: {
-            OR: [
-              { senderId: userId, recipientId: contactId },
-              { senderId: contactId, recipientId: userId },
-            ],
-            subject: "",
-          },
-          include: {
-            sender: { select: { id: true, username: true } },
-            recipient: { select: { id: true, username: true } },
-          },
-          orderBy: { timestamp: "desc" },
-          take: 100,
-        });
-
-        await db.client.message.updateMany({
-          where: {
-            recipientId: userId,
-            senderId: contactId,
-            isRead: false,
-            subject: "",
-          },
-          data: {
-            isRead: true,
-          },
-        });
-
-        function getUsername(user: any, fallback: string) {
-          return user?.username ?? fallback;
+        if (!historyResult.success) {
+          return {
+            success: false,
+            output: [historyResult.message || "Failed to load chat history"],
+            timestamp: new Date(),
+          };
         }
 
-        const contactUsername = command.args[2] || "Contact";
-        const formattedMessages = allMessages.map((msg: any) => ({
-          id: msg.id,
-          senderId: msg.senderId,
-          senderUsername: getUsername(
-            msg.sender,
-            msg.senderId === userId
-              ? currentUser?.username || "You"
-              : contactUsername,
-          ),
-          recipientId: msg.recipientId,
-          recipientUsername: getUsername(
-            msg.recipient,
-            msg.recipientId === userId
-              ? currentUser?.username || "You"
-              : contactUsername,
-          ),
-          content: msg.content,
-          timestamp: msg.timestamp,
-          isRead: msg.isRead,
-        }));
+        // Mark conversation as read
+        await messageService.markConversationRead(userId, contactId);
 
         return {
           success: true,
           output: [
-            `Retrieved ${formattedMessages.length} messages with contact`,
+            `Retrieved ${historyResult.data?.messages?.length || 0} messages with contact`,
           ],
-          data: {
-            messages: formattedMessages,
-          },
+          data: { messages: historyResult.data?.messages || [] },
           openDialog: "chat",
           timestamp: new Date(),
         };
@@ -986,114 +1750,35 @@ export class SocialCommandsModule implements CommandModule {
         };
       }
     }
+
     if (!subCommand) {
-      const chatMessages = await db.client.message.findMany({
-        where: {
-          OR: [{ senderId: userId }, { recipientId: userId }],
-          subject: "",
-        },
-        include: {
-          sender: { select: { id: true, username: true } },
-          recipient: { select: { id: true, username: true } },
-        },
-        orderBy: { timestamp: "desc" },
-        take: 100,
-      });
+      try {
+        const messageService = context.services.messageService;
+        const contactsResult = await messageService.getChatContacts(userId);
 
-      const contactMap = new Map<string, any>();
-
-      const dbContacts = await db.client.contact.findMany({
-        where: { userId },
-        include: {
-          contact: {
-            select: {
-              id: true,
-              username: true,
-            },
-          },
-        },
-      });
-
-      for (const dbContact of dbContacts) {
-        if (!contactMap.has(dbContact.contactUserId)) {
-          contactMap.set(dbContact.contactUserId, {
-            id: dbContact.contactUserId,
-            username: dbContact.contact?.username || dbContact.handle,
-            isOnline: false,
-          });
+        if (!contactsResult.success) {
+          return {
+            success: false,
+            output: [contactsResult.message || "Failed to load contacts"],
+            timestamp: new Date(),
+          };
         }
+
+        return {
+          success: true,
+          output: ["Chat contacts loaded."],
+          data: { contacts: contactsResult.data?.contacts || [] },
+          openDialog: "chat",
+          timestamp: new Date(),
+        };
+      } catch (error) {
+        return {
+          success: false,
+          output: ["Failed to load chat contacts"],
+          error: (error as Error).message,
+          timestamp: new Date(),
+        };
       }
-
-      for (const msg of chatMessages) {
-        if (msg.senderId !== userId && !contactMap.has(msg.senderId)) {
-          contactMap.set(msg.senderId, {
-            id: msg.senderId,
-            username: msg.sender?.username || "Unknown",
-            isOnline: false,
-          });
-        }
-        if (msg.recipientId !== userId && !contactMap.has(msg.recipientId)) {
-          contactMap.set(msg.recipientId, {
-            id: msg.recipientId,
-            username: msg.recipient?.username || "Unknown",
-            isOnline: false,
-          });
-        }
-      }
-
-      const contacts = Array.from(contactMap.values());
-
-      await Promise.all(
-        contacts.map(async (contact) => {
-          // Count unread messages
-          const unreadCount = await db.client.message.count({
-            where: {
-              senderId: contact.id,
-              recipientId: userId,
-              isRead: false,
-              subject: "",
-            },
-          });
-          contact.unreadCount = unreadCount;
-
-          const lastMsg = await db.client.message.findFirst({
-            where: {
-              OR: [
-                { senderId: userId, recipientId: contact.id },
-                { senderId: contact.id, recipientId: userId },
-              ],
-              subject: "",
-            },
-            orderBy: { timestamp: "desc" },
-            select: { content: true },
-          });
-          contact.lastMessagePreview = lastMsg?.content || "";
-        }),
-      );
-
-      return {
-        success: true,
-        output: ["Chat contacts loaded."],
-        data: {
-          contacts: contacts.map(
-            ({
-              id,
-              username,
-              isOnline,
-              unreadCount,
-              lastMessagePreview,
-            }) => ({
-              id,
-              username,
-              isOnline,
-              unreadCount,
-              lastMessagePreview,
-            }),
-          ),
-        },
-        openDialog: "chat",
-        timestamp: new Date(),
-      };
     }
 
     return {

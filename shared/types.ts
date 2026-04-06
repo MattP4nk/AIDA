@@ -2,6 +2,8 @@
 
 // ==================== AUTHENTICATION (From original shared) ====================
 
+export type UserRole = "player" | "moderator" | "admin";
+
 export interface User {
   id: string;
   username: string;
@@ -11,6 +13,7 @@ export interface User {
   lastLogin: Date;
   isActive: boolean;
   isOnline: boolean;
+  role?: UserRole;
 }
 
 export interface AuthRequest {
@@ -32,6 +35,13 @@ export interface ApiResponse<T = any> {
   message?: string;
   error?: string;
   timestamp: Date;
+}
+
+/** Lightweight avatar data included in Socket.IO payloads and command responses */
+export interface AvatarInfo {
+  glyph: string; // inline representation: [◉_◉]
+  color: string; // hex color for styling
+  compact?: string[]; // 3-5 line face art (optional, for detailed views)
 }
 
 // ==================== GAME TYPES (From server/src/types/game.ts) ====================
@@ -138,10 +148,97 @@ export interface PlayerSkills {
 }
 
 export interface FactionReputation {
-  military: number;
-  swordCorp: number;
-  anons: number;
-  neutral: number;
+  [factionShortName: string]: number;
+}
+
+export type FactionId = "garrison" | "dothackers" | "cybercorp" | "darknet";
+
+export type FactionRank = "recruit" | "operative" | "elite" | "council_member";
+
+export interface FactionResources {
+  credits: number;
+  intel: number;
+  compute: number;
+}
+
+export interface FactionStandingInfo {
+  factionId: string;
+  factionName: string;
+  factionShortName: string;
+  reputation: number;
+  isHostile: boolean;
+  isAllied: boolean;
+}
+
+// Territory & Contest types (Phase 3)
+export type ResourceType = "credits" | "intel" | "compute";
+
+export interface ServerContestInfo {
+  id: string;
+  serverId: string;
+  serverName: string;
+  serverIp: string;
+  attackingFactionId: string;
+  attackingFactionName: string;
+  defendingFactionId: string | null;
+  defendingFactionName: string | null;
+  status: ContestStatus;
+  decryptionProgress: number;
+  startedAt: Date;
+  participantCount: number;
+}
+
+export enum ContestStatus {
+  ACTIVE = "active",
+  RESOLVED = "resolved",
+  CANCELLED = "cancelled",
+}
+
+export interface FactionServerInfo {
+  id: string;
+  name: string;
+  ipAddress: string;
+  resourceType: ResourceType | null;
+  resourceOutput: number;
+  isContested: boolean;
+  securityLevel: number;
+}
+
+// ==================== PHASE 5: WARFARE, ALIAS, DARKNET, CENSORSHIP ====================
+
+export type WarStatus = "active" | "ceasefire" | "surrendered" | "resolved";
+
+export interface FactionWarInfo {
+  id: string;
+  attackerFactionId: string;
+  attackerName: string;
+  defenderFactionId: string;
+  defenderName: string;
+  status: WarStatus;
+  attackerScore: number;
+  defenderScore: number;
+  reputationMultiplier: number;
+  startedAt: Date;
+  endedAt: Date | null;
+}
+
+export interface PlayerAliasInfo {
+  aliasName: string;
+  apparentFactionId: string | null;
+  isActive: boolean;
+}
+
+export type DarkNetDiscoveryMethod =
+  | "hidden_file"
+  | "skill_threshold"
+  | "censorship_flags"
+  | "breadcrumb_trail";
+
+export interface CensorshipAlert {
+  userId: string;
+  pattern: string;
+  originalText: string;
+  serverId?: string | undefined;
 }
 
 export interface CurrentServerInfo {
@@ -360,8 +457,6 @@ export interface GameEvent {
   severity: EventSeverity;
 }
 
-export type FactionId = "military" | "sword_corp" | "anons" | "neutral";
-
 export enum EventType {
   HACK_ATTEMPT = "hack_attempt",
   HACK_SUCCESS = "hack_success",
@@ -427,12 +522,37 @@ export interface FileSystemNode {
   lastAccessedBy?: string; // Track who last accessed it
 }
 
+/** Bitmask values for file/directory permissions. */
+export enum PermissionLevel {
+  NONE = 0,
+  READ = 1,
+  WRITE = 2,
+  EXECUTE = 4,
+  DELETE = 8,
+  FULL = 15,
+}
+
+/** Per-user override (e.g. shared access that expires). */
+export interface SpecialAccess {
+  userId: string;
+  permissions: PermissionLevel;
+  expiresAt?: Date;
+}
+
+/**
+ * Permissions stored as three bitmask levels:
+ *   owner   → applies when node.createdBy === userId
+ *   faction → applies when the user is in the owning faction
+ *   others  → applies to everyone else
+ *
+ * requiredAccessLevel is an optional game mechanic gate (hack level 0-10).
+ */
 export interface FilePermissions {
-  owner: string;
-  read: boolean;
-  write: boolean;
-  execute: boolean;
-  delete: boolean;
+  owner: PermissionLevel;
+  faction: PermissionLevel;
+  others: PermissionLevel;
+  requiredAccessLevel?: number;
+  specialAccess?: SpecialAccess[];
 }
 
 export interface FileOperation {
@@ -713,15 +833,48 @@ export interface ObjectiveProgress {
 }
 
 export enum MissionObjectiveType {
-  ACCESS_FILE = "access_file",
-  HACK_SERVER = "hack_server",
-  STEAL_DATA = "steal_data",
-  INSTALL_BACKDOOR = "install_backdoor",
-  DISCOVER_SERVERS = "discover_servers",
-  REACH_ACCESS_LEVEL = "reach_access_level",
+  // Action objectives (tracked by onHackComplete)
+  HACK = "hack",
+  HACK_TARGET = "hack_target",
+  HACK_STEALTH = "hack_stealth",
+  HACK_METHOD = "hack_method",
+  GAIN_ACCESS = "gain_access",
+  // File objectives (tracked by onFileOperation)
+  STEAL = "steal",
+  STEAL_COUNT = "steal_count",
+  UPLOAD_FILE = "upload_file",
+  DELETE_FILE = "delete_file",
+  // Social objectives (tracked by onMessageSent)
+  MESSAGE = "message",
+  CONTACT_PLAYER = "contact_player",
+  // Forum objectives (tracked by onForumActivity)
+  FORUM_POST = "forum_post",
+  FORUM_REPLY = "forum_reply",
+  FORUM_INTERACTION = "forum_interaction",
+  // Exploration objectives (tracked by onServerConnect)
+  EXPLORE = "explore",
+  CONNECT_SERVER = "connect_server",
+  DISCOVER_SERVER_TYPE = "discover_server_type",
+  // Progression objectives (tracked by onSkillUpdate / onCreditsTransaction)
+  SKILL_LEVEL = "skill_level",
+  GAIN_XP = "gain_xp",
   EARN_CREDITS = "earn_credits",
-  COMPLETE_HACKS = "complete_hacks",
-  AVOID_DETECTION = "avoid_detection",
+  SPEND_CREDITS = "spend_credits",
+  // Faction objectives (tracked by onFactionEvent)
+  JOIN_FACTION = "join_faction",
+  FACTION_REPUTATION = "faction_reputation",
+  FACTION_MISSION = "faction_mission",
+  // Network objectives (tracked by onServerConnect / onFileOperation)
+  INFILTRATE_NETWORK = "infiltrate_network",
+  TRACE_CONNECTION = "trace_connection",
+  EXFILTRATE_DATA = "exfiltrate_data",
+  // New system integration objectives
+  DOWNLOAD_FILE = "download_file",
+  DECODE_CONTENT = "decode_content",
+  DEFEND_HOME = "defend_home",
+  CLAIM_BOUNTY = "claim_bounty",
+  SURVIVE_TRACE = "survive_trace",
+  SCAN_SUBNET = "scan_subnet",
 }
 
 // Player Home System
@@ -739,4 +892,44 @@ export interface HomeCustomization {
   aliases?: Record<string, string>;
   environmentVars?: Record<string, string>;
   customPrompt?: string;
+}
+
+// ==================== HACKING MINIGAME TYPES ====================
+
+export type MinigameType = "cipher" | "port_sequence" | "memory_trace";
+
+export interface MinigameChallenge {
+  type: MinigameType;
+  difficulty: number;
+  displayText: string[];
+  solution: string;
+  hints: string[];
+  timeLimit: number; // seconds
+  maxAttempts: number;
+}
+
+export interface HackSessionInfo {
+  id: string;
+  targetIp: string;
+  targetServerId: string;
+  targetOwnerId: string;
+  attackerId: string;
+  method: HackMethod;
+  tools: string[];
+  currentLayer: number;
+  totalLayers: number;
+  status: "active" | "completed" | "failed" | "expired" | "aborted";
+  layers: MinigameChallenge[];
+  layerResults: LayerResult[];
+  detectionAccumulator: number;
+  startedAt: number;
+  expiresAt: number;
+  layerStartedAt: number;
+}
+
+export interface LayerResult {
+  type: MinigameType;
+  solved: boolean;
+  attempts: number;
+  timeUsed: number;
 }

@@ -1,7 +1,9 @@
+import { EventEmitter } from "events";
 import { Mission } from "@prisma/client";
 import { db } from "../database/client";
 import { injectable, inject } from "tsyringe";
-import { CACHE_SERVICE } from "../di/tokens";
+import type { Logger } from "pino";
+import { CACHE_SERVICE, LOGGER } from "../di/tokens";
 import type { CacheService } from "./cacheService";
 import { Server as SocketIOServer } from "socket.io";
 
@@ -100,12 +102,49 @@ interface PlayerMission {
  * - Mission expiry handling
  */
 @injectable()
-class MissionService {
+class MissionService extends EventEmitter {
   private prisma = db.client;
   private io: SocketIOServer | null = null; // Initialize as null
+  private expirationInterval: ReturnType<typeof setInterval> | null = null;
 
-  constructor(@inject(CACHE_SERVICE) private cacheService: CacheService) {
-    console.log("🎯 MissionService initialized");
+  constructor(
+    @inject(LOGGER) private logger: Logger,
+    @inject(CACHE_SERVICE) private cacheService: CacheService,
+  ) {
+    super();
+  }
+
+  /**
+   * Start a periodic interval that checks for expired missions every 15 minutes.
+   */
+  public startExpirationChecker(): void {
+    if (this.expirationInterval) return; // Already running
+
+    const INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
+
+    // Run once immediately, then on interval
+    this.checkExpiredMissions().catch((err) => {
+      this.logger.error({ err }, "Initial mission expiration check failed");
+    });
+
+    this.expirationInterval = setInterval(() => {
+      this.checkExpiredMissions().catch((err) => {
+        this.logger.error({ err }, "Mission expiration check failed");
+      });
+    }, INTERVAL_MS);
+
+    this.logger.info("Mission expiration checker started (every 15 min)");
+  }
+
+  /**
+   * Stop the periodic mission expiration checker.
+   */
+  public stopExpirationChecker(): void {
+    if (this.expirationInterval) {
+      clearInterval(this.expirationInterval);
+      this.expirationInterval = null;
+      this.logger.info("Mission expiration checker stopped");
+    }
   }
 
   /**
@@ -153,7 +192,7 @@ class MissionService {
 
       return mission;
     } catch (error) {
-      console.error("[MissionService] Error creating mission:", error);
+      this.logger.error({ err: error }, "Error creating mission");
       throw new Error(
         `Failed to create mission: ${error instanceof Error ? error.message : "Unknown error"}`,
       );
@@ -184,7 +223,7 @@ class MissionService {
 
       return mission;
     } catch (error) {
-      console.error("[MissionService] Error getting mission:", error);
+      this.logger.error({ err: error }, "Error getting mission");
       throw new Error(
         `Failed to get mission: ${error instanceof Error ? error.message : "Unknown error"}`,
       );
@@ -234,7 +273,7 @@ class MissionService {
 
       return mission;
     } catch (error) {
-      console.error("[MissionService] Error updating mission:", error);
+      this.logger.error({ err: error }, "Error updating mission");
       throw new Error(
         `Failed to update mission: ${error instanceof Error ? error.message : "Unknown error"}`,
       );
@@ -259,7 +298,7 @@ class MissionService {
         missionId,
       });
     } catch (error) {
-      console.error("[MissionService] Error deleting mission:", error);
+      this.logger.error({ err: error }, "Error deleting mission");
       throw new Error(
         `Failed to delete mission: ${error instanceof Error ? error.message : "Unknown error"}`,
       );
@@ -327,16 +366,32 @@ class MissionService {
           assignedTo: userId,
         },
       });
+      this.cacheService.del(`mission:${missionId}`);
 
-      // Store player mission in progress
+      // Store player mission in progress (create progress record if missing)
+      const existingProgress = progress || { missionProgress: {} };
+      const missionProgress =
+        (existingProgress.missionProgress as Record<string, any>) || {};
+      missionProgress[missionId] = playerMission;
+
       if (progress) {
-        const missionProgress = (progress.missionProgress as any) || {};
-        missionProgress[missionId] = playerMission;
-
         await this.prisma.playerProgress.update({
           where: { userId },
           data: {
             missionProgress: missionProgress as any,
+          },
+        });
+      } else {
+        await this.prisma.playerProgress.create({
+          data: {
+            userId,
+            missionProgress: missionProgress as any,
+            experience: 0,
+            level: 1,
+            credits: 0,
+            skills: {},
+            inventory: [],
+            equipment: {},
           },
         });
       }
@@ -360,7 +415,7 @@ class MissionService {
 
       return playerMission;
     } catch (error) {
-      console.error("[MissionService] Error assigning mission:", error);
+      this.logger.error({ err: error }, "Error assigning mission");
       throw new Error(
         `Failed to assign mission: ${error instanceof Error ? error.message : "Unknown error"}`,
       );
@@ -441,7 +496,7 @@ class MissionService {
 
       return enrichedMissions;
     } catch (error) {
-      console.error("[MissionService] Error getting player missions:", error);
+      this.logger.error({ err: error }, "Error getting player missions");
       throw new Error(
         `Failed to get player missions: ${error instanceof Error ? error.message : "Unknown error"}`,
       );
@@ -493,6 +548,7 @@ class MissionService {
           status: "active",
         },
       });
+      this.cacheService.del(`mission:${missionId}`);
 
       // Audit log
       await this.auditLog(userId, "MISSION_ACCEPTED", {
@@ -506,7 +562,7 @@ class MissionService {
         });
       }
     } catch (error) {
-      console.error("[MissionService] Error accepting mission:", error);
+      this.logger.error({ err: error }, "Error accepting mission");
       throw new Error(
         `Failed to accept mission: ${error instanceof Error ? error.message : "Unknown error"}`,
       );
@@ -557,6 +613,7 @@ class MissionService {
           assignedTo: null,
         },
       });
+      this.cacheService.del(`mission:${missionId}`);
 
       // Audit log
       await this.auditLog(userId, "MISSION_ABANDONED", {
@@ -570,7 +627,7 @@ class MissionService {
         });
       }
     } catch (error) {
-      console.error("[MissionService] Error abandoning mission:", error);
+      this.logger.error({ err: error }, "Error abandoning mission");
       throw new Error(
         `Failed to abandon mission: ${error instanceof Error ? error.message : "Unknown error"}`,
       );
@@ -659,7 +716,7 @@ class MissionService {
         await this.completeMission(userId, missionId);
       }
     } catch (error) {
-      console.error("[MissionService] Error updating objective:", error);
+      this.logger.error({ err: error }, "Error updating objective");
       throw new Error(
         `Failed to update objective: ${error instanceof Error ? error.message : "Unknown error"}`,
       );
@@ -699,10 +756,7 @@ class MissionService {
       );
       return objective ? objective.completed : false;
     } catch (error) {
-      console.error(
-        "[MissionService] Error checking objective completion:",
-        error,
-      );
+      this.logger.error({ err: error }, "Error checking objective completion");
       return false;
     }
   }
@@ -747,11 +801,43 @@ class MissionService {
         ? Date.now() - new Date(playerMission.startedAt).getTime()
         : 0;
 
+      // Calculate real performance metrics from objective completion data
+      const objectives = playerMission.objectives || [];
+      const totalObjectives = objectives.length;
+      const completedObjectives = objectives.filter(
+        (o: any) => o.completed,
+      ).length;
+
+      // Stealth: based on detection data stored in mission metadata, default to base score
+      const missionMeta = (playerMission as any).metadata || {};
+      const detectionEvents = missionMeta.detectionCount || 0;
+      const hintCount = missionMeta.hintCount || 0;
+      const stealthScore = Math.max(
+        0,
+        100 - detectionEvents * 15 - hintCount * 5,
+      );
+
+      // Efficiency: ratio of completed vs attempted objectives, penalized by hints
+      const efficiencyScore =
+        totalObjectives > 0
+          ? Math.max(
+              0,
+              Math.round((completedObjectives / totalObjectives) * 100) -
+                hintCount * 10,
+            )
+          : 100;
+
+      // Bonus objectives: count objectives beyond the minimum required
+      const bonusObjectivesCompleted = Math.max(
+        0,
+        completedObjectives - totalObjectives,
+      );
+
       const performance: PerformanceMetrics = {
         timeElapsed,
-        stealthScore: 100,
-        efficiencyScore: 100,
-        bonusObjectivesCompleted: 0,
+        stealthScore,
+        efficiencyScore,
+        bonusObjectivesCompleted,
       };
 
       // Calculate rewards
@@ -776,9 +862,21 @@ class MissionService {
           status: "completed",
         },
       });
+      this.cacheService.del(`mission:${missionId}`);
 
       // Grant rewards
       await this.grantRewards(userId, rewards);
+
+      // Roll for bonus token drop
+      try {
+        await this.rollTokenDrop(userId, {
+          difficulty: mission.difficulty,
+          type: mission.type,
+          factionId: mission.factionId,
+        });
+      } catch (err) {
+        this.logger.warn({ err }, "Token drop roll failed (non-critical)");
+      }
 
       // Audit log
       await this.auditLog(userId, "MISSION_COMPLETED", {
@@ -796,9 +894,22 @@ class MissionService {
         });
       }
 
+      // Emit Node.js event for service-level listeners (e.g. AI persona reactions, faction knowledge)
+      this.emit("mission:completed", {
+        userId,
+        missionId,
+        missionTitle: mission.title,
+        factionId: mission.factionId || undefined,
+        targetServerId: (mission as any).targetServerId || undefined,
+        objectives: ((mission.objectives as any[]) || []).map((obj: any) => ({
+          type: obj.type,
+          metadata: obj.metadata || {},
+        })),
+      });
+
       return rewards;
     } catch (error) {
-      console.error("[MissionService] Error completing mission:", error);
+      this.logger.error({ err: error }, "Error completing mission");
       throw new Error(
         `Failed to complete mission: ${error instanceof Error ? error.message : "Unknown error"}`,
       );
@@ -858,7 +969,7 @@ class MissionService {
 
       return finalRewards;
     } catch (error) {
-      console.error("[MissionService] Error calculating rewards:", error);
+      this.logger.error({ err: error }, "Error calculating rewards");
       return {
         xp: 100,
         credits: 50,
@@ -919,16 +1030,233 @@ class MissionService {
         data: updateData,
       });
 
+      // Grant items (shop items by name)
+      if (rewards.items && rewards.items.length > 0) {
+        for (const itemName of rewards.items) {
+          try {
+            // Look up the shop item by name (case-insensitive)
+            const shopItem = await this.prisma.shopItem.findFirst({
+              where: {
+                name: { equals: itemName, mode: "insensitive" },
+              },
+              select: {
+                id: true,
+                name: true,
+                isStackable: true,
+                maxStack: true,
+              },
+            });
+
+            if (!shopItem) {
+              this.logger.warn({ itemName }, "Reward item not found in shop");
+              continue;
+            }
+
+            // Check if player already has this item
+            const existing = await this.prisma.inventoryItem.findFirst({
+              where: { userId, shopItemId: shopItem.id },
+            });
+
+            if (existing && shopItem.isStackable) {
+              // Stack it up to maxStack
+              const newQty = Math.min(existing.quantity + 1, shopItem.maxStack);
+              if (newQty > existing.quantity) {
+                await this.prisma.inventoryItem.update({
+                  where: { id: existing.id },
+                  data: { quantity: newQty },
+                });
+              }
+            } else if (!existing) {
+              // Create new inventory entry
+              await this.prisma.inventoryItem.create({
+                data: {
+                  userId,
+                  shopItemId: shopItem.id,
+                  quantity: 1,
+                  source: "mission_reward",
+                },
+              });
+            }
+
+            // Notify the player
+            if (this.io) {
+              this.io.to(`player:${userId}`).emit("notification", {
+                type: "item",
+                title: "Item Acquired",
+                message: `You received: ${shopItem.name}`,
+                severity: "success",
+              });
+            }
+
+            this.logger.info(
+              { userId, itemName: shopItem.name },
+              "Granted reward item",
+            );
+          } catch (err) {
+            this.logger.error({ err, itemName }, "Failed to grant reward item");
+          }
+        }
+      }
+
+      // Emit events for mission integration (skill/credits tracking)
+      if (rewards.xp > 0) {
+        this.emit("rewards:xp_granted", {
+          userId,
+          skillName: "general",
+          newLevel: updateData.level || progress.level,
+          xpGained: rewards.xp,
+        });
+      }
+      if (rewards.credits > 0) {
+        this.emit("rewards:credits_granted", {
+          userId,
+          amount: rewards.credits,
+          type: "earned" as const,
+        });
+      }
+
       // Audit log
       await this.auditLog(userId, "REWARDS_GRANTED", {
         rewards,
       });
     } catch (error) {
-      console.error("[MissionService] Error granting rewards:", error);
+      this.logger.error({ err: error }, "Error granting rewards");
       throw new Error(
         `Failed to grant rewards: ${error instanceof Error ? error.message : "Unknown error"}`,
       );
     }
+  }
+
+  /**
+   * Roll for a communication token drop based on mission difficulty and faction.
+   * Higher difficulty missions have better chances. Faction missions drop
+   * faction-appropriate tokens.
+   */
+  private async rollTokenDrop(
+    userId: string,
+    mission: { difficulty: number; type: string; factionId?: string | null },
+  ): Promise<void> {
+    const difficulty = mission.difficulty || 1;
+
+    // Base drop chance scales with difficulty:
+    // difficulty 1-4: 0% (too easy)
+    // difficulty 5-6: 8%
+    // difficulty 7-8: 18%
+    // difficulty 9-10: 30%
+    let dropChance = 0;
+    if (difficulty >= 9) dropChance = 0.3;
+    else if (difficulty >= 7) dropChance = 0.18;
+    else if (difficulty >= 5) dropChance = 0.08;
+    else return; // No drops for easy missions
+
+    // Story missions get a bonus
+    if (mission.type === "story" || mission.type === "espionage") {
+      dropChance += 0.1;
+    }
+
+    const roll = Math.random();
+    if (roll > dropChance) return; // No drop
+
+    // Determine which token to drop
+    let tokenName: string | null = null;
+
+    if (mission.factionId) {
+      // Faction missions: drop the corresponding faction leader token
+      try {
+        const faction = await this.prisma.faction.findUnique({
+          where: { id: mission.factionId },
+          select: { shortName: true, name: true },
+        });
+
+        if (faction) {
+          const factionTokenMap: Record<string, string> = {
+            garrison: "Commander Steele's Briefing Token",
+            dothackers: "gh0st's Dead Drop Token",
+            cybercorp: "Director Chen's Business Card",
+          };
+
+          const shortName = (faction.shortName || "").toLowerCase();
+          tokenName = factionTokenMap[shortName] || null;
+        }
+      } catch {
+        // Faction lookup failed — fall through to generic token
+      }
+    }
+
+    // For non-faction or unknown factions, roll a generic token
+    if (!tokenName) {
+      // Higher difficulty → rarer tokens
+      if (difficulty >= 9 && Math.random() < 0.3) {
+        // 30% chance of AIDA Signal Fragment at difficulty 9+
+        tokenName = "AIDA Signal Fragment";
+      } else if (difficulty >= 7 && Math.random() < 0.5) {
+        tokenName = "Envoy's Cipher Token";
+      } else {
+        // Random faction leader token
+        const leaderTokens = [
+          "Commander Steele's Briefing Token",
+          "gh0st's Dead Drop Token",
+          "Director Chen's Business Card",
+        ];
+        tokenName =
+          leaderTokens[Math.floor(Math.random() * leaderTokens.length)]!;
+      }
+    }
+
+    // Find the shop item
+    const shopItem = await this.prisma.shopItem.findFirst({
+      where: {
+        name: tokenName,
+        itemType: "token",
+      },
+      select: { id: true, name: true, isStackable: true, maxStack: true },
+    });
+
+    if (!shopItem) {
+      this.logger.warn({ tokenName }, "Token shop item not found for drop");
+      return;
+    }
+
+    // Check existing inventory
+    const existing = await this.prisma.inventoryItem.findFirst({
+      where: { userId, shopItemId: shopItem.id },
+    });
+
+    if (existing && existing.quantity >= (shopItem.maxStack || 5)) {
+      // Already at max stack — skip
+      return;
+    }
+
+    if (existing) {
+      await this.prisma.inventoryItem.update({
+        where: { id: existing.id },
+        data: { quantity: { increment: 1 } },
+      });
+    } else {
+      await this.prisma.inventoryItem.create({
+        data: {
+          userId,
+          shopItemId: shopItem.id,
+          quantity: 1,
+          source: "mission_reward",
+        },
+      });
+    }
+
+    // Notify the player
+    if (this.io) {
+      this.io.to(`player:${userId}`).emit("notification", {
+        type: "item",
+        title: "Rare Drop!",
+        message: `You found: ${shopItem.name}`,
+        severity: "info",
+      });
+    }
+
+    this.logger.info(
+      { userId, tokenName: shopItem.name, difficulty },
+      "Player received token drop from mission",
+    );
   }
 
   /**
@@ -967,10 +1295,7 @@ class MissionService {
 
       return missions;
     } catch (error) {
-      console.error(
-        "[MissionService] Error getting available missions:",
-        error,
-      );
+      this.logger.error({ err: error }, "Error getting available missions");
       throw new Error(
         `Failed to get available missions: ${error instanceof Error ? error.message : "Unknown error"}`,
       );
@@ -1034,7 +1359,7 @@ class MissionService {
         }
       }
     } catch (error) {
-      console.error("[MissionService] Error checking expired missions:", error);
+      this.logger.error({ err: error }, "Error checking expired missions");
     }
   }
 
@@ -1078,6 +1403,7 @@ class MissionService {
           assignedTo: null,
         },
       });
+      this.cacheService.del(`mission:${missionId}`);
 
       // Emit Socket.IO event
       if (this.io) {
@@ -1091,7 +1417,7 @@ class MissionService {
         missionId,
       });
     } catch (error) {
-      console.error("[MissionService] Error expiring mission:", error);
+      this.logger.error({ err: error }, "Error expiring mission");
       throw new Error(
         `Failed to expire mission: ${error instanceof Error ? error.message : "Unknown error"}`,
       );
@@ -1132,7 +1458,7 @@ class MissionService {
         },
       });
     } catch (error) {
-      console.error("[MissionService] Error creating audit log:", error);
+      this.logger.error({ err: error }, "Error creating audit log");
       // Don't throw - audit log failure shouldn't break main functionality
     }
   }

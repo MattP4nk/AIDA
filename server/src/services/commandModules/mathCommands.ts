@@ -12,10 +12,13 @@ export class MathCommandsModule implements CommandModule {
     "unset",
     "convert",
     "random",
+    "decode",
+    "subnet",
   ]);
 
   // Per-user expression engines to isolate variables
   private expressionEngines: Map<string, ExpressionEngine> = new Map();
+  private static readonly MAX_ENGINES = 500;
 
   public async execute(
     command: Command,
@@ -42,6 +45,12 @@ export class MathCommandsModule implements CommandModule {
 
         case "random":
           return await this.handleRandom(command, context);
+
+        case "decode":
+          return await this.handleDecode(command, context);
+
+        case "subnet":
+          return await this.handleSubnet(command, context);
 
         default:
           return {
@@ -118,6 +127,20 @@ export class MathCommandsModule implements CommandModule {
         usage: "random [max] or random <min> <max>",
         examples: ["random", "random 100", "random 1 10"],
       },
+      {
+        command: "decode",
+        category: "math",
+        description: "Decode ciphers and encodings",
+        usage: "decode <method> <text> [key]",
+        examples: ["decode xor KHOOR 3", "decode caesar KHOOR 3", "decode rot13 URYYB", "decode base64 SEVFVA==", "decode ascii 72 69 76", "decode hex 48454C4C4F"],
+      },
+      {
+        command: "subnet",
+        category: "math",
+        description: "Calculate network subnet information",
+        usage: "subnet <ip/cidr>",
+        examples: ["subnet 192.168.1.0/24", "subnet 172.16.1.137/24", "subnet 10.0.0.0/16"],
+      },
     ];
   }
 
@@ -126,9 +149,21 @@ export class MathCommandsModule implements CommandModule {
    */
   private getEngine(userId: string): ExpressionEngine {
     if (!this.expressionEngines.has(userId)) {
+      // Evict oldest entry when cap reached
+      if (this.expressionEngines.size >= MathCommandsModule.MAX_ENGINES) {
+        const oldestKey = this.expressionEngines.keys().next().value;
+        if (oldestKey !== undefined) this.expressionEngines.delete(oldestKey);
+      }
       this.expressionEngines.set(userId, new ExpressionEngine());
     }
     return this.expressionEngines.get(userId)!;
+  }
+
+  /**
+   * Release expression engine for a user (call on session cleanup)
+   */
+  public releaseEngine(userId: string): void {
+    this.expressionEngines.delete(userId);
   }
 
   private async handleCalculate(
@@ -303,39 +338,86 @@ export class MathCommandsModule implements CommandModule {
     if (args.length < 3) {
       return {
         success: false,
-        output:
-          "Usage: convert <value> <from_unit> <to_unit>\nExample: convert 10 km mi",
+        output: "Usage: convert <value> <from> <to>\nExamples:\n  convert 255 dec hex    → 0xFF\n  convert 0xFF hex dec   → 255\n  convert 10 km mi       → 6.21371\n  convert 11111111 bin dec → 255\n  convert 255 dec bin    → 11111111\n  convert 255 dec oct    → 377",
         timestamp: new Date(),
       };
     }
 
-    const value = parseFloat(args[0] || "");
-    const fromUnit = args[1]?.toLowerCase();
-    const toUnit = args[2]?.toLowerCase();
+    const rawValue = args[0] || "";
+    const fromUnit = args[1]?.toLowerCase() || "";
+    const toUnit = args[2]?.toLowerCase() || "";
 
+    // ── Base/number system conversions ──
+    const bases = ["hex", "dec", "bin", "oct"];
+    if (bases.includes(fromUnit) && bases.includes(toUnit)) {
+      return this.convertBase(rawValue, fromUnit, toUnit);
+    }
+
+    // ── Physical unit conversions ──
+    const value = parseFloat(rawValue);
     if (isNaN(value)) {
-      return {
-        success: false,
-        output: `Invalid value: ${args[0]}`,
-        timestamp: new Date(),
-      };
+      return { success: false, output: `Invalid value: ${rawValue}`, timestamp: new Date() };
     }
 
-    const result = this.performConversion(value, fromUnit || "", toUnit || "");
-
+    const result = this.performConversion(value, fromUnit, toUnit);
     if (result === null) {
-      return {
-        success: false,
-        output: `Conversion not supported: ${fromUnit} → ${toUnit}`,
-        timestamp: new Date(),
-      };
+      return { success: false, output: `Conversion not supported: ${fromUnit} → ${toUnit}`, timestamp: new Date() };
     }
 
     return {
       success: true,
-      output: `${value} ${fromUnit} = ${result.toFixed(6).replace(/\\.?0+$/, "")} ${toUnit}`,
+      output: `${value} ${fromUnit} = ${result.toFixed(6).replace(/\.?0+$/, "")} ${toUnit}`,
       timestamp: new Date(),
     };
+  }
+
+  private convertBase(rawValue: string, from: string, to: string): CommandResult {
+    let decimal: number;
+
+    // Parse input to decimal
+    try {
+      switch (from) {
+        case "hex":
+          decimal = parseInt(rawValue.replace(/^0x/i, ""), 16);
+          break;
+        case "bin":
+          decimal = parseInt(rawValue.replace(/^0b/i, ""), 2);
+          break;
+        case "oct":
+          decimal = parseInt(rawValue.replace(/^0o/i, ""), 8);
+          break;
+        case "dec":
+        default:
+          decimal = parseInt(rawValue, 10);
+          break;
+      }
+    } catch {
+      return { success: false, output: `Invalid ${from} value: ${rawValue}`, timestamp: new Date() };
+    }
+
+    if (isNaN(decimal)) {
+      return { success: false, output: `Invalid ${from} value: ${rawValue}`, timestamp: new Date() };
+    }
+
+    // Convert decimal to target base
+    let result: string;
+    switch (to) {
+      case "hex":
+        result = `0x${decimal.toString(16).toUpperCase()}`;
+        break;
+      case "bin":
+        result = decimal.toString(2);
+        break;
+      case "oct":
+        result = `0o${decimal.toString(8)}`;
+        break;
+      case "dec":
+      default:
+        result = decimal.toString(10);
+        break;
+    }
+
+    return { success: true, output: `${rawValue} (${from}) = ${result} (${to})`, timestamp: new Date() };
   }
 
   private performConversion(
@@ -454,5 +536,197 @@ export class MathCommandsModule implements CommandModule {
       output: value.toString(),
       timestamp: new Date(),
     };
+  }
+
+  // ══════════════════════════════════════════════════════════════════
+  // DECODE — XOR, Caesar, Base64, ROT13, reverse
+  // Used by players to crack encrypted files and solve cipher puzzles
+  // ══════════════════════════════════════════════════════════════════
+
+  private async handleDecode(
+    command: Command,
+    context: CommandContext,
+  ): Promise<CommandResult> {
+    const args = command.args || [];
+    const method = args[0]?.toLowerCase();
+
+    if (!method || args.length < 2) {
+      return {
+        success: true,
+        output: [
+          "Usage: decode <method> <args...>",
+          "",
+          "Methods:",
+          "  decode xor <text> <key>       — XOR decode with numeric key",
+          "  decode caesar <text> <shift>   — Caesar cipher shift",
+          "  decode rot13 <text>            — ROT13 decode",
+          "  decode base64 <encoded>        — Base64 decode",
+          "  decode reverse <text>          — Reverse string",
+          "  decode ascii <numbers...>      — ASCII codes to text",
+          "  decode hex <hexstring>         — Hex string to text",
+          "",
+          "Examples:",
+          "  decode xor KHOOR 3             → HELLO",
+          "  decode caesar KHOOR 3          → HELLO",
+          "  decode rot13 URYYB             → HELLO",
+          "  decode base64 SEVFVA==         → FRIVIN",
+          "  decode ascii 72 69 76 76 79    → HELLO",
+          "  decode hex 48454C4C4F          → HELLO",
+        ].join("\n"),
+        timestamp: new Date(),
+      };
+    }
+
+    const text = args.slice(1).join(" ");
+    let decoded: string | null = null;
+
+    switch (method) {
+      case "xor": {
+        const parts = this.splitLastArg(args.slice(1));
+        const key = parseInt(parts.last, 10);
+        if (isNaN(key)) return { success: false, output: "XOR key must be a number. Usage: decode xor <text> <key>", timestamp: new Date() };
+        decoded = parts.rest.split("").map(c => String.fromCharCode(c.charCodeAt(0) ^ key)).join("");
+        break;
+      }
+      case "caesar": {
+        const parts = this.splitLastArg(args.slice(1));
+        const shift = parseInt(parts.last, 10);
+        if (isNaN(shift)) return { success: false, output: "Shift must be a number. Usage: decode caesar <text> <shift>", timestamp: new Date() };
+        decoded = parts.rest.split("").map(c => {
+          if (c >= "A" && c <= "Z") return String.fromCharCode(((c.charCodeAt(0) - 65 - shift + 260) % 26) + 65);
+          if (c >= "a" && c <= "z") return String.fromCharCode(((c.charCodeAt(0) - 97 - shift + 260) % 26) + 97);
+          return c;
+        }).join("");
+        break;
+      }
+      case "rot13": {
+        decoded = text.split("").map(c => {
+          if (c >= "A" && c <= "Z") return String.fromCharCode(((c.charCodeAt(0) - 65 + 13) % 26) + 65);
+          if (c >= "a" && c <= "z") return String.fromCharCode(((c.charCodeAt(0) - 97 + 13) % 26) + 97);
+          return c;
+        }).join("");
+        break;
+      }
+      case "base64": {
+        try {
+          decoded = Buffer.from(args[1] || "", "base64").toString("utf8");
+        } catch {
+          return { success: false, output: "Invalid base64 input.", timestamp: new Date() };
+        }
+        break;
+      }
+      case "reverse": {
+        decoded = text.split("").reverse().join("");
+        break;
+      }
+      case "ascii": {
+        const codes = args.slice(1).map(a => parseInt(a, 10)).filter(n => !isNaN(n));
+        if (codes.length === 0) return { success: false, output: "Provide ASCII codes. Usage: decode ascii 72 69 76 76 79", timestamp: new Date() };
+        decoded = codes.map(c => String.fromCharCode(c)).join("");
+        break;
+      }
+      case "hex": {
+        const hexStr = (args[1] || "").replace(/\s+/g, "");
+        if (hexStr.length % 2 !== 0) return { success: false, output: "Hex string must have even length.", timestamp: new Date() };
+        decoded = "";
+        for (let i = 0; i < hexStr.length; i += 2) {
+          decoded += String.fromCharCode(parseInt(hexStr.substring(i, i + 2), 16));
+        }
+        break;
+      }
+      default:
+        return { success: false, output: `Unknown decode method: ${method}. Use: xor, caesar, rot13, base64, reverse, ascii, hex`, timestamp: new Date() };
+    }
+
+    // Fire mission integration hook on successful decode
+    if (decoded !== null && context.services.missionIntegrationService) {
+      context.services.missionIntegrationService.onDecodeSuccess(context.userId, method, decoded).catch(() => {});
+    }
+
+    return { success: true, output: `Decoded: ${decoded}`, timestamp: new Date() };
+  }
+
+  /** Split args so that the last word is separate from the rest */
+  private splitLastArg(args: string[]): { rest: string; last: string } {
+    if (args.length <= 1) return { rest: args[0] || "", last: "" };
+    return { rest: args.slice(0, -1).join(" "), last: args[args.length - 1]! };
+  }
+
+  // ══════════════════════════════════════════════════════════════════
+  // SUBNET — Network calculations for hacking gameplay
+  // Players use this to calculate ranges, find hidden servers, etc.
+  // ══════════════════════════════════════════════════════════════════
+
+  private async handleSubnet(
+    command: Command,
+    context: CommandContext,
+  ): Promise<CommandResult> {
+    const args = command.args || [];
+    if (args.length === 0) {
+      return {
+        success: true,
+        output: [
+          "Usage: subnet <ip/cidr>",
+          "",
+          "Examples:",
+          "  subnet 192.168.1.0/24     → Network info for /24",
+          "  subnet 172.16.1.137/24    → Find network containing IP",
+          "  subnet 10.0.0.0/16        → Large subnet info",
+          "",
+          "Shows: network address, broadcast, host range, total hosts",
+        ].join("\n"),
+        timestamp: new Date(),
+      };
+    }
+
+    const input = args[0]!;
+    const cidrMatch = input.match(/^(\d+\.\d+\.\d+\.\d+)\/(\d+)$/);
+
+    if (!cidrMatch) {
+      return { success: false, output: "Invalid format. Use: subnet <ip>/<cidr>\nExample: subnet 192.168.1.0/24", timestamp: new Date() };
+    }
+
+    const ip = cidrMatch[1]!;
+    const cidr = parseInt(cidrMatch[2]!, 10);
+
+    if (cidr < 0 || cidr > 32) {
+      return { success: false, output: "CIDR must be between 0 and 32.", timestamp: new Date() };
+    }
+
+    // Parse IP to 32-bit number
+    const ipParts = ip.split(".").map(Number);
+    if (ipParts.length !== 4 || ipParts.some(p => isNaN(p) || p < 0 || p > 255)) {
+      return { success: false, output: `Invalid IP address: ${ip}`, timestamp: new Date() };
+    }
+    const ipNum = ((ipParts[0]! << 24) | (ipParts[1]! << 16) | (ipParts[2]! << 8) | ipParts[3]!) >>> 0;
+
+    // Calculate mask
+    const mask = cidr === 0 ? 0 : (~0 << (32 - cidr)) >>> 0;
+    const networkNum = (ipNum & mask) >>> 0;
+    const broadcastNum = (networkNum | (~mask >>> 0)) >>> 0;
+    const firstHost = cidr >= 31 ? networkNum : (networkNum + 1) >>> 0;
+    const lastHost = cidr >= 31 ? broadcastNum : (broadcastNum - 1) >>> 0;
+    const totalHosts = cidr >= 31 ? (cidr === 32 ? 1 : 2) : Math.pow(2, 32 - cidr) - 2;
+
+    const numToIp = (n: number) => `${(n >>> 24) & 0xFF}.${(n >>> 16) & 0xFF}.${(n >>> 8) & 0xFF}.${n & 0xFF}`;
+
+    const lines = [
+      `Subnet: ${input}`,
+      ``,
+      `  Network:    ${numToIp(networkNum)}`,
+      `  Broadcast:  ${numToIp(broadcastNum)}`,
+      `  Mask:       ${numToIp(mask)}`,
+      `  Host Range: ${numToIp(firstHost)} - ${numToIp(lastHost)}`,
+      `  Total Hosts: ${totalHosts.toLocaleString()}`,
+      ``,
+      `  Binary Mask: ${mask.toString(2).padStart(32, "0").replace(/(.{8})/g, "$1.").slice(0, -1)}`,
+    ];
+
+    // Fire mission integration hook
+    if (context.services.missionIntegrationService) {
+      context.services.missionIntegrationService.onSubnetUsed(context.userId).catch(() => {});
+    }
+
+    return { success: true, output: lines.join("\n"), timestamp: new Date() };
   }
 }

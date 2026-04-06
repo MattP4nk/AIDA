@@ -1,4 +1,6 @@
-import { injectable } from "tsyringe";
+import { injectable, inject } from "tsyringe";
+import type { Logger } from "pino";
+import { LOGGER } from "../di/tokens";
 
 interface CacheEntry<T> {
   value: T;
@@ -11,10 +13,10 @@ export class CacheService {
   private cleanupInterval: NodeJS.Timeout;
   private readonly DEFAULT_TTL = 60; // 1 minute default
 
-  constructor() {
+  constructor(@inject(LOGGER) private logger: Logger) {
     // Run cleanup every minute
     this.cleanupInterval = setInterval(() => this.cleanup(), 60 * 1000);
-    console.log("🧠 CacheService initialized");
+    this.logger.info("CacheService initialized");
   }
 
   /**

@@ -1,383 +1,179 @@
-# AIDA - Advanced Intrusion Detection & Analysis
+# AIDA — Advanced Intrusion Detection & Analysis
 
-**A Terminal-Based Multiplayer Cyberpunk Hacking Game**
-
-🎮 **[Play Now](#quick-start)** | 📖 **[Full Documentation](DOCUMENTATION.md)** | 🚀 **[Quick Start](#quick-start)**
+**A multiplayer terminal hacking game where players explore networks, hack servers, steal data, join factions, and uncover the mystery of a shattered AI — all in an AI-driven cyberpunk world.**
 
 ---
 
-## 🌟 What is AIDA?
+## Tech Stack
 
-AIDA is an authentic terminal-based hacking game where you:
-- Type real Unix commands (`ls`, `cd`, `ps`, `top`, `hack`)
-- Infiltrate servers and complete missions
-- Build your reputation as an elite hacker
-- Compete with other players in real-time
-
-**Think SSH meets cyberpunk meets multiplayer RPG.**
+| Layer | Technology |
+|-------|-----------|
+| **Backend** | Node.js 18+ · TypeScript 5.3.3 · Express 4.18.2 · Socket.IO 4.7.4 |
+| **Database** | PostgreSQL 14+ · Prisma 5.22.0 |
+| **DI** | tsyringe 4.10.0 |
+| **AI** | Ollama REST API (local + cloud models) |
+| **Frontend** | Svelte 5.39.6 · Vite 7.1.7 · Socket.IO Client 4.8.1 |
+| **Logging** | pino 10.1.0 |
 
 ---
 
-## 🚀 Quick Start
+## Prerequisites
 
-### 5-Minute Setup
+- **Node.js** 18+
+- **PostgreSQL** 14+
+- **Ollama** (optional — required for AI-driven features; supports local and cloud models)
+
+---
+
+## Getting Started
 
 ```bash
-# 1. Setup database
+# Clone the repo
+git clone <repo-url>
+cd AIDA
+
+# --- Server setup ---
+cd server
+npm install
 createdb aida_game
-
-# 2. Install & configure
-cd server
-npm install
-echo 'DATABASE_URL="postgresql://postgres:postgres@localhost:5432/aida_game"' > .env
-echo 'JWT_SECRET="change-this-secret-key"' >> .env
-npx prisma generate
-npx prisma migrate dev --name init
-npm run db:seed:core
-
-# 3. Start server
+npx prisma migrate dev
+npm run db:seed
 npm run dev
 
-# 4. Start client (new terminal)
-cd ../client
+# --- Client setup (separate terminal) ---
+cd client
 npm install
 npm run dev
-
-# 5. Open http://localhost:8080
 ```
 
-### First Commands
+Server runs on **port 3001**, client on **port 8080**.
 
+---
+
+## Architecture Overview
+
+> **"Backend IS the Console"** — the client is a dumb terminal. The server handles all game logic, command parsing, and state management.
+
+- **103 commands** across **13 modules**
+- **42 injectable services** via tsyringe DI (45 tokens total)
+- **61 database models**
+- AI-driven faction leaders generate missions, react to events, and post on forums
+- The Architect (game master AI) observes the world and autonomously shapes the narrative
+
+---
+
+## Key Systems
+
+### Core Gameplay
+- **Network Topology** — Servers form explorable graph networks with fog-of-war discovery
+- **Hack Minigame** — 3-layer interactive challenges (cipher, port_sequence, memory_trace)
+- **Mission System** — 39 templates, AI-flavored narrative, knowledge-aware targeting
+- **Story Arcs** — Multi-step AI-driven narrative missions with branching
+- **Faction System** — 4 factions with AI leaders, reputation, wars, territory contests
+- **Resource System** — CPU/RAM/Bandwidth management, background processes
+- **Home Defense** — Firewalls, vaults, IDS, honeypots for PvP protection
+- **Bounty System** — Detection → bounty → hunt → consequences cycle
+- **Forum System** — Underground forums with censorship, proxy requirements, voting
+
+### Narrative & Lore
+- **World Lore** — Canonical lore module (`server/src/lore/worldLore.ts`) — backstory, faction lore & voices, AIDA's three fragments (Sword, Master Key, Soul), The Emperor, locations, cryptic quotes. Single source of truth for all AI prompts and content generation.
+- **Story Progression Engine** — The Architect's Staging Engine: records significant events to a StoryLedger, evaluates world state via AI, manages narrative epochs, and executes interventions (send messages, plant clues, create missions, adjust tension, reveal hidden factions).
+- **DarkNet Dungeons** — Procedurally generated 3–7 server chain dungeons with escalating security, encrypted clue files, AI-generated forum riddles, and vault rewards (AIDA tokens, rare scripts, credits, intel). Auto-regenerates on conquest or 7-day expiry.
+- **DarkNet Discovery** — Hidden faction revealed organically through 4 paths: finding `.aida` files, reaching skill thresholds, triggering censorship alerts, or following encrypted breadcrumb trails. AIDA sends a cryptic AI-generated recruitment message on discovery.
+- **Token-Gated AI Communication** — Messaging AI personas (The Architect, AIDA, faction leaders) costs consumable tokens earned through gameplay. Tutorial messages remain free.
+
+---
+
+## Environment Variables
+
+### Server
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `DATABASE_URL` | ✅ | — | PostgreSQL connection string |
+| `JWT_SECRET` | ✅ | — | Secret key for JWT tokens |
+| `PORT` | — | `3001` | Server port |
+| `NODE_ENV` | — | `development` | Environment mode |
+| `AI_API_URL` | — | `http://localhost:11434` | Ollama API endpoint (or `https://ollama.com` for cloud) |
+| `AI_MODEL` | — | `llama3.1:8b` | Model name (e.g. `qwen2.5:7b`, `gpt-oss:120b-cloud`) |
+| `AI_API_KEY` | — | — | Ollama API key (enables cloud mode) |
+| `OLLAMA_API_URL` | — | — | Legacy alias for `AI_API_URL` |
+| `OLLAMA_MODEL` | — | — | Legacy alias for `AI_MODEL` |
+| `OLLAMA_API_KEY` | — | — | Legacy alias for `AI_API_KEY` |
+| `LOG_LEVEL` | — | — | pino log level |
+
+### Client
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `VITE_API_URL` | — | — | Backend API URL |
+| `VITE_SOCKET_URL` | — | — | Backend Socket.IO URL |
+
+---
+
+## AI Configuration
+
+AIDA uses Ollama for AI-driven NPC behavior, mission generation, and dynamic content. Three modes are supported:
+
+### Local Ollama (default)
+Run Ollama locally with any supported model:
 ```bash
-help                    # See all commands
-status                  # Check your stats
-shop                    # Browse items to buy
-missions                # View available missions
-servers                 # List hackable servers
-ps                      # See running processes
-top                     # System monitor
-free -h                 # Memory usage
+ollama serve
+ollama pull qwen2.5:7b
 ```
+No additional configuration needed — the server connects to `http://localhost:11434` by default.
+
+### Ollama Cloud Models
+Use larger models offloaded to Ollama's cloud (requires an Ollama account):
+```bash
+ollama signin
+ollama pull gpt-oss:120b-cloud
+```
+Then set `AI_MODEL=gpt-oss:120b-cloud` in your `.env`. The local Ollama instance handles routing to the cloud.
+
+### Ollama Cloud API (no local Ollama)
+Connect directly to Ollama's cloud API without running a local instance:
+1. Create an API key at [ollama.com](https://ollama.com)
+2. Set these environment variables:
+```env
+AI_API_URL=https://ollama.com
+AI_MODEL=gpt-oss:120b
+AI_API_KEY=your_api_key_here
+```
+
+> **Note:** Cloud mode uses a 60s request timeout (vs 120s for local CPU inference). The `AI_*` env vars take precedence over legacy `OLLAMA_*` vars.
 
 ---
 
-## 📖 Documentation
-
-**👉 [DOCUMENTATION.md](DOCUMENTATION.md) - Complete Guide**
-
-Everything you need in one place:
-- ✅ Complete setup instructions
-- ✅ All 50+ commands documented
-- ✅ Development guide
-- ✅ API reference
-- ✅ Database schema
-- ✅ Troubleshooting
-- ✅ Deployment guide
-
----
-
-## 🎯 Key Features
-
-### Terminal-First Design
-- **100% command-driven** - No clicking, just typing
-- **50+ Unix commands** - Real terminal experience
-- **Process management** - `ps`, `top`, `kill`, `free`
-- **File system** - `ls`, `cd`, `cat`, `mkdir`
-- **Math engine** - `calc`, `expr`, `vars`
-
-### Game Mechanics
-- 🎯 **Mission System** - Complete objectives for rewards
-- 🛒 **Shop & Economy** - Buy tools with earned credits
-- 🌐 **11+ Servers** - Tutorial to maximum security
-- 📦 **Inventory** - Collect and use hacking tools
-- ⚡ **Progression** - Level up, gain XP, unlock skills
-- 👥 **Multiplayer** - Real-time with other players
-
-### Technical Stack
-- **Backend:** Node.js + TypeScript + Express + Socket.IO
-- **Frontend:** Svelte + TypeScript
-- **Database:** PostgreSQL + Prisma ORM
-- **Architecture:** Terminal-based (backend IS the console)
-
----
-
-## 🏗️ Architecture
+## Project Structure
 
 ```
-┌─────────────────┐
-│   Browser       │      User types: "status"
-│   Terminal UI   │────────────────────────────┐
-└─────────────────┘                            │
-                                               ▼
-                                    POST /api/command/execute
-                                    { command: "status" }
-                                               │
-┌─────────────────┐                            │
-│   Node.js       │◄───────────────────────────┘
-│   Server        │
-│                 │      1. Parse command
-│ Command         │      2. Execute logic
-│ Processor       │      3. Return output
-│                 │
-│ All game logic  │
-│ lives here!     │
-└─────────────────┘
-```
-
-**Key Principle:** Backend IS the console. Frontend is just a display.
-
----
-
-## 📦 Project Structure
-
-```
-AIDA/
-├── DOCUMENTATION.md         # 📖 Complete documentation (READ THIS!)
-├── README.md                # 👋 This file
-├── server/                  # Backend (Node.js)
+├── server/              # Backend (Express + Socket.IO + Prisma)
 │   ├── src/
-│   │   ├── services/        # Game logic & command execution
-│   │   ├── routes/          # API endpoints (just 3!)
-│   │   └── index.ts         # Entry point
-│   └── prisma/              # Database schema & migrations
-├── client/                  # Frontend (Svelte)
+│   │   ├── di/              # Dependency injection (45 tokens + container)
+│   │   ├── lore/            # Canonical world lore (backstory, factions, AIDA pieces)
+│   │   ├── middleware/      # Auth, validation, rate limiting
+│   │   ├── services/        # 42 game services
+│   │   │   └── commandModules/  # 13 command modules
+│   │   ├── sockets/         # Socket.IO event handlers
+│   │   └── utils/           # Utilities (auth, encoding, IP, tokens, etc.)
+│   └── prisma/              # Schema (61 models) + 27 migrations + seed
+├── client/              # Frontend (Svelte 5 + Vite)
 │   └── src/
-│       ├── components/      # Terminal UI
-│       └── services/        # API clients
-└── cleanup-docs.sh          # Script to clean up old docs
+│       ├── components/      # Terminal, dialogs, panels
+│       ├── services/        # API, socket, terminal, notifications
+│       └── stores/          # Game state stores
+└── shared/              # Shared TypeScript types
 ```
 
 ---
 
-## 🎮 Example Session
+## Development Notes
 
-```bash
-$ help
-=== AVAILABLE COMMANDS ===
-
-[SYSTEM]
-  ls              - List files/directories
-  cd              - Change directory
-  ps              - List processes
-
-[PROCESS]
-  ps              - List running processes
-  top             - System resource monitor
-  kill            - Terminate process
-
-[GAME]
-  status          - Show player status
-  shop            - List shop items
-  missions        - List available missions
-
-$ status
-═══════════════════════════════════════
-     OPERATIVE STATUS REPORT
-═══════════════════════════════════════
-Username:    h4x0r
-Level:       3
-XP:          2,450 / 3,000
-Credits:     ¢1,250
-Reputation:  Amateur
-
-Skills:
-  Hacking:       Level 3  ████░░░░░░
-  Stealth:       Level 2  ██░░░░░░░░
-  Networking:    Level 2  ██░░░░░░░░
-
-$ shop
-═══════════════════════════════════════
-          DARKNET MARKETPLACE
-═══════════════════════════════════════
-ID   Item                Price    Level
-─────────────────────────────────────
-1    Port Scanner       ¢100      1
-2    Password Cracker   ¢500      2
-3    Exploit Framework  ¢1,200    3
-4    Zero-Day Exploit   ¢5,000    5
-
-$ buy 3
-✓ Purchased: Exploit Framework
-  Cost: ¢1,200
-  Remaining: ¢50
-
-$ missions
-Available Missions:
-  [1] Data Exfiltration - Steal corporate data (Medium)
-  [2] Backdoor Install - Install persistent access (Hard)
-
-$ ps -aux
-USER       PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND
-root         1  0.1  0.4   2048   2.0 ?        R    00:00    0:00 init
-neural       5  3.2  3.2  16384  16.0 ?        R    00:00    0:00 neural-net
-user         6  2.1  2.4  12288  12.0 ?        R    00:00    0:00 terminal
-```
+- See `PROJECT_KNOWLEDGE.toon` for the complete system reference (1200+ lines covering every system, service, schema model, and command).
+- **v0.99-beta** — Pre-release polish phase.
+- Key areas still in progress: endgame sequence implementation, dedicated KeyFragmentService, test suite (0% coverage), client migration to Svelte 5 runes.
 
 ---
 
-## 🛠️ Technology
-
-### Backend
-- **Node.js 18+** with TypeScript
-- **Express** - HTTP server
-- **Socket.IO** - Real-time events
-- **Prisma** - Type-safe ORM
-- **PostgreSQL** - Database
-- **JWT** - Authentication
-
-### Frontend
-- **Svelte** - Reactive UI framework
-- **TypeScript** - Type safety
-- **Vite** - Build tool
-- **Socket.IO Client** - Real-time updates
-
----
-
-## 🐛 Troubleshooting
-
-See [DOCUMENTATION.md - Troubleshooting](DOCUMENTATION.md#troubleshooting) for:
-- Database connection issues
-- Port conflicts
-- Migration problems
-- TypeScript errors
-- Command not working
-
-Quick fix for most issues:
-```bash
-cd server
-npx prisma generate
-npm run build
-```
-
----
-
-## 🚀 Deployment
-
-See [DOCUMENTATION.md - Deployment](DOCUMENTATION.md#deployment) for:
-- Production checklist
-- Environment variables
-- PM2 setup
-- nginx configuration
-- Security best practices
-
----
-
-## 📝 Contributing
-
-1. Fork the repository
-2. Create feature branch: `git checkout -b feature/amazing-feature`
-3. Commit changes: `git commit -m 'feat: add amazing feature'`
-4. Push: `git push origin feature/amazing-feature`
-5. Open Pull Request
-
-See [DOCUMENTATION.md - Contributing](DOCUMENTATION.md#contributing-guidelines) for code style and guidelines.
-
----
-
-## 📚 Learn More
-
-- **[Complete Documentation](DOCUMENTATION.md)** - Everything in one place
-- **Commands Reference** - All 50+ commands documented
-- **Development Guide** - Add features and commands
-- **API Reference** - Services and methods
-- **Database Schema** - Tables and relationships
-
----
-
-## 🎯 Current Status
-
-**✅ Production-Ready (Phase 4 Complete):**
-
-### Core Features
-- ✅ Complete backend with 15 DI-injected services
-- ✅ 50+ terminal commands implemented
-- ✅ Process management system (ps, top, kill, free, nice)
-- ✅ Math engine (calc, expr, vars, convert)
-- ✅ File system (ls, cd, cat, mkdir, cp, mv)
-- ✅ Shop & economy with inventory
-- ✅ Mission system with progress tracking
-- ✅ Hacking mechanics (hack, crack, exploit)
-- ✅ Database schema & seeding
-- ✅ Real-time multiplayer (Socket.IO)
-- ✅ Comprehensive documentation
-
-### Performance & Security (Phase 4 ✅)
-- ✅ **In-memory caching** - CacheService with TTL
-- ✅ **Query optimization** - N+1 fixes, batch fetching
-- ✅ **Path sanitization** - Directory traversal prevention
-- ✅ **Input validation** - 15+ validation functions
-- ✅ **Database audit** - 0 SQL injection vulnerabilities
-- ✅ **Command history limits** - Auto-cleanup on disconnect
-- ✅ **Benchmarking** - Baseline metrics (< 5ms latency)
-- ✅ **Penetration testing** - Security validation complete
-
-### Architecture
-- ✅ **Dependency Injection** - 100% tsyringe migration
-- ✅ **Type Safety** - Full TypeScript coverage
-- ✅ **Modular Commands** - 9 command modules
-- ✅ **Clean Build** - 0 errors, 0 warnings
-
-**Architecture Grade:** `A+` (Production-ready)
-
-**⏳ Next Phase (Phase 5):**
-- AI/NPC implementation
-- Advanced mission system
-- Faction mechanics
-- PvP enhancements
-
----
-
-## 🔐 Security
-
-**✅ Production-Grade Security (Phase 4 Complete)**
-
-- ✅ **Authentication:** Hashed passwords (bcrypt) + JWT tokens
-- ✅ **Input Validation:** Comprehensive validation with `validators.ts` (15+ functions)
-- ✅ **Path Sanitization:** Directory traversal prevention
-- ✅ **Command Injection Prevention:** Pattern detection for dangerous commands
-- ✅ **SQL Injection:** 100% Prisma ORM usage (audited, 0 vulnerabilities)
-- ✅ **XSS Prevention:** Message content sanitization
-- ✅ **Rate Limiting:** Per-user command throttling
-- ✅ **CORS Protection:** Configured for secure origins
-- ✅ **Session Management:** Secure session handling + auto-cleanup
-- ✅ **Memory Leak Prevention:** Command history limits (100/user)
-- ✅ **Cache Poisoning:** TTL-based invalidation
-
-See [DOCUMENTATION.md - Security](DOCUMENTATION.md#security-best-practices)
-
----
-
-## 📞 Support
-
-- **Documentation:** [DOCUMENTATION.md](DOCUMENTATION.md)
-- **Issues:** Open a GitHub issue
-- **Questions:** Check docs first, then ask!
-
----
-
-## 🎉 Credits
-
-Developed with ❤️ for the cyberpunk hacking community.
-
-Special thanks to all contributors and testers!
-
----
-
-## ⚡ Quick Links
-
-- 📖 [Full Documentation](DOCUMENTATION.md)
-- 🚀 [Quick Start](#quick-start)
-- 🎮 [Example Session](#example-session)
-- 🛠️ [Troubleshooting](DOCUMENTATION.md#troubleshooting)
-- 🚀 [Deployment](DOCUMENTATION.md#deployment)
-
----
-
-**Remember:** Every action leaves a trace. Learn stealth early. Cover your tracks. Trust no one.
-
-🌐 **Welcome to the AIDA network, operative. Your neural interface is online.** 🌐
-
----
-
-*Last Updated: December 2025*
-*Version: 1.0*
+*Welcome to the AIDA network, operative. Your neural interface is online. The signal is waiting.*

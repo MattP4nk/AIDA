@@ -1,10 +1,25 @@
 import { injectable, inject } from "tsyringe";
-import { MISSION_SERVICE, PERSONA_SERVICE, AI_SERVICE } from "../di/tokens";
+import type { Logger } from "pino";
+import {
+  LOGGER,
+  MISSION_SERVICE,
+  PERSONA_SERVICE,
+  AI_SERVICE,
+  SERVER_CONTENT_SERVICE,
+} from "../di/tokens";
 import MissionService from "./missionService";
 import { PersonaService } from "./personaService";
 import { AIService } from "./aiService";
+import type { ServerContentService } from "./serverContentService";
 import { db } from "../database/client";
 import { CronJob } from "cron";
+import {
+  MissionTemplate,
+  getEligibleTemplates,
+  selectWeightedTemplate,
+  MISSION_TEMPLATES,
+} from "./missionTemplatePool";
+import { validateObjective, OBJECTIVE_TYPES } from "./missionObjectiveTypes";
 
 /**
  * MissionGenerator Service
@@ -20,33 +35,6 @@ import { CronJob } from "cron";
  * - 10% AI-generated (narrative, special)
  */
 
-interface MissionTemplate {
-  id: string;
-  type: "hack" | "steal" | "social" | "explore" | "mixed";
-  minLevel: number;
-  maxLevel: number;
-  difficulty: number;
-  titleTemplates: string[];
-  descriptionTemplates: string[];
-  objectives: ObjectiveTemplate[];
-  rewards: RewardTemplate;
-  tags?: string[];
-}
-
-interface ObjectiveTemplate {
-  type: string;
-  description: string;
-  target: number | string | boolean;
-  metadata?: Record<string, any>;
-}
-
-interface RewardTemplate {
-  xp: { min: number; max: number };
-  credits: { min: number; max: number };
-  reputation?: number;
-  items?: string[];
-}
-
 interface GeneratedMission {
   title: string;
   description: string;
@@ -57,11 +45,12 @@ interface GeneratedMission {
   timeLimit?: number;
   factionId?: string;
   issuedBy?: string;
+  tier?: number;
+  targetServerId?: string;
 }
 
 @injectable()
 export class MissionGeneratorService {
-  private templates: MissionTemplate[] = [];
   private generationStats = {
     totalGenerated: 0,
     templateBased: 0,
@@ -70,360 +59,24 @@ export class MissionGeneratorService {
   };
   private midnightJob: CronJob | null = null;
 
+  private serverContent: ServerContentService | null = null;
+
   constructor(
+    @inject(LOGGER) private logger: Logger,
     @inject(MISSION_SERVICE) private missionService: MissionService,
     @inject(PERSONA_SERVICE) private personaService: PersonaService,
     @inject(AI_SERVICE) private aiService: AIService,
+    @inject(SERVER_CONTENT_SERVICE)
+    serverContentService?: ServerContentService,
   ) {
-    this.initializeTemplates();
+    this.serverContent = serverContentService || null;
     this.startMidnightScheduler();
   }
 
-  // ==================== INITIALIZATION ====================
+  // ==================== TEMPLATE ACCESS ====================
 
-  /**
-   * Initialize mission templates
-   */
-  private initializeTemplates(): void {
-    this.templates = [
-      // Beginner Hack Missions
-      {
-        id: "hack_basic_1",
-        type: "hack",
-        minLevel: 1,
-        maxLevel: 10,
-        difficulty: 1,
-        titleTemplates: [
-          "First Steps: Hack {count} Servers",
-          "Network Intrusion Training",
-          "Breaking In: {count} Systems",
-        ],
-        descriptionTemplates: [
-          "Every hacker starts somewhere. Gain access to {count} different servers to prove your skills.",
-          "Time to test your abilities. Successfully hack into {count} servers and report back.",
-          "The underground needs new talent. Show us what you can do by hacking {count} systems.",
-        ],
-        objectives: [
-          {
-            type: "hack",
-            description: "Successfully hack into {count} servers",
-            target: 3,
-          },
-        ],
-        rewards: {
-          xp: { min: 100, max: 200 },
-          credits: { min: 500, max: 1000 },
-          reputation: 5,
-        },
-        tags: ["beginner", "training"],
-      },
-
-      // Stealth Missions
-      {
-        id: "hack_stealth_1",
-        type: "hack",
-        minLevel: 5,
-        maxLevel: 20,
-        difficulty: 3,
-        titleTemplates: [
-          "Ghost Protocol: Undetected Intrusion",
-          "Shadow Ops: Silent Hack",
-          "The Invisible Threat",
-        ],
-        descriptionTemplates: [
-          "Stealth is key. Hack {count} servers without triggering any alarms or leaving traces.",
-          "A true professional leaves no evidence. Complete {count} undetected hacks.",
-          "They'll never know you were there. Infiltrate {count} systems silently.",
-        ],
-        objectives: [
-          {
-            type: "hack_stealth",
-            description: "Hack {count} servers without being detected",
-            target: 3,
-          },
-        ],
-        rewards: {
-          xp: { min: 300, max: 500 },
-          credits: { min: 2000, max: 3500 },
-          reputation: 15,
-        },
-        tags: ["stealth", "advanced"],
-      },
-
-      // Data Theft Missions
-      {
-        id: "steal_files_1",
-        type: "steal",
-        minLevel: 3,
-        maxLevel: 15,
-        difficulty: 2,
-        titleTemplates: [
-          "Data Extraction: {target} Files",
-          "Corporate Espionage",
-          "Information Acquisition",
-        ],
-        descriptionTemplates: [
-          "A client needs data. Download {target} files from corporate servers.",
-          "Steal {target} files from secured systems. Payment on delivery.",
-          "Industrial espionage pays well. Acquire {target} files and return them safely.",
-        ],
-        objectives: [
-          {
-            type: "steal_count",
-            description: "Download {target} files from any servers",
-            target: 5,
-          },
-        ],
-        rewards: {
-          xp: { min: 200, max: 400 },
-          credits: { min: 1500, max: 2500 },
-          reputation: 10,
-        },
-        tags: ["theft", "corporate"],
-      },
-
-      // Cover Your Tracks
-      {
-        id: "delete_evidence_1",
-        type: "hack",
-        minLevel: 10,
-        maxLevel: 30,
-        difficulty: 4,
-        titleTemplates: [
-          "Clean Sweep: Evidence Removal",
-          "Erase the Past",
-          "No Witnesses",
-        ],
-        descriptionTemplates: [
-          "Someone left evidence behind. Break in and delete the incriminating files.",
-          "Clean up operation required. Remove all traces from the target system.",
-          "A job went sideways. Delete the evidence before they connect the dots.",
-        ],
-        objectives: [
-          {
-            type: "hack",
-            description: "Gain access to the target server",
-            target: 1,
-          },
-          {
-            type: "delete_file",
-            description: "Delete the evidence file",
-            target: "evidence.log",
-            metadata: { filePattern: "evidence" },
-          },
-        ],
-        rewards: {
-          xp: { min: 400, max: 700 },
-          credits: { min: 3000, max: 5000 },
-          reputation: 20,
-        },
-        tags: ["cleanup", "urgent"],
-      },
-
-      // Social Engineering
-      {
-        id: "social_contact_1",
-        type: "social",
-        minLevel: 5,
-        maxLevel: 25,
-        difficulty: 2,
-        titleTemplates: [
-          "Establish Contact: {target}",
-          "Network Building",
-          "Making Connections",
-        ],
-        descriptionTemplates: [
-          "Reach out to {target}. They have information we need.",
-          "Open a secure channel with {target}. Be professional.",
-          "We need someone on the inside. Make contact with {target}.",
-        ],
-        objectives: [
-          {
-            type: "contact_player",
-            description: "Send a message to {target}",
-            target: "npc_contact",
-            metadata: { requiresResponse: false },
-          },
-        ],
-        rewards: {
-          xp: { min: 150, max: 300 },
-          credits: { min: 1000, max: 2000 },
-          reputation: 8,
-        },
-        tags: ["social", "network"],
-      },
-
-      // Exploration
-      {
-        id: "explore_network_1",
-        type: "explore",
-        minLevel: 1,
-        maxLevel: 15,
-        difficulty: 1,
-        titleTemplates: [
-          "Network Mapping: Discover {count} Servers",
-          "Digital Exploration",
-          "Expanding the Map",
-        ],
-        descriptionTemplates: [
-          "The network is vast. Discover {count} new servers and map the terrain.",
-          "Knowledge is power. Find and document {count} previously unknown servers.",
-          "Expand your network. Locate {count} new systems.",
-        ],
-        objectives: [
-          {
-            type: "explore",
-            description: "Discover {count} new servers",
-            target: 5,
-          },
-        ],
-        rewards: {
-          xp: { min: 100, max: 250 },
-          credits: { min: 500, max: 1500 },
-          reputation: 5,
-        },
-        tags: ["exploration", "mapping"],
-      },
-
-      // Forum Intelligence
-      {
-        id: "forum_post_1",
-        type: "social",
-        minLevel: 8,
-        maxLevel: 20,
-        difficulty: 2,
-        titleTemplates: [
-          "Spread the Word",
-          "Information Warfare",
-          "Public Disclosure",
-        ],
-        descriptionTemplates: [
-          "Post about your findings on a darkweb forum. The public deserves to know.",
-          "Share intelligence on underground forums. Stir up the community.",
-          "Make some noise. Post about the breach and watch the chaos unfold.",
-        ],
-        objectives: [
-          {
-            type: "forum_post",
-            description: "Post on any darkweb forum",
-            target: 1,
-          },
-        ],
-        rewards: {
-          xp: { min: 200, max: 350 },
-          credits: { min: 1000, max: 2000 },
-          reputation: 12,
-        },
-        tags: ["forum", "intelligence"],
-      },
-
-      // Skill Development
-      {
-        id: "skill_progression_1",
-        type: "mixed",
-        minLevel: 5,
-        maxLevel: 50,
-        difficulty: 3,
-        titleTemplates: [
-          "Skill Enhancement: Reach Level {level}",
-          "Training Regiment",
-          "Leveling Up",
-        ],
-        descriptionTemplates: [
-          "Practice makes perfect. Reach hacking level {level} through experience.",
-          "Your skills need work. Gain enough XP to reach level {level}.",
-          "The underground rewards competence. Prove yourself by reaching level {level}.",
-        ],
-        objectives: [
-          {
-            type: "gain_xp",
-            description: "Gain {xp} experience points",
-            target: 1000,
-          },
-        ],
-        rewards: {
-          xp: { min: 500, max: 1000 },
-          credits: { min: 2000, max: 4000 },
-          reputation: 15,
-        },
-        tags: ["progression", "training"],
-      },
-
-      // Economic
-      {
-        id: "earn_credits_1",
-        type: "mixed",
-        minLevel: 1,
-        maxLevel: 20,
-        difficulty: 2,
-        titleTemplates: [
-          "Money Talks: Earn {amount} Credits",
-          "Economic Opportunity",
-          "Building Capital",
-        ],
-        descriptionTemplates: [
-          "You need resources. Earn {amount} credits through any means necessary.",
-          "Cash is king in this world. Accumulate {amount} credits.",
-          "Fund your operations. Generate {amount} credits through hacking and trading.",
-        ],
-        objectives: [
-          {
-            type: "earn_credits",
-            description: "Earn {amount} credits",
-            target: 5000,
-          },
-        ],
-        rewards: {
-          xp: { min: 300, max: 500 },
-          credits: { min: 2000, max: 3000 },
-          reputation: 10,
-        },
-        tags: ["economic", "grind"],
-      },
-
-      // Advanced Multi-Objective
-      {
-        id: "complex_operation_1",
-        type: "mixed",
-        minLevel: 15,
-        maxLevel: 50,
-        difficulty: 5,
-        titleTemplates: [
-          "Operation {codename}",
-          "Complex Infiltration",
-          "Multi-Stage Attack",
-        ],
-        descriptionTemplates: [
-          "This is a complex operation. Hack the target, steal the data, and cover your tracks.",
-          "High-value target requires precision. Infiltrate, extract, and eliminate evidence.",
-          "Multi-phase mission: breach security, acquire files, delete logs, escape undetected.",
-        ],
-        objectives: [
-          {
-            type: "hack",
-            description: "Hack into the target server",
-            target: 1,
-          },
-          {
-            type: "steal_count",
-            description: "Download 3 classified files",
-            target: 3,
-          },
-          {
-            type: "delete_file",
-            description: "Delete access logs",
-            target: "access.log",
-          },
-        ],
-        rewards: {
-          xp: { min: 800, max: 1500 },
-          credits: { min: 5000, max: 10000 },
-          reputation: 30,
-          items: ["advanced_toolkit"],
-        },
-        tags: ["complex", "high-value", "multi-stage"],
-      },
-    ];
+  private get templates(): MissionTemplate[] {
+    return Array.from(MISSION_TEMPLATES.values());
   }
 
   // ==================== MISSION GENERATION ====================
@@ -448,14 +101,22 @@ export class MissionGeneratorService {
       const playerLevel = this.calculateLevel(progress.experience);
       const missionIds: string[] = [];
 
+      // Track used template IDs for deduplication within this batch
+      const usedTemplateIds = new Set<string>();
+
       // Determine AI mission count (10% of missions)
       const aiMissionCount = Math.floor(count * 0.1);
       const templateMissionCount = count - aiMissionCount;
 
       // Generate template-based missions
       for (let i = 0; i < templateMissionCount; i++) {
-        const template = this.selectTemplate(playerLevel);
+        const template = this.selectTemplate(
+          playerLevel,
+          undefined,
+          usedTemplateIds,
+        );
         if (template) {
+          usedTemplateIds.add(template.id);
           const mission = this.generateFromTemplate(template, progress);
           const missionId = await this.createMission(mission, userId);
           if (missionId) {
@@ -478,8 +139,13 @@ export class MissionGeneratorService {
           }
         } catch (error) {
           // AI generation failed, generate template instead
-          const template = this.selectTemplate(playerLevel);
+          const template = this.selectTemplate(
+            playerLevel,
+            undefined,
+            usedTemplateIds,
+          );
           if (template) {
+            usedTemplateIds.add(template.id);
             const mission = this.generateFromTemplate(template, progress);
             const missionId = await this.createMission(mission, userId);
             if (missionId) {
@@ -491,9 +157,65 @@ export class MissionGeneratorService {
       }
 
       this.generationStats.totalGenerated += missionIds.length;
+
+      // Add generated missions to the player's missionProgress as "available"
+      // so they appear in getPlayerMissions() results
+      if (missionIds.length > 0) {
+        try {
+          const missions = await db.client.mission.findMany({
+            where: { id: { in: missionIds } },
+          });
+
+          const missionProgress =
+            (progress.missionProgress as Record<string, any>) || {};
+
+          for (const mission of missions) {
+            const objectives = (mission.objectives as unknown as any[]) || [];
+
+            missionProgress[mission.id] = {
+              missionId: mission.id,
+              userId,
+              status: "available",
+              objectives: objectives.map((obj: any) => ({
+                ...obj,
+                current:
+                  typeof obj.target === "number"
+                    ? 0
+                    : typeof obj.target === "boolean"
+                      ? false
+                      : "",
+                completed: false,
+              })),
+              startedAt: null,
+              completedAt: null,
+              expiresAt: mission.timeLimit
+                ? new Date(Date.now() + (mission.timeLimit as number) * 1000)
+                : null,
+            };
+          }
+
+          await db.client.playerProgress.update({
+            where: { userId },
+            data: {
+              missionProgress: missionProgress as any,
+            },
+          });
+
+          this.logger.info(
+            { userId, count: missionIds.length },
+            "Generated missions added to player missionProgress",
+          );
+        } catch (progressError) {
+          this.logger.error(
+            { err: progressError, userId },
+            "Failed to update missionProgress with generated missions",
+          );
+        }
+      }
+
       return missionIds;
     } catch (error) {
-      console.error("[MissionGenerator] Error generating missions:", error);
+      this.logger.error({ err: error }, "Error generating missions");
       return [];
     }
   }
@@ -501,40 +223,26 @@ export class MissionGeneratorService {
   /**
    * Select appropriate template based on player level
    */
-  private selectTemplate(playerLevel: number): MissionTemplate | null {
-    // Filter templates by level
-    // Fallback to any template
-    const eligible = this.templates.filter(
-      (t) => playerLevel >= t.minLevel && playerLevel <= t.maxLevel,
-    );
+  private selectTemplate(
+    playerLevel: number,
+    missionType?: string,
+    excludeIds?: Set<string>,
+  ): MissionTemplate | null {
+    let eligible = getEligibleTemplates(playerLevel);
 
-    if (eligible.length === 0) {
-      // Fallback to any template
-      return (
-        this.templates[Math.floor(Math.random() * this.templates.length)] ||
-        null
-      );
+    // Exclude already-used template IDs in this batch
+    if (excludeIds && excludeIds.size > 0) {
+      eligible = eligible.filter((t) => !excludeIds.has(t.id));
     }
 
-    // Weighted random selection (prefer appropriate difficulty)
-    const weights = eligible.map((t) => {
-      const levelDiff = Math.abs(playerLevel - (t.minLevel + t.maxLevel) / 2);
-      return Math.max(1, 10 - levelDiff);
-    });
-
-    const totalWeight = weights.reduce((sum, w) => sum + w, 0);
-    let random = Math.random() * totalWeight;
-
-    for (let i = 0; i < eligible.length; i++) {
-      const weight = weights[i];
-      if (weight === undefined) continue;
-      random -= weight;
-      if (random <= 0) {
-        return eligible[i] ?? null;
-      }
+    // Filter by type if specified
+    if (missionType) {
+      const typed = eligible.filter((t) => t.type === missionType);
+      if (typed.length > 0) eligible = typed;
     }
 
-    return eligible[0] ?? null;
+    if (eligible.length === 0) return null;
+    return selectWeightedTemplate(eligible, playerLevel) ?? null;
   }
 
   /**
@@ -544,6 +252,8 @@ export class MissionGeneratorService {
     template: MissionTemplate,
     progress: any,
   ): GeneratedMission {
+    const playerLevel = this.calculateLevel(progress.experience);
+
     // Select random title and description
     const title =
       template.titleTemplates[
@@ -554,59 +264,91 @@ export class MissionGeneratorService {
         Math.floor(Math.random() * template.descriptionTemplates.length)
       ] || "Complete the mission objectives.";
 
+    // Pick a difficulty value from the template's range
+    const difficulty =
+      Math.floor(
+        Math.random() * (template.difficulty.max - template.difficulty.min + 1),
+      ) + template.difficulty.min;
+
     // Generate objectives with unique IDs
-    const objectives = template.objectives.map((obj) => ({
-      id: `obj_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-      type: obj.type,
-      description: this.interpolateString(obj.description, {
-        count: obj.target,
+    const objectives = template.objectives.map((obj) => {
+      const descriptionText = obj.descriptionTemplate || "";
+
+      const built = {
+        id: `obj_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+        type: obj.type,
+        description: this.interpolateString(descriptionText, {
+          count: obj.target,
+          target: obj.target,
+          level: playerLevel + 5,
+          xp: 1000,
+          amount: 5000,
+        }),
         target: obj.target,
-        level: this.calculateLevel(progress.experience) + 5,
-        xp: 1000,
-        amount: 5000,
-      }),
-      target: obj.target,
-      current:
-        typeof obj.target === "number"
-          ? 0
-          : typeof obj.target === "boolean"
-            ? false
-            : "",
-      completed: false,
-      metadata: obj.metadata,
-    }));
+        current:
+          typeof obj.target === "number"
+            ? 0
+            : typeof obj.target === "boolean"
+              ? false
+              : "",
+        completed: false,
+        metadata: obj.metadata,
+      };
 
-    // Calculate rewards based on difficulty and player level
-    const xpReward =
-      Math.floor(
-        Math.random() * (template.rewards.xp.max - template.rewards.xp.min),
-      ) + template.rewards.xp.min;
-    const creditsReward =
-      Math.floor(
-        Math.random() *
-          (template.rewards.credits.max - template.rewards.credits.min),
-      ) + template.rewards.credits.min;
+      // Validate objective against canonical types
+      const validation = validateObjective({
+        type: built.type,
+        target: built.target,
+        ...(built.metadata !== undefined && { metadata: built.metadata }),
+      });
 
-    // Calculate time limit (1 hour per difficulty level)
-    const timeLimit = template.difficulty * 60 * 60 * 1000;
+      if (!validation.valid) {
+        this.logger.warn(
+          {
+            templateId: template.id,
+            objectiveType: built.type,
+            errors: validation.errors,
+          },
+          "Objective validation warning in template-based generation",
+        );
+      }
+
+      return built;
+    });
+
+    // Calculate rewards using RewardScaling: base + perLevel * playerLevel
+    const xpReward = Math.floor(
+      template.rewards.xp.base + template.rewards.xp.perLevel * playerLevel,
+    );
+    const creditsReward = Math.floor(
+      template.rewards.credits.base +
+        template.rewards.credits.perLevel * playerLevel,
+    );
+
+    // Calculate time limit: random between min and max (seconds), convert to ms
+    const timeLimitSeconds =
+      Math.floor(
+        Math.random() * (template.timeLimit.max - template.timeLimit.min + 1),
+      ) + template.timeLimit.min;
+    const timeLimit = timeLimitSeconds * 1000;
 
     return {
       title: this.interpolateString(title, {
         count: objectives[0]?.target || 3,
         target: "Agent_X",
         codename: this.generateCodename(),
-        level: this.calculateLevel(progress.experience) + 5,
+        level: playerLevel + 5,
         amount: 5000,
       }),
       description: this.interpolateString(description, {
         count: objectives[0]?.target || 3,
         target: objectives[0]?.target || 3,
-        level: this.calculateLevel(progress.experience) + 5,
+        level: playerLevel + 5,
         xp: 1000,
         amount: 5000,
       }),
       type: template.type,
-      difficulty: template.difficulty,
+      difficulty,
       objectives,
       reward: {
         xp: xpReward,
@@ -615,6 +357,7 @@ export class MissionGeneratorService {
         items: template.rewards.items || [],
       },
       timeLimit,
+      tier: template.tier,
     };
   }
 
@@ -633,6 +376,9 @@ export class MissionGeneratorService {
         return null;
       }
 
+      // Build canonical objective type list for the prompt
+      const canonicalTypes = [...OBJECTIVE_TYPES.keys()].join(", ");
+
       // Generate mission using AI
       const prompt = `Create a unique hacking mission for a player at level ${playerLevel}.
 
@@ -641,7 +387,11 @@ Mission should include:
 - Detailed backstory (2-3 sentences)
 - Mission type (hack/steal/social/explore/mixed)
 - 1-3 objectives with clear goals
-- Appropriate rewards for level ${playerLevel}
+
+IMPORTANT: Objective types MUST be one of these canonical types:
+${canonicalTypes}
+
+Appropriate rewards for level ${playerLevel}.
 
 Format as JSON:
 {
@@ -668,19 +418,74 @@ Format as JSON:
 
       // Enhance with calculated values
       const difficulty = Math.min(10, Math.max(1, Math.floor(playerLevel / 5)));
-      const objectives = aiMission.objectives.map((obj: any) => ({
-        id: `obj_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-        type: obj.type,
-        description: obj.description,
-        target: obj.target,
-        current:
-          typeof obj.target === "number"
-            ? 0
-            : typeof obj.target === "boolean"
-              ? false
-              : "",
-        completed: false,
-      }));
+
+      // Validate and filter AI-generated objectives
+      const rawObjectives: any[] = aiMission.objectives || [];
+      const objectives = rawObjectives
+        .map((obj: any) => {
+          let objectiveType: string = obj.type;
+
+          // If the AI-generated type is not canonical, try to map it
+          if (!OBJECTIVE_TYPES.has(objectiveType)) {
+            const mapped = this.mapToCanonicalType(objectiveType);
+            if (mapped) {
+              this.logger.warn(
+                { original: objectiveType, mapped },
+                "Mapped non-canonical AI objective type to canonical type",
+              );
+              objectiveType = mapped;
+            } else {
+              this.logger.warn(
+                { type: objectiveType },
+                "Dropping AI-generated objective with unknown type",
+              );
+              return null;
+            }
+          }
+
+          const built = {
+            id: `obj_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+            type: objectiveType,
+            description: obj.description,
+            target: obj.target,
+            current:
+              typeof obj.target === "number"
+                ? 0
+                : typeof obj.target === "boolean"
+                  ? false
+                  : "",
+            completed: false,
+          };
+
+          // Validate the objective
+          const validation = validateObjective({
+            type: built.type,
+            target: built.target,
+            metadata: obj.metadata,
+          });
+
+          if (!validation.valid) {
+            this.logger.warn(
+              { type: built.type, errors: validation.errors },
+              "AI-generated objective validation warning",
+            );
+          }
+
+          return built;
+        })
+        .filter((obj: any): obj is NonNullable<typeof obj> => obj !== null);
+
+      // If all objectives were dropped, bail out
+      if (objectives.length === 0) {
+        this.logger.warn(
+          "All AI-generated objectives were invalid, aborting mission",
+        );
+        return null;
+      }
+
+      // Use same RewardScaling calculation pattern as templates
+      const xpReward = Math.floor(100 + 50 * playerLevel);
+      const creditsReward = Math.floor(500 + 200 * playerLevel);
 
       return {
         title: aiMission.title,
@@ -689,17 +494,74 @@ Format as JSON:
         difficulty,
         objectives,
         reward: {
-          xp: difficulty * 200 + playerLevel * 50,
-          credits: difficulty * 1000 + playerLevel * 200,
+          xp: xpReward,
+          credits: creditsReward,
           reputation: difficulty * 5,
         },
         timeLimit: difficulty * 60 * 60 * 1000,
         issuedBy: gameMaster.id,
       };
     } catch (error) {
-      console.error("[MissionGenerator] AI generation failed:", error);
+      this.logger.error({ err: error }, "AI generation failed");
       return null;
     }
+  }
+
+  /**
+   * Attempt to map a non-canonical objective type to the closest canonical type.
+   * Returns null if no reasonable mapping exists.
+   */
+  private mapToCanonicalType(aiType: string): string | null {
+    const normalized = aiType.toLowerCase().replace(/[\s\-]/g, "_");
+
+    // Direct match after normalization
+    if (OBJECTIVE_TYPES.has(normalized)) return normalized;
+
+    // Common AI-generated type → canonical type mappings
+    const mappings: Record<string, string> = {
+      infiltrate: "hack",
+      breach: "hack",
+      crack: "hack",
+      intrude: "hack",
+      penetrate: "hack",
+      access: "gain_access",
+      gain_access_to: "gain_access",
+      download: "steal_count",
+      extract: "steal_count",
+      exfiltrate: "steal_count",
+      steal_data: "steal_count",
+      steal_files: "steal_count",
+      upload: "upload_file",
+      delete: "delete_file",
+      remove: "delete_file",
+      erase: "delete_file",
+      send_message: "message",
+      communicate: "message",
+      contact: "contact_player",
+      reach_out: "contact_player",
+      post: "forum_post",
+      reply: "forum_reply",
+      discover: "explore",
+      find: "explore",
+      scan: "explore",
+      map: "explore",
+      connect: "connect_server",
+      level_up: "skill_level",
+      train: "gain_xp",
+      earn: "earn_credits",
+      collect_credits: "earn_credits",
+      spend: "spend_credits",
+      join: "join_faction",
+    };
+
+    if (mappings[normalized]) return mappings[normalized];
+
+    // Prefix matching: e.g. "hack_something" → "hack"
+    for (const [key] of OBJECTIVE_TYPES) {
+      if (normalized.startsWith(key)) return key;
+    }
+
+    return null;
   }
 
   /**
@@ -710,6 +572,53 @@ Format as JSON:
     createdBy: string,
   ): Promise<string | null> {
     try {
+      // Provision mission infrastructure (target server, objective files, etc.)
+      // This patches objective metadata with real server/file IDs.
+      if (this.serverContent) {
+        try {
+          const provision =
+            await this.serverContent.provisionMissionInfrastructure(
+              {
+                title: mission.title,
+                description: mission.description,
+                type: mission.type,
+                difficulty: mission.difficulty,
+                objectives: mission.objectives,
+                ...(mission.factionId ? { factionId: mission.factionId } : {}),
+              },
+              createdBy,
+            );
+
+          if (provision) {
+            // Set the target server on the mission
+            mission.targetServerId = provision.targetServerId;
+
+            // Patch objective metadata with real IDs
+            for (const patch of provision.objectives) {
+              const obj = mission.objectives[patch.index];
+              if (obj) {
+                obj.metadata = { ...(obj.metadata || {}), ...patch.metadata };
+              }
+            }
+
+            this.logger.info(
+              {
+                missionTitle: mission.title,
+                targetServerId: provision.targetServerId,
+                patchedObjectives: provision.objectives.length,
+                plantedFiles: provision.plantedFiles.length,
+              },
+              "Mission infrastructure provisioned",
+            );
+          }
+        } catch (provisionErr) {
+          this.logger.warn(
+            { err: provisionErr, missionTitle: mission.title },
+            "Mission infrastructure provisioning failed, creating mission without real targets",
+          );
+        }
+      }
+
       const missionData: any = {
         title: mission.title,
         description: mission.description,
@@ -721,6 +630,9 @@ Format as JSON:
       };
 
       // Only add optional fields if they exist
+      if (mission.targetServerId) {
+        missionData.targetServerId = mission.targetServerId;
+      }
       if (mission.factionId) {
         missionData.factionId = mission.factionId;
       }
@@ -733,9 +645,9 @@ Format as JSON:
 
       const result = await this.missionService.createMission(missionData);
 
-      return typeof result === "string" ? result : null;
+      return result?.id ?? null;
     } catch (error) {
-      console.error("[MissionGenerator] Failed to create mission:", error);
+      this.logger.error({ err: error }, "Failed to create mission");
       return null;
     }
   }
@@ -790,11 +702,12 @@ Format as JSON:
         generated += missions.length;
       }
 
-      console.log(
-        `[MissionGenerator] Generated ${generated} daily missions for ${activePlayers.length} players`,
+      this.logger.info(
+        { generated, playerCount: activePlayers.length },
+        "Generated daily missions",
       );
     } catch (error) {
-      console.error("[MissionGenerator] Daily generation failed:", error);
+      this.logger.error({ err: error }, "Daily generation failed");
     }
   }
 
@@ -812,11 +725,9 @@ Format as JSON:
         },
       });
 
-      console.log(
-        `[MissionGenerator] Cleaned up ${result.count} expired missions`,
-      );
+      this.logger.info({ count: result.count }, "Cleaned up expired missions");
     } catch (error) {
-      console.error("[MissionGenerator] Cleanup failed:", error);
+      this.logger.error({ err: error }, "Cleanup failed");
     }
   }
 
@@ -826,7 +737,7 @@ Format as JSON:
    * Calculate player level from XP
    */
   private calculateLevel(xp: number): number {
-    return Math.floor(Math.sqrt(xp / 100));
+    return Math.floor(Math.sqrt(xp / 100)) + 1;
   }
 
   /**

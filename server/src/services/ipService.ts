@@ -7,7 +7,9 @@ import type {
   TraceRouteHop,
 } from "../types/game";
 import { IPZone } from "../types/game";
-import { injectable } from "tsyringe";
+import { injectable, inject } from "tsyringe";
+import { LOGGER } from "../di/tokens";
+import type { Logger } from "pino";
 
 @injectable()
 class IPService {
@@ -15,7 +17,7 @@ class IPService {
   private ipRanges: Map<IPZone, IPRange>;
   private initialized: boolean;
 
-  constructor() {
+  constructor(@inject(LOGGER) private logger: Logger) {
     this.allocatedIPs = new Set();
     this.ipRanges = new Map();
     this.initialized = false;
@@ -25,12 +27,14 @@ class IPService {
   // ==================== INITIALIZATION ====================
 
   private initializeIPRanges(): void {
-    // Player home networks (10.0.0.0/16)
+    // Player home networks (10.1.0.1 – 10.254.255.254)
+    // Each player gets a unique /16 subnet via the second octet (10.X.x.x)
+    // so players cannot discover each other by scanning from home.
     this.ipRanges.set(IPZone.PLAYER, {
-      start: process.env.PLAYER_IP_RANGE_START || "10.0.0.1",
-      end: process.env.PLAYER_IP_RANGE_END || "10.0.255.254",
+      start: process.env.PLAYER_IP_RANGE_START || "10.1.0.1",
+      end: process.env.PLAYER_IP_RANGE_END || "10.254.255.254",
       zone: IPZone.PLAYER,
-      description: "Player home networks",
+      description: "Player home networks (isolated /16 subnets)",
     });
 
     // Corporate servers (172.16.0.0/12)
@@ -57,11 +61,14 @@ class IPService {
       description: "Underground networks",
     });
 
-    console.log("📡 IP ranges initialized:", Array.from(this.ipRanges.keys()));
+    this.logger.info(
+      { zones: Array.from(this.ipRanges.keys()) },
+      "IP ranges initialized",
+    );
   }
 
   public async loadAllocatedIPs(): Promise<void> {
-    console.log("📡 Loading allocated IPs from database...");
+    this.logger.info("Loading allocated IPs from database");
 
     try {
       // Load user IPs
@@ -85,9 +92,12 @@ class IPService {
       });
 
       this.initialized = true;
-      console.log(`✅ Loaded ${this.allocatedIPs.size} allocated IPs`);
+      this.logger.info(
+        { count: this.allocatedIPs.size },
+        "Loaded allocated IPs",
+      );
     } catch (error) {
-      console.error("❌ Error loading allocated IPs:", error);
+      this.logger.error({ err: error }, "Error loading allocated IPs");
       throw error;
     }
   }
@@ -106,18 +116,114 @@ class IPService {
     while (attempts < maxAttempts) {
       const ip = this.generateRandomIPInRange(range);
 
-      if (await this.isIPAvailable(ip)) {
-        // Reserve the IP immediately
-        this.allocatedIPs.add(ip);
-        console.log(`✅ Generated unique IP: ${ip} in zone ${zone}`);
+      // Reserve in-memory immediately to prevent concurrent generation of same IP
+      if (this.allocatedIPs.has(ip)) {
+        attempts++;
+        continue;
+      }
+      this.allocatedIPs.add(ip);
+
+      // Verify against database (authoritative check)
+      if (await this.isIPAvailableInDB(ip)) {
+        this.logger.info({ ip, zone }, "Generated unique IP");
         return ip;
       }
 
+      // DB says it's taken — already added to cache by isIPAvailableInDB, move on
       attempts++;
     }
 
     throw new Error(
       `Failed to generate unique IP in zone ${zone} after ${maxAttempts} attempts`,
+    );
+  }
+
+  /**
+   * Generate a home IP for a new player on an isolated /16 subnet.
+   *
+   * Picks a random second octet (1–254) that no other player is using,
+   * producing an IP like 10.{unique}.{rand}.{rand}.  This ensures that
+   * scanning from home (which matches on the first two octets) will never
+   * reveal another player's home server.
+   *
+   * Falls back to generateUniqueIP(PLAYER) if all /16 subnets are taken
+   * (extremely unlikely — 254 subnets).
+   */
+  public async generatePlayerHomeIP(): Promise<string> {
+    // Collect second octets already in use by player home servers
+    const existingHomes = await db.client.gameServer.findMany({
+      where: { isPlayerHome: true },
+      select: { ipAddress: true },
+    });
+
+    const usedOctets = new Set<number>();
+    for (const srv of existingHomes) {
+      const parts = srv.ipAddress.split(".");
+      if (parts[0] === "10") {
+        usedOctets.add(Number(parts[1]));
+      }
+    }
+
+    // Also check user homeIps that may not yet have a GameServer row
+    const existingUsers = await db.client.user.findMany({
+      where: { homeIp: { startsWith: "10." } },
+      select: { homeIp: true },
+    });
+    for (const u of existingUsers) {
+      if (u.homeIp) {
+        const parts = u.homeIp.split(".");
+        usedOctets.add(Number(parts[1]));
+      }
+    }
+
+    // Build pool of available second octets (1–254)
+    const available: number[] = [];
+    for (let o = 1; o <= 254; o++) {
+      if (!usedOctets.has(o)) {
+        available.push(o);
+      }
+    }
+
+    if (available.length === 0) {
+      // All 254 subnets taken — fall back to generic generation (players may share)
+      this.logger.warn(
+        "All player /16 subnets exhausted, falling back to shared range",
+      );
+      return this.generateUniqueIP(IPZone.PLAYER);
+    }
+
+    // Pick a random available second octet
+    const secondOctet =
+      available[Math.floor(Math.random() * available.length)]!;
+
+    // Generate a random IP within 10.{secondOctet}.0.1 – 10.{secondOctet}.255.254
+    let attempts = 0;
+    const maxAttempts = 100;
+
+    while (attempts < maxAttempts) {
+      const thirdOctet = Math.floor(Math.random() * 256); // 0–255
+      const fourthOctet = Math.floor(Math.random() * 254) + 1; // 1–254
+      const ip = `10.${secondOctet}.${thirdOctet}.${fourthOctet}`;
+
+      if (this.allocatedIPs.has(ip)) {
+        attempts++;
+        continue;
+      }
+      this.allocatedIPs.add(ip);
+
+      if (await this.isIPAvailableInDB(ip)) {
+        this.logger.info(
+          { ip, subnet: `10.${secondOctet}` },
+          "Generated isolated player home IP",
+        );
+        return ip;
+      }
+      attempts++;
+    }
+
+    // Shouldn't happen on a fresh subnet, but handle gracefully
+    throw new Error(
+      `Failed to generate player home IP in subnet 10.${secondOctet}.x.x`,
     );
   }
 
@@ -143,7 +249,13 @@ class IPService {
       return false;
     }
 
-    // Double-check database (authoritative)
+    return this.isIPAvailableInDB(ip);
+  }
+
+  /**
+   * DB-only availability check — used by generateUniqueIP after in-memory reservation.
+   */
+  private async isIPAvailableInDB(ip: string): Promise<boolean> {
     try {
       const userWithIP = await db.client.user.findUnique({
         where: { homeIp: ip },
@@ -165,7 +277,7 @@ class IPService {
 
       return true;
     } catch (error) {
-      console.error("❌ Error checking IP availability:", error);
+      this.logger.error({ err: error }, "Error checking IP availability");
       // Assume not available on error (safer)
       return false;
     }
@@ -185,12 +297,16 @@ class IPService {
       });
 
       if (user?.homeIp) {
-        console.log(`⚠️  User ${userId} already has IP: ${user.homeIp}`);
+        this.logger.warn({ userId, ip: user.homeIp }, "User already has IP");
         return user.homeIp;
       }
 
-      // Generate new unique IP
-      const ip = await this.generateUniqueIP(zone);
+      // For PLAYER zone, use the isolated-subnet generator so each
+      // player gets their own /16.  Other zones use the generic path.
+      const ip =
+        zone === IPZone.PLAYER
+          ? await this.generatePlayerHomeIP()
+          : await this.generateUniqueIP(zone);
 
       // Assign to user in database
       await db.client.user.update({
@@ -198,10 +314,10 @@ class IPService {
         data: { homeIp: ip },
       });
 
-      console.log(`✅ Assigned IP ${ip} to user ${userId}`);
+      this.logger.info({ ip, userId }, "Assigned IP to user");
       return ip;
     } catch (error) {
-      console.error(`❌ Error assigning IP to user ${userId}:`, error);
+      this.logger.error({ err: error, userId }, "Error assigning IP to user");
       throw error;
     }
   }
@@ -218,8 +334,9 @@ class IPService {
       });
 
       if (server?.ipAddress) {
-        console.log(
-          `⚠️  Server ${serverId} already has IP: ${server.ipAddress}`,
+        this.logger.warn(
+          { serverId, ip: server.ipAddress },
+          "Server already has IP",
         );
         return server.ipAddress;
       }
@@ -233,10 +350,13 @@ class IPService {
         data: { ipAddress: ip },
       });
 
-      console.log(`✅ Assigned IP ${ip} to server ${serverId}`);
+      this.logger.info({ ip, serverId }, "Assigned IP to server");
       return ip;
     } catch (error) {
-      console.error(`❌ Error assigning IP to server ${serverId}:`, error);
+      this.logger.error(
+        { err: error, serverId },
+        "Error assigning IP to server",
+      );
       throw error;
     }
   }
@@ -305,7 +425,7 @@ class IPService {
       // IP not found
       return null;
     } catch (error) {
-      console.error(`❌ Error getting IP owner for ${ip}:`, error);
+      this.logger.error({ err: error, ip }, "Error getting IP owner");
       return null;
     }
   }
@@ -388,7 +508,7 @@ class IPService {
         };
       }
     } catch (error) {
-      console.error(`❌ Error discovering IP ${targetIP}:`, error);
+      this.logger.error({ err: error, targetIP }, "Error discovering IP");
       return {
         success: false,
         discovered: false,
@@ -470,7 +590,7 @@ class IPService {
         reachable,
       };
     } catch (error) {
-      console.error(`❌ Error tracing route from ${fromIP} to ${toIP}:`, error);
+      this.logger.error({ err: error, fromIP, toIP }, "Error tracing route");
       return {
         success: false,
         route: [],
@@ -560,9 +680,7 @@ class IPService {
       const rangeSize = endNum - startNum + 1;
 
       if (rangeSize > maxRange) {
-        console.log(
-          `⚠️  Scan range too large: ${rangeSize} IPs (max: ${maxRange})`,
-        );
+        this.logger.warn({ rangeSize, maxRange }, "Scan range too large");
         return [];
       }
 
@@ -586,12 +704,13 @@ class IPService {
         }
       }
 
-      console.log(
-        `📡 Scan from ${rangeStart} to ${rangeEnd}: found ${discovered.length} systems`,
+      this.logger.info(
+        { rangeStart, rangeEnd, found: discovered.length },
+        "IP range scan complete",
       );
       return discovered;
     } catch (error) {
-      console.error("❌ Error scanning IP range:", error);
+      this.logger.error({ err: error }, "Error scanning IP range");
       return [];
     }
   }
@@ -630,13 +749,13 @@ class IPService {
   // ==================== MAINTENANCE ====================
 
   public async refreshAllocatedIPs(): Promise<void> {
-    console.log("🔄 Refreshing allocated IPs...");
+    this.logger.info("Refreshing allocated IPs");
     this.allocatedIPs.clear();
     await this.loadAllocatedIPs();
   }
 
   public async cleanupOrphanedIPs(): Promise<number> {
-    console.log("🧹 Checking for orphaned IPs...");
+    this.logger.info("Checking for orphaned IPs");
 
     try {
       let cleaned = 0;
@@ -654,23 +773,16 @@ class IPService {
         cleaned++;
       }
 
-      console.log(`✅ Cleaned up ${cleaned} orphaned IP allocations`);
+      this.logger.info(
+        { count: cleaned },
+        "Cleaned up orphaned IP allocations",
+      );
       return cleaned;
     } catch (error) {
-      console.error("❌ Error cleaning up orphaned IPs:", error);
+      this.logger.error({ err: error }, "Error cleaning up orphaned IPs");
       return 0;
     }
   }
 }
 
 export default IPService;
-
-// Backward compatibility - lazy singleton that resolves from DI
-import { container } from "../di/container";
-import { IP_SERVICE } from "../di/tokens";
-export const ipService = new Proxy({} as IPService, {
-  get(_target, prop) {
-    const instance = container.resolve(IP_SERVICE as any);
-    return (instance as any)[prop];
-  }
-});

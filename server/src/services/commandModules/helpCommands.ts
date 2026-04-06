@@ -1,5 +1,17 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
+import {
+  helpPanel,
+  multiPanel,
+  numberedLog,
+  render,
+  HelpEntry,
+} from "./asciiBox";
+import {
+  SKILL_REQUIREMENTS,
+  resolveSkillKey,
+  meetsSkillRequirement,
+} from "./skillRequirements";
 
 export class HelpCommandsModule implements CommandModule {
   public commands: Set<string> = new Set(["help", "man", "history", "stats"]);
@@ -73,7 +85,20 @@ export class HelpCommandsModule implements CommandModule {
     context: CommandContext,
   ): Promise<CommandResult> {
     const category = command.args?.[0]?.toLowerCase();
-    const commands = await this.getAvailableCommands(context);
+
+    // Fetch player progress for skill-based filtering
+    const progress = await context.db.client.playerProgress.findUnique({
+      where: { userId: context.userId },
+    });
+    const skills: Record<string, unknown> = progress
+      ? (progress as unknown as Record<string, unknown>)
+      : {};
+
+    const commands = await this.getAvailableCommands(
+      context,
+      undefined,
+      skills,
+    );
 
     // If no category specified, show only categories
     if (!category) {
@@ -88,7 +113,12 @@ export class HelpCommandsModule implements CommandModule {
    * Show available command categories (no commands listed)
    */
   private showCategories(
-    commands: Array<{ command: string; category: string; description: string }>,
+    commands: Array<{
+      command: string;
+      category: string;
+      description: string;
+      locked?: boolean;
+    }>,
   ): CommandResult {
     const categories = [
       { name: "system", desc: "File operations and navigation" },
@@ -102,30 +132,40 @@ export class HelpCommandsModule implements CommandModule {
       { name: "help", desc: "Help and documentation" },
     ];
 
-    // Count commands per category
+    // Count unlocked commands per category
     const categoryCounts: Record<string, number> = {};
+    const lockedCounts: Record<string, number> = {};
     commands.forEach((cmd) => {
-      categoryCounts[cmd.category] = (categoryCounts[cmd.category] || 0) + 1;
-    });
-
-    let output = "=== COMMAND CATEGORIES ===\n\n";
-    output += "Usage: help <category>\n\n";
-
-    categories.forEach(({ name, desc }) => {
-      const count = categoryCounts[name] || 0;
-      if (count > 0) {
-        output += `📁 ${name.toUpperCase()}\n`;
-        output += `   ${desc}\n`;
-        output += `   ${count} command${count !== 1 ? "s" : ""}\n\n`;
+      if (cmd.locked) {
+        lockedCounts[cmd.category] = (lockedCounts[cmd.category] || 0) + 1;
+      } else {
+        categoryCounts[cmd.category] = (categoryCounts[cmd.category] || 0) + 1;
       }
     });
 
-    output += "\nType 'help <category>' to see commands in that category.\n";
-    output += "Example: help system\n";
+    const entries: HelpEntry[] = [];
+    categories.forEach(({ name, desc }) => {
+      const unlocked = categoryCounts[name] || 0;
+      const locked = lockedCounts[name] || 0;
+      const total = unlocked + locked;
+      if (total > 0) {
+        const suffix =
+          locked > 0 ? ` (${unlocked}/${total})` : ` (${unlocked})`;
+        entries.push({
+          command: `help ${name}`,
+          description: `${desc}${suffix}`,
+        });
+      }
+    });
+
+    const lines = helpPanel("COMMAND CATEGORIES", entries, 50);
+    lines.push("");
+    lines.push(" Type 'help <category>' to see commands.");
+    lines.push(" Raise skills to unlock hidden commands.");
 
     return {
       success: true,
-      output,
+      output: render(lines),
       timestamp: new Date(),
     };
   }
@@ -134,7 +174,14 @@ export class HelpCommandsModule implements CommandModule {
    * Show commands for a specific category
    */
   private showCategoryCommands(
-    commands: Array<{ command: string; category: string; description: string; usage: string; examples: string[] }>,
+    commands: Array<{
+      command: string;
+      category: string;
+      description: string;
+      usage: string;
+      examples: string[];
+      locked?: boolean;
+    }>,
     category: string,
   ): CommandResult {
     const categoryCommands = commands.filter(
@@ -163,24 +210,29 @@ export class HelpCommandsModule implements CommandModule {
       };
     }
 
-    let output = `=== ${category.toUpperCase()} COMMANDS ===\n\n`;
+    const unlocked = categoryCommands.filter((cmd) => !cmd.locked);
+    const lockedCount = categoryCommands.length - unlocked.length;
 
-    categoryCommands.forEach((cmd) => {
-      output += `${cmd.command.padEnd(15)} - ${cmd.description}\n`;
-      output += `  Usage: ${cmd.usage}\n`;
-      if (cmd.examples && cmd.examples.length > 0) {
-        output += `  Example: ${cmd.examples[0]}\n`;
-      }
-      output += "\n";
-    });
+    const entries: HelpEntry[] = unlocked.map((cmd) => ({
+      command: cmd.command,
+      description: cmd.description,
+    }));
 
-    output += "Type 'help' to see all categories.\n";
-    output += "Type 'man <command>' for detailed command information.\n";
+    const lines = helpPanel(`${category.toUpperCase()} COMMANDS`, entries, 50);
+    if (lockedCount > 0) {
+      lines.push("");
+      lines.push(
+        ` + ${lockedCount} locked command${lockedCount > 1 ? "s" : ""} (raise skills to unlock)`,
+      );
+    }
+    lines.push("");
+    lines.push(" Type 'help' to see all categories.");
+    lines.push(" Type 'man <command>' for detailed info.");
 
     return {
       success: true,
-      output,
-      data: { commands: categoryCommands },
+      output: render(lines),
+      data: { commands: unlocked },
       timestamp: new Date(),
     };
   }
@@ -197,40 +249,79 @@ export class HelpCommandsModule implements CommandModule {
         timestamp: new Date(),
       };
     }
-    const commands = await this.getAvailableCommands(context);
+
+    // Fetch player progress for skill-based filtering
+    const progress = await context.db.client.playerProgress.findUnique({
+      where: { userId: context.userId },
+    });
+    const skills: Record<string, unknown> = progress
+      ? (progress as unknown as Record<string, unknown>)
+      : {};
+
+    const commands = await this.getAvailableCommands(
+      context,
+      undefined,
+      skills,
+    );
     const cmdInfo = commands.find((cmd) => cmd.command === commandName);
     if (!cmdInfo) {
+      // Check if the command exists but is locked
+      const allCommands = await this.getAvailableCommands(context);
+      const lockedCmd = allCommands.find((cmd) => cmd.command === commandName);
+      if (lockedCmd) {
+        const key = resolveSkillKey(commandName);
+        const req = SKILL_REQUIREMENTS[key];
+        const skillInfo = req ? ` Requires ${req.label} ${req.level}.` : "";
+        return {
+          success: false,
+          output: `Command '${commandName}' is locked.${skillInfo}\nRaise your skills to unlock it.`,
+          timestamp: new Date(),
+        };
+      }
       return {
         success: false,
         output: `No manual entry for '${commandName}'\nType 'help' to see available commands`,
         timestamp: new Date(),
       };
     }
-    const output = [
-      `📖 MANUAL: ${cmdInfo.command.toUpperCase()}`,
-      "",
-      "NAME",
-      `  ${cmdInfo.command} - ${cmdInfo.description}`,
-      "",
-      "SYNOPSIS",
-      `  ${cmdInfo.usage}`,
-      "",
-      "DESCRIPTION",
-      `  ${cmdInfo.description}`,
-      "",
+    const sections: Array<{
+      heading?: string;
+      rows: Array<{ label: string; value: string }>;
+    }> = [
+      {
+        heading: "NAME",
+        rows: [
+          { label: "", value: `${cmdInfo.command} - ${cmdInfo.description}` },
+        ],
+      },
+      {
+        heading: "SYNOPSIS",
+        rows: [{ label: "", value: cmdInfo.usage }],
+      },
+      {
+        heading: "DESCRIPTION",
+        rows: [{ label: "", value: cmdInfo.description }],
+      },
     ];
     if (cmdInfo.examples && cmdInfo.examples.length > 0) {
-      output.push(`EXAMPLES`);
-      cmdInfo.examples.forEach((ex) => {
-        output.push(`  ${ex}`);
+      sections.push({
+        heading: "EXAMPLES",
+        rows: cmdInfo.examples.map((ex) => ({ label: "", value: ex })),
       });
-      output.push("");
     }
-    output.push(`CATEGORY`);
-    output.push(`  ${cmdInfo.category}`);
+    sections.push({
+      heading: "CATEGORY",
+      rows: [{ label: "", value: cmdInfo.category }],
+    });
+
+    const lines = multiPanel(
+      `MANUAL: ${cmdInfo.command.toUpperCase()}`,
+      sections,
+      50,
+    );
     return {
       success: true,
-      output: output.join("\n"),
+      output: render(lines),
       data: { command: cmdInfo },
       timestamp: new Date(),
     };
@@ -241,13 +332,13 @@ export class HelpCommandsModule implements CommandModule {
     context: CommandContext,
   ): Promise<CommandResult> {
     const limit = parseInt(String(command.args?.[0])) || 50;
-    
+
     // Use in-memory history from context
     const userHistory = context.commandHistory.get(context.userId) || [];
-    
+
     // Filter by server if needed (though legacy implementation might not have strictly filtered by server for history command)
     // For now, we'll return global history for the user as per legacy behavior
-    
+
     const history = userHistory
       .slice() // Create a copy
       .reverse() // Newest first
@@ -260,18 +351,20 @@ export class HelpCommandsModule implements CommandModule {
         timestamp: new Date(),
       };
     }
-    const output = ["📜 COMMAND HISTORY\n"];
-    history.forEach((cmd: Command, index: number) => {
+
+    const entries = history.map((cmd: Command, index: number) => {
       const timeStr = new Date(cmd.timestamp).toLocaleTimeString();
       const args = cmd.args as string[];
       const cmdStr = `${cmd.command} ${args.join(" ")}`.trim();
-      output.push(`${String(index + 1).padStart(4)}  ${timeStr}  ${cmdStr}`);
+      return { index: index + 1, time: timeStr, text: cmdStr };
     });
-    output.push(`\nTotal: ${history.length} command${history.length !== 1 ? "s" : ""}`);
-    output.push(`Use 'history <n>' to limit results (max 200)`);
+
+    const footer = `${history.length} command${history.length !== 1 ? "s" : ""} | Use 'history <n>' to limit (max 200)`;
+    const lines = numberedLog("COMMAND HISTORY", entries, 50, footer);
+
     return {
       success: true,
-      output: output.join("\n"),
+      output: render(lines),
       data: { history },
       timestamp: new Date(),
     };
@@ -283,28 +376,23 @@ export class HelpCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const history = context.commandHistory.get(context.userId) || [];
     const availableCommands = await this.getAvailableCommands(context);
-    
+
     // Create a map of command -> category
     const commandCategories = new Map<string, string>();
-    availableCommands.forEach(cmd => {
+    availableCommands.forEach((cmd) => {
       commandCategories.set(cmd.command, cmd.category);
     });
 
     // Count total commands
     const totalCommands = history.length;
 
-    // Count by category
-    const commandsByCategory: Record<string, number> = {
-      system: 0,
-      network: 0,
-      hack: 0,
-      file: 0,
-      social: 0,
-      game: 0,
-      help: 0,
-      process: 0,
-      math: 0
-    };
+    // Count by category (dynamically built from available commands)
+    const commandsByCategory: Record<string, number> = {};
+    availableCommands.forEach((cmd) => {
+      if (!commandsByCategory[cmd.category]) {
+        commandsByCategory[cmd.category] = 0;
+      }
+    });
 
     // Count command frequency
     const commandCounts: Record<string, number> = {};
@@ -314,10 +402,8 @@ export class HelpCommandsModule implements CommandModule {
 
     history.forEach((cmd) => {
       // Count by category
-      const category = commandCategories.get(cmd.command) || 'unknown';
-      if (commandsByCategory[category] !== undefined) {
-        commandsByCategory[category]++;
-      }
+      const category = commandCategories.get(cmd.command) || "other";
+      commandsByCategory[category] = (commandsByCategory[category] || 0) + 1;
 
       // Count command frequency
       commandCounts[cmd.command] = (commandCounts[cmd.command] || 0) + 1;
@@ -341,53 +427,86 @@ export class HelpCommandsModule implements CommandModule {
       .sort((a, b) => b.date.localeCompare(a.date))
       .slice(0, 7);
 
-    const output = [
-      "=== COMMAND STATISTICS ===\n",
-      `Total Commands: ${totalCommands}`,
-      `Success Rate: 100% (Tracking not implemented)\n`,
-      `Commands by Category:`,
-    ];
+    const sections: Array<{
+      heading?: string;
+      rows: Array<{ label: string; value: string }>;
+    }> = [];
 
-    Object.entries(commandsByCategory).forEach(([category, count]) => {
-      if (count > 0) {
-        const percentage = totalCommands > 0 ? ((count / totalCommands) * 100).toFixed(1) : "0.0";
-        output.push(`  ${category.padEnd(12)} : ${count} (${percentage}%)`);
-      }
+    // Overview section
+    sections.push({
+      rows: [
+        { label: "Total Commands:  ", value: String(totalCommands) },
+        {
+          label: "Success Rate:    ",
+          value: "100% (Tracking not implemented)",
+        },
+      ],
     });
 
-    if (mostUsedCommands.length > 0) {
-      output.push(`\nMost Used Commands:`);
-      mostUsedCommands.slice(0, 5).forEach((cmd, index) => {
-        output.push(
-          `  ${index + 1}. ${cmd.command.padEnd(12)} : ${cmd.count} times`,
-        );
-      });
+    // Commands by category section
+    const categoryRows: Array<{ label: string; value: string }> = [];
+    Object.entries(commandsByCategory).forEach(([category, count]) => {
+      if (count > 0) {
+        const percentage =
+          totalCommands > 0
+            ? ((count / totalCommands) * 100).toFixed(1)
+            : "0.0";
+        categoryRows.push({
+          label: `${category.padEnd(12)} `,
+          value: `${count} (${percentage}%)`,
+        });
+      }
+    });
+    if (categoryRows.length > 0) {
+      sections.push({ heading: "Commands by Category", rows: categoryRows });
     }
 
-    if (recentActivity.length > 0) {
-      output.push(`\nRecent Activity:`);
-      recentActivity.forEach((day) => {
-        output.push(`  ${day.date}: ${day.count} commands`);
-      });
+    // Most used commands section
+    if (mostUsedCommands.length > 0) {
+      const usedRows = mostUsedCommands.slice(0, 5).map((cmd, index) => ({
+        label: `${index + 1}. ${cmd.command.padEnd(12)} `,
+        value: `${cmd.count} times`,
+      }));
+      sections.push({ heading: "Most Used Commands", rows: usedRows });
     }
+
+    // Recent activity section
+    if (recentActivity.length > 0) {
+      const activityRows = recentActivity.map((day) => ({
+        label: `${day.date}  `,
+        value: `${day.count} commands`,
+      }));
+      sections.push({ heading: "Recent Activity", rows: activityRows });
+    }
+
+    const lines = multiPanel("COMMAND STATISTICS", sections, 50);
 
     return {
       success: true,
-      output: output.join("\n"),
+      output: render(lines),
       data: {
         totalCommands,
         commandsByCategory,
         mostUsedCommands,
         recentActivity,
-        successRate: 100
+        successRate: 100,
       },
       timestamp: new Date(),
     };
   }
 
+  /**
+   * Dynamically discover commands from all registered modules via getCommandInfo().
+   * Falls back to listing command names if a module doesn't implement getCommandInfo().
+   *
+   * When `playerSkills` is provided, commands whose skill requirements the player
+   * hasn't met are tagged with `locked: true` and excluded from the default result.
+   * Pass no skills to get the unfiltered list (used by handleStats, etc.).
+   */
   private async getAvailableCommands(
-    _context: CommandContext,
+    context: CommandContext,
     category?: string,
+    playerSkills?: Record<string, unknown>,
   ): Promise<
     Array<{
       command: string;
@@ -395,215 +514,74 @@ export class HelpCommandsModule implements CommandModule {
       description: string;
       usage: string;
       examples: string[];
+      locked?: boolean;
     }>
   > {
-    const allCommands = [
-      // System Commands
-      {
-        command: "ls",
-        category: "system",
-        description: "List files and directories",
-        usage: "ls [directory]",
-        examples: ["ls", "ls /home", "ls .."],
-      },
-      {
-        command: "cd",
-        category: "system",
-        description: "Change current directory",
-        usage: "cd <directory>",
-        examples: ["cd /home", "cd ..", "cd ~"],
-      },
-      {
-        command: "pwd",
-        category: "system",
-        description: "Print working directory",
-        usage: "pwd",
-        examples: ["pwd"],
-      },
-      {
-        command: "cat",
-        category: "system",
-        description: "Display file contents",
-        usage: "cat <file>",
-        examples: ["cat file.txt", "cat /etc/config"],
-      },
-      {
-        command: "mkdir",
-        category: "system",
-        description: "Create a new directory",
-        usage: "mkdir <directory>",
-        examples: ["mkdir newfolder", "mkdir /home/data"],
-      },
-      {
-        command: "rm",
-        category: "system",
-        description: "Remove files or directories",
-        usage: "rm <file>",
-        examples: ["rm file.txt", "rm -r folder"],
-      },
-      // File Commands
-      {
-        command: "upload",
-        category: "file",
-        description: "Upload a file to current server",
-        usage: "upload <filename> <content>",
-        examples: ["upload script.sh 'echo hello'"],
-      },
-      {
-        command: "download",
-        category: "file",
-        description: "Download a file from current server",
-        usage: "download <filename>",
-        examples: ["download data.txt"],
-      },
-      {
-        command: "encrypt",
-        category: "file",
-        description: "Encrypt a file",
-        usage: "encrypt <filename>",
-        examples: ["encrypt secrets.txt"],
-      },
-      {
-        command: "decrypt",
-        category: "file",
-        description: "Decrypt a file",
-        usage: "decrypt <filename>",
-        examples: ["decrypt secrets.txt.enc"],
-      },
-      {
-        command: "analyze",
-        category: "file",
-        description: "Analyze file for vulnerabilities",
-        usage: "analyze <filename>",
-        examples: ["analyze system.log"],
-      },
-      // Process Commands
-      {
-        command: "ps",
-        category: "process",
-        description: "List running processes",
-        usage: "ps",
-        examples: ["ps"],
-      },
-      {
-        command: "top",
-        category: "process",
-        description: "Display system resource usage",
-        usage: "top",
-        examples: ["top"],
-      },
-      {
-        command: "kill",
-        category: "process",
-        description: "Terminate a process",
-        usage: "kill [-SIGNAL] <pid>",
-        examples: ["kill 1234", "kill -KILL 5678"],
-      },
-      {
-        command: "free",
-        category: "process",
-        description: "Display memory usage",
-        usage: "free",
-        examples: ["free"],
-      },
-      {
-        command: "uptime",
-        category: "process",
-        description: "Show system uptime and load",
-        usage: "uptime",
-        examples: ["uptime"],
-      },
-      // Math Commands
-      {
-        command: "calc",
-        category: "math",
-        description: "Evaluate mathematical expressions",
-        usage: "calc <expression>",
-        examples: ["calc 2 + 3 * 4", "calc sqrt(16)", "calc x = 10"],
-      },
-      {
-        command: "vars",
-        category: "math",
-        description: "List defined variables",
-        usage: "vars",
-        examples: ["vars"],
-      },
-      {
-        command: "convert",
-        category: "math",
-        description: "Convert units",
-        usage: "convert <value> <from> <to>",
-        examples: ["convert 10 km mi", "convert 32 f c"],
-      },
-      {
-        command: "random",
-        category: "math",
-        description: "Generate random numbers",
-        usage: "random [max] or random <min> <max>",
-        examples: ["random", "random 100", "random 1 10"],
-      },
-      // Network Commands
-      {
-        command: "scan",
-        category: "network",
-        description: "Scan for available servers",
-        usage: "scan [-l<level>]",
-        examples: ["scan", "scan -l5"],
-      },
-      {
-        command: "connect",
-        category: "network",
-        description: "Connect to a server",
-        usage: "connect <server_id>",
-        examples: ["connect 192.168.1.1"],
-      },
-      {
-        command: "disconnect",
-        category: "network",
-        description: "Disconnect from current server",
-        usage: "disconnect",
-        examples: ["disconnect"],
-      },
-      {
-        command: "probe",
-        category: "network",
-        description: "Get server information",
-        usage: "probe <server_id>",
-        examples: ["probe 192.168.1.1"],
-      },
-      {
-        command: "traceroute",
-        category: "network",
-        description: "Trace network path to server",
-        usage: "traceroute <server_id>",
-        examples: ["traceroute 192.168.1.1"],
-      },
-      // Help Commands
-      {
-        command: "help",
-        category: "help",
-        description: "Show available commands",
-        usage: "help [category]",
-        examples: ["help", "help network"],
-      },
-      {
-        command: "man",
-        category: "help",
-        description: "Show command manual",
-        usage: "man <command>",
-        examples: ["man scan"],
-      },
-      {
-        command: "history",
-        category: "help",
-        description: "Show command history",
-        usage: "history [limit]",
-        examples: ["history", "history 20"],
-      },
-    ];
-    if (category) {
-      return allCommands.filter((cmd) => cmd.category === category);
+    const allCommands: Array<{
+      command: string;
+      category: string;
+      description: string;
+      usage: string;
+      examples: string[];
+      locked?: boolean;
+    }> = [];
+
+    for (const mod of context.modules) {
+      if (mod.getCommandInfo) {
+        const infos = mod.getCommandInfo();
+        for (const info of infos) {
+          let locked = false;
+          if (playerSkills) {
+            locked = !meetsSkillRequirement(
+              info.command,
+              undefined,
+              playerSkills,
+            );
+          }
+          allCommands.push({
+            command: info.command,
+            category: info.category,
+            description: info.description,
+            usage: info.usage,
+            examples: info.examples || [],
+            locked,
+          });
+        }
+      } else {
+        // Fallback: list command names with minimal info
+        for (const cmd of mod.commands) {
+          let locked = false;
+          if (playerSkills) {
+            locked = !meetsSkillRequirement(cmd, undefined, playerSkills);
+          }
+          allCommands.push({
+            command: cmd,
+            category: "other",
+            description: `${cmd} command`,
+            usage: cmd,
+            examples: [],
+            locked,
+          });
+        }
+      }
     }
-    return allCommands;
+
+    // Deduplicate by command name
+    const seen = new Set<string>();
+    const deduplicated = allCommands.filter((cmd) => {
+      if (seen.has(cmd.command)) return false;
+      seen.add(cmd.command);
+      return true;
+    });
+
+    let filtered = deduplicated;
+    if (category) {
+      filtered = filtered.filter((cmd) => cmd.category === category);
+    }
+
+    // When skills are provided, only return unlocked commands
+    // but keep locked ones tagged so callers like showCategoryCommands
+    // can count them
+    return filtered;
   }
 }

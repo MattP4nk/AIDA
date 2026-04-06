@@ -8,10 +8,19 @@ import {
 } from "../services/socket";
 import type {
   User,
-  PlayerProgress,
-  GameServer,
+  GameServerInfo,
   FileSystemNode,
 } from "../../../shared/types";
+
+// Local type – the server endpoint returns an untyped bag; we only rely on
+// `discoveryLevel` today, so keep this open with an index signature.
+export interface PlayerProgress {
+  discoveryLevel?: number;
+  [key: string]: any;
+}
+
+// Alias so the rest of the file can keep using the short name "GameServer"
+type GameServer = GameServerInfo;
 
 // ==================== OUTPUT & TERMINAL ====================
 

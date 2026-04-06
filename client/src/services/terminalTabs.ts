@@ -233,15 +233,19 @@ const createTerminalTabsStore = () => {
       type: OutputLine["type"],
     ) => {
       update((state) => {
-        const lines = state.outputLines.get(terminalId) || [];
-        lines.push({
-          id: lineIdCounter++,
-          text,
-          type,
-          timestamp: new Date(),
-        });
-        state.outputLines.set(terminalId, lines);
-        return state;
+        const existing = state.outputLines.get(terminalId) || [];
+        const newLines = [
+          ...existing,
+          {
+            id: lineIdCounter++,
+            text,
+            type,
+            timestamp: new Date(),
+          },
+        ];
+        const newOutputLines = new Map(state.outputLines);
+        newOutputLines.set(terminalId, newLines);
+        return { ...state, outputLines: newOutputLines };
       });
     },
 

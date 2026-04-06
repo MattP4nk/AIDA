@@ -1,5 +1,7 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
+import { sanitizePath } from "../../utils/pathSanitizer";
+import { table, list, render, Column } from "./asciiBox";
 
 export class SystemCommandsModule implements CommandModule {
   public commands: Set<string> = new Set([
@@ -151,14 +153,21 @@ export class SystemCommandsModule implements CommandModule {
         category: "system",
         description: "Display text or write to file",
         usage: "echo <text> [> | >>] [file]",
-        examples: ["echo hello", "echo 'test' > file.txt", "echo 'more' >> file.txt"],
+        examples: [
+          "echo hello",
+          "echo 'test' > file.txt",
+          "echo 'more' >> file.txt",
+        ],
       },
       {
         command: "write",
         category: "system",
         description: "Write content to a file",
         usage: "write <filename> <content>",
-        examples: ["write notes.txt This is my note", "write /tmp/data.txt Important information"],
+        examples: [
+          "write notes.txt This is my note",
+          "write /tmp/data.txt Important information",
+        ],
       },
     ];
   }
@@ -188,13 +197,13 @@ export class SystemCommandsModule implements CommandModule {
 
       const session = this.getSession(context);
       const currentDir = session?.currentDirectory || "/";
-      
+
       // Resolve path (absolute or relative)
       let path = command.args[0] || currentDir;
       if (!path.startsWith("/")) {
-        path =
-          currentDir === "/" ? `/${path}` : `${currentDir}/${path}`;
+        path = currentDir === "/" ? `/${path}` : `${currentDir}/${path}`;
       }
+      path = sanitizePath(path);
 
       const showHidden = command.args.includes("-a");
       const result = await context.fileService.listDirectory(
@@ -214,31 +223,39 @@ export class SystemCommandsModule implements CommandModule {
 
       // Format output
       const entries = result.data?.entries || [];
-      let output: string | string[] = "";
+      let output = "";
 
       if (command.args.includes("-l")) {
-        // Long format
-        output = entries.map((entry: any) => {
-          const type = entry.type === "directory" ? "d" : "-";
-          const perms = entry.permissions || "rwxr-xr-x";
-          const size = entry.size.toString().padStart(8);
-          const date = new Date(entry.modified).toLocaleString();
-          const name = entry.name;
-          return `${type}${perms} ${size} ${date} ${name}`;
-        });
+        // Long format — table with box-drawing borders
+        const columns: Column[] = [
+          { header: "TYPE", width: 4 },
+          { header: "PERMS", width: 9 },
+          { header: "SIZE", width: 10, align: "right" },
+          { header: "DATE", width: 20 },
+          { header: "NAME", width: 24 },
+        ];
+        const rows = entries.map((entry: any) => [
+          entry.type === "directory" ? "d" : "-",
+          entry.permissions || "rwxr-xr-x",
+          entry.size.toString(),
+          new Date(entry.modified).toLocaleString(),
+          entry.name,
+        ]);
+        output = render(table(columns, rows));
       } else {
-        // Short format
-        output = entries.map((entry: any) => {
+        // Short format — bordered list with bullet points
+        const items = entries.map((entry: any) => {
           const name =
             entry.type === "directory" ? `${entry.name}/` : entry.name;
-          const encrypted = entry.isEncrypted ? " 🔒" : "";
+          const encrypted = entry.isEncrypted ? " [ENC]" : "";
           return `${name}${encrypted}`;
         });
+        output = render(list(path, items));
       }
 
       return {
         success: true,
-        output: Array.isArray(output) ? output.join("\n") : output,
+        output,
         timestamp: new Date(),
       };
     } catch (error) {
@@ -269,15 +286,22 @@ export class SystemCommandsModule implements CommandModule {
       const currentDir = session?.currentDirectory || "/";
       let targetDir = command.args[0] || "/";
 
+      // Handle ~ as home directory
+      if (targetDir === "~" || targetDir.startsWith("~/")) {
+        const homeDir = `/home/${session?.userId || "user"}`;
+        targetDir =
+          targetDir === "~" ? homeDir : targetDir.replace("~", homeDir);
+      }
+
       // Handle relative paths
       if (!targetDir.startsWith("/")) {
         targetDir =
           currentDir === "/" ? `/${targetDir}` : `${currentDir}/${targetDir}`;
       }
 
-      // Verify directory exists using listDirectory (hacky but effective if resolvePath isn't public)
-      // Actually, we should expose resolvePath or just try to list it.
-      // Better: use listDirectory to check existence.
+      // Sanitize path to resolve .. and . components safely
+      targetDir = sanitizePath(targetDir);
+
       const result = await context.fileService.listDirectory(
         serverId,
         context.userId,
@@ -372,9 +396,82 @@ export class SystemCommandsModule implements CommandModule {
         };
       }
 
+      let output = result.data?.content || "";
+
+      // DarkNet vault conquest: reading vault_payload.enc triggers reward
+      if (filename === "vault_payload.enc") {
+        try {
+          const { getService } = await import("../../di/container");
+          const { DARKNET_DUNGEON_SERVICE } = await import("../../di/tokens");
+          const dungeonService = getService<
+            import("../darknetDungeonService").DarkNetDungeonService
+          >(DARKNET_DUNGEON_SERVICE);
+          const conquest = await dungeonService.conquerVault(
+            context.userId,
+            serverId,
+          );
+          if (conquest.conquered && conquest.reward) {
+            const rewardLines = [
+              "",
+              "╔══════════════════════════════════════════╗",
+              "║        ⚡ VAULT CONQUERED ⚡             ║",
+              "╠══════════════════════════════════════════╣",
+              `║  Reward: ${String(conquest.reward.type).replace(/_/g, " ").toUpperCase().padEnd(30)}║`,
+              "║                                          ║",
+              "║  The signal shifts. This network will    ║",
+              "║  collapse. A new path will emerge...     ║",
+              "║                                          ║",
+              "║           — The Architect                ║",
+              "╚══════════════════════════════════════════╝",
+            ];
+            output += "\n" + rewardLines.join("\n");
+          }
+        } catch {
+          /* DarkNet dungeon service not available */
+        }
+      }
+
+      // DarkNet discovery: reading .aida files triggers discovery check
+      if (filename.startsWith(".aida") || filename.endsWith(".aida")) {
+        try {
+          const { getService } = await import("../../di/container");
+          const darknetService = getService<
+            import("../darknetDiscoveryService").default
+          >("DarkNetDiscoveryService");
+          const discovered = await darknetService.checkDiscoveryTrigger(
+            context.userId,
+            {
+              type: "hidden_file",
+              metadata: { filename, serverId },
+            },
+          );
+          if (discovered) {
+            output +=
+              "\n\n[SYSTEM] Something shifted in the network. A new faction has appeared in your faction list...";
+          }
+        } catch {
+          /* DarkNet service not available */
+        }
+      }
+
+      // Apply censorship filtering to file content on faction-owned servers
+      try {
+        const { getService } = await import("../../di/container");
+        const censorshipService =
+          getService<import("../censorshipService").default>(
+            "CensorshipService",
+          );
+        output = await censorshipService.filterAndAlert(output, {
+          userId: context.userId,
+          serverId,
+        });
+      } catch {
+        /* Censorship service not available */
+      }
+
       return {
         success: true,
-        output: result.data?.content || "",
+        output,
         timestamp: new Date(),
       };
     } catch (error) {
@@ -523,7 +620,8 @@ export class SystemCommandsModule implements CommandModule {
       }
 
       const fileName = command.args[0]!;
-      const recursive = command.args.includes("-r") || command.args.includes("-R");
+      const recursive =
+        command.args.includes("-r") || command.args.includes("-R");
       const serverId = this.getServerId(context);
       if (!serverId) {
         return {
@@ -597,7 +695,7 @@ export class SystemCommandsModule implements CommandModule {
 
       const session = this.getSession(context);
       const currentDir = session?.currentDirectory || "/";
-      
+
       let sourcePath = source;
       if (!sourcePath.startsWith("/")) {
         sourcePath =
@@ -666,7 +764,7 @@ export class SystemCommandsModule implements CommandModule {
 
       const session = this.getSession(context);
       const currentDir = session?.currentDirectory || "/";
-      
+
       let sourcePath = source;
       if (!sourcePath.startsWith("/")) {
         sourcePath =
@@ -720,7 +818,10 @@ export class SystemCommandsModule implements CommandModule {
     const writeMatch = fullCommand.match(/echo\s+(.+?)\s+>\s+([^\>].+)/);
 
     if (appendMatch || writeMatch) {
-      const content = (appendMatch ? appendMatch[1] : writeMatch![1])!.replace(/^["']|["']$/g, "");
+      const content = (appendMatch ? appendMatch[1] : writeMatch![1])!.replace(
+        /^["']|["']$/g,
+        "",
+      );
       const filename = (appendMatch ? appendMatch[2] : writeMatch![2])!.trim();
       const append = !!appendMatch;
 
@@ -744,14 +845,14 @@ export class SystemCommandsModule implements CommandModule {
       // Use updateFileContent if file exists, or create if not
       // Actually updateFileContent handles both? No, I implemented it to check existence.
       // If it's a write (overwrite) or append, we need to handle creation if it doesn't exist.
-      
+
       // Try to update first
       let result = await context.fileService.updateFileContent(
         serverId,
         context.userId,
         filePath,
         content,
-        append
+        append,
       );
 
       // If not found and we are writing (or appending to new file), create it
@@ -761,7 +862,7 @@ export class SystemCommandsModule implements CommandModule {
           context.userId,
           filePath,
           content,
-          false
+          false,
         );
       }
 
@@ -838,7 +939,7 @@ export class SystemCommandsModule implements CommandModule {
       context.userId,
       filePath,
       content,
-      false // overwrite
+      false, // overwrite
     );
 
     // If not found, create
@@ -848,7 +949,7 @@ export class SystemCommandsModule implements CommandModule {
         context.userId,
         filePath,
         content,
-        false
+        false,
       );
     }
 

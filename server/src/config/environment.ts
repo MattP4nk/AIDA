@@ -112,6 +112,11 @@ export const isDevelopment = config.NODE_ENV === "development";
 export const isProduction = config.NODE_ENV === "production";
 export const isTest = config.NODE_ENV === "test";
 
+/** Single source of truth for allowed CORS origins */
+export const CORS_ORIGINS: string | string[] =
+  process.env.CORS_ORIGIN ||
+  ["http://localhost:8080", "http://localhost:8081", "http://localhost:5173"];
+
 // Validation
 export const validateConfig = (): void => {
   const required = ["DATABASE_URL", "JWT_SECRET"];
