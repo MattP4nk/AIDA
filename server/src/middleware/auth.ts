@@ -2,24 +2,64 @@ import { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 import logger from "../logger";
 import { prisma } from "../database/client";
-import { config } from "../config/environment";
+import { config, isProduction } from "../config/environment";
+
+// ── Cookie configuration ─────────────────────────────────────────
+export const AUTH_COOKIE_NAME = "aida_token";
+export const AUTH_COOKIE_OPTIONS: {
+  httpOnly: boolean;
+  secure: boolean;
+  sameSite: "strict" | "lax" | "none";
+  maxAge: number;
+  path: string;
+} = {
+  httpOnly: true,
+  secure: true, // Required for sameSite=none; localhost is treated as secure context by browsers
+  sameSite: isProduction ? "strict" : "none", // 'none' required for cross-origin cookie in dev (port 8080 → 3001)
+  maxAge: 24 * 60 * 60 * 1000, // 24 hours (matches JWT expiry)
+  path: "/",
+};
 
 // ── Auth session cache ────────────────────────────────────────────
 // Keyed by token; avoids 2 DB queries on every authenticated request.
 // TTL is intentionally short so changes (ban, deactivation) take effect quickly.
 const AUTH_CACHE_TTL_MS = 60_000; // 60 seconds
+const AUTH_CACHE_MAX_SIZE = 1000;
+const AUTH_CACHE_CLEANUP_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
+
 interface AuthCacheEntry {
   user: { id: string; username: string; email: string; homeIp: string; isActive: boolean; isOnline: boolean; role: string };
   expiresAt: number;
 }
 const authCache = new Map<string, AuthCacheEntry>();
 
+// Periodic cleanup — prevents memory leak from accumulated expired tokens
+const authCacheCleanupTimer = setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of authCache) {
+    if (entry.expiresAt <= now) {
+      authCache.delete(key);
+    }
+  }
+}, AUTH_CACHE_CLEANUP_INTERVAL_MS);
+authCacheCleanupTimer.unref(); // Don't prevent process exit
+
 export function invalidateAuthCache(token: string): void {
   authCache.delete(token);
 }
 
+/** Invalidate all cached sessions for a specific user (e.g., on ban). */
+export function invalidateAuthCacheForUser(userId: string): void {
+  for (const [token, entry] of authCache) {
+    if (entry.user.id === userId) {
+      authCache.delete(token);
+    }
+  }
+}
+
 // Extend Express Request interface to include user
 declare global {
+  // eslint-disable-next-line @typescript-eslint/no-namespace
   namespace Express {
     interface Request {
       user?: {
@@ -41,11 +81,14 @@ export const authenticateToken = async (
   next: NextFunction,
 ) => {
   try {
+    // Read token from httpOnly cookie first, fall back to Authorization header
+    const cookieToken = req.cookies?.[AUTH_COOKIE_NAME];
     const authHeader = req.headers.authorization;
-    const token =
+    const headerToken =
       authHeader && authHeader.startsWith("Bearer ")
         ? authHeader.substring(7)
         : null;
+    const token = cookieToken || headerToken;
 
     if (!token) {
       return res.status(401).json({
@@ -106,7 +149,11 @@ export const authenticateToken = async (
       });
     }
 
-    // Store in cache
+    // Store in cache (evict oldest if full)
+    if (authCache.size >= AUTH_CACHE_MAX_SIZE) {
+      const firstKey = authCache.keys().next().value;
+      if (firstKey) authCache.delete(firstKey);
+    }
     authCache.set(token, { user, expiresAt: Date.now() + AUTH_CACHE_TTL_MS });
 
     // Attach user to request
@@ -137,11 +184,14 @@ export const optionalAuth = async (
   next: NextFunction,
 ): Promise<void> => {
   try {
+    // Read token from httpOnly cookie first, fall back to Authorization header
+    const cookieToken = req.cookies?.[AUTH_COOKIE_NAME];
     const authHeader = req.headers.authorization;
-    const token =
+    const headerToken =
       authHeader && authHeader.startsWith("Bearer ")
         ? authHeader.substring(7)
         : null;
+    const token = cookieToken || headerToken;
 
     if (!token) {
       return next(); // Continue without user
@@ -178,6 +228,10 @@ export const optionalAuth = async (
       });
 
       if (user && user.isActive) {
+        if (authCache.size >= AUTH_CACHE_MAX_SIZE) {
+          const firstKey = authCache.keys().next().value;
+          if (firstKey) authCache.delete(firstKey);
+        }
         authCache.set(token, { user, expiresAt: Date.now() + AUTH_CACHE_TTL_MS });
         req.user = user;
       }
@@ -226,6 +280,10 @@ export const verifySocketToken = async (token: string) => {
     });
 
     if (user && user.isActive) {
+      if (authCache.size >= AUTH_CACHE_MAX_SIZE) {
+        const firstKey = authCache.keys().next().value;
+        if (firstKey) authCache.delete(firstKey);
+      }
       authCache.set(token, { user, expiresAt: Date.now() + AUTH_CACHE_TTL_MS });
       return user;
     }
@@ -270,11 +328,21 @@ export const requireRole = (minimumRole: string) => {
   };
 };
 
-// Rate limiting per user (with periodic cleanup to prevent memory leak)
+// Rate limiting per user (with timer-based cleanup to prevent memory leak)
 export const userRateLimit = (requestsPerMinute: number) => {
   const userRequests = new Map<string, { count: number; resetTime: number }>();
-  let lastCleanup = Date.now();
   const CLEANUP_INTERVAL = 5 * 60 * 1000; // Clean up every 5 minutes
+
+  // Timer-based cleanup — runs regardless of request activity
+  const cleanupTimer = setInterval(() => {
+    const now = Date.now();
+    for (const [key, entry] of userRequests) {
+      if (now > entry.resetTime) {
+        userRequests.delete(key);
+      }
+    }
+  }, CLEANUP_INTERVAL);
+  cleanupTimer.unref(); // Don't prevent process exit
 
   return (req: Request, res: Response, next: NextFunction): void => {
     const userId = req.user?.id;
@@ -283,17 +351,6 @@ export const userRateLimit = (requestsPerMinute: number) => {
     }
 
     const now = Date.now();
-
-    // Periodic cleanup of expired entries
-    if (now - lastCleanup > CLEANUP_INTERVAL) {
-      for (const [key, entry] of userRequests.entries()) {
-        if (now > entry.resetTime) {
-          userRequests.delete(key);
-        }
-      }
-      lastCleanup = now;
-    }
-
     const resetTime = now + 60 * 1000; // 1 minute from now
     const userLimit = userRequests.get(userId);
 

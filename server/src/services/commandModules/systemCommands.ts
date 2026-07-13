@@ -454,6 +454,41 @@ export class SystemCommandsModule implements CommandModule {
         }
       }
 
+      // Key fragment discovery: check if this server contains a fragment
+      try {
+        const { getService } = await import("../../di/container");
+        const { KEY_FRAGMENT_SERVICE } = await import("../../di/tokens");
+        const keyFragmentService =
+          getService<import("../keyFragmentService").KeyFragmentService>(
+            KEY_FRAGMENT_SERVICE,
+          );
+        const fragmentResult = await keyFragmentService.checkServerFragment(
+          context.userId,
+          serverId,
+        );
+        if (fragmentResult.claimed && fragmentResult.fragment) {
+          const frag = fragmentResult.fragment;
+          output +=
+            "\n\n" +
+            "╔══════════════════════════════════════════╗\n" +
+            "║       ◆ FRAGMENT CLAIMED ◆              ║\n" +
+            "╠══════════════════════════════════════════╣\n" +
+            `║  ${String(frag.name).padEnd(38)}║\n` +
+            `║  Type: ${String(frag.keyType).toUpperCase().padEnd(33)}║\n` +
+            "║                                          ║\n" +
+            "║  You now hold this piece of AIDA.        ║\n" +
+            "║  Use 'fragments' to view your holdings.  ║\n" +
+            "╚══════════════════════════════════════════╝";
+        } else if (!fragmentResult.claimed && fragmentResult.currentHolder) {
+          output +=
+            "\n\n[INTEL] This server contains an AIDA fragment, but it is already held by " +
+            fragmentResult.currentHolder +
+            ". Hack their home server to steal it, or negotiate a trade.";
+        }
+      } catch {
+        /* Key fragment service not available */
+      }
+
       // Apply censorship filtering to file content on faction-owned servers
       try {
         const { getService } = await import("../../di/container");

@@ -86,3 +86,6 @@ export const ARCHITECT_INTERVENTION_EXECUTOR = "ArchitectInterventionExecutor";
 
 // DarkNet Dungeon
 export const DARKNET_DUNGEON_SERVICE = "DarkNetDungeonService";
+
+// Key Fragment / Endgame
+export const KEY_FRAGMENT_SERVICE = "KeyFragmentService";

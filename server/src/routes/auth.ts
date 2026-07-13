@@ -5,7 +5,7 @@ import jwt from "jsonwebtoken";
 import logger from "../logger";
 import { prisma } from "../database/client";
 import { config } from "../config/environment";
-import { authenticateToken, invalidateAuthCache } from "../middleware/auth";
+import { authenticateToken, invalidateAuthCache, AUTH_COOKIE_NAME, AUTH_COOKIE_OPTIONS } from "../middleware/auth";
 import { getService } from "../di/container";
 import { FACTION_SERVICE, IP_SERVICE } from "../di/tokens";
 import type { FactionService } from "../services/factionService";
@@ -251,6 +251,9 @@ router.post(
         },
       });
 
+      // Set httpOnly cookie with JWT
+      res.cookie(AUTH_COOKIE_NAME, token, AUTH_COOKIE_OPTIONS);
+
       const response: AuthResponse = {
         success: true,
         token,
@@ -355,6 +358,9 @@ router.post(
         },
       });
 
+      // Set httpOnly cookie with JWT
+      res.cookie(AUTH_COOKIE_NAME, token, AUTH_COOKIE_OPTIONS);
+
       // Remove password from response
       const { password: _, ...userWithoutPassword } = user;
 
@@ -390,7 +396,10 @@ router.post("/logout", authenticateToken, async (req, res) => {
       return;
     }
 
-    const token = req.headers.authorization?.replace("Bearer ", "");
+    // Read token from cookie or header
+    const token =
+      req.cookies?.[AUTH_COOKIE_NAME] ||
+      req.headers.authorization?.replace("Bearer ", "");
 
     if (token) {
       // Evict from auth cache immediately so the token stops working at once
@@ -421,6 +430,9 @@ router.post("/logout", authenticateToken, async (req, res) => {
       });
     }
 
+    // Clear the httpOnly cookie
+    res.clearCookie(AUTH_COOKIE_NAME, { path: "/" });
+
     res.json({
       success: true,
       message: "Logged out successfully",
@@ -439,7 +451,9 @@ router.post("/logout", authenticateToken, async (req, res) => {
 // Verify Token
 router.get("/verify", async (req: any, res: any) => {
   try {
-    const token = req.headers.authorization?.replace("Bearer ", "");
+    const token =
+      req.cookies?.[AUTH_COOKIE_NAME] ||
+      req.headers.authorization?.replace("Bearer ", "");
 
     if (!token) {
       return res.status(401).json({
@@ -494,6 +508,7 @@ router.get("/verify", async (req: any, res: any) => {
 
     res.json({
       success: true,
+      token, // Return token so client can restore it for Socket.IO auth
       user,
       timestamp: new Date(),
     });
@@ -504,6 +519,54 @@ router.get("/verify", async (req: any, res: any) => {
       error: "Invalid token",
       timestamp: new Date(),
     });
+  }
+});
+
+// Refresh Token — issues a new JWT + cookie, deactivates old session
+router.post("/refresh", authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      res.status(401).json({ success: false, error: "Not authenticated", timestamp: new Date() });
+      return;
+    }
+
+    // Deactivate old session
+    const oldToken =
+      req.cookies?.[AUTH_COOKIE_NAME] ||
+      req.headers.authorization?.replace("Bearer ", "");
+    if (oldToken) {
+      invalidateAuthCache(oldToken);
+      await prisma.userSession.updateMany({
+        where: { token: oldToken, userId },
+        data: { isActive: false },
+      });
+    }
+
+    // Issue new token + session
+    const newToken = generateToken(userId);
+    await prisma.userSession.create({
+      data: {
+        userId,
+        token: newToken,
+        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+        ipAddress: req.ip || null,
+        userAgent: req.get("User-Agent") || null,
+      },
+    });
+
+    // Set new cookie
+    res.cookie(AUTH_COOKIE_NAME, newToken, AUTH_COOKIE_OPTIONS);
+
+    res.json({
+      success: true,
+      token: newToken,
+      message: "Token refreshed",
+      timestamp: new Date(),
+    });
+  } catch (error) {
+    logger.error({ err: error }, "Token refresh error");
+    res.status(500).json({ success: false, error: "Internal server error", timestamp: new Date() });
   }
 });
 

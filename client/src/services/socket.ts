@@ -82,6 +82,7 @@ class SocketService {
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 5;
   private reconnectDelay = 1000; // Start with 1 second
+  private registeredEvents: string[] = []; // Track registered events for clean removal
 
   constructor() {
     this.connect();
@@ -102,6 +103,7 @@ class SocketService {
 
     this.socket = io(SOCKET_URL, {
       auth: { token },
+      withCredentials: true, // Send httpOnly cookie alongside Socket.IO handshake
       transports: ["websocket", "polling"],
       timeout: 10000,
       forceNew: true,
@@ -129,52 +131,20 @@ class SocketService {
 
   // ==================== CLEANUP ====================
 
+  /** Register an event handler and track it for automatic cleanup. */
+  private on(event: string, handler: (...args: any[]) => void): void {
+    if (!this.socket) return;
+    this.socket.on(event, handler);
+    this.registeredEvents.push(event);
+  }
+
+  /** Remove all tracked event listeners to prevent memory leaks. */
   private removeAllListeners(): void {
     if (!this.socket) return;
-
-    // Remove all event listeners to prevent memory leaks
-    this.socket.off("connect");
-    this.socket.off("disconnect");
-    this.socket.off("connect_error");
-    this.socket.off("authenticated");
-    this.socket.off("user:status_change");
-    this.socket.off("server:user_connected");
-    this.socket.off("server:user_disconnected");
-    this.socket.off("server:file_modified");
-    this.socket.off("message:received");
-    this.socket.off("message:error");
-    this.socket.off("hack:attempted");
-    this.socket.off("hack:successful");
-    this.socket.off("hack:blocked");
-    this.socket.off("hack:result");
-    this.socket.off("hack:error");
-    this.socket.off("game:event");
-    this.socket.off("system:announcement");
-    this.socket.off("mission:completed");
-    this.socket.off("mission:expired");
-    this.socket.off("mission:updated");
-    this.socket.off("mission:objective:updated");
-    this.socket.off("process:started");
-    this.socket.off("process:completed");
-    this.socket.off("process:cancelled");
-    this.socket.off("process:progress");
-    this.socket.off("process:failed");
-    this.socket.off("player:levelup");
-    this.socket.off("rewards:xp_granted");
-    this.socket.off("rewards:credits_granted");
-    this.socket.off("command:result");
-    this.socket.off("notification");
-    this.socket.off("resources:update");
-    this.socket.off("game:notification");
-    this.socket.off("game:state_update");
-    this.socket.off("forum:new-post");
-    this.socket.off("forum:new-reply");
-    this.socket.off("faction:event");
-    this.socket.off("discovery:made");
-    this.socket.off("achievement:unlocked");
-    this.socket.off("error");
-    this.socket.off("game:event:public");
-    this.socket.off("mission:assigned");
+    for (const event of this.registeredEvents) {
+      this.socket.off(event);
+    }
+    this.registeredEvents = [];
   }
 
   // ==================== EVENT HANDLERS ====================
@@ -186,7 +156,7 @@ class SocketService {
     this.removeAllListeners();
 
     // Connection events
-    this.socket.on("connect", () => {
+    this.on("connect", () => {
       socketConnected.set(true);
       socketError.set(null);
       this.reconnectAttempts = 0;
@@ -195,7 +165,7 @@ class SocketService {
       this.socket?.emit("authenticated");
     });
 
-    this.socket.on("disconnect", (reason) => {
+    this.on("disconnect", (reason) => {
       socketConnected.set(false);
 
       if (reason === "io server disconnect") {
@@ -206,20 +176,20 @@ class SocketService {
       this.handleReconnect();
     });
 
-    this.socket.on("connect_error", (error) => {
+    this.on("connect_error", (error) => {
       console.error("🔌 WebSocket connection error:", error);
       socketError.set(error.message);
       this.handleReconnect();
     });
 
     // Authentication events
-    this.socket.on("authenticated", () => {
+    this.on("authenticated", () => {
       // Authenticated successfully
     });
 
     // ==================== USER PRESENCE EVENTS ====================
 
-    this.socket.on(
+    this.on(
       "user:status_change",
       (data: { userId: string; isOnline: boolean; timestamp: Date }) => {
         onlineUsers.update((users) => {
@@ -236,21 +206,21 @@ class SocketService {
 
     // ==================== SERVER ACTIVITY EVENTS ====================
 
-    this.socket.on("server:user_connected", (data: any) => {
+    this.on("server:user_connected", (data: any) => {
       serverActivity.update((activities) => [
         { type: "user_connected", data, timestamp: new Date() },
         ...activities.slice(0, 49), // Keep last 50 activities
       ]);
     });
 
-    this.socket.on("server:user_disconnected", (data: any) => {
+    this.on("server:user_disconnected", (data: any) => {
       serverActivity.update((activities) => [
         { type: "user_disconnected", data, timestamp: new Date() },
         ...activities.slice(0, 49),
       ]);
     });
 
-    this.socket.on("server:file_modified", (data: any) => {
+    this.on("server:file_modified", (data: any) => {
       serverActivity.update((activities) => [
         { type: "file_modified", data, timestamp: new Date() },
         ...activities.slice(0, 49),
@@ -259,7 +229,7 @@ class SocketService {
 
     // ==================== MESSAGING EVENTS ====================
 
-    this.socket.on("message:received", (data: any) => {
+    this.on("message:received", (data: any) => {
       console.log("💬 New message received:", data);
       liveMessages.update((messages) => [data, ...messages.slice(0, 19)]); // Keep last 20 messages
 
@@ -270,27 +240,27 @@ class SocketService {
       );
     });
 
-    this.socket.on("message:new_mail", (data: any) => {
+    this.on("message:new_mail", (data: any) => {
       newMailNotifications.update((list) => {
         return [data, ...list];
       });
     });
 
-    this.socket.on("message:error", (data: any) => {
+    this.on("message:error", (data: any) => {
       console.error("💬 Message error:", data);
       socketError.set(`Message error: ${data.message}`);
     });
 
     // ==================== FORUM EVENTS ====================
 
-    this.socket.on("forum:new-post", (data: any) => {
+    this.on("forum:new-post", (data: any) => {
       this.showNotification(
         "New Forum Post",
         `${data.authorHandle || "Someone"} posted in ${data.forumName || "a forum"}: ${data.title || ""}`,
       );
     });
 
-    this.socket.on("forum:new-reply", (data: any) => {
+    this.on("forum:new-reply", (data: any) => {
       this.showNotification(
         "Forum Reply",
         `${data.authorHandle || "Someone"} replied to "${data.postTitle || "your post"}"`,
@@ -299,7 +269,7 @@ class SocketService {
 
     // ==================== HACKING EVENTS ====================
 
-    this.socket.on("hack:attempted", (data: any) => {
+    this.on("hack:attempted", (data: any) => {
       hackAttempts.update((attempts) => [
         { type: "attempted", data, timestamp: new Date() },
         ...attempts.slice(0, 19), // Keep last 20 attempts
@@ -313,7 +283,7 @@ class SocketService {
       }
     });
 
-    this.socket.on("hack:successful", (data: any) => {
+    this.on("hack:successful", (data: any) => {
       console.log("🔓 Successful hack:", data);
       hackAttempts.update((attempts) => [
         { type: "successful", data, timestamp: new Date() },
@@ -328,7 +298,7 @@ class SocketService {
       }
     });
 
-    this.socket.on("hack:blocked", (data: any) => {
+    this.on("hack:blocked", (data: any) => {
       console.log("🛡️ Hack blocked:", data);
       hackAttempts.update((attempts) => [
         { type: "blocked", data, timestamp: new Date() },
@@ -336,20 +306,20 @@ class SocketService {
       ]);
     });
 
-    this.socket.on("hack:result", (data: any) => {
+    this.on("hack:result", (data: any) => {
       console.log("🔓 Hack result:", data);
       // Handle hack result in the UI
       this.handleHackResult(data);
     });
 
-    this.socket.on("hack:error", (data: any) => {
+    this.on("hack:error", (data: any) => {
       console.error("🔓 Hack error:", data);
       socketError.set(`Hack error: ${data.message}`);
     });
 
     // ==================== GAME EVENTS ====================
 
-    this.socket.on("game:event", (data: any) => {
+    this.on("game:event", (data: any) => {
       console.log("🎯 Game event received:", data);
       gameEvents.update((events) => [data, ...events.slice(0, 49)]); // Keep last 50 events
 
@@ -359,24 +329,106 @@ class SocketService {
       }
     });
 
-    this.socket.on("game:event:public", (data: any) => {
+    this.on("game:event:public", (data: any) => {
       console.log("📡 Public event:", data);
       // Handle public event broadcasts (visible to all)
     });
 
+    // ==================== FRAGMENT / ENDGAME EVENTS ====================
+
+    this.on("story:key-fragment", (data: any) => {
+      this.showNotification(
+        "Fragment Found",
+        `${data.name} (${data.keyType})`,
+      );
+      const ns = getNotifService();
+      if (ns) {
+        ns.add({
+          type: "game",
+          title: "AIDA Fragment Claimed",
+          message: `You claimed ${data.name} — ${data.description || data.keyType + " fragment"}`,
+          priority: "high",
+        });
+      }
+    });
+
+    this.on("story:fragment-stolen", (data: any) => {
+      this.showNotification(
+        "Fragment Stolen!",
+        data.message || `Your fragment "${data.name}" has been stolen!`,
+      );
+      const ns = getNotifService();
+      if (ns) {
+        ns.add({
+          type: "game",
+          title: "Fragment Stolen",
+          message: data.message || `Your fragment "${data.name}" has been stolen!`,
+          priority: "urgent",
+        });
+      }
+    });
+
+    this.on("story:fragment-transferred", (data: any) => {
+      this.showNotification(
+        "Fragment Sent",
+        data.message || `You transferred "${data.name}".`,
+      );
+      const ns = getNotifService();
+      if (ns) {
+        ns.add({
+          type: "game",
+          title: "Fragment Transferred",
+          message: data.message || `You transferred "${data.name}".`,
+          priority: "normal",
+        });
+      }
+    });
+
+    this.on("story:endgame-unlocked", (data: any) => {
+      this.showNotification(
+        "ENDGAME UNLOCKED",
+        data.message || "All fragments collected. The final choice awaits.",
+      );
+      const ns = getNotifService();
+      if (ns) {
+        ns.add({
+          type: "game",
+          title: "Endgame Unlocked",
+          message: data.message || "All 9 AIDA fragments collected. Use 'endgame' to choose.",
+          priority: "urgent",
+        });
+      }
+    });
+
+    this.on("story:endgame-completed", (data: any) => {
+      this.showNotification(
+        "The Endgame",
+        "A player has decided AIDA's fate. The net trembles.",
+      );
+      const ns = getNotifService();
+      if (ns) {
+        ns.add({
+          type: "game",
+          title: "Endgame Completed",
+          message: "A player has made their final choice about AIDA. The net will never be the same.",
+          priority: "urgent",
+        });
+      }
+    });
+
     // ==================== SYSTEM EVENTS ====================
 
-    this.socket.on("system:announcement", (data: any) => {
+    this.on("system:announcement", (data: any) => {
       console.log("📢 System announcement:", data);
       this.showNotification("System Announcement", data.message);
     });
 
-    this.socket.on("mission:assigned", (data: any) => {
+    this.on("mission:assigned", (data: any) => {
       console.log("🎯 Mission assigned:", data);
       this.showNotification("New Mission", `Mission assigned: ${data.title}`);
     });
 
-    this.socket.on("faction:event", (data: any) => {
+    this.on("faction:event", (data: any) => {
       const ns = getNotifService();
       if (ns) {
         ns.add({
@@ -389,7 +441,7 @@ class SocketService {
       }
     });
 
-    this.socket.on("discovery:made", (data: any) => {
+    this.on("discovery:made", (data: any) => {
       this.showNotification("Discovery", `New discovery: ${data.title}`);
       const ns = getNotifService();
       if (ns) {
@@ -405,11 +457,11 @@ class SocketService {
 
     // ==================== PROCESS EVENTS ====================
 
-    this.socket.on("process:started", (data: any) => {
+    this.on("process:started", (data: any) => {
       activeProcesses.update((procs) => [...procs, data]);
     });
 
-    this.socket.on("process:completed", (data: any) => {
+    this.on("process:completed", (data: any) => {
       console.log(
         "[process:completed] PID:",
         data.pid,
@@ -448,13 +500,13 @@ class SocketService {
       }
     });
 
-    this.socket.on("process:cancelled", (data: any) => {
+    this.on("process:cancelled", (data: any) => {
       activeProcesses.update((procs) =>
         procs.filter((p) => p.pid !== data.pid),
       );
     });
 
-    this.socket.on("process:progress", (data: any) => {
+    this.on("process:progress", (data: any) => {
       activeProcesses.update((procs) =>
         procs.map((p) =>
           p.pid === data.pid ? { ...p, progress: data.progress } : p,
@@ -462,7 +514,7 @@ class SocketService {
       );
     });
 
-    this.socket.on("process:failed", (data: any) => {
+    this.on("process:failed", (data: any) => {
       activeProcesses.update((procs) =>
         procs.filter((p) => p.pid !== data.pid),
       );
@@ -480,7 +532,7 @@ class SocketService {
 
     // ==================== MISSION EVENTS ====================
 
-    this.socket.on("mission:objective:updated", (data: any) => {
+    this.on("mission:objective:updated", (data: any) => {
       const ns = getNotifService();
       if (ns) {
         ns.add({
@@ -493,7 +545,7 @@ class SocketService {
       }
     });
 
-    this.socket.on("mission:completed", (data: any) => {
+    this.on("mission:completed", (data: any) => {
       const ns = getNotifService();
       if (ns) {
         ns.add({
@@ -506,7 +558,7 @@ class SocketService {
       }
     });
 
-    this.socket.on("mission:expired", (data: any) => {
+    this.on("mission:expired", (data: any) => {
       const ns = getNotifService();
       if (ns) {
         ns.add({
@@ -519,7 +571,7 @@ class SocketService {
       }
     });
 
-    this.socket.on("mission:updated", (data: any) => {
+    this.on("mission:updated", (data: any) => {
       const ns = getNotifService();
       if (ns) {
         ns.add({
@@ -532,7 +584,7 @@ class SocketService {
       }
     });
 
-    this.socket.on("game:state_update", (data: any) => {
+    this.on("game:state_update", (data: any) => {
       const ns = getNotifService();
       if (ns && data.message) {
         ns.add({
@@ -547,7 +599,7 @@ class SocketService {
 
     // ==================== PLAYER PROGRESSION EVENTS ====================
 
-    this.socket.on("player:levelup", (data: any) => {
+    this.on("player:levelup", (data: any) => {
       const ns = getNotifService();
       if (ns) {
         ns.add({
@@ -560,15 +612,15 @@ class SocketService {
       }
     });
 
-    this.socket.on("rewards:xp_granted", (data: any) => {
+    this.on("rewards:xp_granted", (data: any) => {
       // Silent — XP rewards don't need a popup, shown in command output
     });
 
-    this.socket.on("rewards:credits_granted", (data: any) => {
+    this.on("rewards:credits_granted", (data: any) => {
       // Silent — credit rewards shown in command output
     });
 
-    this.socket.on("achievement:unlocked", (data: any) => {
+    this.on("achievement:unlocked", (data: any) => {
       const ns = getNotifService();
       if (ns) {
         ns.add({
@@ -583,7 +635,7 @@ class SocketService {
 
     // ==================== SECURITY EVENTS ====================
 
-    this.socket.on("command:result", (data: any) => {
+    this.on("command:result", (data: any) => {
       console.log("[command:result] Received:", {
         hasOutput: !!data.output,
         outputLength: data.output?.length,
@@ -631,7 +683,7 @@ class SocketService {
       }
     });
 
-    this.socket.on("notification", (data: any) => {
+    this.on("notification", (data: any) => {
       // Generic server notification (used by bounty system, IDS, etc.)
       const ns = getNotifService();
       if (ns) {
@@ -647,7 +699,7 @@ class SocketService {
 
     // ==================== RESOURCE UPDATES ====================
 
-    this.socket.on("resources:update", (data: any) => {
+    this.on("resources:update", (data: any) => {
       if (data) {
         playerResources.set({
           cpuUsed: data.cpuUsed ?? 0,
@@ -662,7 +714,7 @@ class SocketService {
 
     // ==================== TYPING INDICATORS ====================
 
-    this.socket.on(
+    this.on(
       "typing:start",
       (data: { userId: string; username: string }) => {
         typingUsers.update((map) => {
@@ -672,7 +724,7 @@ class SocketService {
       },
     );
 
-    this.socket.on("typing:stop", (data: { userId: string }) => {
+    this.on("typing:stop", (data: { userId: string }) => {
       typingUsers.update((map) => {
         map.delete(data.userId);
         return new Map(map);
@@ -681,7 +733,7 @@ class SocketService {
 
     // ==================== ERROR HANDLING ====================
 
-    this.socket.on("error", (data: any) => {
+    this.on("error", (data: any) => {
       console.error("Socket error:", data);
       socketError.set(data.message || "Unknown socket error");
     });

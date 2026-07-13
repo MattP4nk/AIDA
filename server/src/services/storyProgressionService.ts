@@ -26,10 +26,12 @@ import { EventType, EventSeverity } from "../../../shared/types";
 // ═══════════════════════════════════════════════════════════════════
 
 export interface StoryEventInput {
-  type: string; // "hack", "faction_war", "territory_shift", "fragment_found", "player_choice", "persona_action", "token_used"
-  category: string; // "combat", "diplomacy", "discovery", "economy", "narrative", "communication"
+  type: string; // "hack", "faction_war", "territory_shift", "fragment_found", "fragment_claimed", "fragment_stolen", "fragment_transferred", "player_choice", "persona_action", "token_used"
+  category: string; // "combat", "diplomacy", "discovery", "economy", "narrative", "communication", "conflict", "social"
   actorId: string;
   actorType: "player" | "persona";
+  targetId?: string; // for conflict/social events: the other player involved
+  targetType?: "player" | "persona"; // type of the target
   summary: string;
   detail?: string;
   data?: Record<string, unknown>;
@@ -55,7 +57,7 @@ export interface WorldNarrativeState {
   }>;
   unprocessedEventCount: number;
   totalEventsThisEpoch: number;
-  keyFragmentsFound: { signal: number; location: number; cipher: number };
+  keyFragmentsFound: { sword: number; key: number; collar: number };
   aidaContactCount: number;
   globalTension: number; // derived from accumulated impact.tension
   narrativeThemes: string[]; // AI-detected themes from recent events
@@ -220,15 +222,17 @@ export class StoryProgressionService {
         select: { data: true },
       });
 
-    const keyFragmentsFound = { signal: 0, location: 0, cipher: 0 };
+    const keyFragmentsFound = { sword: 0, key: 0, collar: 0 };
     for (const fe of fragmentEvents) {
       const data = fe.data as Record<string, unknown> | null;
       if (data && typeof data === "object") {
-        const fragmentType = data.fragmentType as string | undefined;
+        const fragmentType = (data.fragmentType || data.keyType) as
+          | string
+          | undefined;
         if (
-          fragmentType === "signal" ||
-          fragmentType === "location" ||
-          fragmentType === "cipher"
+          fragmentType === "sword" ||
+          fragmentType === "key" ||
+          fragmentType === "collar"
         ) {
           keyFragmentsFound[fragmentType]++;
         }
@@ -467,7 +471,7 @@ export class StoryProgressionService {
     const kf = state.keyFragmentsFound;
     lines.push("AIDA MYSTERY PROGRESS:");
     lines.push(
-      `  Key Fragments — Signal: ${kf.signal}/3, Location: ${kf.location}/3, Cipher: ${kf.cipher}/3`,
+      `  Key Fragments — Sword: ${kf.sword}/3, Key: ${kf.key}/3, Collar: ${kf.collar}/3`,
     );
     lines.push(`  Total AIDA Contacts: ${state.aidaContactCount}`);
     lines.push("");
@@ -627,7 +631,7 @@ WORLD STATE:
   Factions:
 ${factionLines || "    No factions registered."}
   Global Tension Level: ${worldState.globalTension}/100
-  AIDA Discovery: Signal ${kf.signal}/3, Location ${kf.location}/3, Cipher ${kf.cipher}/3
+  AIDA Discovery: Sword ${kf.sword}/3, Key ${kf.key}/3, Collar ${kf.collar}/3
   Total AIDA Contacts: ${worldState.aidaContactCount}
 
 NARRATIVE THEMES:

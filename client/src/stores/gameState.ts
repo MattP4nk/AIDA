@@ -32,6 +32,7 @@ export interface OutputLine {
 }
 
 let outputIdCounter = 0;
+const MAX_OUTPUT_LINES = 1000;
 
 export const outputLines = writable<OutputLine[]>([]);
 export const commandHistory = writable<string[]>([]);
@@ -94,15 +95,22 @@ export function addOutput(
   text: string,
   type: OutputLine["type"] = "info",
 ): void {
-  outputLines.update((lines) => [
-    ...lines,
-    {
-      text,
-      id: ++outputIdCounter,
-      timestamp: new Date(),
-      type,
-    },
-  ]);
+  outputLines.update((lines) => {
+    const updated = [
+      ...lines,
+      {
+        text,
+        id: ++outputIdCounter,
+        timestamp: new Date(),
+        type,
+      },
+    ];
+    // Cap buffer to prevent unbounded memory growth
+    if (updated.length > MAX_OUTPUT_LINES) {
+      return updated.slice(-MAX_OUTPUT_LINES);
+    }
+    return updated;
+  });
 }
 
 export function addSystemOutput(text: string): void {
@@ -276,13 +284,11 @@ export async function logoutUser(): Promise<void> {
 }
 
 export async function verifyAuthentication(): Promise<boolean> {
-  if (!apiClient.isAuthenticated()) {
-    return false;
-  }
-
   authLoading.set(true);
 
   try {
+    // Always call the server — httpOnly cookie is sent automatically
+    // via credentials:'include', even when in-memory token is gone after reload.
     const response = await apiClient.verifyToken();
 
     if (response.success && response.user) {
@@ -638,17 +644,17 @@ export async function attemptHack(
 
 // ==================== INITIALIZATION ====================
 
-export function initializeGameState(): void {
+export async function initializeGameState(): Promise<void> {
   // Clear any existing socket errors
   socketError.set(null);
 
   // Request notification permission
   socketService.requestNotificationPermission();
 
-  // Check for existing authentication
-  if (apiClient.isAuthenticated()) {
-    verifyAuthentication();
-  } else {
+  // Always attempt session restore — httpOnly cookie is sent automatically
+  // via credentials:'include', even after page reload when in-memory token is gone.
+  const restored = await verifyAuthentication();
+  if (!restored) {
     addSystemOutput(">>> AIDA NEURAL INTERFACE <<<");
     addSystemOutput("Connection established to neural network");
     addSystemOutput("Authentication required for network access");

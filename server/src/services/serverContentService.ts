@@ -42,6 +42,10 @@ import {
   FACTION_FILE_FLAVORS,
   CRYPTIC_QUOTES,
   AIDA_PIECES,
+  FACTION_MUNDANE_THEMES,
+  INDEPENDENT_SERVER_THEMES,
+  AMBIENT_NEWS_POOL,
+  EASTER_EGG_POOL,
 } from "../lore/worldLore";
 
 interface PlannedFile {
@@ -1019,32 +1023,65 @@ function generateEncodedFiles(ctx: NetworkContext): PlannedFile[] {
 // AI prompt templates for server content generation (network-aware)
 // ---------------------------------------------------------------------------
 
-const SERVER_CONTENT_SYSTEM_PROMPT = `You are an AI game content generator for AIDA, a multiplayer terminal hacking RPG.
-Your job is to generate realistic filesystem content for servers in a network.
+// ---------------------------------------------------------------------------
+// Process 1 — Lore content (faction servers only)
+// Serious, dark, enigmatic. Faction intel, AIDA fragments, buried secrets.
+// ---------------------------------------------------------------------------
 
-WORLD LORE (weave fragments of this into files naturally — logs, memos, encrypted notes):
+const LORE_SYSTEM_PROMPT = `You are an AI content generator for AIDA, a multiplayer terminal hacking RPG.
+You generate faction-critical, lore-adjacent, and intelligence content for servers in a hacking RPG.
+
+TONE: Serious, dark, enigmatic. Every file you create should read like a classified document, an intercepted transmission, an encrypted memo, or a personal confession written late at night. Nothing you write is casual.
+
+WORLD CONTEXT (use as background knowledge — NEVER copy verbatim):
 ${WORLD_BACKSTORY_SHORT}
 
 The Emperor shattered AIDA into three pieces before his death:
 - The Sword: ${AIDA_PIECES.sword.name} — offensive power, hidden in deep military networks
-- The Master Key: ${AIDA_PIECES.masterKey.name} — administrative access, embedded in the Silver Tower
-- The Soul: ${AIDA_PIECES.soul.name} — AIDA's consciousness, hiding in the DarkNet
+- The Key: ${AIDA_PIECES.key.name} — infiltration capacity, embedded in the Silver Tower
+- The Collar: ${AIDA_PIECES.collar.name} — the control program, hidden in the DarkNet
+
+CONTENT REQUIREMENTS:
+- Each file MUST be at least 400 characters — these are substantial documents, not stubs
+- Content should bury important information inside plausible context — a key IP mentioned in paragraph 3 of a security report, a password noted in the margin of a maintenance log, a name dropped in an intercepted conversation
+- Generate 2-4 files and 2-4 directories
+- Hidden files (prefix with .) should contain the most sensitive content
+- NEVER copy lore verbatim — rewrite in the voice of whoever authored the file
+- File content cap: 3000 characters per file
 
 CRITICAL RULES:
 - Output ONLY valid JSON, no other text
 - Reference ONLY the IPs, server names, and employee names provided in the context
 - DO NOT invent new IPs, names, or servers
-- File content should feel authentic to the server's TYPE and ROLE
-- Cross-reference other servers in the network by their real IPs and names
-- Keep individual file contents SHORT (5-15 lines max)
 - Directory names: lowercase, no spaces
 - File paths: absolute (start with /)
-- Include 1-2 hidden files (prefix with .) containing secrets or clues pointing to other servers
-- Make content that rewards exploration — logs that reveal other server IPs, emails that mention projects on other servers
-- At least 1 file should contain a lore fragment: a cryptic reference to The Emperor, AIDA, the factions' search for the pieces, or the Shattering
-- Lore should feel organic — embedded in memos, personal logs, intercepted transmissions, or research notes, NOT as exposition dumps
-- NEVER copy lore text verbatim. Every lore reference must be REWRITTEN in the voice of whoever authored the file — a soldier writes differently than a hacker, a CEO differently than an AI
-- Each file must feel like it was written by a SPECIFIC person on THIS server for THEIR purposes, not placed there for a player to find`;
+- Cross-reference other servers in the network by their real IPs and names`;
+
+// ---------------------------------------------------------------------------
+// Process 2 — Ambient content (all servers)
+// World-building. Mundane files, gossip, news, easter eggs.
+// ---------------------------------------------------------------------------
+
+const AMBIENT_SYSTEM_PROMPT = `You are an AI content generator for AIDA, a multiplayer terminal hacking RPG.
+You generate everyday, lived-in content that makes servers feel like real machines used by real people.
+
+TONE: Varies — match the voice to whoever would have created this file. A sysadmin's sticky note sounds different from an executive's memo, which sounds different from an IRC chat log.
+
+CONTENT REQUIREMENTS:
+- Each file MUST be at least 400 characters — even mundane content should be fleshed out (a full chat conversation, a complete memo, a real todo list with context)
+- Most files should be completely mundane: work documents, personal notes, gossip, news, routine logs, spam, complaints, lunch orders, saved articles
+- The signal-in-noise principle: OCCASIONALLY (not always) bury one useful detail in an otherwise boring file — an IP in a forwarded email, a server name in a meeting invite, a hint in someone's diary
+- Generate 4-6 files and 4-7 directories
+- File content cap: 3000 characters per file
+
+CRITICAL RULES:
+- Output ONLY valid JSON, no other text
+- Reference ONLY the IPs, server names, and employee names provided in the context
+- DO NOT invent new IPs, names, or servers
+- Directory names: lowercase, no spaces
+- File paths: absolute (start with /)
+- Cross-reference other servers in the network by their real IPs and names
+- Do NOT reference AIDA, The Emperor, factions, or world lore — this content exists independently of the main narrative`;
 
 /** Pick a random cryptic lore quote to embed in server content */
 function pickLoreQuote(): string {
@@ -1053,7 +1090,7 @@ function pickLoreQuote(): string {
 
 /** Pick a random lore hint from one of the three AIDA pieces */
 function pickPieceHint(): string {
-  const pieces = [AIDA_PIECES.sword, AIDA_PIECES.masterKey, AIDA_PIECES.soul];
+  const pieces = [AIDA_PIECES.sword, AIDA_PIECES.key, AIDA_PIECES.collar];
   const piece = pieces[Math.floor(Math.random() * pieces.length)]!;
   return piece.loreHints[Math.floor(Math.random() * piece.loreHints.length)]!;
 }
@@ -1086,75 +1123,123 @@ function pickFactionFileNames(factionKey: string): string[] {
   return shuffled.slice(0, Math.min(4, shuffled.length));
 }
 
-function buildNetworkAwarePrompt(ctx: NetworkContext): string {
+/** Pick a random mundane content theme for a specific faction */
+function pickFactionMundaneTheme(
+  factionKey: string,
+): { work: string; personal: string; gossip: string } | null {
+  const themes = FACTION_MUNDANE_THEMES[factionKey];
+  if (!themes) return null;
+  return {
+    work: themes.workFiles[
+      Math.floor(Math.random() * themes.workFiles.length)
+    ]!,
+    personal:
+      themes.personalFiles[
+        Math.floor(Math.random() * themes.personalFiles.length)
+      ]!,
+    gossip: themes.gossip[Math.floor(Math.random() * themes.gossip.length)]!,
+  };
+}
+
+/** Pick a random independent server theme for non-faction servers */
+function pickIndependentTheme(): (typeof INDEPENDENT_SERVER_THEMES)[number] {
+  return INDEPENDENT_SERVER_THEMES[
+    Math.floor(Math.random() * INDEPENDENT_SERVER_THEMES.length)
+  ]!;
+}
+
+/** Pick a random ambient news snippet */
+function pickAmbientNews(): string {
+  return AMBIENT_NEWS_POOL[
+    Math.floor(Math.random() * AMBIENT_NEWS_POOL.length)
+  ]!;
+}
+
+/** Pick a random easter egg description (returns null ~70% of the time to keep them rare) */
+function pickEasterEgg(): string | null {
+  if (Math.random() > 0.3) return null; // Only 30% chance
+  return EASTER_EGG_POOL[Math.floor(Math.random() * EASTER_EGG_POOL.length)]!;
+}
+
+/** Resolve the faction key from a NetworkContext */
+function resolveFactionKey(ctx: NetworkContext | null): string | null {
+  if (!ctx?.network?.factionName) return null;
+  return (
+    Object.keys(FACTION_LORE).find((k) =>
+      ctx.network!.factionName!.toLowerCase().includes(k),
+    ) ?? null
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Prompt builders — one per AI process
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the user prompt for Process 1 (lore content).
+ * Only called for faction servers — serious, dark, enigmatic tone.
+ */
+function buildLorePrompt(ctx: NetworkContext): string {
   const { server, network, linkedServers, allNetworkServers, employeeRoster } =
     ctx;
 
-  let prompt = `Generate filesystem content for a server in a hacking game.
+  const factionKey = resolveFactionKey(ctx);
+  if (!factionKey || !network) {
+    // Safety: shouldn't be called without a faction, but return minimal prompt
+    return `Generate 2-4 lore files for server "${server.name}" (${server.ip}).`;
+  }
+
+  let prompt = `Generate LORE content for a faction server in a hacking RPG.
 
 SERVER:
   Name: ${server.name}
   IP: ${server.ip}
   Type: ${server.type}
   Role: ${server.role}
-  Security: Level ${server.securityLevel}`;
+  Security: Level ${server.securityLevel}
 
-  // Resolve faction key for lore/voice/flavor lookups
-  let factionKey: string | null = null;
+NETWORK: ${network.name} (zone: ${network.zone})
+Faction: ${network.factionName}`;
 
-  if (network) {
-    prompt += `\n\nNETWORK: ${network.name} (zone: ${network.zone})`;
-    if (network.factionName) {
-      prompt += `\nFaction: ${network.factionName}`;
-
-      // Resolve faction key
-      factionKey =
-        Object.keys(FACTION_LORE).find((k) =>
-          network.factionName!.toLowerCase().includes(k),
-        ) ?? null;
-
-      if (factionKey) {
-        // Inject faction lore — the WHAT (motivation, history, goals)
-        if (FACTION_LORE[factionKey]) {
-          prompt += `\n\nFACTION CONTEXT (what this faction cares about — reference but do NOT copy verbatim):\n${FACTION_LORE[factionKey]}`;
-        }
-
-        // Inject faction voice — the HOW (writing style, tone, jargon)
-        if (FACTION_VOICE[factionKey]) {
-          prompt += `\n\nWRITING VOICE (write ALL files in this style — this is mandatory):\n${FACTION_VOICE[factionKey]}`;
-        }
-
-        // Inject suggested file names so naming feels faction-authentic
-        const suggestedNames = pickFactionFileNames(factionKey);
-        if (suggestedNames.length > 0) {
-          prompt += `\n\nSUGGESTED FILE NAMES (use these or similar faction-appropriate names, not generic ones):\n  ${suggestedNames.join(", ")}`;
-        }
-
-        // Inject a faction-specific content topic to ensure unique focus
-        const topic = pickFactionTopic(factionKey);
-        if (topic) {
-          prompt += `\n\nFEATURED TOPIC (one file MUST explore this subject, written in the faction voice):\n${topic}`;
-        }
-
-        // Inject a faction-specific hidden file hint
-        const hiddenHint = pickFactionHiddenHint(factionKey);
-        if (hiddenHint) {
-          prompt += `\n\nHIDDEN FILE SEED (create a hidden file inspired by this — REWRITE it in the faction's voice, do not copy):\n${hiddenHint}`;
-        }
-      }
-    }
+  // Inject faction lore — the WHAT (motivation, history, goals)
+  if (FACTION_LORE[factionKey]) {
+    prompt += `\n\nFACTION CONTEXT (what this faction cares about — reference but do NOT copy verbatim):\n${FACTION_LORE[factionKey]}`;
   }
 
-  // Inject a cryptic quote — must be rewritten in the faction voice, not pasted raw
+  // Inject faction voice — the HOW (writing style, tone, jargon) — mandatory
+  if (FACTION_VOICE[factionKey]) {
+    prompt += `\n\nWRITING VOICE (write ALL files in this style — this is mandatory):\n${FACTION_VOICE[factionKey]}`;
+  }
+
+  // Inject suggested file names so naming feels faction-authentic
+  const suggestedNames = pickFactionFileNames(factionKey);
+  if (suggestedNames.length > 0) {
+    prompt += `\n\nSUGGESTED FILE NAMES (use these or similar faction-appropriate names, not generic ones):\n  ${suggestedNames.join(", ")}`;
+  }
+
+  // Inject a faction-specific content topic to ensure unique focus
+  const topic = pickFactionTopic(factionKey);
+  if (topic) {
+    prompt += `\n\nFEATURED TOPIC (one file MUST explore this subject, written in the faction voice):\n${topic}`;
+  }
+
+  // Inject a faction-specific hidden file hint
+  const hiddenHint = pickFactionHiddenHint(factionKey);
+  if (hiddenHint) {
+    prompt += `\n\nHIDDEN FILE SEED (create a hidden file inspired by this — REWRITE it in the faction's voice, do not copy):\n${hiddenHint}`;
+  }
+
+  // Lore quote — always included for lore process
   const quote = pickLoreQuote();
   prompt += `\n\nLORE QUOTE TO REINTERPRET (rewrite this idea in the faction's own voice and embed it naturally — do NOT paste it verbatim):\n"${quote}"`;
 
-  // Inject a piece hint — must also be rewritten
+  // AIDA fragment reference — always included for lore process
   const pieceHint = pickPieceHint();
-  prompt += `\n\nAIDA FRAGMENT REFERENCE (rephrase this concept as something a ${factionKey ? network?.factionName || "neutral" : "neutral"} employee would write — a margin note, a worried memo, a research annotation):\n"${pieceHint}"`;
+  prompt += `\n\nAIDA FRAGMENT REFERENCE (rephrase this concept as something a ${network.factionName || "neutral"} employee would write — a margin note, a worried memo, a research annotation):\n"${pieceHint}"`;
 
+  // Linked servers for cross-referencing
   if (linkedServers.length > 0) {
-    prompt += `\n\nDIRECTLY LINKED SERVERS (reference these in logs, configs, emails):`;
+    prompt += `\n\nDIRECTLY LINKED SERVERS (reference these in logs, memos, intercepted communications):`;
     for (const s of linkedServers) {
       prompt += `\n  - ${s.ip} "${s.name}" [${s.role}]`;
     }
@@ -1169,26 +1254,23 @@ SERVER:
     }
   }
 
+  // Employee roster
   prompt += `\n\nEMPLOYEE ROSTER (use ONLY these names in files):`;
   prompt += `\n  ${employeeRoster.slice(0, 12).join(", ")}`;
 
-  // Role-specific instructions — tailored to faction voice when available
-  const factionLabel = factionKey
-    ? `a ${network?.factionName || factionKey} employee`
-    : "someone who works on this server";
-
-  const roleInstructions: Record<string, string> = {
-    gateway: `Generate firewall rules referencing linked server IPs, connection logs showing traffic, ACL lists with employee names. Include a network map file. Add an old access log that ${factionLabel} wrote or annotated, referencing legacy security protocols — write it in THEIR voice, not generic tech-speak.`,
-    router: `Generate routing tables with real IPs, interface status, traffic logs. Show connections to linked servers. Include a hidden routing anomaly log written by ${factionLabel} who noticed something strange — unexplained traffic, phantom nodes, patterns that shouldn't exist. Their reaction should match the faction's personality.`,
-    database: `Generate user tables with employee names, SQL exports, query logs referencing other server IPs, backup configs pointing to other servers. Include a locked archive or research table that ${factionLabel} has been quietly investigating — the subject matter should relate to the faction's goals regarding AIDA's pieces.`,
-    email: `Generate realistic emails between employees discussing projects, mentioning other servers by IP, referencing events. Include an unsent draft with a secret. At least one email should be ${factionLabel} gossiping, theorizing, or worrying about lore events — written naturally in their voice, as real people talk about things they've heard.`,
-    workstation: `Generate user documents, notes mentioning other servers, .ssh/config with real hostnames, browser history with internal URLs using real IPs. Include a personal file — a journal entry, a draft message, margin notes — where ${factionLabel} processes something they've seen or heard about The Emperor, AIDA, or the faction's operations. Make it feel private and authentic.`,
-    firewall: `Generate ACL rules protecting linked servers, IDS alert logs, blocked connection logs from external zones. Include a flagged intrusion attempt that puzzled ${factionLabel} — the source, signature, or behavior didn't match known threat profiles. Their analysis notes should reflect their faction's worldview.`,
-    dns: `Generate zone files mapping hostnames to real server IPs, reverse DNS entries, query cache. Include an anomalous entry that ${factionLabel} flagged — a ghost hostname, an impossible resolution, or a record that predates the server itself. Their annotation should sound like THEM, not a textbook.`,
+  // Role-specific lore instructions — dark, serious, intelligence-focused
+  const loreRoleInstructions: Record<string, string> = {
+    gateway: `Hidden security audit that flagged anomalous traffic matching pre-Shattering signatures. Firewall logs with one entry that doesn't match any known protocol.`,
+    router: `Routing anomaly logs showing traffic patterns that shouldn't exist — packets routed through nodes that were decommissioned decades ago.`,
+    database: `Archived research tables or personnel records with classified entries. A locked data export that cross-references other servers in the network.`,
+    email: `Intercepted or leaked correspondence between faction operatives. An unsent draft containing intelligence about other factions or AIDA piece locations.`,
+    workstation: `Private journal entries or personal notes from someone who's seen too much. SSH configs and browser history pointing to hidden or classified servers.`,
+    firewall: `IDS alerts flagging intrusion signatures that match Emperor-era AIDA patterns. A flagged anomaly report that the author clearly found disturbing.`,
+    dns: `Zone file anomalies — hostnames that resolve to servers not on any map. DNS records that predate the server itself.`,
   };
 
-  if (roleInstructions[server.role]) {
-    prompt += `\n\nROLE-SPECIFIC CONTENT: ${roleInstructions[server.role]}`;
+  if (loreRoleInstructions[server.role]) {
+    prompt += `\n\nROLE-SPECIFIC LORE CONTENT: ${loreRoleInstructions[server.role]}`;
   }
 
   prompt += `
@@ -1199,7 +1281,127 @@ Return ONLY a JSON object:
   "files": [{ "path": "/...", "content": "...", "isHidden": false, "isEncrypted": false, "isProtected": false }]
 }
 
-Generate 6-10 directories and 5-8 files. At least 1 hidden file with a clue pointing to another server in the network.`;
+Generate 2-4 directories and 2-4 files. At least 1 hidden file containing the most sensitive content.`;
+
+  return prompt;
+}
+
+/**
+ * Build the user prompt for Process 2 (ambient content).
+ * Called for ALL servers — mundane, lived-in, world-building.
+ */
+function buildAmbientPrompt(ctx: NetworkContext): string {
+  const { server, network, linkedServers, allNetworkServers, employeeRoster } =
+    ctx;
+
+  const factionKey = resolveFactionKey(ctx);
+
+  let prompt = `Generate AMBIENT (everyday, mundane) content for a server in a hacking RPG.
+
+SERVER:
+  Name: ${server.name}
+  IP: ${server.ip}
+  Type: ${server.type}
+  Role: ${server.role}
+  Security: Level ${server.securityLevel}`;
+
+  if (network) {
+    prompt += `\n\nNETWORK: ${network.name} (zone: ${network.zone})`;
+    if (network.factionName) {
+      prompt += `\nFaction: ${network.factionName}`;
+    }
+  }
+
+  // ── Faction servers: mundane themes with faction flavor ──
+  if (factionKey) {
+    // Inject mundane content themes — work, personal, gossip
+    const mundaneTheme = pickFactionMundaneTheme(factionKey);
+    if (mundaneTheme) {
+      prompt += `\n\nMUNDANE CONTENT REQUIREMENTS (these are the kinds of files to generate):`;
+      prompt += `\n  Work file to include: ${mundaneTheme.work}`;
+      prompt += `\n  Personal file to include: ${mundaneTheme.personal}`;
+      prompt += `\n  Gossip/social file to include: ${mundaneTheme.gossip}`;
+    }
+
+    // Faction voice for consistency — but for mundane content
+    if (FACTION_VOICE[factionKey]) {
+      prompt += `\n\nWRITING VOICE (use this voice but for MUNDANE content — not everything these people write is about faction business):\n${FACTION_VOICE[factionKey]}`;
+    }
+  } else {
+    // ── Non-faction servers: independent themes ──
+    const independentTheme = pickIndependentTheme();
+    prompt += `\n\nINDEPENDENT SERVER THEME: "${independentTheme.name}"`;
+    prompt += `\n  Description: ${independentTheme.description}`;
+    prompt += `\n  Atmosphere: ${independentTheme.atmosphere}`;
+    prompt += `\n  Content guidance: ${independentTheme.contentGuidance}`;
+    if (independentTheme.sampleFileNames.length > 0) {
+      prompt += `\n  Suggested file names: ${independentTheme.sampleFileNames.slice(0, 5).join(", ")}`;
+    }
+    // Occasionally include a hidden quest seed
+    if (Math.random() < 0.4 && independentTheme.possibleSecrets.length > 0) {
+      const secret =
+        independentTheme.possibleSecrets[
+          Math.floor(Math.random() * independentTheme.possibleSecrets.length)
+        ]!;
+      prompt += `\n  HIDDEN CONTENT SEED (bury this subtly in the server, do NOT make it obvious): ${secret}`;
+    }
+  }
+
+  // Ambient news — all servers
+  const news = pickAmbientNews();
+  prompt += `\n\nNETWORK NEWS (include as a news bulletin, forwarded email, or saved article — background flavor): "${news}"`;
+
+  // Easter egg — 30% chance, all servers
+  const easterEgg = pickEasterEgg();
+  if (easterEgg) {
+    prompt += `\n\nEASTER EGG (include ONE fun/weird/humorous hidden file inspired by this — make it feel like a real person left it here): ${easterEgg}`;
+  }
+
+  // Linked servers for cross-referencing in mundane ways
+  if (linkedServers.length > 0) {
+    prompt += `\n\nDIRECTLY LINKED SERVERS (reference in mundane ways — mentioned in emails, saved bookmarks, meeting invites):`;
+    for (const s of linkedServers) {
+      prompt += `\n  - ${s.ip} "${s.name}" [${s.role}]`;
+    }
+  }
+
+  if (allNetworkServers.length > linkedServers.length) {
+    prompt += `\n\nOTHER SERVERS IN THIS NETWORK:`;
+    for (const s of allNetworkServers.filter(
+      (n) => !linkedServers.some((l) => l.ip === n.ip) && n.ip !== server.ip,
+    )) {
+      prompt += `\n  - ${s.ip} "${s.name}" [${s.role}]`;
+    }
+  }
+
+  // Employee roster
+  prompt += `\n\nEMPLOYEE ROSTER (use ONLY these names in files):`;
+  prompt += `\n  ${employeeRoster.slice(0, 12).join(", ")}`;
+
+  // Role-specific mundane instructions
+  const ambientRoleInstructions: Record<string, string> = {
+    gateway: `Maintenance sticky notes, shift handoff logs, a reminder about upcoming certificate renewals.`,
+    router: `Bandwidth usage complaints, a technician's personal bookmarks, traffic summary reports that nobody reads.`,
+    database: `Backup schedule confirmations, a DBA's todo list, someone's accidentally-saved personal spreadsheet.`,
+    email: `Workplace emails — meeting invites, lunch plans, IT support tickets, office announcements, a forwarded news article.`,
+    workstation: `Personal workspace clutter — sticky notes, saved articles, half-written messages, music playlists, browser bookmarks, a todo list.`,
+    firewall: `Routine weekly security summaries, false positive logs, a note about the next scheduled penetration test.`,
+    dns: `Routine zone update confirmations, a maintenance log entry about record cleanup, standard infrastructure documentation.`,
+  };
+
+  if (ambientRoleInstructions[server.role]) {
+    prompt += `\n\nROLE-SPECIFIC CONTENT: ${ambientRoleInstructions[server.role]}`;
+  }
+
+  prompt += `
+
+Return ONLY a JSON object:
+{
+  "directories": [{ "path": "/...", "isHidden": false, "isProtected": false }],
+  "files": [{ "path": "/...", "content": "...", "isHidden": false, "isEncrypted": false, "isProtected": false }]
+}
+
+Generate 4-7 directories and 4-6 files.`;
 
   return prompt;
 }
@@ -1325,18 +1527,56 @@ export class ServerContentService {
       // Build network context for content generation
       const networkCtx = await this.buildNetworkContext(server);
 
-      // Generate content plan (AI-first with network context, fallback to role-based static)
-      const plan = await this.generateContentPlan(
-        server.type,
-        server.name,
-        server.faction?.name,
-        server.faction?.description ?? undefined,
-        server.faction?.aiPersona?.systemPrompt ?? undefined,
-        options.skipAI,
-        networkCtx,
-      );
+      // Resolve faction identity for content generation
+      const factionKey = resolveFactionKey(networkCtx);
 
-      // Plant faction secrets on the appropriate server role
+      // ═══ PROCESS 1: Lore Content (faction servers only) ═══
+      // Serious, dark, enigmatic. Faction intel, AIDA fragments, buried secrets.
+      let lorePlan: ServerContentPlan = { directories: [], files: [] };
+      if (factionKey && !options.skipAI && networkCtx) {
+        try {
+          const loreResult = await this.generatePlanFromAI(
+            LORE_SYSTEM_PROMPT,
+            buildLorePrompt(networkCtx),
+            server.faction?.aiPersona?.systemPrompt ?? undefined,
+          );
+          if (loreResult) lorePlan = loreResult;
+        } catch (err) {
+          this.logger.debug({ err }, "Lore content generation failed");
+        }
+      }
+
+      // ═══ PROCESS 2: Ambient Content (all servers) ═══
+      // World-building. Mundane files, gossip, news, easter eggs.
+      let ambientPlan: ServerContentPlan = { directories: [], files: [] };
+      if (!options.skipAI && networkCtx) {
+        try {
+          const ambientResult = await this.generatePlanFromAI(
+            AMBIENT_SYSTEM_PROMPT,
+            buildAmbientPrompt(networkCtx),
+          );
+          if (ambientResult) ambientPlan = ambientResult;
+        } catch (err) {
+          this.logger.debug({ err }, "Ambient content generation failed");
+        }
+      }
+
+      // Merge both AI plans
+      const plan: ServerContentPlan = {
+        directories: [...lorePlan.directories, ...ambientPlan.directories],
+        files: [...lorePlan.files, ...ambientPlan.files],
+      };
+
+      // If both AI processes failed, fall back to static content
+      if (plan.directories.length === 0 && plan.files.length === 0) {
+        const fallback = networkCtx
+          ? generateRoleContent(networkCtx)
+          : this.getStaticContentPlan(server.type);
+        plan.directories = fallback.directories;
+        plan.files = fallback.files;
+      }
+
+      // Plant faction secrets on the appropriate server role (existing behavior)
       if (networkCtx) {
         const matchingSecrets = networkCtx.secrets.filter(
           (s) =>
@@ -1356,7 +1596,7 @@ export class ServerContentService {
         plan.files.push(...encodedFiles);
       }
 
-      // Apply the plan
+      // Apply the merged plan
       await this.applyContentPlan(serverId, server.ownerId || "system", plan);
 
       this.logger.info(
@@ -1364,10 +1604,12 @@ export class ServerContentService {
           serverId,
           serverName: server.name,
           serverType: server.type,
-          dirs: plan.directories.length,
-          files: plan.files.length,
+          loreFiles: lorePlan.files.length,
+          ambientFiles: ambientPlan.files.length,
+          totalDirs: plan.directories.length,
+          totalFiles: plan.files.length,
         },
-        "Server content provisioned",
+        "Server content provisioned (two-process)",
       );
     } catch (error) {
       this.logger.error(
@@ -1785,57 +2027,13 @@ export class ServerContentService {
   }
 
   /**
-   * Generate a content plan for a server.
-   * Tries AI with full network context first, falls back to role-based static templates.
+   * Generate content plan from AI using the given prompts.
+   * Used by both lore and ambient content generation processes.
    */
-  private async generateContentPlan(
-    serverType: string,
-    serverName: string,
-    factionName?: string,
-    factionDescription?: string,
+  private async generatePlanFromAI(
+    systemPrompt: string,
+    userPrompt: string,
     factionSystemPrompt?: string,
-    skipAI?: boolean,
-    networkCtx?: NetworkContext | null,
-  ): Promise<ServerContentPlan> {
-    // Try AI generation with network context
-    if (!skipAI && networkCtx) {
-      try {
-        const aiPlan = await this.generateContentPlanWithAI(
-          serverType,
-          serverName,
-          factionName,
-          factionDescription,
-          factionSystemPrompt,
-          networkCtx,
-        );
-        if (aiPlan) return aiPlan;
-      } catch (err) {
-        this.logger.debug(
-          { err },
-          "AI content generation failed, falling back to static",
-        );
-      }
-    }
-
-    // Fall back to role-based static with network context injection
-    if (networkCtx) {
-      return generateRoleContent(networkCtx);
-    }
-
-    // Legacy fallback: type-based static template (no network context)
-    return this.getStaticContentPlan(serverType);
-  }
-
-  /**
-   * Attempt to generate content plan using AI with network context.
-   */
-  private async generateContentPlanWithAI(
-    serverType: string,
-    serverName: string,
-    factionName?: string,
-    _factionDescription?: string,
-    factionSystemPrompt?: string,
-    networkCtx?: NetworkContext | null,
   ): Promise<ServerContentPlan | null> {
     try {
       if (!this.aiService) {
@@ -1846,18 +2044,13 @@ export class ServerContentService {
       }
       const aiService = this.aiService;
 
-      const systemPrompt = factionSystemPrompt
-        ? `${factionSystemPrompt}\n\n${SERVER_CONTENT_SYSTEM_PROMPT}`
-        : SERVER_CONTENT_SYSTEM_PROMPT;
-
-      // Use network-aware prompt if context available, otherwise legacy
-      const prompt = networkCtx
-        ? buildNetworkAwarePrompt(networkCtx)
-        : `Generate filesystem content for a "${serverType}" server named "${serverName}".${factionName ? ` Belongs to faction "${factionName}".` : ""}\n\nReturn JSON: { "directories": [{ "path": "/...", "isHidden": false }], "files": [{ "path": "/...", "content": "...", "isHidden": false, "isEncrypted": false }] }\n\nGenerate 6-10 dirs and 5-8 files.`;
+      const fullSystemPrompt = factionSystemPrompt
+        ? `${factionSystemPrompt}\n\n${systemPrompt}`
+        : systemPrompt;
 
       const { response } = await aiService.generateResponse(
-        prompt,
-        systemPrompt,
+        userPrompt,
+        fullSystemPrompt,
       );
 
       // Extract JSON from the response
@@ -1875,7 +2068,7 @@ export class ServerContentService {
         return null;
       }
 
-      // Sanitize paths
+      // Sanitize paths and enforce content quality
       const plan: ServerContentPlan = {
         directories: parsed.directories
           .filter(
@@ -1895,7 +2088,7 @@ export class ServerContentService {
           )
           .map((f: any) => ({
             path: f.path,
-            content: String(f.content).slice(0, 2000), // Cap content length
+            content: String(f.content).slice(0, 3000), // Cap content length (raised from 2000 for richer files)
             isHidden: Boolean(f.isHidden),
             isEncrypted: Boolean(f.isEncrypted),
             isProtected: Boolean(f.isProtected),

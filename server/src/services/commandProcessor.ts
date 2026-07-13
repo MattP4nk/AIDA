@@ -207,6 +207,9 @@ class CommandProcessor extends EventEmitter {
     const achievementService = this.resolveService<
       import("./achievementService").AchievementService
     >(TOKENS.ACHIEVEMENT_SERVICE);
+    const keyFragmentService = this.resolveService<
+      import("./keyFragmentService").KeyFragmentService
+    >(TOKENS.KEY_FRAGMENT_SERVICE);
 
     // Fetch user role for command-level role gating
     const user = await db.client.user.findUnique({
@@ -244,6 +247,7 @@ class CommandProcessor extends EventEmitter {
         ...(storyMissionService ? { storyMissionService } : {}),
         ...(leaderboardService ? { leaderboardService } : {}),
         ...(achievementService ? { achievementService } : {}),
+        ...(keyFragmentService ? { keyFragmentService } : {}),
       },
     };
   }
@@ -671,8 +675,10 @@ class CommandProcessor extends EventEmitter {
   public clearHistory(userId?: string): void {
     if (userId) {
       this.commandHistory.delete(userId);
+      this.rateLimitMap.delete(userId); // Clean up rate limit entry too
     } else {
       this.commandHistory.clear();
+      this.rateLimitMap.clear();
     }
   }
 
@@ -701,7 +707,7 @@ class CommandProcessor extends EventEmitter {
     const history = this.commandHistory.get(userId) || [];
 
     // Filter by serverId if provided
-    let filtered = serverId
+    const filtered = serverId
       ? history.filter((cmd) => cmd.serverId === serverId)
       : history;
 

@@ -91,6 +91,11 @@ export const SKILL_REQUIREMENTS: Readonly<Record<string, SkillRequirement>> = {
   share_intel: { skill: "socialEng", level: 10, label: "Social Engineering" },
   // msg, mail, inbox, contact, chat → ungated (basic comms)
 
+  // ── Fragment / Endgame commands ─────────────────────────────────────
+  fragment: { skill: "hacking", level: 30, label: "Hacking" },
+  fragments: { skill: "hacking", level: 30, label: "Hacking" },
+  endgame: { skill: "hacking", level: 50, label: "Hacking" },
+
   // ── Alias subcommands (key = "alias:<sub>") ────────────────────────
   "alias:create": {
     skill: "socialEng",

@@ -1,6 +1,6 @@
 import crypto from "crypto";
 import { Request, Response, NextFunction } from "express";
-import { verifySocketToken } from "./auth";
+import { verifySocketToken, AUTH_COOKIE_NAME } from "./auth";
 
 /**
  * CSRF Protection using custom header validation (no cookies needed for JWT-based auth).
@@ -87,7 +87,10 @@ export function csrfProtection(
     });
   }
 
-  const jwtToken = authHeader?.replace("Bearer ", "");
+  // Read JWT from cookie or Authorization header
+  const jwtToken =
+    req.cookies?.[AUTH_COOKIE_NAME] ||
+    authHeader?.replace("Bearer ", "");
   if (!jwtToken) {
     return res.status(403).json({
       success: false,
@@ -115,8 +118,11 @@ export async function csrfTokenEndpoint(
   req: Request,
   res: Response,
 ): Promise<void> {
+  // Read JWT from cookie or Authorization header
   const authHeader = req.headers.authorization as string;
-  const jwtToken = authHeader?.replace("Bearer ", "");
+  const jwtToken =
+    req.cookies?.[AUTH_COOKIE_NAME] ||
+    authHeader?.replace("Bearer ", "");
 
   if (!jwtToken) {
     res.status(401).json({

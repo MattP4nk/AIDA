@@ -3,6 +3,7 @@ import logger from "../logger";
 import cors from "cors";
 import helmet from "helmet";
 import compression from "compression";
+import cookieParser from "cookie-parser";
 import morgan from "morgan";
 import rateLimit from "express-rate-limit";
 import { config, CORS_ORIGINS } from "../config/environment";
@@ -46,6 +47,9 @@ export function setupMiddleware(app: Application): void {
       ],
     }),
   );
+
+  // Cookie parsing
+  app.use(cookieParser());
 
   // Compression
   app.use(compression());

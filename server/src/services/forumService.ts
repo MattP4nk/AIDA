@@ -749,13 +749,18 @@ export class ForumService extends EventEmitter {
       if (!aiUser) {
         // Create AI user account
         const crypto = await import("crypto");
+        const { getService } = await import("../di/container");
+        const { IP_SERVICE } = await import("../di/tokens");
+        const ipService = getService<any>(IP_SERVICE);
+        const homeIp = await ipService.generateUniqueIP();
+
         aiUser = await prisma.user.create({
           data: {
             id: aiUserId,
             username: persona.name,
             email: `${personaId}@ai.aida.internal`,
             password: crypto.randomBytes(32).toString("hex"),
-            homeIp: "127.0.0.1",
+            homeIp: homeIp,
           },
         });
       }
@@ -820,6 +825,585 @@ export class ForumService extends EventEmitter {
       this.logger.error({ err: error }, "Error creating AI post");
       throw error;
     }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // FORUM CONTENT POPULATION — AI-generated NPC posts on startup
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /**
+   * Populate all forums with AI-generated NPC posts on first startup.
+   * Idempotent — skips if any posts already exist across all forums.
+   * Fire-and-forget from index.ts.
+   */
+  public async populateForumContent(): Promise<void> {
+    try {
+      const totalPosts = await prisma.post.count();
+      if (totalPosts > 0) {
+        this.logger.info(
+          "Forums already populated (%d posts), skipping",
+          totalPosts,
+        );
+        return;
+      }
+
+      const forums = await prisma.forum.findMany({
+        include: { faction: true },
+      });
+
+      this.logger.info(
+        "Populating %d forums with NPC content...",
+        forums.length,
+      );
+
+      for (const forum of forums) {
+        try {
+          await this.generateForumPosts(forum);
+        } catch (err) {
+          this.logger.error(
+            { err, forumId: forum.id, forumName: forum.name },
+            "Failed to populate forum, using fallback",
+          );
+          await this.insertFallbackPosts(forum);
+        }
+      }
+
+      const finalCount = await prisma.post.count();
+      this.logger.info(
+        "Forum population complete: %d posts created",
+        finalCount,
+      );
+    } catch (error) {
+      this.logger.error({ err: error }, "Error populating forum content");
+    }
+  }
+
+  /**
+   * Generate AI-authored NPC posts for a single forum.
+   */
+  private async generateForumPosts(forum: any): Promise<void> {
+    // Lazy-load AIService
+    let aiService: any;
+    try {
+      const { getService } = await import("../di/container");
+      const { AI_SERVICE } = await import("../di/tokens");
+      aiService = getService(AI_SERVICE);
+    } catch {
+      throw new Error("AIService not available");
+    }
+
+    // Lazy-load lore constants
+    const {
+      FACTION_LORE,
+      FACTION_VOICE,
+      CRYPTIC_QUOTES,
+      AMBIENT_NEWS_POOL,
+      FACTION_MUNDANE_THEMES,
+    } = await import("../lore/worldLore");
+
+    const factionKey = forum.faction
+      ? this.resolveFactionKey(forum.faction.shortName || forum.faction.name)
+      : null;
+
+    // Build context for AI prompt
+    const newsItems = this.pickRandom(AMBIENT_NEWS_POOL, 3);
+    const crypticQuote = this.pickRandom(CRYPTIC_QUOTES, 1)[0] || "";
+    const mundaneThemes =
+      factionKey && FACTION_MUNDANE_THEMES[factionKey]
+        ? FACTION_MUNDANE_THEMES[factionKey]
+        : null;
+
+    const systemPrompt = `You generate forum posts for an underground hacking game's forum system.
+Create 4-6 posts from DIFFERENT forum users. Each user has a unique handle and personality.
+
+CRITICAL RULES:
+- Each post must have a different author with a unique handle and one-sentence personality description
+- Handles should feel like real internet usernames — creative, lowercase, underscores OK, no corporate names
+- Content: 200-800 chars per post. Natural forum style — questions, opinions, tips, rants. NOT essays.
+- Mix: 60% mundane forum chatter (complaints, questions, tips, drama), 30% faction/community-relevant, 10% subtle story hints
+- ONE post should contain a buried clue: an IP address mentioned in passing, a rumor about a hidden server, or a cryptic reference
+- Never break the fourth wall — these are real people posting on a real forum in a cyberpunk world
+- Return ONLY valid JSON array: [{\"authorHandle\": \"...\", \"authorPersonality\": \"one sentence\", \"title\": \"...\", \"content\": \"...\", \"isSticky\": false, \"storyRelevant\": false}]`;
+
+    let userPrompt = `FORUM: "${forum.name}" (${forum.category})
+URL: ${forum.url}
+Security Level: ${forum.securityLevel}/5
+${forum.description ? `Description: ${forum.description}` : ""}`;
+
+    if (factionKey) {
+      userPrompt += `\n\nFACTION CONTEXT:\n${FACTION_LORE[factionKey] || ""}`;
+      userPrompt += `\n\nWRITING VOICE (guide for all posts on this forum):\n${FACTION_VOICE[factionKey] || ""}`;
+    }
+
+    if (mundaneThemes) {
+      const topics = [
+        ...(mundaneThemes.workFiles || []).slice(0, 3),
+        ...(mundaneThemes.personalFiles || []).slice(0, 2),
+        ...(mundaneThemes.gossip || []).slice(0, 2),
+      ];
+      userPrompt += `\n\nTOPIC IDEAS (for mundane posts):\n${topics.join(", ")}`;
+    }
+
+    userPrompt += `\n\nCURRENT NEWS (reference in posts if relevant):\n${newsItems.map((n) => `- ${n}`).join("\n")}`;
+    userPrompt += `\n\nCRYPTIC LORE (weave into ONE post as subtle hint):\n"${crypticQuote}"`;
+
+    if (forum.isHoneypot) {
+      userPrompt += `\n\nSPECIAL: This forum is a HONEYPOT trap. Posts should be enticing — free tools, leaked credentials, too-good-to-be-true offers. Authors should seem enthusiastic and helpful (suspiciously so).`;
+    }
+
+    const { response } = await aiService.generateResponse(
+      userPrompt,
+      systemPrompt,
+    );
+
+    // Parse JSON array from response
+    const jsonMatch = response.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) {
+      throw new Error("No JSON array found in AI response");
+    }
+
+    const posts: Array<{
+      authorHandle: string;
+      authorPersonality: string;
+      title: string;
+      content: string;
+      isSticky?: boolean;
+      storyRelevant?: boolean;
+    }> = JSON.parse(jsonMatch[0]);
+
+    if (!Array.isArray(posts) || posts.length === 0) {
+      throw new Error("AI returned empty or invalid posts array");
+    }
+
+    // Create each NPC post
+    for (const postData of posts) {
+      if (!postData.authorHandle || !postData.title || !postData.content)
+        continue;
+
+      await this.createNPCPost(forum.id, postData);
+    }
+
+    // For faction forums, add a sticky post from the faction leader
+    if (forum.factionId) {
+      const leader = await prisma.aIPersona.findFirst({
+        where: { faction: { id: forum.factionId } },
+      });
+      if (leader) {
+        const stickyTitle =
+          factionKey === "garrison"
+            ? "OFFICIAL: Standing Orders & Briefing Protocol"
+            : factionKey === "dothackers"
+              ? "READ FIRST: Assembly Rules & Opsec"
+              : factionKey === "cybercorp"
+                ? "MEMO: Employee Forum Guidelines & Updates"
+                : "Welcome";
+
+        const stickyContent =
+          factionKey === "garrison"
+            ? "All operatives must review current briefings before field deployment. Maintain OPSEC at all times. Report suspicious activity through proper channels. Unauthorized disclosures will be prosecuted under Section 7."
+            : factionKey === "dothackers"
+              ? "Welcome to the Assembly. Rules: 1) No snitches. 2) Encrypt everything. 3) Share knowledge freely. 4) If Garrison or CyberCorp come knocking, you were never here. Stay sharp. Stay free."
+              : factionKey === "cybercorp"
+                ? "Welcome to the CyberCorp Employee Portal. Please keep discussions professional and aligned with company values. All communications are monitored per your employment agreement. Contact HR for policy questions."
+                : "Welcome to this forum.";
+
+        const post = await this.createAIPost(
+          leader.id,
+          forum.id,
+          stickyTitle,
+          stickyContent,
+        );
+        await prisma.post.update({
+          where: { id: post.id },
+          data: { isSticky: true, isPinned: true },
+        });
+      }
+    }
+
+    this.logger.info(
+      { forumId: forum.id, forumName: forum.name, postCount: posts.length },
+      "Forum populated with NPC posts",
+    );
+  }
+
+  /**
+   * Create a forum post from an NPC (not a canonical AI persona).
+   * Auto-creates User + ForumMember with personality.
+   */
+  private async createNPCPost(
+    forumId: string,
+    postData: {
+      authorHandle: string;
+      authorPersonality: string;
+      title: string;
+      content: string;
+      isSticky?: boolean;
+      storyRelevant?: boolean;
+    },
+  ): Promise<Post> {
+    const handle = postData.authorHandle
+      .toLowerCase()
+      .replace(/[^a-z0-9_.-]/g, "_")
+      .slice(0, 30);
+    const npcUserId = `npc_forum_${handle}`;
+
+    // Upsert NPC user account
+    await prisma.user.upsert({
+      where: { id: npcUserId },
+      create: {
+        id: npcUserId,
+        username: handle,
+        email: `${handle}@npc.aida.internal`,
+        password: (await import("crypto")).randomBytes(32).toString("hex"),
+        homeIp: `127.0.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}`,
+      },
+      update: {},
+    });
+
+    // Upsert ForumMember with personality
+    const personality = {
+      description: postData.authorPersonality,
+      tone: postData.authorPersonality,
+      topics: [],
+    };
+
+    await prisma.forumMember.upsert({
+      where: { userId_forumId: { userId: npcUserId, forumId } },
+      create: {
+        userId: npcUserId,
+        forumId,
+        handle,
+        reputation: 10 + Math.floor(Math.random() * 90),
+        postCount: 0,
+        personality,
+        memory: [],
+      },
+      update: { personality },
+    });
+
+    // Create post
+    const post = await prisma.post.create({
+      data: {
+        forumId,
+        authorId: npcUserId,
+        authorHandle: handle,
+        title: postData.title,
+        content: postData.content,
+        isSticky: postData.isSticky || false,
+        storyRelevant: postData.storyRelevant || false,
+      },
+    });
+
+    // Update post count
+    await prisma.forumMember.update({
+      where: { userId_forumId: { userId: npcUserId, forumId } },
+      data: { postCount: { increment: 1 } },
+    });
+
+    return post;
+  }
+
+  /**
+   * Static fallback posts when AI generation fails.
+   */
+  private async insertFallbackPosts(forum: any): Promise<void> {
+    const factionKey = forum.faction
+      ? this.resolveFactionKey(forum.faction.shortName || forum.faction.name)
+      : null;
+
+    const fallbackPosts = forum.isHoneypot
+      ? [
+          {
+            authorHandle: "toolz_master",
+            authorPersonality: "Overly enthusiastic tool sharer",
+            title: "FREE: Elite Exploit Pack v4.2",
+            content:
+              "Hey everyone! Dropping my personal toolkit here. Includes zero-days for most common firewalls. Download link in my profile. No strings attached! Been using these for months with zero detection. You're welcome.",
+          },
+          {
+            authorHandle: "happy_user_99",
+            authorPersonality: "Suspiciously satisfied customer",
+            title: "These tools actually work!",
+            content:
+              "Just used the exploit pack from toolz_master and wow, got root on three servers in an hour. Totally legit. Everyone should download this. Best community ever!",
+          },
+        ]
+      : factionKey === "garrison"
+        ? [
+            {
+              authorHandle: "sentry_7",
+              authorPersonality: "By-the-book security analyst",
+              title: "Perimeter Alert: Unusual Traffic Patterns",
+              content:
+                "Logging anomalous traffic on subnet 192.168.1.x. Multiple probes against garrison-gw in the last 48 hours. Could be automated scans, could be something more targeted. Recommend heightened monitoring on all gateway nodes. Report anything suspicious.",
+            },
+            {
+              authorHandle: "lt_cipher",
+              authorPersonality: "Exhausted but dedicated officer",
+              title: "Shift Change Protocols — READ THIS",
+              content:
+                "Third time this month someone left their terminal unlocked during shift change. If I catch it again, I'm filing a formal report. Lock your sessions, rotate your keys, and for the love of operational security, stop using 'password123' as your temp credentials.",
+            },
+            {
+              authorHandle: "field_ops_bravo",
+              authorPersonality: "Grizzled field operative",
+              title: "After-Action Report: Sector 7 Sweep",
+              content:
+                "Completed sweep of abandoned infrastructure in Sector 7. Found traces of dotHacker activity — encrypted dead drops, wiped logs, the usual. One thing stood out: a file referencing something called 'The Sword'. Flagging for intel review.",
+            },
+          ]
+        : factionKey === "dothackers"
+          ? [
+              {
+                authorHandle: "fr33_radical",
+                authorPersonality: "Passionate digital activist",
+                title: "CyberCorp's new surveillance patch — we need to talk",
+                content:
+                  "They pushed an update to all corp-managed nodes last night. Hidden telemetry endpoint phones home every 30 seconds. I've got the packet captures. This is bigger than we thought. If Garrison is getting this data too, we're all compromised. Spread the word.",
+              },
+              {
+                authorHandle: "old_skool_hack",
+                authorPersonality: "Veteran hacker, nostalgic",
+                title: "Remember when the net was free?",
+                content:
+                  "Before The Emperor. Before the factions. Before AIDA. There was a time when you could traverse the entire grid without hitting a single firewall. I was there. Most of you weren't. Don't let anyone tell you this is how it's supposed to be.",
+              },
+              {
+                authorHandle: "bit_rebel",
+                authorPersonality: "Energetic script kiddie",
+                title: "First hack!! (help needed)",
+                content:
+                  "OK so I managed to crack a level 3 firewall on my own. Took forever but I'm in! Problem is I don't know what I'm looking at. Found some encrypted files but my crypto skill is trash. Any tips? Also is it normal to feel like someone's watching you after you hack a server?",
+              },
+            ]
+          : factionKey === "cybercorp"
+            ? [
+                {
+                  authorHandle: "q4_analyst",
+                  authorPersonality: "Numbers-obsessed financial analyst",
+                  title: "Q3 Revenue Projections (Internal)",
+                  content:
+                    "Numbers are looking strong. Server infrastructure revenue up 12% QoQ. The new encryption licensing model is printing money. Only concern: R&D costs on Project Nightfall are above forecast. Director Chen wants a full review before the board meeting.",
+                },
+                {
+                  authorHandle: "synergy_steve",
+                  authorPersonality: "Overly corporate middle manager",
+                  title: "Team Building Event Next Thursday!",
+                  content:
+                    "Hi team! Exciting news — we're doing a virtual escape room for team building. Mandatory attendance. Please clear your calendars from 14:00-16:00. Snacks will be provided (digital vouchers). Let's build those cross-departmental synergies!",
+                },
+                {
+                  authorHandle: "intern_404",
+                  authorPersonality: "Confused but eager intern",
+                  title: "Question about access levels?",
+                  content:
+                    "Hey, new intern here. I was poking around the dev server and found a directory called .vault_master_key. Is that supposed to be there? My badge doesn't let me open it. Should I file a ticket or just pretend I didn't see it?",
+                },
+              ]
+            : [
+                {
+                  authorHandle: "netrunner_anon",
+                  authorPersonality: "Cautious independent hacker",
+                  title: "PSA: New scan detection on public nodes",
+                  content:
+                    "Heads up — someone updated the IDS signatures on the public-facing servers. My usual port scan patterns are getting flagged instantly. Recommend switching to slow-scan with randomized intervals. Stay safe out there.",
+                },
+                {
+                  authorHandle: "data_nomad",
+                  authorPersonality: "Wandering information trader",
+                  title: "Trading intel for credits",
+                  content:
+                    "Got access logs from three different networks. Nothing earth-shattering but could be useful for mapping topology. Looking for 500 credits per log set or trade for equivalent intel. DM me. No Garrison affiliates.",
+                },
+                {
+                  authorHandle: "curious_cat",
+                  authorPersonality: "Conspiracy theorist",
+                  title: "Has anyone else noticed the signal?",
+                  content:
+                    "There's a pattern in the background noise on the DarkNet frequency. Every 73 seconds, a burst of encrypted data. It's not random. I've been logging it for weeks. I think... I think something is trying to communicate. Something old. Something that was broken apart a long time ago.",
+                },
+              ];
+
+    for (const post of fallbackPosts) {
+      await this.createNPCPost(forum.id, post);
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // NPC REPLY SYSTEM — AI-driven replies with persistent memory
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /**
+   * Check if a post's author is an NPC with personality and optionally generate a reply.
+   * Called after a real player creates a reply to a forum post.
+   */
+  public async handleNPCReply(
+    postId: string,
+    replyUserId: string,
+    replyContent: string,
+  ): Promise<void> {
+    try {
+      // Fetch the original post
+      const post = await prisma.post.findUnique({
+        where: { id: postId },
+        include: { forum: true },
+      });
+      if (!post) return;
+
+      // Check if the post author is an NPC (has personality on their ForumMember)
+      const npcMember = await prisma.forumMember.findUnique({
+        where: {
+          userId_forumId: { userId: post.authorId, forumId: post.forumId },
+        },
+      });
+      if (!npcMember || !npcMember.personality) return;
+
+      // Don't reply to self or other NPCs
+      if (replyUserId.startsWith("npc_forum_") || replyUserId.startsWith("ai_"))
+        return;
+
+      // Get replying player's username
+      const replyUser = await prisma.user.findUnique({
+        where: { id: replyUserId },
+        select: { username: true },
+      });
+      if (!replyUser) return;
+
+      // Lazy-load AIService
+      let aiService: any;
+      try {
+        const { getService } = await import("../di/container");
+        const { AI_SERVICE } = await import("../di/tokens");
+        aiService = getService(AI_SERVICE);
+      } catch {
+        return; // AI not available, skip silently
+      }
+
+      const personality = npcMember.personality as any;
+      const memory = (npcMember.memory as any[]) || [];
+
+      // Build NPC reply prompt
+      const systemPrompt = `You are "${npcMember.handle}", a forum user in an underground hacking game world.
+Personality: ${personality.description || personality.tone || "Regular forum user"}
+
+RULES:
+- Stay in character at all times
+- If the reply is off-topic, boring, or not worth engaging, respond with just the word PASS
+- Otherwise write a short in-character reply (100-400 chars). Be natural — argue, agree, joke, warn, whatever fits your personality
+- Also extract any key facts from the player's message worth remembering
+- Return ONLY valid JSON: {"reply": "your reply text or PASS", "memoryEntry": {"summary": "what the player shared/asked", "topic": "category"} | null}`;
+
+      let userPrompt = `FORUM: "${post.forum.name}"
+YOUR POST TITLE: "${post.title}"`;
+
+      if (memory.length > 0) {
+        const recentMemory = memory.slice(-10);
+        userPrompt += `\n\nYOUR MEMORY OF PAST INTERACTIONS:`;
+        for (const entry of recentMemory) {
+          userPrompt += `\n- ${entry.username || "someone"}: ${entry.summary} (${entry.topic || "general"})`;
+        }
+      }
+
+      userPrompt += `\n\nPLAYER "${replyUser.username}" REPLIED:\n"${replyContent}"`;
+
+      const { response } = await aiService.generateResponse(
+        userPrompt,
+        systemPrompt,
+      );
+
+      // Parse response
+      const jsonMatch = response.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) return;
+
+      let parsed: {
+        reply: string;
+        memoryEntry?: { summary: string; topic: string } | null;
+      };
+      try {
+        parsed = JSON.parse(jsonMatch[0]);
+      } catch {
+        return;
+      }
+
+      // Update memory regardless of reply
+      if (parsed.memoryEntry && parsed.memoryEntry.summary) {
+        const newEntry = {
+          timestamp: new Date().toISOString(),
+          userId: replyUserId,
+          username: replyUser.username,
+          summary: parsed.memoryEntry.summary.slice(0, 200),
+          topic: parsed.memoryEntry.topic || "general",
+        };
+
+        const updatedMemory = [...memory, newEntry].slice(-20); // Cap at 20 entries
+
+        await prisma.forumMember.update({
+          where: {
+            userId_forumId: { userId: post.authorId, forumId: post.forumId },
+          },
+          data: { memory: updatedMemory },
+        });
+      }
+
+      // Create reply if not PASS
+      if (parsed.reply && parsed.reply.trim().toUpperCase() !== "PASS") {
+        await prisma.postReply.create({
+          data: {
+            postId,
+            authorId: post.authorId,
+            authorHandle: npcMember.handle,
+            content: parsed.reply.trim(),
+          },
+        });
+
+        await prisma.post.update({
+          where: { id: postId },
+          data: { replyCount: { increment: 1 } },
+        });
+
+        // Notify via Socket.IO
+        if (this.io) {
+          this.io.to(`forum:${post.forumId}`).emit("forum:new-reply", {
+            postId,
+            author: npcMember.handle,
+            isNPC: true,
+          });
+        }
+
+        this.logger.info(
+          {
+            npcHandle: npcMember.handle,
+            postId,
+            replyUser: replyUser.username,
+          },
+          "NPC forum reply generated",
+        );
+      }
+    } catch (error) {
+      this.logger.error(
+        { err: error, postId, replyUserId },
+        "Error handling NPC reply",
+      );
+    }
+  }
+
+  // ── Helpers ──────────────────────────────────────────────────────────
+
+  private resolveFactionKey(name: string): string | null {
+    const lower = name.toLowerCase();
+    if (lower.includes("garrison")) return "garrison";
+    if (lower.includes("dothack") || lower.includes("dot_hack"))
+      return "dothackers";
+    if (lower.includes("cybercorp") || lower.includes("cyber_corp"))
+      return "cybercorp";
+    if (lower.includes("darknet") || lower.includes("dark_net"))
+      return "darknet";
+    return null;
+  }
+
+  private pickRandom<T>(arr: T[], count: number): T[] {
+    const shuffled = [...arr].sort(() => Math.random() - 0.5);
+    return shuffled.slice(0, count);
   }
 
   /**
@@ -1124,81 +1708,44 @@ export class ForumService extends EventEmitter {
     try {
       if (!post.keyFragmentId) return;
 
-      // Check if user already has this fragment
-      const hasFragment = await prisma.keyFragmentDiscovery.findUnique({
-        where: {
-          userId_fragmentId: {
-            userId,
-            fragmentId: post.keyFragmentId,
-          },
-        },
-      });
-
-      if (hasFragment) {
-        // Already discovered
+      // Delegate to KeyFragmentService for ownership-based claiming
+      let keyFragmentService:
+        | import("./keyFragmentService").KeyFragmentService
+        | null = null;
+      try {
+        const { getService } = await import("../di/container");
+        const { KEY_FRAGMENT_SERVICE } = await import("../di/tokens");
+        keyFragmentService =
+          getService<import("./keyFragmentService").KeyFragmentService>(
+            KEY_FRAGMENT_SERVICE,
+          );
+      } catch {
+        // KeyFragmentService not available — fall through silently
         return;
       }
 
-      // Get fragment details
-      const fragment = await prisma.keyFragment.findUnique({
-        where: { id: post.keyFragmentId },
-      });
-
-      if (!fragment) return;
-
-      // Award fragment to player
-      await prisma.keyFragmentDiscovery.create({
-        data: {
-          userId,
-          fragmentId: post.keyFragmentId,
-          method: "forum_post",
-        },
-      });
-
-      // Update story progress
-      const storyProgress = await prisma.storyProgress.findUnique({
-        where: { userId },
-      });
-
-      if (storyProgress) {
-        const updateData: any = {};
-
-        if (fragment.keyType === "signal") {
-          updateData.signalKey = Math.min(storyProgress.signalKey + 1, 3);
-        } else if (fragment.keyType === "location") {
-          updateData.locationKey = Math.min(storyProgress.locationKey + 1, 3);
-        } else if (fragment.keyType === "cipher") {
-          updateData.cipherKey = Math.min(storyProgress.cipherKey + 1, 3);
-        }
-
-        await prisma.storyProgress.update({
-          where: { userId },
-          data: updateData,
-        });
-      }
-
-      // Emit key fragment found event
-      this.emit("key:fragment-found", {
+      const result = await keyFragmentService.claimFragment(
         userId,
-        fragmentId: post.keyFragmentId,
-        keyType: fragment.keyType,
-        fragmentNum: fragment.fragmentNum,
-      });
-
-      // Notify player
-      if (this.io) {
-        this.io.to(`user:${userId}`).emit("story:key-fragment", {
-          name: fragment.name,
-          keyType: fragment.keyType,
-          fragmentNum: fragment.fragmentNum,
-          description: fragment.description,
-        });
-      }
-
-      this.logger.info(
-        { userId, fragmentName: fragment.name },
-        "Key fragment found",
+        post.keyFragmentId,
+        "forum_post",
       );
+
+      if (result.claimed && result.fragment) {
+        this.logger.info(
+          { userId, fragmentName: result.fragment.name },
+          "Key fragment claimed via forum post",
+        );
+      } else if (result.currentHolder) {
+        // Fragment already held — notify player who has it
+        if (this.io) {
+          this.io.to(`user:${userId}`).emit("story:fragment-intel", {
+            fragmentId: post.keyFragmentId,
+            currentHolder: result.currentHolder,
+            message: `This fragment is held by ${result.currentHolder}. You'll need to negotiate or take it by force.`,
+          });
+        }
+      }
+      // If alreadyHeld (player already has it), do nothing
     } catch (error) {
       this.logger.error({ err: error }, "Error checking key fragment");
     }

@@ -428,6 +428,10 @@ model ForumMember {
   isBanned   Boolean  @default(false) @map("is_banned")
   joinedAt   DateTime @default(now()) @map("joined_at")
 
+  // NPC forum identity + memory (null for real players)
+  personality Json? // { description, tone, topics, factionLean }
+  memory      Json? // [{ timestamp, userId, username, summary, topic }]
+
   user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
   forum Forum @relation(fields: [forumId], references: [id], onDelete: Cascade)
 
@@ -536,10 +540,10 @@ model StoryProgress {
   userId         String @unique @map("user_id")
   discoveryLevel Int    @default(0) @map("discovery_level") // 0-6
 
-  // Key fragments (3 keys × 3 fragments each = 9 total)
-  signalKey   Int @default(0) @map("signal_key") // 0-3
-  locationKey Int @default(0) @map("location_key") // 0-3
-  cipherKey   Int @default(0) @map("cipher_key") // 0-3
+  // AIDA fragments (sword/key/collar × 3 each = 9 total)
+  swordFragments  Int @default(0) @map("sword_fragments") // 0-3
+  keyFragments    Int @default(0) @map("key_fragments") // 0-3
+  collarFragments Int @default(0) @map("collar_fragments") // 0-3
 
   fragments Json @default("[]") // Array of found fragment IDs
 
@@ -588,18 +592,23 @@ model IntelligenceReport {
 
 model KeyFragment {
   id          String                 @id @default(cuid())
-  keyType     String                 @map("key_type") // 'signal' | 'location' | 'cipher'
+  keyType     String                 @map("key_type") // 'sword' | 'key' | 'collar'
   fragmentNum Int                    @map("fragment_num") // 1, 2, or 3
   name        String
   description String                 @db.Text
   hint        String                 @db.Text
   foundBy     KeyFragmentDiscovery[]
 
+  // Current holder (only one player can hold each fragment at a time)
+  heldByUserId String?   @map("held_by_user_id")
+  heldSince    DateTime? @map("held_since")
+
   // Location/trigger
   sourceType String @map("source_type") // 'forum', 'server', 'mission', 'hack'
   sourceId   String @map("source_id")
 
   @@unique([keyType, fragmentNum])
+  @@index([heldByUserId])
   @@map("key_fragments")
 }
 

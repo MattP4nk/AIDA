@@ -55,6 +55,7 @@ import { TutorialService } from "../services/tutorialService";
 import { StoryProgressionService } from "../services/storyProgressionService";
 import { ArchitectInterventionExecutor } from "../services/architectInterventionExecutor";
 import { DarkNetDungeonService } from "../services/darknetDungeonService";
+import { KeyFragmentService } from "../services/keyFragmentService";
 
 import * as TOKENS from "./tokens";
 
@@ -180,6 +181,9 @@ export function setupContainer(
     TOKENS.DARKNET_DUNGEON_SERVICE,
     DarkNetDungeonService,
   );
+
+  // Key Fragment / Endgame
+  container.registerSingleton(TOKENS.KEY_FRAGMENT_SERVICE, KeyFragmentService);
 
   logger.info("DI Container initialized with all services");
 }

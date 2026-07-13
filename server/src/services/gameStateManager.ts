@@ -48,7 +48,8 @@ class GameStateManager extends EventEmitter {
   private readonly CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
   private readonly MAX_SESSIONS = 1000;
   private readonly SESSION_IDLE_TIMEOUT_MS = 60 * 60 * 1000; // 60 minutes
-  private sessionLocks = new Set<string>(); // Prevents concurrent createSession for same user
+  private readonly SESSION_LOCK_TTL_MS = 30 * 1000; // 30 seconds — locks expire if holder crashes
+  private sessionLocks = new Map<string, number>(); // userId -> lock timestamp
 
   private get commandProcessor(): CommandProcessor {
     if (!this._commandProcessor) {
@@ -96,17 +97,26 @@ class GameStateManager extends EventEmitter {
     socketId: string,
     ipAddress: string,
   ): Promise<PlayerSession> {
-    // Per-user lock to prevent concurrent session creation
-    if (this.sessionLocks.has(userId)) {
-      // Wait for the in-flight creation, then return the existing session
-      const existing = this.playerSessions.get(userId);
-      if (existing) return existing;
-      throw new Error(
-        `Session creation already in progress for user ${userId}`,
+    // Per-user lock to prevent concurrent session creation (with TTL)
+    const lockTime = this.sessionLocks.get(userId);
+    if (lockTime !== undefined) {
+      const lockAge = Date.now() - lockTime;
+      if (lockAge < this.SESSION_LOCK_TTL_MS) {
+        // Lock is still valid — return existing session or reject
+        const existing = this.playerSessions.get(userId);
+        if (existing) return existing;
+        throw new Error(
+          `Session creation already in progress for user ${userId}`,
+        );
+      }
+      // Lock expired — stale lock from a crashed operation, proceed
+      this.logger.warn(
+        { userId, lockAgeMs: lockAge },
+        "Expired stale session lock",
       );
     }
 
-    this.sessionLocks.add(userId);
+    this.sessionLocks.set(userId, Date.now());
     try {
       // Check if session already exists
       const existingSession = this.playerSessions.get(userId);
@@ -780,10 +790,10 @@ class GameStateManager extends EventEmitter {
       }
 
       // Initialize file system for home server
-      await fileService.initializeFileSystem(homeServerId, userId);
+      await fileService.initializeFileSystem(homeServer.id, userId);
 
       // Create user's home directory with some starter files
-      await this.createStarterFiles(homeServerId, userId);
+      await this.createStarterFiles(homeServer.id, userId);
     } catch (error) {
       this.logger.error({ err: error }, "Error initializing home file system");
     }

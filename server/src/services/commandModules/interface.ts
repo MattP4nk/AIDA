@@ -24,6 +24,7 @@ import type { NetworkTopologyService } from "../networkTopologyService";
 import type MissionIntegrationService from "../missionIntegration";
 import type { LeaderboardService } from "../leaderboardService";
 import type { AchievementService } from "../achievementService";
+import type { KeyFragmentService } from "../keyFragmentService";
 
 export interface CommandContext {
   userId: string;
@@ -54,6 +55,7 @@ export interface CommandContext {
     missionIntegrationService?: MissionIntegrationService;
     leaderboardService?: LeaderboardService;
     achievementService?: AchievementService;
+    keyFragmentService?: KeyFragmentService;
     [key: string]: any;
   };
 }

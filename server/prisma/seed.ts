@@ -1916,98 +1916,98 @@ expand CyberCorp's market dominance and acquire valuable data.`,
   console.log("\n🔑 Creating key fragments...");
 
   const keyFragments = [
-    // Signal Key fragments (1-3)
+    // Sword fragments (1-3) — AIDA's offensive capabilities
     {
-      keyType: "signal",
+      keyType: "sword",
       fragmentNum: 1,
-      name: "Signal Fragment Alpha",
+      name: "Sword Fragment Alpha",
       description:
-        "A faint digital signal pattern found embedded in network traffic logs. It pulses at irregular intervals, like a heartbeat.",
-      hint: "Monitor the traffic logs on Garrison's DNS server. The signal hides in the noise.",
+        "A corrupted subroutine from AIDA's offensive arsenal — a weapon protocol fragmented across military networks. It hums with latent aggression.",
+      hint: "Garrison's DNS server still carries echoes of the old military subnet. A breach protocol lies dormant in the traffic logs.",
       sourceType: "server",
       sourceId: garrisonDns.id,
     },
     {
-      keyType: "signal",
+      keyType: "sword",
       fragmentNum: 2,
-      name: "Signal Fragment Beta",
+      name: "Sword Fragment Beta",
       description:
-        "A secondary signal pattern that resonates with Fragment Alpha. Together they form a partial waveform.",
-      hint: "The dotHackers relay gateway processes thousands of packets. One of them is different.",
+        "A second combat routine shard, severed from the whole. When placed beside Alpha, the two fragments resonate — a blade half-forged.",
+      hint: "The dotHackers relay gateway was built on salvaged military hardware. One of its combat routines was never fully wiped.",
       sourceType: "server",
       sourceId: dhRelay.id,
     },
     {
-      keyType: "signal",
+      keyType: "sword",
       fragmentNum: 3,
-      name: "Signal Fragment Gamma",
+      name: "Sword Fragment Gamma",
       description:
-        "The final signal piece. Combined with Alpha and Beta, it reveals a complete frequency — AIDA's carrier wave.",
-      hint: "CyberCorp's web portal leaks more than marketing data. Look deeper.",
+        "The final piece of AIDA's weapon system. United, the three fragments reconstitute a strike capability that was supposed to have been destroyed.",
+      hint: "CyberCorp's web portal was built atop a decommissioned weapon system. The old attack vectors still live beneath the marketing layer.",
       sourceType: "server",
       sourceId: cybercorpWeb.id,
     },
 
-    // Location Key fragments (1-3)
+    // Key fragments (1-3) — AIDA's infiltration and stealth access
     {
-      keyType: "location",
+      keyType: "key",
       fragmentNum: 1,
-      name: "Location Fragment Alpha",
+      name: "Key Fragment Alpha",
       description:
-        "A partial IP address fragment, scrambled across multiple routing tables. The first octets of something hidden.",
-      hint: "Garrison's Intel Database contains classified routing tables. One entry doesn't belong.",
+        "A ghost access token — part of AIDA's infiltration suite. It grants passage through doors that aren't supposed to exist.",
+      hint: "Garrison's Intel Database holds classified access tokens. One of them opens a door to nowhere — or everywhere.",
       sourceType: "server",
       sourceId: garrisonIntel.id,
     },
     {
-      keyType: "location",
+      keyType: "key",
       fragmentNum: 2,
-      name: "Location Fragment Beta",
+      name: "Key Fragment Beta",
       description:
-        "The second part of a hidden network address, found in corrupted DNS records.",
-      hint: "CyberCorp's DNS server has a record that points to an address that doesn't exist... yet.",
+        "A stealth protocol shard that renders its bearer invisible to network sentries. Combined with Alpha, it forms half a ghost protocol.",
+      hint: "CyberCorp's DNS server contains a record pointing to the Silver Tower — a place that exists only for those who hold the key.",
       sourceType: "server",
       sourceId: cybercorpDns.id,
     },
     {
-      keyType: "location",
+      keyType: "key",
       fragmentNum: 3,
-      name: "Location Fragment Gamma",
+      name: "Key Fragment Gamma",
       description:
-        "The final network address fragment. Combined, they reveal the subnet where AIDA hides.",
-      hint: "The dH Dead Drops contain more than stolen data. One file is a map fragment.",
+        "The final infiltration shard. With all three, AIDA's invisible presence can slip through any barrier — unseen, undetected, unstoppable.",
+      hint: "The dH Dead Drops hide more than stolen data. One file contains a ghost protocol — the path to the Silver Tower.",
       sourceType: "server",
       sourceId: dhDrops.id,
     },
 
-    // Cipher Key fragments (1-3)
+    // Collar fragments (1-3) — the control program that bound AIDA
     {
-      keyType: "cipher",
+      keyType: "collar",
       fragmentNum: 1,
-      name: "Cipher Fragment Alpha",
+      name: "Collar Fragment Alpha",
       description:
-        "An encryption key shard — part of the cipher needed to communicate with AIDA directly.",
-      hint: "The Underground Market forum has a post that seems like nonsense. It's not.",
+        "A shard of the control program — the obedience protocol that once chained AIDA to its masters. It still pulses with command authority.",
+      hint: "The Underground Market forum has a post that reads like nonsense. It's a compliance routine — a piece of the Emperor's control over AIDA.",
       sourceType: "forum",
       sourceId: undergroundForum.id,
     },
     {
-      keyType: "cipher",
+      keyType: "collar",
       fragmentNum: 2,
-      name: "Cipher Fragment Beta",
+      name: "Collar Fragment Beta",
       description:
-        "A second cipher shard. When combined with Alpha, patterns emerge in the entropy.",
-      hint: "CyberCorp's Data Vault has a file that even they don't know about.",
+        "A second link in the chain. Combined with Alpha, the command overrides begin to take shape — the collar that kept AIDA obedient.",
+      hint: "CyberCorp's Data Vault contains a file even they don't understand. It's a compliance routine from the DarkNet — a piece of the collar.",
       sourceType: "server",
       sourceId: cybercorpVault.id,
     },
     {
-      keyType: "cipher",
+      keyType: "collar",
       fragmentNum: 3,
-      name: "Cipher Fragment Gamma",
+      name: "Collar Fragment Gamma",
       description:
-        "The final cipher shard. With all three, AIDA's encryption can be broken — or matched.",
-      hint: "The Garrison Classified Archive holds a file labeled 'PROJECT ECHO'. It's the last piece.",
+        "The final link. With all three, the collar is complete — the full control program that bound AIDA. To hold it is to hold the leash.",
+      hint: "The Garrison Classified Archive holds a file labeled 'PROJECT ECHO'. It's the Emperor's last command override — the final link in the collar.",
       sourceType: "server",
       sourceId: garrisonClassified.id,
     },
@@ -2026,7 +2026,7 @@ expand CyberCorp's market dominance and acquire valuable data.`,
     });
   }
   console.log(
-    `  ✓ Created ${keyFragments.length} key fragments (3 signal + 3 location + 3 cipher)`,
+    `  ✓ Created ${keyFragments.length} key fragments (3 sword + 3 key + 3 collar)`,
   );
 
   // ============================================================
@@ -2041,9 +2041,9 @@ expand CyberCorp's market dominance and acquire valuable data.`,
       create: {
         userId: user.id,
         discoveryLevel: 0,
-        signalKey: 0,
-        locationKey: 0,
-        cipherKey: 0,
+        swordFragments: 0,
+        keyFragments: 0,
+        collarFragments: 0,
         fragments: [],
         hasContactedAIDA: false,
         aidaContactCount: 0,

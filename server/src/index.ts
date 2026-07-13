@@ -29,6 +29,7 @@ import {
   FORUM_SERVICE,
   ARCHITECT_INTERVENTION_EXECUTOR,
   DARKNET_DUNGEON_SERVICE,
+  KEY_FRAGMENT_SERVICE,
 } from "./di/tokens";
 
 import type GameStateManager from "./services/gameStateManager";
@@ -107,7 +108,7 @@ async function initialize(): Promise<void> {
   const hackService = getService<HackService>(HACK_SERVICE);
   const missionService = getService<MissionService>(MISSION_SERVICE);
   const factionService = getService<FactionService>(FACTION_SERVICE);
-  const forumService = getService<ForumService>(FORUM_SERVICE);
+  void getService<ForumService>(FORUM_SERVICE); // side-effect initialization
 
   // 5b. Initialize Story Progression (The Architect's staging engine)
   const storyProgression = getService<StoryProgressionService>(
@@ -117,42 +118,51 @@ async function initialize(): Promise<void> {
   logger.info("✅ Story Progression initialized (Epoch 0)");
 
   // 6. Wire dynamic content hooks to game events
+  //
+  // All event side-effects are deferred via queueMicrotask so the EventEmitter
+  // returns immediately. This prevents slow handlers (AI calls, DB writes)
+  // from blocking event delivery to other listeners.
   const dynamicContent = getService<DynamicContentService>(
     DYNAMIC_CONTENT_SERVICE,
   );
 
+  /** Fire-and-forget async work without blocking the event emitter. */
+  const defer = (fn: () => Promise<unknown>, label: string) => {
+    queueMicrotask(() => {
+      fn().catch((err) => logger.error({ err }, label));
+    });
+  };
+
   hackService.on("hack:detected", (data: any) => {
-    dynamicContent.processEvent("hack:detected", data).catch(() => {});
+    defer(() => dynamicContent.processEvent("hack:detected", data), "Dynamic content error on hack:detected");
   });
 
   hackService.on("hack:attempt", (data: any) => {
-    dynamicContent.processEvent("hack:attempt", data).catch(() => {});
+    defer(() => dynamicContent.processEvent("hack:attempt", data), "Dynamic content error on hack:attempt");
     if (data.result?.success || data.success) {
-      storyProgression
-        .recordEvent({
-          type: "hack",
-          category: "combat",
-          actorId: data.attackerId || data.userId,
-          actorType: "player",
-          summary: `Player hacked server ${data.serverName || data.targetServerId || data.serverId}`,
-          data: {
-            serverId: data.targetServerId || data.serverId,
-            serverName: data.serverName,
-            method: data.method,
-          },
-          impact: { tension: 1 },
-          weight: 3,
-        })
-        .catch((err) => console.error("Story ledger error:", err));
+      defer(() => storyProgression.recordEvent({
+        type: "hack",
+        category: "combat",
+        actorId: data.attackerId || data.userId,
+        actorType: "player",
+        summary: `Player hacked server ${data.serverName || data.targetServerId || data.serverId}`,
+        data: {
+          serverId: data.targetServerId || data.serverId,
+          serverName: data.serverName,
+          method: data.method,
+        },
+        impact: { tension: 1 },
+        weight: 3,
+      }), "Story ledger error on hack");
     }
   });
 
   hackService.on("ids_alert", (data: any) => {
-    dynamicContent.processEvent("ids_alert", data).catch(() => {});
+    defer(() => dynamicContent.processEvent("ids_alert", data), "Dynamic content error on ids_alert");
   });
 
   hackService.on("bounty:posted", (data: any) => {
-    dynamicContent.processEvent("bounty:posted", data).catch(() => {});
+    defer(() => dynamicContent.processEvent("bounty:posted", data), "Dynamic content error on bounty:posted");
   });
 
   // IDS alerts: push to player via Socket.IO
@@ -169,25 +179,21 @@ async function initialize(): Promise<void> {
 
   hackService.on("hack:attempt", (data: any) => {
     if (data.result?.success) {
-      personaService
-        .onServerHacked({
-          userId: data.attackerId,
-          serverId: data.targetServerId,
-          serverName: data.serverName,
-          difficulty: data.difficulty,
-        })
-        .catch(() => {});
-      // Check achievements after successful hack
+      defer(() => personaService.onServerHacked({
+        userId: data.attackerId,
+        serverId: data.targetServerId,
+        serverName: data.serverName,
+        difficulty: data.difficulty,
+      }), "Persona error on hack:attempt");
       if (data.attackerId) {
-        // Lazy-load to avoid ordering issues (achievementService resolved later)
         try {
           const achSvc =
             getService<
               import("./services/achievementService").AchievementService
             >(ACHIEVEMENT_SERVICE);
-          achSvc.checkAndAward(data.attackerId).catch(() => {});
+          defer(() => achSvc.checkAndAward(data.attackerId), "Achievement check error after hack");
         } catch {
-          /* service not yet available */
+          /* service not yet available during startup */
         }
       }
     }
@@ -205,141 +211,126 @@ async function initialize(): Promise<void> {
     );
 
   missionService.on("mission:completed", (data: any) => {
-    personaService.onMissionCompleted(data).catch(() => {});
-    dynamicContent.processEvent("mission:completed", data).catch(() => {});
+    defer(() => personaService.onMissionCompleted(data), "Persona error on mission:completed");
+    defer(() => dynamicContent.processEvent("mission:completed", data), "Dynamic content error on mission:completed");
     if (data.userId)
-      achievementService.checkAndAward(data.userId).catch(() => {});
-    if (data.missionId) {
-      storyMissionService
-        .advanceStory(data.missionId, "completed")
-        .catch(() => {});
-    }
-    storyProgression
-      .recordEvent({
-        type: "player_choice",
-        category: "narrative",
-        actorId: data.userId,
-        actorType: "player",
-        summary: `Completed mission: ${data.title || data.missionId}`,
-        data: {
-          missionId: data.missionId,
-          type: data.type,
-          factionId: data.factionId,
-        },
-        impact: data.factionId ? { factions: { [data.factionId]: 2 } } : {},
-        weight: 4,
-      })
-      .catch((err) => console.error("Story ledger error:", err));
+      defer(() => achievementService.checkAndAward(data.userId), "Achievement check error on mission:completed");
+    if (data.missionId)
+      defer(() => storyMissionService.advanceStory(data.missionId, "completed"), "Story mission advance error on mission:completed");
+    defer(() => storyProgression.recordEvent({
+      type: "player_choice",
+      category: "narrative",
+      actorId: data.userId,
+      actorType: "player",
+      summary: `Completed mission: ${data.title || data.missionId}`,
+      data: { missionId: data.missionId, type: data.type, factionId: data.factionId },
+      impact: data.factionId ? { factions: { [data.factionId]: 2 } } : {},
+      weight: 4,
+    }), "Story ledger error on mission:completed");
   });
 
   missionService.on("mission:failed", (data: any) => {
-    if (data.missionId) {
-      storyMissionService
-        .advanceStory(data.missionId, "failed")
-        .catch(() => {});
-    }
-    storyProgression
-      .recordEvent({
-        type: "player_choice",
-        category: "narrative",
-        actorId: data.userId,
-        actorType: "player",
-        summary: `Failed mission: ${data.missionId}`,
-        data: { missionId: data.missionId, reason: data.reason },
-        weight: 2,
-      })
-      .catch((err) => console.error("Story ledger error:", err));
+    if (data.missionId)
+      defer(() => storyMissionService.advanceStory(data.missionId, "failed"), "Story mission advance error on mission:failed");
+    defer(() => storyProgression.recordEvent({
+      type: "player_choice",
+      category: "narrative",
+      actorId: data.userId,
+      actorType: "player",
+      summary: `Failed mission: ${data.missionId}`,
+      data: { missionId: data.missionId, reason: data.reason },
+      weight: 2,
+    }), "Story ledger error on mission:failed");
   });
 
   // Faction events → story ledger
   factionService.on("faction:member_joined", (data: any) => {
-    storyProgression
-      .recordEvent({
-        type: "player_choice",
-        category: "diplomacy",
-        actorId: data.userId,
-        actorType: "player",
-        summary: `Player joined faction ${data.factionName || data.factionId}`,
-        data: { factionId: data.factionId },
-        impact: { factions: { [data.factionId]: 5 } },
-        weight: 5,
-      })
-      .catch((err) => console.error("Story ledger error:", err));
+    defer(() => storyProgression.recordEvent({
+      type: "player_choice", category: "diplomacy", actorId: data.userId, actorType: "player",
+      summary: `Player joined faction ${data.factionName || data.factionId}`,
+      data: { factionId: data.factionId },
+      impact: { factions: { [data.factionId]: 5 } }, weight: 5,
+    }), "Story ledger error on faction:member_joined");
   });
 
-  // Key fragment discovery → story ledger
-  forumService.on("key:fragment-found", (data: any) => {
-    storyProgression
-      .recordEvent({
-        type: "fragment_found",
-        category: "discovery",
-        actorId: data.userId,
-        actorType: "player",
-        summary: `Player discovered key fragment: ${data.keyType || data.fragmentId}`,
-        data: {
-          fragmentId: data.fragmentId,
-          keyType: data.keyType,
-          fragmentNum: data.fragmentNum,
-        },
-        impact: { discoveryWeight: 3, tension: 1 },
-        weight: 7,
-      })
-      .catch((err: any) => console.error("Story ledger error:", err));
-  });
-
-  // Faction member left → story ledger
   factionService.on("faction:member_left", (data: any) => {
-    storyProgression
-      .recordEvent({
-        type: "player_choice",
-        category: "diplomacy",
-        actorId: data.userId,
-        actorType: "player",
-        summary: `Player left faction ${data.factionName || data.factionId}`,
-        data: { factionId: data.factionId },
-        impact: { factions: { [data.factionId]: -5 } },
-        weight: 4,
-      })
-      .catch((err: any) => console.error("Story ledger error:", err));
+    defer(() => storyProgression.recordEvent({
+      type: "player_choice", category: "diplomacy", actorId: data.userId, actorType: "player",
+      summary: `Player left faction ${data.factionName || data.factionId}`,
+      data: { factionId: data.factionId },
+      impact: { factions: { [data.factionId]: -5 } }, weight: 4,
+    }), "Story ledger error on faction:member_left");
   });
 
-  // Faction reputation changed → story ledger
   factionService.on("faction:reputation_changed", (data: any) => {
-    storyProgression
-      .recordEvent({
-        type: "player_choice",
-        category: "diplomacy",
-        actorId: data.userId,
-        actorType: "player",
-        summary: `Player reputation changed with faction ${data.factionId}: ${data.amount > 0 ? "+" : ""}${data.amount} (now ${data.newReputation})`,
-        data: {
-          factionId: data.factionId,
-          amount: data.amount,
-          newReputation: data.newReputation,
-        },
-        impact: { factions: { [data.factionId]: data.amount > 0 ? 1 : -1 } },
-        weight: 2,
-      })
-      .catch((err: any) => console.error("Story ledger error:", err));
+    defer(() => storyProgression.recordEvent({
+      type: "player_choice", category: "diplomacy", actorId: data.userId, actorType: "player",
+      summary: `Player reputation changed with faction ${data.factionId}: ${data.amount > 0 ? "+" : ""}${data.amount} (now ${data.newReputation})`,
+      data: { factionId: data.factionId, amount: data.amount, newReputation: data.newReputation },
+      impact: { factions: { [data.factionId]: data.amount > 0 ? 1 : -1 } }, weight: 2,
+    }), "Story ledger error on faction:reputation_changed");
   });
 
-  // Faction rank achieved → story ledger
   factionService.on("faction:rank_achieved", (data: any) => {
-    storyProgression
-      .recordEvent({
-        type: "player_choice",
-        category: "diplomacy",
-        actorId: data.userId,
-        actorType: "player",
-        summary: `Player achieved rank ${data.newRank} in faction ${data.factionId}`,
-        data: {
-          factionId: data.factionId,
-          newRank: data.newRank,
-        },
-        impact: { factions: { [data.factionId]: 3 } },
-        weight: 5,
-      })
-      .catch((err: any) => console.error("Story ledger error:", err));
+    defer(() => storyProgression.recordEvent({
+      type: "player_choice", category: "diplomacy", actorId: data.userId, actorType: "player",
+      summary: `Player achieved rank ${data.newRank} in faction ${data.factionId}`,
+      data: { factionId: data.factionId, newRank: data.newRank },
+      impact: { factions: { [data.factionId]: 3 } }, weight: 5,
+    }), "Story ledger error on faction:rank_achieved");
+  });
+
+  // Key Fragment Service events
+  const keyFragmentService =
+    getService<import("./services/keyFragmentService").KeyFragmentService>(
+      KEY_FRAGMENT_SERVICE,
+    );
+
+  keyFragmentService.on("fragment:claimed", (data: any) => {
+    defer(() => storyProgression.recordEvent({
+      type: "fragment_claimed", category: "discovery", actorId: data.userId, actorType: "player",
+      summary: `Player claimed AIDA fragment: ${data.name} (${data.keyType} ${data.fragmentNum}/3)`,
+      data: { fragmentId: data.fragmentId, keyType: data.keyType, fragmentNum: data.fragmentNum, fragmentType: data.keyType },
+      impact: { discoveryWeight: 5, tension: 2 }, weight: 7,
+    }), "Story ledger error on fragment:claimed");
+  });
+
+  keyFragmentService.on("fragment:stolen", (data: any) => {
+    defer(() => storyProgression.recordEvent({
+      type: "fragment_stolen", category: "conflict", actorId: data.attackerUserId, actorType: "player",
+      targetId: data.victimUserId, targetType: "player",
+      summary: `Player stole AIDA fragment ${data.name} (${data.keyType}) from another player`,
+      data: { fragmentId: data.fragmentId, keyType: data.keyType, fragmentNum: data.fragmentNum, attackerUserId: data.attackerUserId, victimUserId: data.victimUserId },
+      impact: { discoveryWeight: 7, tension: 4 }, weight: 8,
+    }), "Story ledger error on fragment:stolen");
+  });
+
+  keyFragmentService.on("fragment:transferred", (data: any) => {
+    defer(() => storyProgression.recordEvent({
+      type: "fragment_transferred", category: "social", actorId: data.fromUserId, actorType: "player",
+      targetId: data.toUserId, targetType: "player",
+      summary: `Player traded AIDA fragment ${data.name} (${data.keyType}) to another player`,
+      data: { fragmentId: data.fragmentId, keyType: data.keyType, fragmentNum: data.fragmentNum, fromUserId: data.fromUserId, toUserId: data.toUserId },
+      impact: { discoveryWeight: 3, tension: 1 }, weight: 6,
+    }), "Story ledger error on fragment:transferred");
+  });
+
+  keyFragmentService.on("endgame:unlocked", (data: any) => {
+    defer(() => storyProgression.recordEvent({
+      type: "endgame_unlocked", category: "milestone", actorId: data.userId, actorType: "player",
+      summary: "A player has collected all 9 AIDA fragments. The endgame is unlocked.",
+      data: { userId: data.userId },
+      impact: { discoveryWeight: 10, tension: 5 }, weight: 10,
+    }), "Story ledger error on endgame:unlocked");
+  });
+
+  keyFragmentService.on("endgame:completed", (data: any) => {
+    defer(() => storyProgression.recordEvent({
+      type: "endgame_completed", category: "milestone", actorId: data.userId, actorType: "player",
+      summary: `A player has completed the endgame. Choice: ${data.choice}`,
+      data: { userId: data.userId, choice: data.choice },
+      impact: { discoveryWeight: 10, tension: 10 }, weight: 10,
+    }), "Story ledger error on endgame:completed");
   });
 
   // Tutorial system: advance tutorial when tutorial missions complete
@@ -347,18 +338,14 @@ async function initialize(): Promise<void> {
 
   missionService.on("mission:completed", (data: any) => {
     if (data.userId) {
-      tutorialService
-        .advanceTutorial(data.userId, data.missionId)
-        .catch(() => {});
+      defer(() => tutorialService.advanceTutorial(data.userId, data.missionId), "Tutorial advance error on mission:completed");
     }
   });
 
   // Wire message hook: intercept replies to The Architect for training hints
   const msgSvc = getService<MessageService>(MESSAGE_SERVICE);
   msgSvc.onPrivateMessageSent((senderId, recipientId, content, subject) => {
-    tutorialService
-      .handlePlayerReply(senderId, recipientId, content, subject)
-      .catch(() => {});
+    defer(() => tutorialService.handlePlayerReply(senderId, recipientId, content, subject), "Tutorial reply handler error");
   });
 
   logger.info("✅ Tutorial service initialized");
