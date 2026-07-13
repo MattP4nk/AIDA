@@ -90,8 +90,9 @@ export class AIService {
     return headers;
   }
 
-  private getCacheKey(prompt: string, systemPrompt?: string): string {
-    const data = `${prompt}|${systemPrompt || ""}|${this.defaultModel}`;
+  private getCacheKey(prompt: string, systemPrompt?: string, context?: number[]): string {
+    const contextStr = context ? context.join(",") : "";
+    const data = `${prompt}|${systemPrompt || ""}|${this.defaultModel}|${contextStr}`;
     return `ai:${crypto.createHash("md5").update(data).digest("hex")}`;
   }
 
@@ -119,17 +120,15 @@ export class AIService {
   ): Promise<{ response: string; context?: number[] }> {
     this.metrics.totalRequests++;
 
-    if (!context) {
-      const cacheKey = this.getCacheKey(prompt, systemPrompt);
-      const cached = this.cacheService.get<{
-        response: string;
-        context?: number[];
-      }>(cacheKey);
-      if (cached) {
-        this.metrics.cacheHits++;
-        this.logger.debug({ cacheKey }, "AI cache hit");
-        return cached;
-      }
+    const cacheKey = this.getCacheKey(prompt, systemPrompt, context);
+    const cached = this.cacheService.get<{
+      response: string;
+      context?: number[];
+    }>(cacheKey);
+    if (cached) {
+      this.metrics.cacheHits++;
+      this.logger.debug({ cacheKey }, "AI cache hit");
+      return cached;
     }
 
     try {
@@ -192,10 +191,8 @@ export class AIService {
 
       this.metrics.successfulRequests++;
 
-      if (!context) {
-        const cacheKey = this.getCacheKey(prompt, systemPrompt);
-        this.cacheService.set(cacheKey, result, 300);
-      }
+      // Cache all responses (including those with context)
+      this.cacheService.set(cacheKey, result, 300);
 
       return result;
     } catch (error) {

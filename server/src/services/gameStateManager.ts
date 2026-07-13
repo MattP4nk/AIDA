@@ -14,6 +14,12 @@ import {
   TerminalTab,
 } from "../types/game";
 import { SESSION_TIMEOUT_MS } from "../config/constants";
+import {
+  MAX_SESSIONS as MAX_SESSIONS_LIMIT,
+  SESSION_IDLE_TIMEOUT_MIN,
+  SESSION_LOCK_TTL_MS as SESSION_LOCK_TTL_MS_CFG,
+  SESSION_CLEANUP_INTERVAL_MS,
+} from "../config/gameBalance";
 
 import { injectable, inject } from "tsyringe";
 import { Logger } from "pino";
@@ -45,10 +51,10 @@ class GameStateManager extends EventEmitter {
   private missionService: MissionService;
   private factionService: FactionService;
   private cleanupTimer: NodeJS.Timeout | null = null;
-  private readonly CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
-  private readonly MAX_SESSIONS = 1000;
-  private readonly SESSION_IDLE_TIMEOUT_MS = 60 * 60 * 1000; // 60 minutes
-  private readonly SESSION_LOCK_TTL_MS = 30 * 1000; // 30 seconds — locks expire if holder crashes
+  private readonly CLEANUP_INTERVAL_MS = SESSION_CLEANUP_INTERVAL_MS;
+  private readonly MAX_SESSIONS = MAX_SESSIONS_LIMIT;
+  private readonly SESSION_IDLE_TIMEOUT_MS = SESSION_IDLE_TIMEOUT_MIN * 60 * 1000;
+  private readonly SESSION_LOCK_TTL_MS = SESSION_LOCK_TTL_MS_CFG;
   private sessionLocks = new Map<string, number>(); // userId -> lock timestamp
 
   private get commandProcessor(): CommandProcessor {
@@ -318,8 +324,17 @@ class GameStateManager extends EventEmitter {
 
       const session = this.playerSessions.get(userId);
 
-      // Build reputation from FactionStanding (dynamic, not hardcoded)
-      const reputationMap = await this.factionService.getReputationMap(userId);
+      // Batch parallel queries — reputation, inventory, missions, events, server info
+      const [reputationMap, inventoryItems, playerMissions, userEvents, currentServer] =
+        await Promise.all([
+          this.factionService.getReputationMap(userId),
+          this.shopService.getPlayerInventory(userId),
+          this.missionService.getPlayerMissions(userId),
+          this.eventService.getUserEvents(userId, 10),
+          session?.currentServerId
+            ? this.getServerInfo(session.currentServerId)
+            : Promise.resolve(undefined),
+        ]);
 
       // Build player info
       const playerInfo: PlayerInfo = {
@@ -339,21 +354,6 @@ class GameStateManager extends EventEmitter {
         },
         reputation: reputationMap,
       };
-
-      // Get current server info if connected
-      let currentServer = undefined;
-      if (session?.currentServerId) {
-        const serverInfo = await this.getServerInfo(session.currentServerId);
-        if (serverInfo) {
-          currentServer = serverInfo;
-        }
-      }
-
-      // Build complete game state
-      const inventoryItems = await this.shopService.getPlayerInventory(userId);
-      const playerMissions =
-        await this.missionService.getPlayerMissions(userId);
-      const userEvents = await this.eventService.getUserEvents(userId, 10);
 
       const gameState: GameState = {
         player: playerInfo,
@@ -608,7 +608,7 @@ class GameStateManager extends EventEmitter {
 
       const serverId = session.currentServerId;
 
-      // Update server state
+      // Update server state — prune empty entries to prevent unbounded growth
       const serverState = this.serverStates.get(serverId);
       if (serverState) {
         serverState.connectedPlayers = serverState.connectedPlayers.filter(
@@ -616,6 +616,11 @@ class GameStateManager extends EventEmitter {
         );
         serverState.activeConnections = serverState.connectedPlayers.length;
         serverState.lastUpdate = new Date();
+
+        // Remove from map if no players remain
+        if (serverState.connectedPlayers.length === 0) {
+          this.serverStates.delete(serverId);
+        }
 
         // Update database
         await db.client.gameServer.update({

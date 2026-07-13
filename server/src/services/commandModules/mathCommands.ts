@@ -3,6 +3,7 @@ import { CommandModule, CommandContext } from "./interface";
 import { ExpressionEngine } from "../../utils/expressionEngine";
 
 export class MathCommandsModule implements CommandModule {
+  public category = "math";
   public commands: Set<string> = new Set([
     "calc",
     "expr",

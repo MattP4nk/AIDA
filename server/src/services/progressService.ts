@@ -167,12 +167,10 @@ class ProgressService {
     reason: string = "manual",
   ): Promise<boolean> {
     try {
-      // Get current progress data
+      // Ensure player progress record exists
       const user = await db.client.user.findUnique({
         where: { id: userId },
-        include: {
-          progress: true,
-        },
+        include: { progress: true },
       });
 
       if (!user) {
@@ -180,20 +178,29 @@ class ProgressService {
         return false;
       }
 
-      // Note: User model doesn't have lastSavedAt field
-      // Consider adding it to schema if needed for tracking
-
-      // If progress doesn't exist, create it
       if (!user.progress) {
         await db.client.playerProgress.create({
+          data: { userId },
+        });
+      }
+
+      // Persist session directory to the latest UserSession so it survives
+      // reconnects. The active session's currentDirectory is stored here.
+      const activeSession = await db.client.userSession.findFirst({
+        where: { userId, isActive: true },
+        orderBy: { createdAt: "desc" },
+      });
+
+      if (activeSession) {
+        await db.client.userSession.update({
+          where: { id: activeSession.id },
           data: {
-            userId: userId,
-            // Default values will be set by schema
+            lastServerId: activeSession.lastServerId,
           },
         });
       }
 
-      this.logger.info({ userId, reason }, "Saved progress for user");
+      this.logger.debug({ userId, reason }, "Progress checkpoint saved");
       return true;
     } catch (error) {
       this.logger.error({ err: error, userId }, "Error saving progress for user");

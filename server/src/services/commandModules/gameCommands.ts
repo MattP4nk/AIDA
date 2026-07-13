@@ -1,5 +1,6 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
+import logger from "../../logger";
 import type { ShopItem } from "../shopService";
 import type { InventoryItem } from "../shopService";
 import {
@@ -28,6 +29,7 @@ export class GameCommandsModule implements CommandModule {
   // Refreshed every time the `missions` command runs
   private missionIndex: Map<string, string[]> = new Map();
 
+  public category = "game";
   public commands: Set<string> = new Set([
     "status",
     "skills",
@@ -606,7 +608,7 @@ export class GameCommandsModule implements CommandModule {
           missions = await missionService.getPlayerMissions(context.userId);
         }
       } catch (err) {
-        console.error("[missions] Auto-generation failed:", err);
+        logger.error({ err }, "Mission auto-generation failed");
       }
     }
 

@@ -1,9 +1,15 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
-import { sanitizePath } from "../../utils/pathSanitizer";
 import { table, list, render, Column } from "./asciiBox";
+import {
+  resolvePath,
+  getSession,
+  getServerId,
+} from "./helpers";
+import { VAULT_PAYLOAD_FILENAME, AIDA_FILE_PREFIX } from "../../config/gameBalance";
 
 export class SystemCommandsModule implements CommandModule {
+  public category = "system";
   public commands: Set<string> = new Set([
     "ls",
     "cd",
@@ -22,7 +28,7 @@ export class SystemCommandsModule implements CommandModule {
     command: Command,
     context: CommandContext,
   ): Promise<CommandResult> {
-    const session = this.getSession(context);
+    const session = getSession(context);
     if (!session) {
       return {
         success: false,
@@ -172,21 +178,14 @@ export class SystemCommandsModule implements CommandModule {
     ];
   }
 
-  private getSession(context: CommandContext) {
-    return context.gameStateManager?.getSession(context.userId);
-  }
-
-  private getServerId(context: CommandContext): string | undefined {
-    const session = this.getSession(context);
-    return session?.currentServerId || session?.homeServerId;
-  }
+  // getSession() and getServerId() now imported from helpers.ts
 
   private async handleListDirectory(
     command: Command,
     context: CommandContext,
   ): Promise<CommandResult> {
     try {
-      const serverId = this.getServerId(context);
+      const serverId = getServerId(context);
       if (!serverId) {
         return {
           success: false,
@@ -195,15 +194,11 @@ export class SystemCommandsModule implements CommandModule {
         };
       }
 
-      const session = this.getSession(context);
+      const session = getSession(context);
       const currentDir = session?.currentDirectory || "/";
 
       // Resolve path (absolute or relative)
-      let path = command.args[0] || currentDir;
-      if (!path.startsWith("/")) {
-        path = currentDir === "/" ? `/${path}` : `${currentDir}/${path}`;
-      }
-      path = sanitizePath(path);
+      const path = resolvePath(command.args[0] || currentDir, currentDir);
 
       const showHidden = command.args.includes("-a");
       const result = await context.fileService.listDirectory(
@@ -273,7 +268,7 @@ export class SystemCommandsModule implements CommandModule {
     context: CommandContext,
   ): Promise<CommandResult> {
     try {
-      const serverId = this.getServerId(context);
+      const serverId = getServerId(context);
       if (!serverId) {
         return {
           success: false,
@@ -282,7 +277,7 @@ export class SystemCommandsModule implements CommandModule {
         };
       }
 
-      const session = this.getSession(context);
+      const session = getSession(context);
       const currentDir = session?.currentDirectory || "/";
       let targetDir = command.args[0] || "/";
 
@@ -293,14 +288,8 @@ export class SystemCommandsModule implements CommandModule {
           targetDir === "~" ? homeDir : targetDir.replace("~", homeDir);
       }
 
-      // Handle relative paths
-      if (!targetDir.startsWith("/")) {
-        targetDir =
-          currentDir === "/" ? `/${targetDir}` : `${currentDir}/${targetDir}`;
-      }
-
-      // Sanitize path to resolve .. and . components safely
-      targetDir = sanitizePath(targetDir);
+      // Resolve relative path and sanitize
+      targetDir = resolvePath(targetDir, currentDir);
 
       const result = await context.fileService.listDirectory(
         serverId,
@@ -341,7 +330,7 @@ export class SystemCommandsModule implements CommandModule {
     _command: Command,
     context: CommandContext,
   ): Promise<CommandResult> {
-    const session = this.getSession(context);
+    const session = getSession(context);
     const currentDir = session?.currentDirectory || "/";
 
     return {
@@ -365,7 +354,7 @@ export class SystemCommandsModule implements CommandModule {
       }
 
       const filename = command.args[0]!;
-      const serverId = this.getServerId(context);
+      const serverId = getServerId(context);
       if (!serverId) {
         return {
           success: false,
@@ -374,13 +363,9 @@ export class SystemCommandsModule implements CommandModule {
         };
       }
 
-      const session = this.getSession(context);
+      const session = getSession(context);
       const currentDir = session?.currentDirectory || "/";
-      let filePath = filename;
-      if (!filePath.startsWith("/")) {
-        filePath =
-          currentDir === "/" ? `/${filePath}` : `${currentDir}/${filePath}`;
-      }
+      const filePath = resolvePath(filename, currentDir);
 
       const result = await context.fileService.readFile(
         serverId,
@@ -398,14 +383,11 @@ export class SystemCommandsModule implements CommandModule {
 
       let output = result.data?.content || "";
 
-      // DarkNet vault conquest: reading vault_payload.enc triggers reward
-      if (filename === "vault_payload.enc") {
+      // DarkNet vault conquest: reading vault payload triggers reward
+      if (filename === VAULT_PAYLOAD_FILENAME) {
         try {
-          const { getService } = await import("../../di/container");
-          const { DARKNET_DUNGEON_SERVICE } = await import("../../di/tokens");
-          const dungeonService = getService<
-            import("../darknetDungeonService").DarkNetDungeonService
-          >(DARKNET_DUNGEON_SERVICE);
+          const dungeonService = context.services.darknetDungeonService;
+          if (!dungeonService) throw new Error("not available");
           const conquest = await dungeonService.conquerVault(
             context.userId,
             serverId,
@@ -431,13 +413,11 @@ export class SystemCommandsModule implements CommandModule {
         }
       }
 
-      // DarkNet discovery: reading .aida files triggers discovery check
-      if (filename.startsWith(".aida") || filename.endsWith(".aida")) {
+      // DarkNet discovery: reading AIDA-related files triggers discovery check
+      if (filename.startsWith(AIDA_FILE_PREFIX) || filename.endsWith(AIDA_FILE_PREFIX)) {
         try {
-          const { getService } = await import("../../di/container");
-          const darknetService = getService<
-            import("../darknetDiscoveryService").default
-          >("DarkNetDiscoveryService");
+          const darknetService = context.services.darknetDiscoveryService;
+          if (!darknetService) throw new Error("not available");
           const discovered = await darknetService.checkDiscoveryTrigger(
             context.userId,
             {
@@ -456,12 +436,8 @@ export class SystemCommandsModule implements CommandModule {
 
       // Key fragment discovery: check if this server contains a fragment
       try {
-        const { getService } = await import("../../di/container");
-        const { KEY_FRAGMENT_SERVICE } = await import("../../di/tokens");
-        const keyFragmentService =
-          getService<import("../keyFragmentService").KeyFragmentService>(
-            KEY_FRAGMENT_SERVICE,
-          );
+        const keyFragmentService = context.services.keyFragmentService;
+        if (!keyFragmentService) throw new Error("not available");
         const fragmentResult = await keyFragmentService.checkServerFragment(
           context.userId,
           serverId,
@@ -533,7 +509,7 @@ export class SystemCommandsModule implements CommandModule {
       }
 
       const dirName = command.args[0]!;
-      const serverId = this.getServerId(context);
+      const serverId = getServerId(context);
       if (!serverId) {
         return {
           success: false,
@@ -542,13 +518,9 @@ export class SystemCommandsModule implements CommandModule {
         };
       }
 
-      const session = this.getSession(context);
+      const session = getSession(context);
       const currentDir = session?.currentDirectory || "/";
-      let dirPath = dirName;
-      if (!dirPath.startsWith("/")) {
-        dirPath =
-          currentDir === "/" ? `/${dirPath}` : `${currentDir}/${dirPath}`;
-      }
+      const dirPath = resolvePath(dirName, currentDir);
 
       const result = await context.fileService.createDirectory(
         serverId,
@@ -593,7 +565,7 @@ export class SystemCommandsModule implements CommandModule {
       }
 
       const fileName = command.args[0]!;
-      const serverId = this.getServerId(context);
+      const serverId = getServerId(context);
       if (!serverId) {
         return {
           success: false,
@@ -602,13 +574,9 @@ export class SystemCommandsModule implements CommandModule {
         };
       }
 
-      const session = this.getSession(context);
+      const session = getSession(context);
       const currentDir = session?.currentDirectory || "/";
-      let filePath = fileName;
-      if (!filePath.startsWith("/")) {
-        filePath =
-          currentDir === "/" ? `/${filePath}` : `${currentDir}/${filePath}`;
-      }
+      const filePath = resolvePath(fileName, currentDir);
 
       const result = await context.fileService.createFile(
         serverId,
@@ -657,7 +625,7 @@ export class SystemCommandsModule implements CommandModule {
       const fileName = command.args[0]!;
       const recursive =
         command.args.includes("-r") || command.args.includes("-R");
-      const serverId = this.getServerId(context);
+      const serverId = getServerId(context);
       if (!serverId) {
         return {
           success: false,
@@ -666,13 +634,9 @@ export class SystemCommandsModule implements CommandModule {
         };
       }
 
-      const session = this.getSession(context);
+      const session = getSession(context);
       const currentDir = session?.currentDirectory || "/";
-      let filePath = fileName;
-      if (!filePath.startsWith("/")) {
-        filePath =
-          currentDir === "/" ? `/${filePath}` : `${currentDir}/${filePath}`;
-      }
+      const filePath = resolvePath(fileName, currentDir);
 
       const result = await context.fileService.deleteNode(
         serverId,
@@ -719,7 +683,7 @@ export class SystemCommandsModule implements CommandModule {
 
       const source = command.args[0]!;
       const dest = command.args[1]!;
-      const serverId = this.getServerId(context);
+      const serverId = getServerId(context);
       if (!serverId) {
         return {
           success: false,
@@ -728,20 +692,10 @@ export class SystemCommandsModule implements CommandModule {
         };
       }
 
-      const session = this.getSession(context);
+      const session = getSession(context);
       const currentDir = session?.currentDirectory || "/";
-
-      let sourcePath = source;
-      if (!sourcePath.startsWith("/")) {
-        sourcePath =
-          currentDir === "/" ? `/${sourcePath}` : `${currentDir}/${sourcePath}`;
-      }
-
-      let destPath = dest;
-      if (!destPath.startsWith("/")) {
-        destPath =
-          currentDir === "/" ? `/${destPath}` : `${currentDir}/${destPath}`;
-      }
+      const sourcePath = resolvePath(source, currentDir);
+      const destPath = resolvePath(dest, currentDir);
 
       const result = await context.fileService.copyNode(
         serverId,
@@ -788,7 +742,7 @@ export class SystemCommandsModule implements CommandModule {
 
       const source = command.args[0]!;
       const dest = command.args[1]!;
-      const serverId = this.getServerId(context);
+      const serverId = getServerId(context);
       if (!serverId) {
         return {
           success: false,
@@ -797,20 +751,10 @@ export class SystemCommandsModule implements CommandModule {
         };
       }
 
-      const session = this.getSession(context);
+      const session = getSession(context);
       const currentDir = session?.currentDirectory || "/";
-
-      let sourcePath = source;
-      if (!sourcePath.startsWith("/")) {
-        sourcePath =
-          currentDir === "/" ? `/${sourcePath}` : `${currentDir}/${sourcePath}`;
-      }
-
-      let destPath = dest;
-      if (!destPath.startsWith("/")) {
-        destPath =
-          currentDir === "/" ? `/${destPath}` : `${currentDir}/${destPath}`;
-      }
+      const sourcePath = resolvePath(source, currentDir);
+      const destPath = resolvePath(dest, currentDir);
 
       const result = await context.fileService.moveNode(
         serverId,
@@ -860,7 +804,7 @@ export class SystemCommandsModule implements CommandModule {
       const filename = (appendMatch ? appendMatch[2] : writeMatch![2])!.trim();
       const append = !!appendMatch;
 
-      const serverId = this.getServerId(context);
+      const serverId = getServerId(context);
       if (!serverId) {
         return {
           success: false,
@@ -869,13 +813,9 @@ export class SystemCommandsModule implements CommandModule {
         };
       }
 
-      const session = this.getSession(context);
+      const session = getSession(context);
       const currentDir = session?.currentDirectory || "/";
-      let filePath = filename;
-      if (!filePath.startsWith("/")) {
-        filePath =
-          currentDir === "/" ? `/${filePath}` : `${currentDir}/${filePath}`;
-      }
+      const filePath = resolvePath(filename, currentDir);
 
       // Use updateFileContent if file exists, or create if not
       // Actually updateFileContent handles both? No, I implemented it to check existence.
@@ -951,7 +891,7 @@ export class SystemCommandsModule implements CommandModule {
       .join(" ")
       .replace(/^["']|["']$/g, "");
 
-    const serverId = this.getServerId(context);
+    const serverId = getServerId(context);
     if (!serverId) {
       return {
         success: false,
@@ -960,13 +900,9 @@ export class SystemCommandsModule implements CommandModule {
       };
     }
 
-    const session = this.getSession(context);
+    const session = getSession(context);
     const currentDir = session?.currentDirectory || "/";
-    let filePath = filename;
-    if (!filePath.startsWith("/")) {
-      filePath =
-        currentDir === "/" ? `/${filePath}` : `${currentDir}/${filePath}`;
-    }
+    const filePath = resolvePath(filename, currentDir);
 
     // Try to update (overwrite)
     let result = await context.fileService.updateFileContent(

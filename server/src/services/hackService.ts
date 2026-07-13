@@ -26,6 +26,7 @@ import {
   validateAnswer,
 } from "./hackMinigameGenerator";
 import type { LayerResult } from "../types/game";
+import { HACK_COOLDOWN_BASE_S } from "../config/gameBalance";
 
 /**
  * Enhanced HackService - Complete PvP hacking mechanics
@@ -44,7 +45,7 @@ class HackService extends EventEmitter {
   private cooldowns: Map<string, Date>;
   private activeHacks: Map<string, HackSessionInfo>;
   private sessionTimers: Map<string, NodeJS.Timeout>;
-  private readonly COOLDOWN_SECONDS = 30;
+  private readonly COOLDOWN_SECONDS = HACK_COOLDOWN_BASE_S; // From gameBalance — use getHackCooldown(skill) for skill-scaled value
   private readonly BASE_DETECTION_RATE = 0.3;
   private readonly BASE_SUCCESS_RATE = 0.5;
   private missionIntegration: MissionIntegrationService | null = null;

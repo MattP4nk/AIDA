@@ -58,6 +58,10 @@ import {
 } from "./middleware/setup";
 import { setupSocketHandlers } from "./sockets/handlers";
 import { registerShutdownHandlers } from "./lifecycle";
+import {
+  ARCHITECT_EVAL_INTERVAL_MS,
+  DUNGEON_EXPIRATION_INTERVAL_MS,
+} from "./config/gameBalance";
 
 // ── Infrastructure ────────────────────────────────────────────────
 const app = express();
@@ -137,6 +141,7 @@ async function initialize(): Promise<void> {
     defer(() => dynamicContent.processEvent("hack:detected", data), "Dynamic content error on hack:detected");
   });
 
+  // Single unified hack:attempt handler — dynamic content, story ledger, persona, achievements
   hackService.on("hack:attempt", (data: any) => {
     defer(() => dynamicContent.processEvent("hack:attempt", data), "Dynamic content error on hack:attempt");
     if (data.result?.success || data.success) {
@@ -154,31 +159,6 @@ async function initialize(): Promise<void> {
         impact: { tension: 1 },
         weight: 3,
       }), "Story ledger error on hack");
-    }
-  });
-
-  hackService.on("ids_alert", (data: any) => {
-    defer(() => dynamicContent.processEvent("ids_alert", data), "Dynamic content error on ids_alert");
-  });
-
-  hackService.on("bounty:posted", (data: any) => {
-    defer(() => dynamicContent.processEvent("bounty:posted", data), "Dynamic content error on bounty:posted");
-  });
-
-  // IDS alerts: push to player via Socket.IO
-  hackService.on(
-    "ids_alert",
-    (data: { targetUserId: string; message: string; severity: string }) => {
-      io.to(`player:${data.targetUserId}`).emit("command:result", {
-        success: false,
-        output: data.message,
-        timestamp: new Date(),
-      });
-    },
-  );
-
-  hackService.on("hack:attempt", (data: any) => {
-    if (data.result?.success) {
       defer(() => personaService.onServerHacked({
         userId: data.attackerId,
         serverId: data.targetServerId,
@@ -186,29 +166,28 @@ async function initialize(): Promise<void> {
         difficulty: data.difficulty,
       }), "Persona error on hack:attempt");
       if (data.attackerId) {
-        try {
-          const achSvc =
-            getService<
-              import("./services/achievementService").AchievementService
-            >(ACHIEVEMENT_SERVICE);
-          defer(() => achSvc.checkAndAward(data.attackerId), "Achievement check error after hack");
-        } catch {
-          /* service not yet available during startup */
-        }
+        defer(() => achievementService.checkAndAward(data.attackerId), "Achievement check error after hack");
       }
     }
   });
 
-  // Story arc advancement on mission completion/failure
-  const storyMissionService = getService<StoryMissionService>(
-    STORY_MISSION_SERVICE,
-  );
+  hackService.on("ids_alert", (data: any) => {
+    defer(() => dynamicContent.processEvent("ids_alert", data), "Dynamic content error on ids_alert");
+    // Push IDS alert to player via Socket.IO
+    io.to(`player:${(data as any).targetUserId}`).emit("command:result", {
+      success: false,
+      output: (data as any).message,
+      timestamp: new Date(),
+    });
+  });
 
-  // Achievement checks on key events
-  const achievementService =
-    getService<import("./services/achievementService").AchievementService>(
-      ACHIEVEMENT_SERVICE,
-    );
+  hackService.on("bounty:posted", (data: any) => {
+    defer(() => dynamicContent.processEvent("bounty:posted", data), "Dynamic content error on bounty:posted");
+  });
+
+  // Resolve services needed by event handlers below
+  const storyMissionService = getService<StoryMissionService>(STORY_MISSION_SERVICE);
+  const achievementService = getService<import("./services/achievementService").AchievementService>(ACHIEVEMENT_SERVICE);
 
   missionService.on("mission:completed", (data: any) => {
     defer(() => personaService.onMissionCompleted(data), "Persona error on mission:completed");
@@ -290,7 +269,7 @@ async function initialize(): Promise<void> {
     defer(() => storyProgression.recordEvent({
       type: "fragment_claimed", category: "discovery", actorId: data.userId, actorType: "player",
       summary: `Player claimed AIDA fragment: ${data.name} (${data.keyType} ${data.fragmentNum}/3)`,
-      data: { fragmentId: data.fragmentId, keyType: data.keyType, fragmentNum: data.fragmentNum, fragmentType: data.keyType },
+      data: { fragmentId: data.fragmentId, keyType: data.keyType, fragmentNum: data.fragmentNum },
       impact: { discoveryWeight: 5, tension: 2 }, weight: 7,
     }), "Story ledger error on fragment:claimed");
   });
@@ -391,8 +370,8 @@ async function initialize(): Promise<void> {
         logger.error({ err }, "[Architect] Evaluation error");
       }
     },
-    2 * 60 * 60 * 1000,
-  ); // 2 hours
+    ARCHITECT_EVAL_INTERVAL_MS,
+  );
   logger.info("✅ Architect periodic evaluation scheduled (every 2h)");
 
   // Initialize DarkNet Dungeon system — ensure at least one active dungeon
@@ -418,8 +397,8 @@ async function initialize(): Promise<void> {
         logger.error({ err }, "Dungeon expiration check failed");
       }
     },
-    60 * 60 * 1000,
-  ); // 1 hour
+    DUNGEON_EXPIRATION_INTERVAL_MS,
+  );
   logger.info("✅ DarkNet Dungeon expiration checker scheduled (every 1h)");
 
   const resourceService =

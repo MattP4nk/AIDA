@@ -620,9 +620,11 @@ class MemoryService extends EventEmitter {
       }
     }
 
-    // Push resource updates to all active players every 5 seconds
+    // Push resource updates only to players with running processes (every 5 ticks)
     if (this.io && now % 5000 < 1000) {
-      for (const userId of this.baseSpecs.keys()) {
+      for (const [userId, userProcesses] of this.gameProcesses) {
+        // Only broadcast if the player has running processes
+        if (userProcesses.size === 0) continue;
         const spec = this.getComputerSpec(userId);
         this.io.to(`player:${userId}`).emit("resources:update", {
           cpuUsed: spec.cpuUsed,

@@ -9,9 +9,9 @@
  */
 
 import { injectable, inject } from "tsyringe";
-import { PrismaClient } from "@prisma/client";
+import type { PrismaClient } from "@prisma/client";
 import type { Logger } from "pino";
-import { LOGGER } from "../di/tokens";
+import { LOGGER, PRISMA_CLIENT } from "../di/tokens";
 import { ContentEncoder, EncodingType } from "../utils/contentEncoder";
 
 // ═══════════════════════════════════════════════════════════════════
@@ -56,8 +56,9 @@ export class DynamicContentService {
 
   constructor(
     @inject(LOGGER) private logger: Logger,
+    @inject(PRISMA_CLIENT) prisma: PrismaClient,
   ) {
-    this.prisma = new PrismaClient();
+    this.prisma = prisma;
     this.registerDefaultHooks();
   }
 

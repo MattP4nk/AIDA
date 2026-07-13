@@ -1,5 +1,6 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
+import { getSession } from "./helpers";
 import {
   boxTop,
   boxBottom,
@@ -15,6 +16,7 @@ import {
 } from "./asciiBox";
 
 export class ProcessCommandsModule implements CommandModule {
+  public category = "process";
   public commands: Set<string> = new Set([
     "ps",
     "top",
@@ -30,7 +32,7 @@ export class ProcessCommandsModule implements CommandModule {
     command: Command,
     context: CommandContext,
   ): Promise<CommandResult> {
-    const session = context.gameStateManager.getSession(context.userId);
+    const session = getSession(context);
     if (!session) {
       return { success: false, output: "No active session", timestamp: new Date() };
     }
@@ -267,7 +269,7 @@ export class ProcessCommandsModule implements CommandModule {
     const consumers = memoryService.getPassiveConsumers(context.userId);
     const load = memoryService.getLoadAverage(context.userId);
 
-    const session = context.gameStateManager.getSession(context.userId);
+    const session = getSession(context);
     const uptime = session ? Date.now() - session.connectedAt.getTime() : 0;
 
     const lines: string[] = [
@@ -339,7 +341,7 @@ export class ProcessCommandsModule implements CommandModule {
     }
 
     // Store the priority preference — the next process spawn will pick it up
-    const session = context.gameStateManager.getSession(context.userId);
+    const session = getSession(context);
     if (session) {
       (session as any)._nextProcessPriority = priority;
     }

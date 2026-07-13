@@ -30,6 +30,24 @@ export class MissionIntegrationService {
   private io: SocketIOServer | null = null;
   private factionKnowledge: FactionKnowledgeService | null = null;
 
+  /**
+   * Get active missions filtered to only those with at least one matching objective type.
+   * Avoids iterating all objectives for missions that can't possibly match.
+   */
+  private async getActiveMissionsWithObjectiveTypes(
+    userId: string,
+    relevantTypes: string[],
+  ): Promise<any[]> {
+    const missions = await this.missionService.getPlayerMissions(userId);
+    const typeSet = new Set(relevantTypes);
+    return missions.filter(
+      (m: any) =>
+        m.status === "active" &&
+        Array.isArray(m.objectives) &&
+        m.objectives.some((o: any) => typeSet.has(o.type as string)),
+    );
+  }
+
   constructor(
     @inject(LOGGER) private logger: Logger,
     @inject(MISSION_SERVICE) private missionService: MissionService,
@@ -134,12 +152,10 @@ export class MissionIntegrationService {
     method: string,
   ): Promise<void> {
     try {
-      const missions = await this.missionService.getPlayerMissions(userId);
-      const activeMissions = missions.filter((m: any) => m.status === "active");
+      const hackObjectiveTypes = ["hack", "hack_target", "hack_stealth", "hack_method", "gain_access", "install_backdoor"];
+      const activeMissions = await this.getActiveMissionsWithObjectiveTypes(userId, hackObjectiveTypes);
 
       for (const mission of activeMissions) {
-        if (!mission.objectives || !Array.isArray(mission.objectives)) continue;
-
         for (const objective of mission.objectives) {
           let shouldUpdate = false;
           let newProgress: number | string | boolean = objective.current;

@@ -3,6 +3,12 @@ import { injectable, inject } from "tsyringe";
 import type { Logger } from "pino";
 import { LOGGER } from "../di/tokens";
 import { db } from "../database/client";
+import {
+  BACKDOOR_INITIAL_RISK,
+  BACKDOOR_DISCOVERY_THRESHOLD,
+  getBackdoorDuration,
+  getBackdoorDetectionIncrement,
+} from "../config/gameBalance";
 
 /**
  * BackdoorService - Manages persistent backdoors on hacked servers
@@ -16,22 +22,11 @@ import { db } from "../database/client";
  */
 @injectable()
 export class BackdoorService extends EventEmitter {
-  /** Hours until expiration by backdoor type */
-  private readonly EXPIRATION_HOURS: Record<string, number | null> = {
-    standard: 24,
-    persistent: 72,
-    rootkit: null, // permanent
-  };
+  /** Initial detection risk by backdoor type — from gameBalance */
+  private readonly INITIAL_DETECTION_RISK = BACKDOOR_INITIAL_RISK;
 
-  /** Initial detection risk by backdoor type */
-  private readonly INITIAL_DETECTION_RISK: Record<string, number> = {
-    rootkit: 10,
-    persistent: 15,
-    standard: 20,
-  };
-
-  /** Detection risk increment per use */
-  private readonly DETECTION_RISK_INCREMENT = 5;
+  /** Discovery threshold — from gameBalance */
+  private readonly DISCOVERY_THRESHOLD = BACKDOOR_DISCOVERY_THRESHOLD;
 
   constructor(@inject(LOGGER) private logger: Logger) {
     super();
@@ -61,7 +56,8 @@ export class BackdoorService extends EventEmitter {
   }> {
     try {
       const type = this.resolveBackdoorType(method);
-      const expiresAt = this.calculateExpiration(type);
+      const stealthSkill = await this.getInstallerStealth(installerId);
+      const expiresAt = this.calculateExpiration(type, stealthSkill);
       const detectionRisk = this.INITIAL_DETECTION_RISK[type] ?? 20;
 
       this.logger.info(
@@ -85,7 +81,7 @@ export class BackdoorService extends EventEmitter {
               accessLevel,
               type,
               isActive: true,
-              detectionRisk: Math.min(detectionRisk, existing.detectionRisk), // keep the stealthier value
+              detectionRisk, // reset to new type's base risk on upgrade
               expiresAt,
               metadata: {
                 method,
@@ -210,11 +206,14 @@ export class BackdoorService extends EventEmitter {
       }
 
       // Increment detection risk
-      const newDetectionRisk = Math.min(100, backdoor.detectionRisk + this.DETECTION_RISK_INCREMENT);
+      // Skill-scaled detection increment — higher stealth = smaller increment
+      const stealthSkill = await this.getInstallerStealth(backdoor.installerId);
+      const increment = getBackdoorDetectionIncrement(stealthSkill);
+      const newDetectionRisk = Math.min(100, backdoor.detectionRisk + increment);
 
-      // Discovery check — only triggers when risk > 75
+      // Discovery check — only triggers when risk exceeds threshold
       let discovered = false;
-      if (newDetectionRisk > 75) {
+      if (newDetectionRisk > this.DISCOVERY_THRESHOLD) {
         const discoveryRoll = Math.random();
         if (discoveryRoll < newDetectionRisk / 100) {
           discovered = true;
@@ -528,13 +527,27 @@ export class BackdoorService extends EventEmitter {
   }
 
   /**
-   * Calculate the expiration date based on backdoor type.
+   * Calculate the expiration date based on backdoor type and installer's stealth.
    * Returns null for permanent (rootkit) backdoors.
+   * Higher stealth = longer duration.
    */
-  private calculateExpiration(type: string): Date | null {
-    const hours = this.EXPIRATION_HOURS[type];
-    if (hours === null || hours === undefined) return null;
+  private calculateExpiration(type: string, stealthSkill: number = 0): Date | null {
+    const hours = getBackdoorDuration(type, stealthSkill);
+    if (hours === null) return null;
     return new Date(Date.now() + hours * 60 * 60 * 1000);
+  }
+
+  /** Helper to fetch the installer's stealth skill for scaling. */
+  private async getInstallerStealth(installerId: string): Promise<number> {
+    try {
+      const progress = await db.client.playerProgress.findUnique({
+        where: { userId: installerId },
+        select: { stealth: true },
+      });
+      return progress?.stealth ?? 0;
+    } catch {
+      return 0;
+    }
   }
 }
 

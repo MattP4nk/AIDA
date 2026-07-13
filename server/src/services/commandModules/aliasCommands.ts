@@ -2,6 +2,7 @@ import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
 
 export class AliasCommandsModule implements CommandModule {
+  public category = "alias";
   public commands: Set<string> = new Set(["alias"]);
 
   public async execute(

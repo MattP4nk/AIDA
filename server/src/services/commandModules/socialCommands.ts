@@ -21,6 +21,7 @@ import {
 } from "../../utils/tokenConsumption";
 
 export class SocialCommandsModule implements CommandModule {
+  public category = "social";
   public commands: Set<string> = new Set([
     "msg",
     "mail",

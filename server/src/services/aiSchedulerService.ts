@@ -352,7 +352,7 @@ export class AISchedulerService {
       },
       null,
       true, // Start immediately
-      "America/Sao_Paulo" // Timezone (adjust as needed)
+      "UTC"
     );
 
     this.logger.info("Midnight reset job scheduled");

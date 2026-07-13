@@ -11,6 +11,12 @@ import { Logger } from "pino";
 import { FactionStandingInfo, FactionRank } from "../../../shared/types";
 import { LOGGER, MISSION_INTEGRATION_SERVICE } from "../di/tokens";
 import type MissionIntegrationService from "./missionIntegration";
+import {
+  REPUTATION_MIN,
+  REPUTATION_MAX,
+  REPUTATION_ALLIED_THRESHOLD,
+  REPUTATION_HOSTILE_THRESHOLD,
+} from "../config/gameBalance";
 
 /** Rank promotion requirements per faction (overridable via Faction.rankRequirements JSON). */
 const DEFAULT_RANK_REQUIREMENTS: Record<
@@ -383,8 +389,8 @@ export class FactionService extends EventEmitter {
         },
       });
 
-      // Clamp reputation to [-100, 100]
-      const clamped = Math.max(-100, Math.min(100, standing.reputation));
+      // Clamp reputation to configured bounds
+      const clamped = Math.max(REPUTATION_MIN, Math.min(REPUTATION_MAX, standing.reputation));
       if (clamped !== standing.reputation) {
         await this.prisma.factionStanding.update({
           where: { id: standing.id },
@@ -392,14 +398,14 @@ export class FactionService extends EventEmitter {
         });
       }
 
-      // Update standing flags based on new reputation
+      // Update standing flags based on configured thresholds
       const newRep = clamped;
       await this.prisma.factionStanding.update({
         where: { id: standing.id },
         data: {
-          isAllied: newRep >= 30,
-          isHostile: newRep <= -30,
-          isNeutral: newRep > -30 && newRep < 30,
+          isAllied: newRep >= REPUTATION_ALLIED_THRESHOLD,
+          isHostile: newRep <= REPUTATION_HOSTILE_THRESHOLD,
+          isNeutral: newRep > REPUTATION_HOSTILE_THRESHOLD && newRep < REPUTATION_ALLIED_THRESHOLD,
         },
       });
 

@@ -28,6 +28,7 @@ import logger from "../../logger";
  *   - scan: (delegated to NetworkCommandsModule) placeholder here
  */
 export class HackCommandsModule implements CommandModule {
+  public category = "hack";
   public commands: Set<string> = new Set([
     "hack",
     "crack",

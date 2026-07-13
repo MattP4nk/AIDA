@@ -1,5 +1,7 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
+import logger from "../../logger";
+import { spawnBackgroundProcess } from "./helpers";
 import {
   validateIPAddress,
   validateServerId,
@@ -23,6 +25,7 @@ import {
 } from "./asciiBox";
 
 export class NetworkCommandsModule implements CommandModule {
+  public category = "network";
   public commands: Set<string> = new Set([
     "scan",
     "servers",
@@ -179,51 +182,27 @@ export class NetworkCommandsModule implements CommandModule {
 
     // ── Resource check: spawn scan as a background process ──
     if (memoryService && topoService) {
-      memoryService.initComputerSpec(context.userId, progress?.level ?? 1);
-
-      const check = memoryService.canSpawnProcess(context.userId, "scan");
-      if (!check.allowed) {
-        return {
-          success: false,
-          output: `Scan failed: ${check.reason}`,
-          timestamp: new Date(),
-        };
-      }
-
-      const proc = memoryService.spawnGameProcess(
-        context.userId,
-        session!.socketId || context.userId,
-        "scan",
-        scanLevel,
-        "network scan",
-        currentServerId,
-        async () => {
+      const spawn = await spawnBackgroundProcess({
+        context,
+        processType: "scan",
+        skillKey: "networking",
+        label: "network scan",
+        targetServerId: currentServerId,
+        onComplete: async () => {
           // ── On completion: run the actual scan and push results ──
           try {
-            console.log(
-              "[SCAN] Adjacency scan onComplete fired for",
-              context.userId,
-            );
+            logger.debug({ userId: context.userId }, "Adjacency scan onComplete fired");
             const results = await topoService.discoverNeighbors(
               context.userId,
               currentServerId,
               scanLevel,
             );
-            console.log(
-              "[SCAN] discoverNeighbors returned",
-              results.length,
-              "results",
-            );
+            logger.debug({ count: results.length }, "discoverNeighbors returned results");
             const currentServer =
               await context.services.serverService.getServer(currentServerId);
             const output = this.formatScanResults(
               results,
               currentServer?.name || currentServerId,
-            );
-
-            console.log(
-              "[SCAN] Emitting command:result, io available:",
-              !!context.io,
             );
             if (context.io) {
               context.io.to(`player:${context.userId}`).emit("command:result", {
@@ -246,7 +225,7 @@ export class NetworkCommandsModule implements CommandModule {
               });
             }
           } catch (err) {
-            console.error("[SCAN] Adjacency scan callback error:", err);
+            logger.error({ err }, "Adjacency scan callback error");
             if (context.io) {
               context.io.to(`player:${context.userId}`).emit("command:result", {
                 success: false,
@@ -257,22 +236,9 @@ export class NetworkCommandsModule implements CommandModule {
             }
           }
         },
-      );
+      });
 
-      if (!proc) {
-        return {
-          success: false,
-          output: "Failed to start scan process.",
-          timestamp: new Date(),
-        };
-      }
-
-      const etaSec = Math.ceil(proc.duration / 1000);
-      return {
-        success: true,
-        output: `Scanning network... ETA ${etaSec}s [PID ${proc.pid}]\nUse 'ps' to monitor progress.`,
-        timestamp: new Date(),
-      };
+      if (spawn) return spawn.result;
     }
 
     // ── Fallback: no resource system — instant scan ──
@@ -321,48 +287,24 @@ export class NetworkCommandsModule implements CommandModule {
 
     // ── Resource check: spawn as a background process if available ──
     if (memoryService) {
-      memoryService.initComputerSpec(context.userId, progress?.level ?? 1);
-
-      const check = memoryService.canSpawnProcess(context.userId, "scan");
-      if (!check.allowed) {
-        return {
-          success: false,
-          output: `Scan failed: ${check.reason}`,
-          timestamp: new Date(),
-        };
-      }
-
-      const proc = memoryService.spawnGameProcess(
-        context.userId,
-        session?.socketId || context.userId,
-        "scan",
-        scanLevel,
-        `subnet sweep ${partialIp}`,
-        session?.currentServerId || session?.homeServerId || context.userId,
-        async () => {
+      const spawn = await spawnBackgroundProcess({
+        context,
+        processType: "scan",
+        skillKey: "networking",
+        label: `subnet sweep ${partialIp}`,
+        targetServerId: session?.currentServerId || session?.homeServerId,
+        onComplete: async () => {
           try {
-            console.log(
-              "[SCAN] Subnet sweep onComplete fired for",
-              context.userId,
-            );
+            logger.debug({ userId: context.userId }, "Subnet sweep onComplete fired");
             const servers =
               await context.services.serverService.scanByPartialIp(
                 context.userId,
                 ipPrefix,
                 scanLevel,
               );
-            console.log(
-              "[SCAN] scanByPartialIp returned",
-              servers.length,
-              "servers for prefix",
-              ipPrefix,
-            );
+            logger.debug({ count: servers.length, ipPrefix }, "scanByPartialIp returned results");
             const output = this.formatSubnetSweepResults(servers, partialIp);
 
-            console.log(
-              "[SCAN] Emitting command:result, io available:",
-              !!context.io,
-            );
             if (context.io) {
               context.io.to(`player:${context.userId}`).emit("command:result", {
                 success: true,
@@ -370,10 +312,6 @@ export class NetworkCommandsModule implements CommandModule {
                 terminalId,
                 timestamp: new Date(),
               });
-            }
-
-            // Also emit as notification for guaranteed delivery
-            if (context.io) {
               context.io.to(`player:${context.userId}`).emit("notification", {
                 title: "Subnet Sweep Complete",
                 message:
@@ -384,7 +322,7 @@ export class NetworkCommandsModule implements CommandModule {
               });
             }
           } catch (err) {
-            console.error("[SCAN] Subnet sweep callback error:", err);
+            logger.error({ err }, "Subnet sweep callback error");
             if (context.io) {
               context.io.to(`player:${context.userId}`).emit("command:result", {
                 success: false,
@@ -395,22 +333,9 @@ export class NetworkCommandsModule implements CommandModule {
             }
           }
         },
-      );
+      });
 
-      if (!proc) {
-        return {
-          success: false,
-          output: "Failed to start subnet sweep.",
-          timestamp: new Date(),
-        };
-      }
-
-      const etaSec = Math.ceil(proc.duration / 1000);
-      return {
-        success: true,
-        output: `Sweeping subnet ${partialIp}... ETA ${etaSec}s [PID ${proc.pid}]\nUse 'ps' to monitor progress.`,
-        timestamp: new Date(),
-      };
+      if (spawn) return spawn.result;
     }
 
     // ── Fallback: instant sweep (no resource system) ──

@@ -699,15 +699,44 @@ class ShopService extends EventEmitter {
         };
       }
 
-      // Deduct credits and add item
+      // Atomic: deduct credits and add item in a single transaction
       const newCredits = progress.credits - totalCost;
 
-      await prisma.playerProgress.update({
-        where: { userId },
-        data: { credits: newCredits },
-      });
+      await prisma.$transaction(async (tx) => {
+        // Re-check credits inside transaction to prevent race conditions
+        const freshProgress = await tx.playerProgress.findUnique({
+          where: { userId },
+          select: { credits: true },
+        });
+        if (!freshProgress || freshProgress.credits < totalCost) {
+          throw new Error("Insufficient credits (concurrent purchase detected)");
+        }
 
-      await this.addItemToInventory(userId, itemId, quantity);
+        await tx.playerProgress.update({
+          where: { userId },
+          data: { credits: { decrement: totalCost } },
+        });
+
+        // Upsert inventory item
+        const existing = await tx.inventoryItem.findFirst({
+          where: { userId, shopItemId: itemId },
+        });
+        if (existing) {
+          await tx.inventoryItem.update({
+            where: { id: existing.id },
+            data: { quantity: { increment: quantity } },
+          });
+        } else {
+          await tx.inventoryItem.create({
+            data: {
+              userId,
+              shopItemId: itemId,
+              quantity,
+              source: "shop",
+            },
+          });
+        }
+      });
 
       // Track credit spending for mission objectives
       if (this.missionIntegration) {

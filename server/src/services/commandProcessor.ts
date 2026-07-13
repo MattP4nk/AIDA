@@ -7,21 +7,8 @@ import type {
   CommandResult,
   ValidationResult,
 } from "../types/game";
-import { SystemCommandsModule } from "./commandModules/systemCommands";
-import { NetworkCommandsModule } from "./commandModules/networkCommands";
-import { HackCommandsModule } from "./commandModules/hackCommands";
-import { FileCommandsModule } from "./commandModules/fileCommands";
-import { SocialCommandsModule } from "./commandModules/socialCommands";
-import { GameCommandsModule } from "./commandModules/gameCommands";
-import { HelpCommandsModule } from "./commandModules/helpCommands";
-import { ProcessCommandsModule } from "./commandModules/processCommands";
-import { MathCommandsModule } from "./commandModules/mathCommands";
-import { FactionCommandsModule } from "./commandModules/factionCommands";
-import { AliasCommandsModule } from "./commandModules/aliasCommands";
-import { AdminCommandsModule } from "./commandModules/adminCommands";
-import { DefenseCommandsModule } from "./commandModules/defenseCommands";
-
 import { CommandModule, CommandContext } from "./commandModules/interface";
+import { createAllModules } from "./commandModules/registry";
 import { checkSkillRequirement } from "./commandModules/skillRequirements";
 import { injectable, inject } from "tsyringe";
 import type { Logger } from "pino";
@@ -38,6 +25,7 @@ import {
   validateArgs,
   validateUserId,
 } from "../utils/validators";
+import { COMMAND_RATE_LIMIT, COMMAND_RATE_WINDOW_MS } from "../config/gameBalance";
 
 import type ProgressService from "./progressService";
 import type GameStateManager from "./gameStateManager";
@@ -77,8 +65,8 @@ import type { PlayerProgress } from "@prisma/client";
 class CommandProcessor extends EventEmitter {
   private commandHistory: Map<string, Command[]>;
   private rateLimitMap: Map<string, number[]>; // userId -> timestamps[]
-  private readonly RATE_LIMIT_WINDOW = 1000; // 1 second
-  private readonly MAX_COMMANDS_PER_WINDOW = 10;
+  private readonly RATE_LIMIT_WINDOW = COMMAND_RATE_WINDOW_MS;
+  private readonly MAX_COMMANDS_PER_WINDOW = COMMAND_RATE_LIMIT;
 
   // Command categories removed - now handled by modules
 
@@ -96,22 +84,8 @@ class CommandProcessor extends EventEmitter {
     this.commandHistory = new Map();
     this.rateLimitMap = new Map();
 
-    // Initialize command modules
-    this.modules = [
-      new SystemCommandsModule(),
-      new NetworkCommandsModule(),
-      new HackCommandsModule(),
-      new FileCommandsModule(),
-      new SocialCommandsModule(),
-      new GameCommandsModule(),
-      new HelpCommandsModule(),
-      new ProcessCommandsModule(),
-      new MathCommandsModule(),
-      new FactionCommandsModule(),
-      new AliasCommandsModule(),
-      new AdminCommandsModule(),
-      new DefenseCommandsModule(),
-    ];
+    // Initialize command modules from registry
+    this.modules = createAllModules();
 
     // Build command map from modules
     this.buildCommandMap();
@@ -210,6 +184,12 @@ class CommandProcessor extends EventEmitter {
     const keyFragmentService = this.resolveService<
       import("./keyFragmentService").KeyFragmentService
     >(TOKENS.KEY_FRAGMENT_SERVICE);
+    const darknetDungeonService = this.resolveService<
+      import("./darknetDungeonService").DarkNetDungeonService
+    >(TOKENS.DARKNET_DUNGEON_SERVICE);
+    const darknetDiscoveryService = this.resolveService<
+      import("./darknetDiscoveryService").default
+    >("DarkNetDiscoveryService");
 
     // Fetch user role for command-level role gating
     const user = await db.client.user.findUnique({
@@ -248,6 +228,8 @@ class CommandProcessor extends EventEmitter {
         ...(leaderboardService ? { leaderboardService } : {}),
         ...(achievementService ? { achievementService } : {}),
         ...(keyFragmentService ? { keyFragmentService } : {}),
+        ...(darknetDungeonService ? { darknetDungeonService } : {}),
+        ...(darknetDiscoveryService ? { darknetDiscoveryService } : {}),
       },
     };
   }
@@ -392,7 +374,7 @@ class CommandProcessor extends EventEmitter {
       const module = this.commandMap.get(command);
 
       // Network commands require network access (being connected to a server)
-      if (module instanceof NetworkCommandsModule) {
+      if (module?.category === "network") {
         if (
           !session.currentServerId &&
           command !== "connect" &&
@@ -406,14 +388,9 @@ class CommandProcessor extends EventEmitter {
         }
       }
 
-      // Skill-gated commands (hack, network, file, social, alias modules)
-      if (
-        module instanceof HackCommandsModule ||
-        module instanceof NetworkCommandsModule ||
-        module instanceof FileCommandsModule ||
-        module instanceof SocialCommandsModule ||
-        module instanceof AliasCommandsModule
-      ) {
+      // Skill-gated command categories
+      const skillGatedCategories = new Set(["hack", "network", "file", "social", "alias"]);
+      if (module && skillGatedCategories.has(module.category)) {
         const validation = await this.validateSkillRequirements(
           parsedCommand,
           user.progress,
@@ -722,18 +699,7 @@ class CommandProcessor extends EventEmitter {
    * @returns Array of command information objects
    */
   private getCategoryFromModule(module?: CommandModule): string {
-    if (!module) return "other";
-    if (module instanceof SystemCommandsModule) return "system";
-    if (module instanceof NetworkCommandsModule) return "network";
-    if (module instanceof HackCommandsModule) return "hack";
-    if (module instanceof FileCommandsModule) return "file";
-    if (module instanceof SocialCommandsModule) return "social";
-    if (module instanceof GameCommandsModule) return "game";
-    if (module instanceof HelpCommandsModule) return "help";
-    if (module instanceof ProcessCommandsModule) return "process";
-    if (module instanceof MathCommandsModule) return "math";
-    if (module instanceof FactionCommandsModule) return "faction";
-    return "other";
+    return module?.category ?? "other";
   }
 
   /**

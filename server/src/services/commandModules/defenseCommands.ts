@@ -1,5 +1,6 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext, CommandInfo } from "./interface";
+import { getSession } from "./helpers";
 import {
   boxTop,
   boxBottom,
@@ -20,6 +21,7 @@ import {
  *   upgrade       — Purchase defense upgrades
  */
 export class DefenseCommandsModule implements CommandModule {
+  public category = "defense";
   public commands: Set<string> = new Set([
     "defenses",
     "protect",
@@ -104,7 +106,7 @@ export class DefenseCommandsModule implements CommandModule {
     lines.push(boxDivider(W));
 
     // Protected folders
-    const session = context.gameStateManager.getSession(context.userId);
+    const session = getSession(context);
     if (session?.homeServerId) {
       const protectedDirs = await context.db.client.fileSystemNode.count({
         where: {
@@ -127,7 +129,7 @@ export class DefenseCommandsModule implements CommandModule {
 
   // ── protect — toggle protection on a directory ──
   private async handleProtect(command: Command, context: CommandContext): Promise<CommandResult> {
-    const session = context.gameStateManager.getSession(context.userId);
+    const session = getSession(context);
     if (!session?.homeServerId) {
       return { success: false, output: "No home server.", timestamp: new Date() };
     }
@@ -175,7 +177,7 @@ export class DefenseCommandsModule implements CommandModule {
 
   // ── safevault — manage encrypted vault ──
   private async handleSafeVault(command: Command, context: CommandContext): Promise<CommandResult> {
-    const session = context.gameStateManager.getSession(context.userId);
+    const session = getSession(context);
     if (!session?.homeServerId) {
       return { success: false, output: "No home server.", timestamp: new Date() };
     }
@@ -340,7 +342,7 @@ export class DefenseCommandsModule implements CommandModule {
 
   // ── honeypot — toggle decoy directory ──
   private async handleHoneypot(command: Command, context: CommandContext): Promise<CommandResult> {
-    const session = context.gameStateManager.getSession(context.userId);
+    const session = getSession(context);
     if (!session?.homeServerId) {
       return { success: false, output: "No home server.", timestamp: new Date() };
     }
@@ -481,7 +483,7 @@ export class DefenseCommandsModule implements CommandModule {
         data: { credits: { decrement: price }, homeVault: level },
       });
       // Create vault directory on home server
-      const session = context.gameStateManager.getSession(context.userId);
+      const session = getSession(context);
       if (session?.homeServerId) {
         const user = await context.db.client.user.findUnique({
           where: { id: context.userId },
@@ -540,7 +542,7 @@ export class DefenseCommandsModule implements CommandModule {
         data: { credits: { decrement: HONEYPOT_PRICE }, homeHoneypot: true },
       });
       // Generate initial decoy files
-      const session = context.gameStateManager.getSession(context.userId);
+      const session = getSession(context);
       if (session?.homeServerId) {
         await this.generateDecoyFiles(context, session.homeServerId);
       }
@@ -617,7 +619,7 @@ export class DefenseCommandsModule implements CommandModule {
   // ── Helper: resolve path ──
   private resolvePath(input: string, context: CommandContext): string {
     if (input.startsWith("/")) return input;
-    const session = context.gameStateManager.getSession(context.userId);
+    const session = getSession(context);
     const cwd = session?.currentDirectory || "/";
     return cwd === "/" ? `/${input}` : `${cwd}/${input}`;
   }

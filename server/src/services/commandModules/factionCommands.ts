@@ -12,6 +12,7 @@ import {
 } from "./asciiBox";
 
 export class FactionCommandsModule implements CommandModule {
+  public category = "faction";
   public commands: Set<string> = new Set(["faction"]);
 
   public async execute(

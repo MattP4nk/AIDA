@@ -36,6 +36,7 @@ function boxLine(label: string, value: string, width = 44): string {
 }
 
 export class AdminCommandsModule implements CommandModule {
+  public category = "admin";
   commands = new Set(["admin"]);
 
   async execute(

@@ -186,15 +186,17 @@ export class StoryProgressionService {
       };
     }
 
-    // Recent events: last 50, unprocessed first
+    // Recent significant events: weight >= 3, unprocessed first, capped at 30
+    // Low-weight events (1-2) are noise that wastes AI tokens without adding context.
     const recentEvents: Array<{
       type: string;
       summary: string;
       weight: number;
       createdAt: Date;
     }> = await prisma.storyLedger.findMany({
+      where: { weight: { gte: 3 } },
       orderBy: [{ isProcessed: "asc" }, { createdAt: "desc" }],
-      take: 50,
+      take: 30,
       select: {
         type: true,
         summary: true,
@@ -226,9 +228,7 @@ export class StoryProgressionService {
     for (const fe of fragmentEvents) {
       const data = fe.data as Record<string, unknown> | null;
       if (data && typeof data === "object") {
-        const fragmentType = (data.fragmentType || data.keyType) as
-          | string
-          | undefined;
+        const fragmentType = data.keyType as string | undefined;
         if (
           fragmentType === "sword" ||
           fragmentType === "key" ||
@@ -428,7 +428,7 @@ export class StoryProgressionService {
    * Used by PersonaService.decideDirectorAction() and other services
    * to enhance the Architect's awareness of the world state.
    */
-  async getArchitectContext(maxEvents: number = 25): Promise<string> {
+  async getArchitectContext(maxEvents: number = 15): Promise<string> {
     const state = await this.getWorldNarrativeState();
     const lines: string[] = [];
 

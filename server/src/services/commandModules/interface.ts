@@ -25,6 +25,8 @@ import type MissionIntegrationService from "../missionIntegration";
 import type { LeaderboardService } from "../leaderboardService";
 import type { AchievementService } from "../achievementService";
 import type { KeyFragmentService } from "../keyFragmentService";
+import type { DarkNetDungeonService } from "../darknetDungeonService";
+import type DarkNetDiscoveryService from "../darknetDiscoveryService";
 
 export interface CommandContext {
   userId: string;
@@ -56,6 +58,8 @@ export interface CommandContext {
     leaderboardService?: LeaderboardService;
     achievementService?: AchievementService;
     keyFragmentService?: KeyFragmentService;
+    darknetDungeonService?: DarkNetDungeonService;
+    darknetDiscoveryService?: DarkNetDiscoveryService;
     [key: string]: any;
   };
 }
@@ -69,6 +73,8 @@ export interface CommandInfo {
 }
 
 export interface CommandModule {
+  /** The category name for this module (e.g. "system", "network", "hack"). */
+  category: string;
   commands: Set<string>;
   execute(command: Command, context: CommandContext): Promise<CommandResult>;
   getCommandInfo?(): CommandInfo[];

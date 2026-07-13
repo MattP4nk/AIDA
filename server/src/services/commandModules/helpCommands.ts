@@ -14,6 +14,7 @@ import {
 } from "./skillRequirements";
 
 export class HelpCommandsModule implements CommandModule {
+  public category = "help";
   public commands: Set<string> = new Set(["help", "man", "history", "stats"]);
 
   public async execute(
