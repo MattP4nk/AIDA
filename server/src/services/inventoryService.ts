@@ -1,5 +1,5 @@
 import { injectable, inject } from "tsyringe";
-import { prisma, Prisma } from "../database/client";
+import { prisma } from "../database/client";
 import { EventEmitter } from "events";
 import { ShopItem, ItemCategory, ItemEffects } from "./shopService";
 import type { Logger } from "pino";
@@ -17,7 +17,7 @@ export enum EquipmentSlot {
 }
 
 /**
- * Equipment state for a player
+ * Equipment state for a player — maps slot name to item ID
  */
 export interface Equipment {
   [EquipmentSlot.TOOL]?: string;
@@ -52,7 +52,8 @@ export interface CombinedBonuses {
 }
 
 /**
- * Service for managing player inventory and equipment
+ * Service for managing player equipment.
+ * All operations use the InventoryItem table (isEquipped + slot fields).
  */
 @injectable()
 export class InventoryService extends EventEmitter {
@@ -61,20 +62,21 @@ export class InventoryService extends EventEmitter {
   }
 
   /**
-   * Get player's currently equipped items
+   * Get player's currently equipped items as a slot → itemId map.
    */
   public async getEquipment(userId: string): Promise<Equipment> {
     try {
-      const progress = await prisma.playerProgress.findUnique({
-        where: { userId },
+      const equipped = await prisma.inventoryItem.findMany({
+        where: { userId, isEquipped: true },
       });
 
-      if (!progress) {
-        return {};
+      const equipment: Equipment = {};
+      for (const row of equipped) {
+        if (row.slot) {
+          equipment[row.slot as EquipmentSlot] = row.shopItemId;
+        }
       }
-
-      const equipment = progress.equipment as unknown as Equipment;
-      return equipment || {};
+      return equipment;
     } catch (error) {
       this.logger.error({ err: error }, "Error getting equipment");
       return {};
@@ -82,7 +84,7 @@ export class InventoryService extends EventEmitter {
   }
 
   /**
-   * Equip an item from inventory to an equipment slot
+   * Equip an item from inventory to an equipment slot.
    */
   public async equipItem(
     userId: string,
@@ -90,7 +92,6 @@ export class InventoryService extends EventEmitter {
     item: ShopItem,
   ): Promise<EquipmentResult> {
     try {
-      // Check if item can be equipped (only certain categories)
       const equipableCategories = [
         ItemCategory.TOOL,
         ItemCategory.SOFTWARE,
@@ -106,55 +107,53 @@ export class InventoryService extends EventEmitter {
         };
       }
 
-      // Determine equipment slot
       const slot = item.category as unknown as EquipmentSlot;
 
-      // Atomic transaction: verify ownership + equip
       const txResult = await prisma.$transaction(async (tx) => {
-        const progress = await tx.playerProgress.findUnique({
-          where: { userId },
+        // Verify player owns the item
+        const invItem = await tx.inventoryItem.findFirst({
+          where: { userId, shopItemId: itemId, quantity: { gt: 0 } },
         });
 
-        if (!progress) {
-          return { success: false as const, message: "Player progress not found" };
-        }
-
-        // Check if player owns the item
-        const inventory = progress.inventory as Record<string, number>;
-        if (!inventory[itemId] || inventory[itemId] <= 0) {
+        if (!invItem) {
           return { success: false as const, message: `You don't own ${item.name}` };
         }
 
-        // Get current equipment
-        const equipment = (progress.equipment as unknown as Equipment) || {};
-
-        // Check if slot is already occupied by same item
-        const currentItemId = equipment[slot];
-        if (currentItemId === itemId) {
+        // Already equipped in this slot?
+        if (invItem.isEquipped && invItem.slot === slot) {
           return { success: false as const, message: `${item.name} is already equipped` };
         }
 
-        // Equip the item
-        equipment[slot] = itemId;
-
-        await tx.playerProgress.update({
-          where: { userId },
-          data: { equipment: equipment as Prisma.JsonObject },
+        // Unequip whatever is currently in this slot
+        const currentlyEquipped = await tx.inventoryItem.findFirst({
+          where: { userId, isEquipped: true, slot },
         });
 
-        return { success: true as const, currentItemId };
+        if (currentlyEquipped) {
+          await tx.inventoryItem.update({
+            where: { id: currentlyEquipped.id },
+            data: { isEquipped: false, slot: null },
+          });
+        }
+
+        // Equip the new item
+        await tx.inventoryItem.update({
+          where: { id: invItem.id },
+          data: { isEquipped: true, slot },
+        });
+
+        return { success: true as const, replaced: !!currentlyEquipped };
       });
 
       if (!txResult.success) {
         return { success: false, message: txResult.message };
       }
 
-      // Emit event
       this.emit("item:equipped", { userId, itemId, slot, item });
 
       const result: EquipmentResult = {
         success: true,
-        message: txResult.currentItemId
+        message: txResult.replaced
           ? `Equipped ${item.name}, replacing previous item`
           : `Equipped ${item.name}`,
         slot,
@@ -168,128 +167,70 @@ export class InventoryService extends EventEmitter {
       return result;
     } catch (error) {
       this.logger.error({ err: error }, "Error equipping item");
-      return {
-        success: false,
-        message: "Failed to equip item",
-      };
+      return { success: false, message: "Failed to equip item" };
     }
   }
 
   /**
-   * Unequip an item from an equipment slot
+   * Unequip an item from an equipment slot.
    */
   public async unequipItem(
     userId: string,
     slot: EquipmentSlot,
   ): Promise<EquipmentResult> {
     try {
-      // Get player progress
-      const progress = await prisma.playerProgress.findUnique({
-        where: { userId },
+      const equipped = await prisma.inventoryItem.findFirst({
+        where: { userId, isEquipped: true, slot },
       });
 
-      if (!progress) {
-        return {
-          success: false,
-          message: "Player progress not found",
-        };
+      if (!equipped) {
+        return { success: false, message: `No item equipped in ${slot} slot` };
       }
 
-      // Get current equipment
-      const equipment = (progress.equipment as unknown as Equipment) || {};
-
-      // Check if slot has an item
-      const itemId = equipment[slot];
-      if (!itemId) {
-        return {
-          success: false,
-          message: `No item equipped in ${slot} slot`,
-        };
-      }
-
-      // Remove item from slot
-      delete equipment[slot];
-
-      // Update database
-      await prisma.playerProgress.update({
-        where: { userId },
-        data: { equipment: equipment as Prisma.JsonObject },
+      await prisma.inventoryItem.update({
+        where: { id: equipped.id },
+        data: { isEquipped: false, slot: null },
       });
 
-      // Emit event
-      this.emit("item:unequipped", {
-        userId,
-        itemId,
-        slot,
-      });
+      this.emit("item:unequipped", { userId, itemId: equipped.shopItemId, slot });
 
       return {
         success: true,
         message: `Unequipped item from ${slot} slot`,
         slot,
-        itemId,
+        itemId: equipped.shopItemId,
       };
     } catch (error) {
       this.logger.error({ err: error }, "Error unequipping item");
-      return {
-        success: false,
-        message: "Failed to unequip item",
-      };
+      return { success: false, message: "Failed to unequip item" };
     }
   }
 
   /**
-   * Unequip a specific item by item ID
+   * Unequip a specific item by item ID.
    */
   public async unequipItemById(
     userId: string,
     itemId: string,
   ): Promise<EquipmentResult> {
     try {
-      // Get player progress
-      const progress = await prisma.playerProgress.findUnique({
-        where: { userId },
+      const equipped = await prisma.inventoryItem.findFirst({
+        where: { userId, shopItemId: itemId, isEquipped: true },
       });
 
-      if (!progress) {
-        return {
-          success: false,
-          message: "Player progress not found",
-        };
+      if (!equipped || !equipped.slot) {
+        return { success: false, message: "Item is not currently equipped" };
       }
 
-      // Get current equipment
-      const equipment = (progress.equipment as unknown as Equipment) || {};
-
-      // Find the slot containing this item
-      let foundSlot: EquipmentSlot | null = null;
-      for (const [slot, equippedItemId] of Object.entries(equipment)) {
-        if (equippedItemId === itemId) {
-          foundSlot = slot as EquipmentSlot;
-          break;
-        }
-      }
-
-      if (!foundSlot) {
-        return {
-          success: false,
-          message: "Item is not currently equipped",
-        };
-      }
-
-      // Unequip using the slot
-      return await this.unequipItem(userId, foundSlot);
+      return await this.unequipItem(userId, equipped.slot as EquipmentSlot);
     } catch (error) {
       this.logger.error({ err: error }, "Error unequipping item by ID");
-      return {
-        success: false,
-        message: "Failed to unequip item",
-      };
+      return { success: false, message: "Failed to unequip item" };
     }
   }
 
   /**
-   * Get combined bonuses from all equipped items
+   * Get combined bonuses from all equipped items.
    */
   public async getEquipmentBonuses(
     userId: string,
@@ -306,14 +247,14 @@ export class InventoryService extends EventEmitter {
     };
 
     try {
-      const equipment = await this.getEquipment(userId);
+      const equipped = await prisma.inventoryItem.findMany({
+        where: { userId, isEquipped: true },
+      });
+
       const bonuses = { ...defaultBonuses };
 
-      // Sum up bonuses from all equipped items
-      for (const itemId of Object.values(equipment)) {
-        if (!itemId) continue;
-
-        const item = catalog.find((i) => i.id === itemId);
+      for (const row of equipped) {
+        const item = catalog.find((i) => i.id === row.shopItemId);
         if (!item || !item.effects) continue;
 
         const effects = item.effects;
@@ -323,7 +264,6 @@ export class InventoryService extends EventEmitter {
         bonuses.detectionReduction += effects.detectionReduction || 0;
         bonuses.successRateIncrease += effects.successRateIncrease || 0;
 
-        // Multipliers are multiplicative (1.1 * 1.2 = 1.32)
         if (effects.xpMultiplier) {
           bonuses.xpMultiplier *= effects.xpMultiplier;
         }
@@ -340,12 +280,14 @@ export class InventoryService extends EventEmitter {
   }
 
   /**
-   * Check if a specific item is equipped
+   * Check if a specific item is equipped.
    */
   public async isEquipped(userId: string, itemId: string): Promise<boolean> {
     try {
-      const equipment = await this.getEquipment(userId);
-      return Object.values(equipment).includes(itemId);
+      const row = await prisma.inventoryItem.findFirst({
+        where: { userId, shopItemId: itemId, isEquipped: true },
+      });
+      return !!row;
     } catch (error) {
       this.logger.error({ err: error }, "Error checking if item is equipped");
       return false;
@@ -353,22 +295,17 @@ export class InventoryService extends EventEmitter {
   }
 
   /**
-   * Get the slot an item is equipped in (if any)
+   * Get the slot an item is equipped in (if any).
    */
   public async getEquippedSlot(
     userId: string,
     itemId: string,
   ): Promise<EquipmentSlot | null> {
     try {
-      const equipment = await this.getEquipment(userId);
-
-      for (const [slot, equippedItemId] of Object.entries(equipment)) {
-        if (equippedItemId === itemId) {
-          return slot as EquipmentSlot;
-        }
-      }
-
-      return null;
+      const row = await prisma.inventoryItem.findFirst({
+        where: { userId, shopItemId: itemId, isEquipped: true },
+      });
+      return row?.slot as EquipmentSlot | null ?? null;
     } catch (error) {
       this.logger.error({ err: error }, "Error getting equipped slot");
       return null;
@@ -376,43 +313,26 @@ export class InventoryService extends EventEmitter {
   }
 
   /**
-   * Validate equipment state (ensure all equipped items are owned)
+   * Validate equipment state — auto-unequip items no longer in inventory.
    */
   public async validateEquipment(userId: string): Promise<void> {
     try {
-      const progress = await prisma.playerProgress.findUnique({
-        where: { userId },
+      // Items with isEquipped=true but quantity=0 should be unequipped
+      const broken = await prisma.inventoryItem.findMany({
+        where: { userId, isEquipped: true, quantity: { lte: 0 } },
       });
 
-      if (!progress) return;
+      for (const row of broken) {
+        await prisma.inventoryItem.update({
+          where: { id: row.id },
+          data: { isEquipped: false, slot: null },
+        });
 
-      const equipment = (progress.equipment as unknown as Equipment) || {};
-      const inventory = progress.inventory as Record<string, number>;
-      let modified = false;
-
-      // Check each equipped item
-      for (const [slot, itemId] of Object.entries(equipment)) {
-        if (!itemId) continue;
-
-        // If item is not in inventory or quantity is 0, unequip it
-        if (!inventory[itemId] || inventory[itemId] <= 0) {
-          delete equipment[slot as EquipmentSlot];
-          modified = true;
-
-          this.emit("item:auto_unequipped", {
-            userId,
-            itemId,
-            slot,
-            reason: "Item no longer in inventory",
-          });
-        }
-      }
-
-      // Update database if modifications were made
-      if (modified) {
-        await prisma.playerProgress.update({
-          where: { userId },
-          data: { equipment: equipment as Prisma.JsonObject },
+        this.emit("item:auto_unequipped", {
+          userId,
+          itemId: row.shopItemId,
+          slot: row.slot,
+          reason: "Item quantity is zero",
         });
       }
     } catch (error) {
@@ -421,27 +341,21 @@ export class InventoryService extends EventEmitter {
   }
 
   /**
-   * Unequip all items
+   * Unequip all items.
    */
   public async unequipAll(userId: string): Promise<EquipmentResult> {
     try {
-      await prisma.playerProgress.update({
-        where: { userId },
-        data: { equipment: {} as Prisma.JsonObject },
+      await prisma.inventoryItem.updateMany({
+        where: { userId, isEquipped: true },
+        data: { isEquipped: false, slot: null },
       });
 
       this.emit("equipment:cleared", { userId });
 
-      return {
-        success: true,
-        message: "Unequipped all items",
-      };
+      return { success: true, message: "Unequipped all items" };
     } catch (error) {
       this.logger.error({ err: error }, "Error unequipping all items");
-      return {
-        success: false,
-        message: "Failed to unequip all items",
-      };
+      return { success: false, message: "Failed to unequip all items" };
     }
   }
 }

@@ -458,59 +458,54 @@ class ShopService extends EventEmitter {
   // ==================== INVENTORY MANAGEMENT ====================
 
   /**
-   * Get player inventory
+   * Get player inventory from InventoryItem table.
    */
   public async getPlayerInventory(userId: string): Promise<InventoryItem[]> {
-    const progress = await prisma.playerProgress.findUnique({
+    const dbItems = await prisma.inventoryItem.findMany({
       where: { userId },
+      include: { item: true },
+      orderBy: { acquiredAt: "desc" },
     });
 
-    if (!progress) {
-      return [];
-    }
-
-    // Note: inventory should be stored in missionProgress JSON field
-    const missionData = progress.missionProgress as any;
-    const inventory = missionData?.inventory || {};
-    const items: InventoryItem[] = [];
-
-    for (const [itemId, data] of Object.entries(inventory)) {
-      const item = this.catalog.get(itemId);
-      if (item) {
-        items.push({
-          itemId,
-          item,
-          quantity: (data as any).quantity || 1,
-          acquiredAt: new Date((data as any).acquiredAt || Date.now()),
-        });
-      }
-    }
-
-    return items;
+    return dbItems
+      .map((row) => {
+        const catalogItem = this.catalog.get(row.shopItemId);
+        if (!catalogItem) return null;
+        return {
+          itemId: row.shopItemId,
+          item: catalogItem,
+          quantity: row.quantity,
+          acquiredAt: row.acquiredAt,
+        };
+      })
+      .filter((x): x is InventoryItem => x !== null);
   }
 
   /**
-   * Check if player has item
+   * Check if player has item in InventoryItem table.
    */
   public async hasItem(userId: string, itemId: string): Promise<boolean> {
-    const inventory = await this.getPlayerInventory(userId);
-    return inventory.some((invItem) => invItem.itemId === itemId);
+    const row = await prisma.inventoryItem.findFirst({
+      where: { userId, shopItemId: itemId, quantity: { gt: 0 } },
+    });
+    return !!row;
   }
 
   /**
-   * Get item quantity in inventory
+   * Get item quantity from InventoryItem table.
    */
   public async getItemQuantity(
     userId: string,
     itemId: string,
   ): Promise<number> {
-    const inventory = await this.getPlayerInventory(userId);
-    const invItem = inventory.find((item) => item.itemId === itemId);
-    return invItem ? invItem.quantity : 0;
+    const row = await prisma.inventoryItem.findFirst({
+      where: { userId, shopItemId: itemId },
+    });
+    return row?.quantity ?? 0;
   }
 
   /**
-   * Add item to inventory
+   * Add item to inventory via InventoryItem table (upsert).
    */
   public async addItemToInventory(
     userId: string,
@@ -518,38 +513,29 @@ class ShopService extends EventEmitter {
     quantity: number = 1,
   ): Promise<boolean> {
     try {
-      const progress = await prisma.playerProgress.findUnique({
-        where: { userId },
-      });
-
-      if (!progress) return false;
-
-      // Store inventory in missionProgress JSON field
-      const missionData = (progress.missionProgress as any) || {};
-      const inventory = missionData.inventory || {};
       const item = this.catalog.get(itemId);
-
       if (!item) return false;
 
-      if (inventory[itemId]) {
-        // Item exists, increase quantity
-        const currentQuantity = inventory[itemId].quantity || 1;
-        const newQuantity = Math.min(currentQuantity + quantity, item.maxStack);
-        inventory[itemId].quantity = newQuantity;
-      } else {
-        // New item
-        inventory[itemId] = {
-          quantity: Math.min(quantity, item.maxStack),
-          acquiredAt: new Date().toISOString(),
-        };
-      }
-
-      // Update missionProgress with inventory data
-      missionData.inventory = inventory;
-      await prisma.playerProgress.update({
-        where: { userId },
-        data: { missionProgress: missionData },
+      const existing = await prisma.inventoryItem.findFirst({
+        where: { userId, shopItemId: itemId },
       });
+
+      if (existing) {
+        const newQty = Math.min(existing.quantity + quantity, item.maxStack);
+        await prisma.inventoryItem.update({
+          where: { id: existing.id },
+          data: { quantity: newQty },
+        });
+      } else {
+        await prisma.inventoryItem.create({
+          data: {
+            userId,
+            shopItemId: itemId,
+            quantity: Math.min(quantity, item.maxStack),
+            source: "shop",
+          },
+        });
+      }
 
       this.emit("item:added", { userId, itemId, quantity });
       return true;
@@ -560,7 +546,7 @@ class ShopService extends EventEmitter {
   }
 
   /**
-   * Remove item from inventory
+   * Remove item from inventory via InventoryItem table.
    */
   public async removeItemFromInventory(
     userId: string,
@@ -568,34 +554,20 @@ class ShopService extends EventEmitter {
     quantity: number = 1,
   ): Promise<boolean> {
     try {
-      const progress = await prisma.playerProgress.findUnique({
-        where: { userId },
+      const existing = await prisma.inventoryItem.findFirst({
+        where: { userId, shopItemId: itemId },
       });
 
-      if (!progress) return false;
+      if (!existing) return false;
 
-      // Get inventory from missionProgress JSON field
-      const missionData = (progress.missionProgress as any) || {};
-      const inventory = missionData.inventory || {};
-
-      if (!inventory[itemId]) return false;
-
-      const currentQuantity = inventory[itemId].quantity || 1;
-
-      if (currentQuantity <= quantity) {
-        // Remove item completely
-        delete inventory[itemId];
+      if (existing.quantity <= quantity) {
+        await prisma.inventoryItem.delete({ where: { id: existing.id } });
       } else {
-        // Decrease quantity
-        inventory[itemId].quantity = currentQuantity - quantity;
+        await prisma.inventoryItem.update({
+          where: { id: existing.id },
+          data: { quantity: { decrement: quantity } },
+        });
       }
-
-      // Update missionProgress with inventory data
-      missionData.inventory = inventory;
-      await prisma.playerProgress.update({
-        where: { userId },
-        data: { missionProgress: missionData },
-      });
 
       this.emit("item:removed", { userId, itemId, quantity });
       return true;
@@ -797,60 +769,44 @@ class ShopService extends EventEmitter {
       // Calculate sell price (50% of original)
       const sellPrice = Math.floor((item.price * quantity) / 2);
 
-      // Atomic transaction: check quantity, remove item, add credits
+      // Atomic transaction: check quantity, check not equipped, remove item, add credits
       const result = await prisma.$transaction(async (tx) => {
-        const progress = await tx.playerProgress.findUnique({
-          where: { userId },
+        const invItem = await tx.inventoryItem.findFirst({
+          where: { userId, shopItemId: itemId },
         });
 
-        if (!progress) {
+        if (!invItem || invItem.quantity < quantity) {
           return {
             success: false as const,
-            message: "Player progress not found",
-          };
-        }
-
-        const inventory = progress.inventory as Record<string, number>;
-        const currentQuantity = inventory[itemId] || 0;
-        if (currentQuantity < quantity) {
-          return {
-            success: false as const,
-            message: `You only have ${currentQuantity} of this item`,
+            message: `You only have ${invItem?.quantity ?? 0} of this item`,
           };
         }
 
         // Check item is not currently equipped
-        const equipment = (progress.equipment as Record<string, unknown>) || {};
-        const equippedSlots = Object.entries(equipment).filter(
-          ([, eqItemId]) => eqItemId === itemId,
-        );
-        if (
-          equippedSlots.length > 0 &&
-          currentQuantity - quantity < equippedSlots.length
-        ) {
+        if (invItem.isEquipped) {
           return {
             success: false as const,
-            message: `Cannot sell: ${item.name} is currently equipped`,
+            message: `Cannot sell: ${item.name} is currently equipped. Unequip it first.`,
           };
         }
 
-        // Update inventory and credits atomically
-        inventory[itemId] = currentQuantity - quantity;
-        if (inventory[itemId] <= 0) {
-          delete inventory[itemId];
+        // Remove or decrement
+        if (invItem.quantity <= quantity) {
+          await tx.inventoryItem.delete({ where: { id: invItem.id } });
+        } else {
+          await tx.inventoryItem.update({
+            where: { id: invItem.id },
+            data: { quantity: { decrement: quantity } },
+          });
         }
 
-        const newCredits = progress.credits + sellPrice;
-
-        await tx.playerProgress.update({
+        // Add credits
+        const progress = await tx.playerProgress.update({
           where: { userId },
-          data: {
-            inventory: inventory as Prisma.JsonObject,
-            credits: newCredits,
-          },
+          data: { credits: { increment: sellPrice } },
         });
 
-        return { success: true as const, newCredits };
+        return { success: true as const, newCredits: progress.credits };
       });
 
       if (!result.success) {
