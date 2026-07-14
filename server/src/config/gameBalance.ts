@@ -197,6 +197,51 @@ export const BOUNTY_BASE_REP = 5;
 
 /** Reputation bounds and thresholds. */
 // ═══════════════════════════════════════════════════════════════════
+// Connection Challenges
+// ═══════════════════════════════════════════════════════════════════
+
+/** Security threshold below which revisits skip the challenge. */
+export const CONNECTION_CHALLENGE_SKIP_THRESHOLD = 2;
+
+/** Handshake challenge settings by difficulty tier. */
+export const HANDSHAKE_CONFIG = {
+  easy:   { packets: 3, real: 2, decoys: 1, timeLimit: 45, maxAttempts: 3 },
+  medium: { packets: 5, real: 3, decoys: 2, timeLimit: 35, maxAttempts: 3 },
+  hard:   { packets: 7, real: 4, decoys: 3, timeLimit: 25, maxAttempts: 2 },
+} as const;
+
+/** Signal trace grid settings by difficulty tier. */
+export const SIGNAL_TRACE_CONFIG = {
+  easy:   { rows: 4, cols: 6, hops: 3, noise: 0, timeLimit: 50, maxAttempts: 3 },
+  medium: { rows: 5, cols: 8, hops: 4, noise: 1, timeLimit: 40, maxAttempts: 3 },
+  hard:   { rows: 6, cols: 10, hops: 5, noise: 2, timeLimit: 30, maxAttempts: 2 },
+} as const;
+
+/** Get difficulty tier from numeric difficulty. */
+export function getChallengeTier(difficulty: number): "easy" | "medium" | "hard" {
+  if (difficulty <= 3) return "easy";
+  if (difficulty <= 6) return "medium";
+  return "hard";
+}
+
+/** Calculate connection challenge difficulty from server security and player networking skill. */
+export function getConnectionDifficulty(
+  securityLevel: number,
+  isFirstVisit: boolean,
+  networkingSkill: number,
+): number {
+  const base = isFirstVisit
+    ? Math.max(1, Math.min(8, securityLevel))
+    : Math.max(1, securityLevel - 1);
+  const reduction = networkingSkill / (isFirstVisit ? 50 : 40);
+  return Math.max(1, Math.min(10, Math.round(base - reduction)));
+}
+
+/** Factions/zones that get signal_trace instead of handshake. */
+export const SIGNAL_TRACE_FACTIONS = new Set(["darknet", "dothackers"]);
+export const SIGNAL_TRACE_ZONES = new Set(["underground", "darknet", "hidden"]);
+
+// ═══════════════════════════════════════════════════════════════════
 // Special File Triggers (cat command checks these)
 // ═══════════════════════════════════════════════════════════════════
 

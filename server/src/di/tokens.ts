@@ -89,3 +89,6 @@ export const DARKNET_DUNGEON_SERVICE = "DarkNetDungeonService";
 
 // Key Fragment / Endgame
 export const KEY_FRAGMENT_SERVICE = "KeyFragmentService";
+
+// Connection Challenge
+export const CONNECTION_CHALLENGE_SERVICE = "ConnectionChallengeService";

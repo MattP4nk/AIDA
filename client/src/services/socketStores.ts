@@ -7,4 +7,5 @@ export {
   hackAttempts,
   playerResources,
   activeHackSession,
+  activeConnectionSession,
 } from "./socket";

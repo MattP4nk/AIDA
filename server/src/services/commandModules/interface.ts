@@ -27,6 +27,7 @@ import type { AchievementService } from "../achievementService";
 import type { KeyFragmentService } from "../keyFragmentService";
 import type { DarkNetDungeonService } from "../darknetDungeonService";
 import type DarkNetDiscoveryService from "../darknetDiscoveryService";
+import type { ConnectionChallengeService } from "../connectionChallengeService";
 
 export interface CommandContext {
   userId: string;
@@ -60,6 +61,7 @@ export interface CommandContext {
     keyFragmentService?: KeyFragmentService;
     darknetDungeonService?: DarkNetDungeonService;
     darknetDiscoveryService?: DarkNetDiscoveryService;
+    connectionChallengeService?: ConnectionChallengeService;
     [key: string]: any;
   };
 }

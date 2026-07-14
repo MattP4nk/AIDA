@@ -48,6 +48,14 @@ export const activeHackSession = writable<{
   challenge?: any;
 } | null>(null);
 
+// Active connection challenge store (for sticky challenge panel)
+export const activeConnectionSession = writable<{
+  active: boolean;
+  targetIp?: string;
+  challenge?: any;
+  sessionId?: string;
+} | null>(null);
+
 // Lazy notification service reference (avoids circular import)
 let _notifService: any = null;
 // Kick off dynamic import so _notifService is populated asynchronously
@@ -646,7 +654,6 @@ class SocketService {
 
       // Check if this is a hack session start (contains session data with challenge)
       if (data.data?.sessionId && data.data?.targetIp) {
-        // Hack session started — parse the challenge from the output
         activeHackSession.set({
           active: true,
           targetIp: data.data.targetIp,
@@ -654,6 +661,21 @@ class SocketService {
           totalLayers: data.data.totalLayers,
           challenge: data.data.challenge,
         });
+      }
+
+      // Check if this is a connection challenge start
+      if (data.data?.connectionSessionId && data.data?.connectionChallenge) {
+        activeConnectionSession.set({
+          active: true,
+          targetIp: data.data.targetIp,
+          challenge: data.data.connectionChallenge,
+          sessionId: data.data.connectionSessionId,
+        });
+      }
+
+      // Clear connection challenge panel on resolution
+      if (data.data?.connectionResolved) {
+        activeConnectionSession.set(null);
       }
       // Render output text from background processes (hack prep, scan, traceroute, etc.)
       if (data.output) {

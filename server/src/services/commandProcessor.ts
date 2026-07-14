@@ -190,6 +190,9 @@ class CommandProcessor extends EventEmitter {
     const darknetDiscoveryService = this.resolveService<
       import("./darknetDiscoveryService").default
     >("DarkNetDiscoveryService");
+    const connectionChallengeService = this.resolveService<
+      import("./connectionChallengeService").ConnectionChallengeService
+    >(TOKENS.CONNECTION_CHALLENGE_SERVICE);
 
     // Fetch user role for command-level role gating
     const user = await db.client.user.findUnique({
@@ -230,6 +233,7 @@ class CommandProcessor extends EventEmitter {
         ...(keyFragmentService ? { keyFragmentService } : {}),
         ...(darknetDungeonService ? { darknetDungeonService } : {}),
         ...(darknetDiscoveryService ? { darknetDiscoveryService } : {}),
+        ...(connectionChallengeService ? { connectionChallengeService } : {}),
       },
     };
   }
@@ -373,17 +377,13 @@ class CommandProcessor extends EventEmitter {
       // Get module for command
       const module = this.commandMap.get(command);
 
-      // Network commands require network access (being connected to a server)
+      // Network commands require network context (home server or connected to remote)
       if (module?.category === "network") {
-        if (
-          !session.currentServerId &&
-          command !== "connect" &&
-          command !== "scan" &&
-          command !== "servers"
-        ) {
+        const hasNetworkContext = !!(session.currentServerId || session.homeServerId);
+        if (!hasNetworkContext) {
           return {
             valid: false,
-            error: "Network access required. Connect to a server first.",
+            error: "Network access required. No server context available.",
           };
         }
       }

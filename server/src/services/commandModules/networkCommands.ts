@@ -34,6 +34,9 @@ export class NetworkCommandsModule implements CommandModule {
     "traceroute",
     "probe",
     "netmap",
+    "handshake.ack",
+    "signal.trace",
+    "connect.abort",
   ]);
 
   public async execute(
@@ -56,6 +59,12 @@ export class NetworkCommandsModule implements CommandModule {
           return await this.handleTraceroute(command, context);
         case "netmap":
           return await this.handleNetmap(command, context);
+        case "handshake.ack":
+          return await this.handleChallengeSubmit(command, context, "handshake");
+        case "signal.trace":
+          return await this.handleChallengeSubmit(command, context, "signal_trace");
+        case "connect.abort":
+          return this.handleConnectAbort(context);
         default:
           return {
             success: false,
@@ -780,7 +789,88 @@ export class NetworkCommandsModule implements CommandModule {
       }
     }
 
-    // ── Proceed with connection ──
+    // ── Connection challenge check ──
+    const challengeService = context.services.connectionChallengeService;
+    if (challengeService) {
+      // Check if player already has an active challenge
+      const existing = challengeService.getActiveSession(context.userId);
+      if (existing && existing.status === "active") {
+        const cmd = existing.challenge.type === "handshake" ? "handshake.ack" : "signal.trace";
+        return {
+          success: false,
+          output: `Active connection challenge in progress.\nSubmit: ${cmd} <answer>\nOr: connect.abort to cancel.`,
+          timestamp: new Date(),
+        };
+      }
+
+      // Check if this is a first visit
+      const previousConn = await context.db.client.serverConnection.findFirst({
+        where: { userId: context.userId, serverId: targetServer.id },
+      });
+      const isFirstVisit = !previousConn;
+
+      const check = challengeService.shouldChallenge(context.userId, targetServer, isFirstVisit);
+
+      if (check.needed) {
+        // Get player networking skill
+        const prog = await context.db.client.playerProgress.findUnique({
+          where: { userId: context.userId },
+          select: { networking: true },
+        });
+
+        // Get network zone for challenge type selection
+        let networkZone: string | null = null;
+        if (targetServer.networkId) {
+          const net = await context.db.client.network.findUnique({
+            where: { id: targetServer.networkId },
+            select: { zone: true },
+          });
+          networkZone = net?.zone ?? null;
+        }
+
+        const { challenge } = challengeService.initiateChallenge(
+          context.userId,
+          targetServer,
+          networkZone,
+          prog?.networking ?? 0,
+          isFirstVisit,
+        );
+
+        // Fire content provisioning early so it runs during the challenge
+        if (isFirstVisit && !targetServer.isPlayerHome) {
+          try {
+            const { getService } = await import("../../di/container");
+            const { SERVER_CONTENT_SERVICE } = await import("../../di/tokens");
+            const contentService = getService<any>(SERVER_CONTENT_SERVICE);
+            contentService.provisionServerContent(targetServer.id).catch(() => {});
+          } catch { /* non-critical */ }
+        }
+
+        return {
+          success: true,
+          output: challenge.displayText,
+          data: {
+            connectionSessionId: challenge.type,
+            targetIp: targetServer.ipAddress,
+            connectionChallenge: challenge,
+          },
+          timestamp: new Date(),
+        };
+      }
+    }
+
+    // ── Proceed with connection (no challenge needed) ──
+    return await this.completeConnection(context, target, targetServer);
+  }
+
+  /**
+   * Complete a server connection — shared by direct connect and challenge success.
+   */
+  private async completeConnection(
+    context: CommandContext,
+    target: string,
+    targetServer: any,
+  ): Promise<CommandResult> {
     try {
       const result = await context.services.serverService.connectToServer(
         context.userId,
@@ -807,7 +897,6 @@ export class NetworkCommandsModule implements CommandModule {
         };
       }
 
-      // Show connection info with role and network
       const serverRole = (targetServer as any).role || "general";
       const network = targetServer.networkId
         ? await context.db.client.network.findUnique({
@@ -828,11 +917,17 @@ export class NetworkCommandsModule implements CommandModule {
       }
 
       const lines = statusCard("CONNECTED", infoRows);
-      return { success: true, output: render(lines), timestamp: new Date() };
+      return {
+        success: true,
+        output: render(lines),
+        data: { connectionResolved: true },
+        timestamp: new Date(),
+      };
     } catch (error) {
       return {
         success: false,
         output: error instanceof Error ? error.message : "Connection failed",
+        data: { connectionResolved: true },
         timestamp: new Date(),
       };
     }
@@ -1349,5 +1444,120 @@ export class NetworkCommandsModule implements CommandModule {
     lines.push(boxBottom(W));
 
     return { success: true, output: render(lines), timestamp: new Date() };
+  }
+
+  // ==================== CONNECTION CHALLENGE HANDLERS ====================
+
+  /**
+   * Handle handshake.ack and signal.trace submissions.
+   */
+  private async handleChallengeSubmit(
+    command: Command,
+    context: CommandContext,
+    expectedType: "handshake" | "signal_trace",
+  ): Promise<CommandResult> {
+    const answer = command.args?.join(" ");
+    if (!answer) {
+      const cmd = expectedType === "handshake" ? "handshake.ack" : "signal.trace";
+      return {
+        success: false,
+        output: `Usage: ${cmd} <answer>`,
+        timestamp: new Date(),
+      };
+    }
+
+    const service = context.services.connectionChallengeService;
+    if (!service) {
+      return { success: false, output: "Connection challenge service unavailable.", timestamp: new Date() };
+    }
+
+    const session = service.getActiveSession(context.userId);
+    if (!session || session.status !== "active") {
+      return {
+        success: false,
+        output: "No active connection challenge. Use 'connect <ip>' first.",
+        timestamp: new Date(),
+      };
+    }
+
+    if (session.challenge.type !== expectedType) {
+      const correctCmd = session.challenge.type === "handshake" ? "handshake.ack" : "signal.trace";
+      return {
+        success: false,
+        output: `Wrong command. This challenge requires: ${correctCmd}`,
+        timestamp: new Date(),
+      };
+    }
+
+    try {
+      const result = service.submitAnswer(context.userId, answer);
+
+      if (result.correct) {
+        // Challenge passed — complete the connection
+        const targetServer = await context.db.client.gameServer.findUnique({
+          where: { id: session.targetServerId },
+        });
+        if (!targetServer) {
+          return { success: false, output: "Target server no longer exists.", data: { connectionResolved: true }, timestamp: new Date() };
+        }
+
+        const connectResult = await this.completeConnection(context, targetServer.ipAddress, targetServer);
+        const output = Array.isArray(connectResult.output) ? connectResult.output : [connectResult.output];
+        return {
+          success: true,
+          output: [`  [+] ${result.feedback}`, "", ...output],
+          data: { connectionResolved: true },
+          timestamp: new Date(),
+        };
+      }
+
+      // Wrong answer
+      if (result.session.status === "failed") {
+        return {
+          success: false,
+          output: `  [-] ${result.feedback}\n  Connection rejected. Maximum attempts reached.\n  Try 'connect ${session.targetIp}' again for a new challenge.`,
+          data: { connectionResolved: true },
+          timestamp: new Date(),
+        };
+      }
+
+      const remaining = result.session.challenge.maxAttempts - result.session.attempts;
+      const timeLeft = Math.max(0, Math.ceil((result.session.expiresAt - Date.now()) / 1000));
+      return {
+        success: false,
+        output: `  [-] ${result.feedback}\n  Attempts remaining: ${remaining} | Time: ${timeLeft}s`,
+        timestamp: new Date(),
+      };
+    } catch (err) {
+      return {
+        success: false,
+        output: err instanceof Error ? err.message : "Challenge error.",
+        data: { connectionResolved: true },
+        timestamp: new Date(),
+      };
+    }
+  }
+
+  /**
+   * Abort an active connection challenge.
+   */
+  private handleConnectAbort(context: CommandContext): CommandResult {
+    const service = context.services.connectionChallengeService;
+    if (!service) {
+      return { success: false, output: "No active connection challenge.", timestamp: new Date() };
+    }
+
+    const session = service.getActiveSession(context.userId);
+    if (!session || session.status !== "active") {
+      return { success: false, output: "No active connection challenge to abort.", timestamp: new Date() };
+    }
+
+    service.abortSession(context.userId);
+    return {
+      success: true,
+      output: "Connection challenge aborted.",
+      data: { connectionResolved: true },
+      timestamp: new Date(),
+    };
   }
 }

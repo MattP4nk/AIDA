@@ -205,20 +205,21 @@ router.post(
         // Non-critical: standings will be created on first interaction
       }
 
-      // Link home server to Internet Exchange (fire-and-forget)
+      // Link home server to Internet Exchange
       try {
         const { NETWORK_TOPOLOGY_SERVICE } = await import("../di/tokens");
         const topoService = getService<any>(NETWORK_TOPOLOGY_SERVICE);
-        // Find the home server ID from the transaction result
         const homeServerRecord = await prisma.gameServer.findFirst({
           where: { ipAddress: homeIp, isPlayerHome: true },
           select: { id: true },
         });
         if (homeServerRecord) {
-          topoService.createHomeLink(homeServerRecord.id).catch(() => {});
+          await topoService.createHomeLink(homeServerRecord.id);
+          logger.info({ homeServerId: homeServerRecord.id }, "Home server linked to Internet Exchange");
         }
-      } catch {
-        // Non-critical: home link will be created on first session if missed
+      } catch (err) {
+        // Log but don't block registration — fallback in createSession() will retry
+        logger.warn({ err, homeIp }, "Failed to link home server to IX on registration (will retry on session)");
       }
 
       // Generate JWT token

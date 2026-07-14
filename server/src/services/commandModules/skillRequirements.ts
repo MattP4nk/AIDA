@@ -96,6 +96,10 @@ export const SKILL_REQUIREMENTS: Readonly<Record<string, SkillRequirement>> = {
   fragments: { skill: "hacking", level: 30, label: "Hacking" },
   endgame: { skill: "hacking", level: 50, label: "Hacking" },
 
+  // ── Connection challenge commands ─────────────────────────────────
+  "handshake.ack": { skill: "networking", level: 5, label: "Networking" },
+  "signal.trace": { skill: "networking", level: 5, label: "Networking" },
+
   // ── Alias subcommands (key = "alias:<sub>") ────────────────────────
   "alias:create": {
     skill: "socialEng",

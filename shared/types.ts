@@ -933,3 +933,31 @@ export interface LayerResult {
   attempts: number;
   timeUsed: number;
 }
+
+// ==================== CONNECTION CHALLENGE TYPES ====================
+
+export type ConnectionChallengeType = "handshake" | "signal_trace";
+
+export interface ConnectionChallenge {
+  type: ConnectionChallengeType;
+  difficulty: number;
+  displayText: string[];
+  solution: string;
+  hints: string[];
+  timeLimit: number; // seconds
+  maxAttempts: number;
+}
+
+export interface ConnectionSessionInfo {
+  id: string;
+  userId: string;
+  targetServerId: string;
+  targetIp: string;
+  targetName: string;
+  isFirstVisit: boolean;
+  status: "active" | "completed" | "failed" | "expired" | "aborted";
+  challenge: ConnectionChallenge;
+  attempts: number;
+  startedAt: number;
+  expiresAt: number;
+}

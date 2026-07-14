@@ -16,6 +16,7 @@
     import {
         playerResources,
         activeHackSession,
+        activeConnectionSession,
     } from "../services/socketStores";
     // Notification service
     import {
@@ -1179,6 +1180,30 @@
         </div>
     {/if}
 
+    <!-- Sticky Connection Challenge Panel -->
+    {#if $activeConnectionSession?.active && $activeConnectionSession.challenge}
+        <div class="connection-challenge-panel">
+            <div class="challenge-header connection">
+                CONNECTION — {$activeConnectionSession.targetIp} —
+                {$activeConnectionSession.challenge.type === "handshake"
+                    ? "TCP HANDSHAKE"
+                    : "SIGNAL TRACE"}
+            </div>
+            {#if $activeConnectionSession.challenge.displayText}
+                {#each $activeConnectionSession.challenge.displayText as line}
+                    <div class="challenge-line">{line}</div>
+                {/each}
+            {/if}
+            {#if $activeConnectionSession.challenge.hints?.length}
+                <div class="challenge-hints">
+                    {#each $activeConnectionSession.challenge.hints as hint}
+                        <div class="hint-line">hint: {hint}</div>
+                    {/each}
+                </div>
+            {/if}
+        </div>
+    {/if}
+
     <!-- Input Line -->
     <div class="input-line">
         <span class="prompt" aria-hidden="true">{getPrompt()}</span>
@@ -1724,6 +1749,29 @@
         color: #666;
         font-style: italic;
         font-size: 0.9em;
+    }
+
+    /* ==================== CONNECTION CHALLENGE PANEL ==================== */
+
+    .connection-challenge-panel {
+        border-top: 1px solid #0a2a3a;
+        border-bottom: 1px solid #0a2a3a;
+        background: #060e14;
+        padding: 8px 40px;
+        font-family: inherit;
+        font-size: 0.85em;
+        color: #00ccff;
+        max-height: 200px;
+        overflow-y: auto;
+    }
+
+    .challenge-header.connection {
+        color: #00ccff;
+        text-shadow: 0 0 5px rgba(0, 204, 255, 0.3);
+    }
+
+    .connection-challenge-panel .challenge-line {
+        color: #0099cc;
     }
 
     /* ==================== INPUT LINE ==================== */
