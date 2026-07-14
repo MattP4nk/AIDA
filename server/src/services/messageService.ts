@@ -4,10 +4,12 @@
  * Handles all messaging operations including:
  * - Private messages between players
  * - Real-time delivery via Socket.IO
- * - Message encryption based on cryptography skill
  * - Read receipts and message status
  * - Message history and inbox management
- * - Encrypted message interception (for gameplay)
+ * - Token-gated AI persona messaging
+ *
+ * Encryption operations are delegated to MessageEncryptionService.
+ * Chat history/contacts are handled by ChatService.
  *
  * Phase 2, Day 8
  */
@@ -22,7 +24,9 @@ import {
   SOCKET_IO,
   MISSION_INTEGRATION_SERVICE,
   AI_SERVICE,
+  MESSAGE_ENCRYPTION_SERVICE,
 } from "../di/tokens";
+import type { MessageEncryptionService } from "./messageEncryptionService";
 import type MissionIntegrationService from "./missionIntegration";
 import type { AIService } from "./aiService";
 import {
@@ -101,7 +105,6 @@ export interface ChatContact {
 
 @injectable()
 export class MessageService {
-  private encryptionAlgorithm = "aes-256-cbc";
   private deliveryQueue: Map<string, QueuedMessage[]> = new Map();
   private deliveryProcessorInterval: NodeJS.Timeout | null = null;
   private missionIntegration: MissionIntegrationService | null = null;
@@ -121,6 +124,8 @@ export class MessageService {
     @inject(SOCKET_IO) private io: SocketIOServer,
     @inject(MISSION_INTEGRATION_SERVICE)
     missionIntegrationService?: MissionIntegrationService,
+    @inject(MESSAGE_ENCRYPTION_SERVICE)
+    private encryptionService?: MessageEncryptionService,
   ) {
     this.missionIntegration = missionIntegrationService || null;
     this.startDeliveryProcessor();
@@ -236,8 +241,8 @@ export class MessageService {
           ? Math.min(options.encryptionLevel, maxEncryptionLevel)
           : maxEncryptionLevel;
 
-        if (encryptionLevel > 0) {
-          const encryptionResult = await this.encryptMessage(
+        if (encryptionLevel > 0 && this.encryptionService) {
+          const encryptionResult = await this.encryptionService.encryptMessage(
             options.content,
             encryptionLevel,
           );
@@ -817,317 +822,6 @@ export class MessageService {
     }
   }
 
-  // ==================== ENCRYPTION & DECRYPTION ====================
-
-  /**
-   * Encrypt message content based on skill level
-   */
-  private async encryptMessage(
-    content: string,
-    encryptionLevel: number,
-  ): Promise<EncryptionResult> {
-    try {
-      // Generate encryption key based on level
-      const keyLength = 16 + encryptionLevel * 2; // 16-36 bytes
-      const key = crypto.randomBytes(keyLength).toString("hex");
-
-      const iv = crypto.randomBytes(16);
-      const keyBuffer = crypto.scryptSync(key, "salt", 32);
-      const cipher = crypto.createCipheriv(
-        this.encryptionAlgorithm,
-        keyBuffer,
-        iv,
-      );
-
-      let encrypted = cipher.update(content, "utf8", "hex");
-      encrypted += cipher.final("hex");
-
-      const encryptedContent = iv.toString("hex") + ":" + encrypted;
-
-      return {
-        encryptedContent,
-        encryptionLevel,
-        key,
-      };
-    } catch (error) {
-      this.logger.error({ err: error }, "Encryption error");
-      throw error;
-    }
-  }
-
-  /**
-   * Decrypt message content.
-   *
-   * If `key` is omitted/empty and `messageId` is provided, the stored
-   * server-side encryption key will be looked up from the database.
-   */
-  async decryptMessage(
-    encryptedContent: string,
-    key: string | undefined,
-    userId: string,
-    messageId?: string,
-  ): Promise<MessageOperationResult> {
-    try {
-      // If no key was supplied, try to look it up from the database
-      let resolvedKey = key;
-      if (!resolvedKey && messageId) {
-        const dbMessage = await prisma.message.findUnique({
-          where: { id: messageId },
-          select: { encryptionKey: true, senderId: true, recipientId: true },
-        });
-
-        if (!dbMessage) {
-          return {
-            success: false,
-            message: "Message not found",
-            error: "NOT_FOUND",
-          };
-        }
-        // Only sender or recipient may use the stored key
-        if (dbMessage.senderId !== userId && dbMessage.recipientId !== userId) {
-          return {
-            success: false,
-            message: "Permission denied",
-            error: "PERMISSION_DENIED",
-          };
-        }
-        if (!dbMessage.encryptionKey) {
-          return {
-            success: false,
-            message: "No stored encryption key for this message",
-            error: "NO_KEY",
-          };
-        }
-        resolvedKey = dbMessage.encryptionKey;
-      }
-
-      if (!resolvedKey) {
-        return {
-          success: false,
-          message: "No encryption key provided and no messageId to look it up",
-          error: "NO_KEY",
-        };
-      }
-
-      // Get user's cryptography skill
-      const progress = await prisma.playerProgress.findUnique({
-        where: { userId },
-      });
-
-      if (!progress) {
-        return {
-          success: false,
-          message: "Player progress not found",
-          error: "NO_PROGRESS",
-        };
-      }
-
-      const parts = encryptedContent.split(":");
-      if (parts.length !== 2) {
-        return {
-          success: false,
-          message: "Invalid encrypted content format",
-          error: "INVALID_FORMAT",
-        };
-      }
-
-      const iv = Buffer.from(parts[0]!, "hex");
-      const encrypted = parts[1]!;
-      const keyBuffer = crypto.scryptSync(resolvedKey, "salt", 32);
-      const decipher = crypto.createDecipheriv(
-        this.encryptionAlgorithm,
-        keyBuffer,
-        iv,
-      );
-
-      let decrypted = decipher.update(encrypted, "hex", "utf8");
-      decrypted += decipher.final("utf8");
-
-      return {
-        success: true,
-        message: "Message decrypted successfully",
-        data: { content: decrypted },
-      };
-    } catch (error: any) {
-      this.logger.error({ err: error }, "Decryption error");
-      return {
-        success: false,
-        message: "Failed to decrypt message. Invalid key or corrupted data.",
-        error: "DECRYPTION_FAILED",
-      };
-    }
-  }
-
-  /**
-   * Decrypt a message by its ID using the server-side stored encryption key.
-   *
-   * Validates that the requesting user is the sender or recipient before
-   * allowing decryption.
-   */
-  async decryptMessageById(
-    messageId: string,
-    userId: string,
-  ): Promise<MessageOperationResult> {
-    try {
-      const message = await prisma.message.findUnique({
-        where: { id: messageId },
-      });
-
-      if (!message) {
-        return {
-          success: false,
-          message: "Message not found",
-          error: "NOT_FOUND",
-        };
-      }
-
-      // Only sender or recipient may decrypt
-      if (message.senderId !== userId && message.recipientId !== userId) {
-        return {
-          success: false,
-          message: "Permission denied",
-          error: "PERMISSION_DENIED",
-        };
-      }
-
-      if (!message.isEncrypted) {
-        return {
-          success: true,
-          message: "Message is not encrypted",
-          data: { content: message.content },
-        };
-      }
-
-      if (!message.encryptionKey) {
-        return {
-          success: false,
-          message: "No stored encryption key for this message",
-          error: "NO_KEY",
-        };
-      }
-
-      return await this.decryptMessage(
-        message.content,
-        message.encryptionKey,
-        userId,
-        messageId,
-      );
-    } catch (error: any) {
-      this.logger.error({ err: error }, "Decrypt message by ID error");
-      return {
-        success: false,
-        message: "Failed to decrypt message",
-        error: error.message,
-      };
-    }
-  }
-
-  /**
-   * Attempt to crack encrypted message (gameplay mechanic)
-   */
-  async crackEncryption(
-    messageId: string,
-    userId: string,
-  ): Promise<MessageOperationResult> {
-    try {
-      const message = await prisma.message.findUnique({
-        where: { id: messageId },
-      });
-
-      if (!message) {
-        return {
-          success: false,
-          message: "Message not found",
-          error: "NOT_FOUND",
-        };
-      }
-
-      if (!message.isEncrypted) {
-        return {
-          success: false,
-          message: "Message is not encrypted",
-          error: "NOT_ENCRYPTED",
-        };
-      }
-
-      const progress = await prisma.playerProgress.findUnique({
-        where: { userId },
-      });
-
-      if (!progress) {
-        return {
-          success: false,
-          message: "Player progress not found",
-          error: "NO_PROGRESS",
-        };
-      }
-
-      const cryptoSkill = progress.cryptography;
-      const requiredSkill = (message.encryptionLevel || 5) * 10;
-
-      // Success chance based on skill difference
-      const skillDiff = cryptoSkill - requiredSkill;
-      const baseChance = 50; // 50% at equal skill
-      const successChance = Math.max(10, Math.min(90, baseChance + skillDiff));
-
-      const roll = Math.random() * 100;
-      const success = roll < successChance;
-
-      if (success) {
-        // Award XP for successful crack
-        const xpGain = message.encryptionLevel! * 10;
-        await prisma.playerProgress.update({
-          where: { userId },
-          data: {
-            experience: { increment: xpGain },
-            cryptography: { increment: Math.min(2, message.encryptionLevel!) },
-          },
-        });
-
-        // Actually decrypt the content using the stored encryption key
-        const decryptResult = await this.decryptMessage(
-          message.content,
-          message.encryptionKey!,
-          userId,
-          messageId,
-        );
-
-        const decryptedContent =
-          decryptResult.success && decryptResult.data
-            ? decryptResult.data.content
-            : message.content; // Fallback to ciphertext if decryption fails unexpectedly
-
-        return {
-          success: true,
-          message: "Encryption cracked successfully!",
-          data: {
-            content: decryptedContent,
-            xpGained: xpGain,
-            skillGained: Math.min(2, message.encryptionLevel!),
-          },
-        };
-      } else {
-        return {
-          success: false,
-          message: `Failed to crack encryption (${successChance.toFixed(0)}% chance)`,
-          error: "CRACK_FAILED",
-          data: {
-            successChance,
-            requiredSkill,
-            yourSkill: cryptoSkill,
-          },
-        };
-      }
-    } catch (error: any) {
-      this.logger.error({ err: error }, "Crack encryption error");
-      return {
-        success: false,
-        message: "Failed to crack encryption",
-        error: error.message,
-      };
-    }
-  }
-
   // ==================== REAL-TIME DELIVERY ====================
 
   /**
@@ -1425,296 +1119,21 @@ export class MessageService {
     }
   }
 
-  // ==================== CHAT METHODS ====================
-
   /**
-   * Get chat history between two users
-   */
-  async getChatHistory(
-    userId: string,
-    contactId: string,
-    limit: number = 100,
-  ): Promise<MessageOperationResult> {
-    try {
-      const messages = await prisma.message.findMany({
-        where: {
-          OR: [
-            { senderId: userId, recipientId: contactId },
-            { senderId: contactId, recipientId: userId },
-          ],
-          subject: "",
-        },
-        include: {
-          sender: { select: { id: true, username: true } },
-          recipient: { select: { id: true, username: true } },
-        },
-        orderBy: { timestamp: "desc" },
-        take: limit,
-      });
-
-      const formattedMessages = messages.map((msg) => ({
-        id: msg.id,
-        senderId: msg.senderId,
-        senderUsername: msg.sender?.username ?? "Unknown",
-        recipientId: msg.recipientId,
-        recipientUsername: msg.recipient?.username ?? "Unknown",
-        content: msg.isEncrypted ? "[ENCRYPTED]" : msg.content,
-        timestamp: msg.timestamp,
-        isRead: msg.isRead,
-        isEncrypted: msg.isEncrypted,
-        avatar: this.generateAvatarInfo(msg.sender?.username ?? "Unknown"),
-      }));
-
-      return {
-        success: true,
-        message: `Retrieved ${formattedMessages.length} messages`,
-        data: { messages: formattedMessages },
-      };
-    } catch (error: any) {
-      this.logger.error({ err: error }, "Get chat history error");
-      return {
-        success: false,
-        message: "Failed to load chat history",
-        error: error.message,
-      };
-    }
-  }
-
-  /**
-   * Get chat contacts for a user (from DB contacts + message history)
-   */
-  async getChatContacts(userId: string): Promise<MessageOperationResult> {
-    try {
-      // Get DB contacts
-      const dbContacts = await prisma.contact.findMany({
-        where: { userId },
-        include: {
-          contact: {
-            select: {
-              id: true,
-              username: true,
-              factionMembers: { select: { factionId: true }, take: 1 },
-            },
-          },
-        },
-      });
-
-      // Get all chat messages to find additional contacts from message history
-      const chatMessages = await prisma.message.findMany({
-        where: {
-          OR: [{ senderId: userId }, { recipientId: userId }],
-          subject: "",
-        },
-        include: {
-          sender: {
-            select: {
-              id: true,
-              username: true,
-              factionMembers: { select: { factionId: true }, take: 1 },
-            },
-          },
-          recipient: {
-            select: {
-              id: true,
-              username: true,
-              factionMembers: { select: { factionId: true }, take: 1 },
-            },
-          },
-        },
-        orderBy: { timestamp: "desc" },
-      });
-
-      const contactMap = new Map<string, ChatContact>();
-
-      // Add DB contacts
-      for (const dbContact of dbContacts) {
-        if (dbContact.contact && !contactMap.has(dbContact.contactUserId)) {
-          const factionId =
-            dbContact.contact.factionMembers?.[0]?.factionId ?? null;
-          contactMap.set(dbContact.contactUserId, {
-            userId: dbContact.contactUserId,
-            username: dbContact.contact.username,
-            isOnline: false,
-            unreadCount: 0,
-            lastMessage: "",
-            lastMessageTime: new Date(0),
-            isContact: true,
-            factionId,
-            avatar: this.generateAvatarInfo(
-              dbContact.contact.username,
-              "player",
-              factionId ?? undefined,
-            ),
-          });
-        }
-      }
-
-      // Add contacts from message history
-      for (const msg of chatMessages) {
-        const otherId =
-          msg.senderId === userId ? msg.recipientId : msg.senderId;
-        const other = msg.senderId === userId ? msg.recipient : msg.sender;
-        if (other && !contactMap.has(otherId)) {
-          const factionId = other.factionMembers?.[0]?.factionId ?? null;
-          contactMap.set(otherId, {
-            userId: otherId,
-            username: other.username,
-            isOnline: false,
-            unreadCount: 0,
-            lastMessage: "",
-            lastMessageTime: new Date(0),
-            isContact: false,
-            factionId,
-            avatar: this.generateAvatarInfo(
-              other.username,
-              "player",
-              factionId ?? undefined,
-            ),
-          });
-        }
-
-        // Update last message preview
-        const contact = contactMap.get(otherId);
-        if (contact && msg.timestamp > contact.lastMessageTime) {
-          contact.lastMessage = msg.isEncrypted
-            ? "[ENCRYPTED]"
-            : msg.content.substring(0, 50);
-          contact.lastMessageTime = msg.timestamp;
-        }
-      }
-
-      // Get unread counts in a single query
-      const unreadCounts = await prisma.message.groupBy({
-        by: ["senderId"],
-        where: {
-          recipientId: userId,
-          isRead: false,
-          subject: "",
-        },
-        _count: { id: true },
-      });
-
-      for (const uc of unreadCounts) {
-        const contact = contactMap.get(uc.senderId);
-        if (contact) {
-          contact.unreadCount = uc._count.id;
-        }
-      }
-
-      // Check online status via Socket.IO rooms
-      const contacts = Array.from(contactMap.values());
-      for (const contact of contacts) {
-        const sockets = await this.io
-          .in(`user:${contact.userId}`)
-          .fetchSockets();
-        contact.isOnline = sockets.length > 0;
-      }
-
-      // Sort by last message time (most recent first)
-      contacts.sort(
-        (a, b) => b.lastMessageTime.getTime() - a.lastMessageTime.getTime(),
-      );
-
-      return {
-        success: true,
-        message: `Found ${contacts.length} contacts`,
-        data: { contacts },
-      };
-    } catch (error: any) {
-      this.logger.error({ err: error }, "Get chat contacts error");
-      return {
-        success: false,
-        message: "Failed to load contacts",
-        error: error.message,
-      };
-    }
-  }
-
-  /**
-   * Mark all messages in a conversation as read
-   */
-  async markConversationRead(
-    userId: string,
-    senderId: string,
-  ): Promise<MessageOperationResult> {
-    try {
-      const result = await prisma.message.updateMany({
-        where: {
-          recipientId: userId,
-          senderId: senderId,
-          isRead: false,
-          subject: "",
-        },
-        data: { isRead: true },
-      });
-
-      // Send read receipts for each marked message
-      if (result.count > 0) {
-        this.io.to(`user:${senderId}`).emit("message:conversation_read", {
-          readBy: userId,
-          count: result.count,
-        });
-      }
-
-      return {
-        success: true,
-        message: `Marked ${result.count} messages as read`,
-        data: { count: result.count },
-      };
-    } catch (error: any) {
-      this.logger.error({ err: error }, "Mark conversation read error");
-      return {
-        success: false,
-        message: "Failed to mark messages as read",
-        error: error.message,
-      };
-    }
-  }
-
-  /**
-   * Get unread chat message counts grouped by sender
-   */
-  async getUnreadChatCounts(userId: string): Promise<MessageOperationResult> {
-    try {
-      const counts = await prisma.message.groupBy({
-        by: ["senderId"],
-        where: {
-          recipientId: userId,
-          isRead: false,
-          subject: "",
-        },
-        _count: { id: true },
-      });
-
-      const countMap: Record<string, number> = {};
-      for (const c of counts) {
-        countMap[c.senderId] = c._count.id;
-      }
-
-      return {
-        success: true,
-        message: "Unread counts retrieved",
-        data: { counts: countMap },
-      };
-    } catch (error: any) {
-      this.logger.error({ err: error }, "Get unread chat counts error");
-      return {
-        success: false,
-        message: "Failed to get unread counts",
-        error: error.message,
-      };
-    }
-  }
-
-  /**
-   * Request decryption of a message (wrapper around decryptMessageById)
+   * Request decryption of a message (delegates to MessageEncryptionService)
    */
   async requestDecryption(
     messageId: string,
     userId: string,
   ): Promise<MessageOperationResult> {
-    // This delegates to decryptMessageById which checks sender/recipient authorization
-    return this.decryptMessageById(messageId, userId);
+    if (!this.encryptionService) {
+      return {
+        success: false,
+        message: "Encryption service not available",
+        error: "SERVICE_UNAVAILABLE",
+      };
+    }
+    return this.encryptionService.decryptMessageById(messageId, userId);
   }
 
   // ==================== TOKEN-GATED AI PERSONA MESSAGING ====================

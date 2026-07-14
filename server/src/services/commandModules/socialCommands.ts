@@ -1716,8 +1716,8 @@ export class SocialCommandsModule implements CommandModule {
       }
 
       try {
-        const messageService = context.services.messageService;
-        const historyResult = await messageService.getChatHistory(
+        const chatService = context.services.chatService!;
+        const historyResult = await chatService.getChatHistory(
           userId,
           contactId,
         );
@@ -1731,7 +1731,7 @@ export class SocialCommandsModule implements CommandModule {
         }
 
         // Mark conversation as read
-        await messageService.markConversationRead(userId, contactId);
+        await chatService.markConversationRead(userId, contactId);
 
         return {
           success: true,
@@ -1754,8 +1754,8 @@ export class SocialCommandsModule implements CommandModule {
 
     if (!subCommand) {
       try {
-        const messageService = context.services.messageService;
-        const contactsResult = await messageService.getChatContacts(userId);
+        const chatService = context.services.chatService!;
+        const contactsResult = await chatService.getChatContacts(userId);
 
         if (!contactsResult.success) {
           return {

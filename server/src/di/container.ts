@@ -24,6 +24,8 @@ import ServerService from "../services/serverService";
 import HackService from "../services/hackService";
 import FileService from "../services/fileService";
 import MessageService from "../services/messageService";
+import { MessageEncryptionService } from "../services/messageEncryptionService";
+import { ChatService } from "../services/chatService";
 import ForumService from "../services/forumService";
 import PlayerPresenceService from "../services/playerPresenceService";
 import MemoryService from "../services/memoryService";
@@ -33,6 +35,8 @@ import { FactionService } from "../services/factionService";
 import { ReputationEngine } from "../services/reputationEngine";
 import { AIService } from "../services/aiService";
 import { PersonaService } from "../services/personaService";
+import { PersonaMissionGenService } from "../services/personaMissionGenService";
+import { PersonaActionService } from "../services/personaActionService";
 import AISchedulerService from "../services/aiSchedulerService";
 import MissionIntegrationService from "../services/missionIntegration";
 import MissionGeneratorService from "../services/missionGenerator";
@@ -99,6 +103,8 @@ export function setupContainer(
   container.registerSingleton(TOKENS.SERVER_SERVICE, ServerService);
   container.registerSingleton(TOKENS.HACK_SERVICE, HackService);
   container.registerSingleton(TOKENS.FILE_SERVICE, FileService);
+  container.registerSingleton(TOKENS.MESSAGE_ENCRYPTION_SERVICE, MessageEncryptionService);
+  container.registerSingleton(TOKENS.CHAT_SERVICE, ChatService);
   container.registerSingleton(TOKENS.MESSAGE_SERVICE, MessageService);
   container.registerSingleton(TOKENS.FORUM_SERVICE, ForumService);
   container.registerSingleton(
@@ -114,6 +120,8 @@ export function setupContainer(
   container.registerSingleton(TOKENS.FACTION_SERVICE, FactionService);
   container.registerSingleton(TOKENS.REPUTATION_ENGINE, ReputationEngine);
   container.registerSingleton(TOKENS.AI_SERVICE, AIService);
+  container.registerSingleton(TOKENS.PERSONA_MISSION_GEN_SERVICE, PersonaMissionGenService);
+  container.registerSingleton(TOKENS.PERSONA_ACTION_SERVICE, PersonaActionService);
   container.registerSingleton(TOKENS.PERSONA_SERVICE, PersonaService);
   container.registerSingleton(TOKENS.AI_SCHEDULER_SERVICE, AISchedulerService);
 

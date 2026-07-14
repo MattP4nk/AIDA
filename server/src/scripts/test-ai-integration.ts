@@ -63,15 +63,19 @@ async function testAIIntegration() {
   const factionService = new FactionService(prisma, logger);
   const EventService = (await import("../services/eventService")).default;
   const eventService = new EventService(logger, io);
+  const { PersonaMissionGenService } = await import("../services/personaMissionGenService");
+  const missionGenService = new PersonaMissionGenService(prisma, logger, missionService, aiService);
+  const { PersonaActionService } = await import("../services/personaActionService");
+  const actionService = new PersonaActionService(prisma, logger, missionService, aiService, messageService, forumService, eventService, missionGenService);
   const personaService = new PersonaService(
     prisma,
     logger,
-    missionService,
     aiService,
     messageService,
     forumService,
     factionService,
-    eventService,
+    missionGenService,
+    actionService,
   );
 
   try {

@@ -13,6 +13,8 @@ import type ProcessStateService from "../processStateService";
 import type PlayerPresenceService from "../playerPresenceService";
 import type HackService from "../hackService";
 import type MessageService from "../messageService";
+import type { ChatService } from "../chatService";
+import type { MessageEncryptionService } from "../messageEncryptionService";
 import type ForumService from "../forumService";
 import type { FactionService } from "../factionService";
 import type { InventoryService } from "../inventoryService";
@@ -62,6 +64,8 @@ export interface CommandContext {
     darknetDungeonService?: DarkNetDungeonService;
     darknetDiscoveryService?: DarkNetDiscoveryService;
     connectionChallengeService?: ConnectionChallengeService;
+    chatService?: ChatService;
+    messageEncryptionService?: MessageEncryptionService;
     [key: string]: any;
   };
 }

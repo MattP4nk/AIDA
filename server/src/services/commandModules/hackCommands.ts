@@ -754,7 +754,7 @@ export class HackCommandsModule implements CommandModule {
       const proc = memoryService.spawnGameProcess(
         userId, session.socketId, "decrypt", progress?.cryptography ?? 1, messageId, undefined,
         async () => {
-          const result = await context.services.messageService.crackEncryption(messageId, userId);
+          const result = await context.services.messageEncryptionService!.crackEncryption(messageId, userId);
           if (context.io) {
             context.io.to(`player:${userId}`).emit("command:result", {
               success: result.success,
@@ -772,7 +772,7 @@ export class HackCommandsModule implements CommandModule {
     }
 
     // Fallback: no process system
-    const result = await context.services.messageService.crackEncryption(messageId, context.userId);
+    const result = await context.services.messageEncryptionService!.crackEncryption(messageId, context.userId);
     return { success: result.success, output: result.success ? "Encryption cracked successfully" : "Failed to crack encryption", timestamp: new Date() };
   }
 

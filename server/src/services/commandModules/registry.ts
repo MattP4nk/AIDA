@@ -12,7 +12,10 @@ import { NetworkCommandsModule } from "./networkCommands";
 import { HackCommandsModule } from "./hackCommands";
 import { FileCommandsModule } from "./fileCommands";
 import { SocialCommandsModule } from "./socialCommands";
-import { GameCommandsModule } from "./gameCommands";
+import { ShopCommandsModule } from "./shopCommands";
+import { MissionCommandsModule } from "./missionCommands";
+import { FragmentCommandsModule } from "./fragmentCommands";
+import { PlayerInfoCommandsModule } from "./playerInfoCommands";
 import { HelpCommandsModule } from "./helpCommands";
 import { ProcessCommandsModule } from "./processCommands";
 import { MathCommandsModule } from "./mathCommands";
@@ -28,7 +31,10 @@ const MODULE_CONSTRUCTORS: Array<new () => CommandModule> = [
   HackCommandsModule,
   FileCommandsModule,
   SocialCommandsModule,
-  GameCommandsModule,
+  ShopCommandsModule,
+  MissionCommandsModule,
+  FragmentCommandsModule,
+  PlayerInfoCommandsModule,
   HelpCommandsModule,
   ProcessCommandsModule,
   MathCommandsModule,

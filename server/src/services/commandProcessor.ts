@@ -38,6 +38,8 @@ import type MemoryService from "./memoryService";
 import type ProcessStateService from "./processStateService";
 import type HackService from "./hackService";
 import type MessageService from "./messageService";
+import type { ChatService } from "./chatService";
+import type { MessageEncryptionService } from "./messageEncryptionService";
 import type ForumService from "./forumService";
 import type { FactionService } from "./factionService";
 import type InventoryService from "./inventoryService";
@@ -193,6 +195,12 @@ class CommandProcessor extends EventEmitter {
     const connectionChallengeService = this.resolveService<
       import("./connectionChallengeService").ConnectionChallengeService
     >(TOKENS.CONNECTION_CHALLENGE_SERVICE);
+    const chatService = this.resolveService<ChatService>(
+      TOKENS.CHAT_SERVICE,
+    );
+    const messageEncryptionService = this.resolveService<MessageEncryptionService>(
+      TOKENS.MESSAGE_ENCRYPTION_SERVICE,
+    );
 
     // Fetch user role for command-level role gating
     const user = await db.client.user.findUnique({
@@ -234,6 +242,8 @@ class CommandProcessor extends EventEmitter {
         ...(darknetDungeonService ? { darknetDungeonService } : {}),
         ...(darknetDiscoveryService ? { darknetDiscoveryService } : {}),
         ...(connectionChallengeService ? { connectionChallengeService } : {}),
+        ...(chatService ? { chatService } : {}),
+        ...(messageEncryptionService ? { messageEncryptionService } : {}),
       },
     };
   }

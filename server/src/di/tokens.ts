@@ -21,6 +21,8 @@ export const SERVER_SERVICE = "ServerService";
 export const HACK_SERVICE = "HackService";
 export const FILE_SERVICE = "FileService";
 export const MESSAGE_SERVICE = "MessageService";
+export const MESSAGE_ENCRYPTION_SERVICE = "MessageEncryptionService";
+export const CHAT_SERVICE = "ChatService";
 export const FORUM_SERVICE = "ForumService";
 export const PLAYER_PRESENCE_SERVICE = "PlayerPresenceService";
 export const MEMORY_SERVICE = "MemoryService";
@@ -47,6 +49,8 @@ export const CONTEST_SERVICE = "ContestService";
 export const FACTION_SERVICE = "FactionService";
 export const AI_SERVICE = "AIService";
 export const PERSONA_SERVICE = "PersonaService";
+export const PERSONA_MISSION_GEN_SERVICE = "PersonaMissionGenService";
+export const PERSONA_ACTION_SERVICE = "PersonaActionService";
 export const AI_SCHEDULER_SERVICE = "AISchedulerService";
 
 // Phase 5: Warfare, Alias, DarkNet, Censorship
