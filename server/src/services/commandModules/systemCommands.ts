@@ -227,25 +227,43 @@ export class SystemCommandsModule implements CommandModule {
           { header: "PERMS", width: 9 },
           { header: "SIZE", width: 10, align: "right" },
           { header: "DATE", width: 20 },
-          { header: "NAME", width: 24 },
+          { header: "NAME", width: 30 },
         ];
-        const rows = entries.map((entry: any) => [
-          entry.type === "directory" ? "d" : "-",
-          entry.permissions || "rwxr-xr-x",
-          entry.size.toString(),
-          new Date(entry.modified).toLocaleString(),
-          entry.name,
-        ]);
+        const rows = entries.map((entry: any) => {
+          let name = entry.name;
+          if (entry.type === "directory") {
+            const count = entry.childCount ?? 0;
+            name = `${entry.name}/ (${count})`;
+          }
+          if (entry.isEncrypted) name += " [ENC]";
+          if (entry.isProtected) name += " [PROT]";
+          return [
+            entry.type === "directory" ? "d" : "-",
+            entry.permissions || "rwxr-xr-x",
+            entry.type === "directory" ? `${entry.childCount ?? 0} items` : entry.size.toString(),
+            new Date(entry.modified).toLocaleString(),
+            name,
+          ];
+        });
         output = render(table(columns, rows));
       } else {
-        // Short format — bordered list with bullet points
+        // Short format — bordered list with item counts for directories
         const items = entries.map((entry: any) => {
-          const name =
-            entry.type === "directory" ? `${entry.name}/` : entry.name;
+          if (entry.type === "directory") {
+            const count = entry.childCount ?? 0;
+            return count > 0 ? `${entry.name}/ (${count})` : `${entry.name}/`;
+          }
           const encrypted = entry.isEncrypted ? " [ENC]" : "";
-          return `${name}${encrypted}`;
+          return `${entry.name}${encrypted}`;
         });
         output = render(list(path, items));
+      }
+
+      // Summary line
+      const dirCount = entries.filter((e: any) => e.type === "directory").length;
+      const fileCount = entries.filter((e: any) => e.type === "file").length;
+      if (entries.length > 0) {
+        output += `\n  ${dirCount} director${dirCount !== 1 ? "ies" : "y"}, ${fileCount} file${fileCount !== 1 ? "s" : ""}`;
       }
 
       return {

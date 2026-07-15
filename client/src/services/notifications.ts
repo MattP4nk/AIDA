@@ -1,5 +1,6 @@
 import { writable, derived, get } from "svelte/store";
 import { socketService, liveMessages } from "./socket";
+import { sound } from "./sound";
 
 // ==================== TYPES ====================
 
@@ -14,7 +15,8 @@ export interface Notification {
   data?: any;
   action?: {
     label: string;
-    handler: () => void;
+    handler?: () => void; // client-side action
+    command?: string; // command to fill in terminal input (server-sent)
   };
 }
 
@@ -120,14 +122,11 @@ class NotificationService {
       return updated.slice(0, this.maxNotifications);
     });
 
-    // Play sound for high priority
-    if (notification.priority === "high" || notification.priority === "urgent") {
-      this.playSound();
-    }
-
-    // Show desktop notification
-    if (this.desktopEnabled) {
-      this.showDesktopNotification(newNotification);
+    // Play sound via sound service based on priority
+    if (notification.priority === "urgent") {
+      sound.alert();
+    } else if (notification.priority === "high") {
+      sound.notification();
     }
 
     // Update counts

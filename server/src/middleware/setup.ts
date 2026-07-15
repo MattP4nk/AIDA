@@ -112,6 +112,34 @@ export async function setupRoutes(app: Application): Promise<void> {
   // Command execution route — THE MAIN INTERFACE
   app.use("/api/command", (await import("../routes/command")).default);
 
+  // Command list endpoint — for client command palette
+  app.get("/api/commands", (_req, res) => {
+    try {
+      const { createAllModules } = require("../services/commandModules/registry");
+      const modules = createAllModules();
+      const commands: Array<{ name: string; category: string; description: string }> = [];
+      for (const mod of modules) {
+        const infos = mod.getCommandInfo?.() || [];
+        for (const info of infos) {
+          commands.push({
+            name: info.command,
+            category: info.category || mod.category,
+            description: info.description,
+          });
+        }
+        // Add commands that don't have getCommandInfo entries
+        for (const cmd of mod.commands) {
+          if (!commands.some((c) => c.name === cmd)) {
+            commands.push({ name: cmd, category: mod.category, description: "" });
+          }
+        }
+      }
+      res.json({ success: true, commands });
+    } catch {
+      res.json({ success: true, commands: [] });
+    }
+  });
+
   // Authentication — minimal REST for login/register only
   app.use("/api/auth", (await import("../routes/auth")).default);
 

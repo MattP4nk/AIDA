@@ -29,6 +29,18 @@ interface OllamaChatResponse {
   eval_duration?: number;
 }
 
+/** A failed AI request queued for retry. */
+interface QueuedRequest {
+  id: string;
+  prompt: string;
+  systemPrompt?: string | undefined;
+  context?: number[] | undefined;
+  expectedFormat?: string | undefined;
+  onSuccess: (response: string) => void;
+  attempts: number;
+  createdAt: number;
+}
+
 @injectable()
 export class AIService {
   private apiUrl: string;
@@ -43,7 +55,17 @@ export class AIService {
     successfulRequests: 0,
     failedRequests: 0,
     cacheHits: 0,
+    retryQueueSize: 0,
+    retrySuccesses: 0,
   };
+
+  /** Queue of failed requests to retry later. */
+  private retryQueue: QueuedRequest[] = [];
+  private readonly RETRY_QUEUE_MAX = 20;
+  private readonly RETRY_QUEUE_INTERVAL_MS = 30_000; // Process queue every 30s
+  private readonly RETRY_MAX_ATTEMPTS = 3;
+  private readonly RETRY_MAX_AGE_MS = 10 * 60 * 1000; // Drop requests older than 10 min
+  private retryTimer: NodeJS.Timeout | null = null;
 
   constructor(
     @inject(LOGGER) logger: Logger,
@@ -76,6 +98,10 @@ export class AIService {
       },
       `AIService initialized (${this.isCloudMode ? "cloud" : "local"} mode)`,
     );
+
+    // Start retry queue processor
+    this.retryTimer = setInterval(() => this.processRetryQueue(), this.RETRY_QUEUE_INTERVAL_MS);
+    (this.retryTimer as NodeJS.Timeout & { unref?: () => void }).unref?.();
   }
 
   private getHeaders(): Record<string, string> {
@@ -113,15 +139,29 @@ export class AIService {
     throw new Error("Max retries exceeded");
   }
 
+  /**
+   * Generate an AI response.
+   * @param prompt - The user prompt
+   * @param systemPrompt - Optional system prompt
+   * @param context - Optional conversation context
+   * @param expectedFormat - Optional JSON format hint appended to prompt (improves structured output accuracy)
+   */
   public async generateResponse(
     prompt: string,
     systemPrompt?: string,
     context?: number[],
-  ): Promise<{ response: string; context?: number[] }> {
+    expectedFormat?: string,
+  ): Promise<{ success: boolean; response: string; context?: number[]; error?: string }> {
     this.metrics.totalRequests++;
 
-    const cacheKey = this.getCacheKey(prompt, systemPrompt, context);
+    // Append format instruction to prompt if provided
+    const fullPrompt = expectedFormat
+      ? `${prompt}\n\nRespond ONLY with valid JSON in this exact format:\n${expectedFormat}`
+      : prompt;
+
+    const cacheKey = this.getCacheKey(fullPrompt, systemPrompt, context);
     const cached = this.cacheService.get<{
+      success: boolean;
       response: string;
       context?: number[];
     }>(cacheKey);
@@ -139,7 +179,7 @@ export class AIService {
           messages.push({ role: "system", content: systemPrompt });
         }
 
-        messages.push({ role: "user", content: prompt });
+        messages.push({ role: "user", content: fullPrompt });
 
         const request: OllamaChatRequest = {
           model: this.defaultModel,
@@ -191,16 +231,136 @@ export class AIService {
 
       this.metrics.successfulRequests++;
 
-      // Cache all responses (including those with context)
-      this.cacheService.set(cacheKey, result, 300);
+      const successResult = { success: true as const, ...result };
 
-      return result;
+      // Cache all responses (including those with context)
+      this.cacheService.set(cacheKey, successResult, 300);
+
+      return successResult;
     } catch (error) {
       this.metrics.failedRequests++;
-      this.logger.error(error, "Error generating AI response");
+      const errMsg = error instanceof Error ? error.message : "Unknown AI error";
+      this.logger.error({ err: error }, "Error generating AI response");
       return {
-        response: "... [Connection Lost] ...",
+        success: false,
+        response: "",
+        error: errMsg,
       };
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // Retry Queue — failed requests are retried later
+  // ═══════════════════════════════════════════════════════════════════
+
+  /**
+   * Queue a failed AI request for background retry.
+   * When the retry succeeds, `onSuccess` is called with the response text.
+   * Callers should use their smart fallback immediately and let the queue
+   * handle eventual consistency (e.g., updating a message, adding a file).
+   *
+   * @param expectedFormat - JSON format hint appended to the prompt on retry
+   *   e.g. '{ "title": "string", "description": "string" }'
+   *   This helps the AI produce valid output on the second attempt.
+   */
+  public queueForRetry(
+    prompt: string,
+    systemPrompt: string | undefined,
+    onSuccess: (response: string) => void,
+    context?: number[],
+    expectedFormat?: string,
+  ): void {
+    // Don't exceed max queue size
+    if (this.retryQueue.length >= this.RETRY_QUEUE_MAX) {
+      // Drop oldest entry
+      this.retryQueue.shift();
+    }
+
+    const id = `retry_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    this.retryQueue.push({
+      id,
+      prompt,
+      systemPrompt,
+      context,
+      expectedFormat,
+      onSuccess,
+      attempts: 0,
+      createdAt: Date.now(),
+    });
+
+    this.metrics.retryQueueSize = this.retryQueue.length;
+    this.logger.debug({ queueSize: this.retryQueue.length, id }, "AI request queued for retry");
+  }
+
+  /**
+   * Process the retry queue — attempts one request per cycle.
+   * Runs every RETRY_QUEUE_INTERVAL_MS (30s).
+   */
+  private async processRetryQueue(): Promise<void> {
+    if (this.retryQueue.length === 0) return;
+
+    // Purge expired entries
+    const now = Date.now();
+    this.retryQueue = this.retryQueue.filter(
+      (req) => now - req.createdAt < this.RETRY_MAX_AGE_MS,
+    );
+
+    if (this.retryQueue.length === 0) return;
+
+    // Try the oldest request — pass format hint through generateResponse
+    const req = this.retryQueue[0]!;
+    req.attempts++;
+
+    // On retry, strengthen the format instruction
+    const retryFormat = req.expectedFormat
+      ? `IMPORTANT: Your previous response was invalid. ${req.expectedFormat}`
+      : (req.attempts > 1 ? "Respond ONLY with valid JSON. No markdown, no explanation." : undefined);
+
+    try {
+      const result = await this.generateResponse(req.prompt, req.systemPrompt, req.context, retryFormat);
+
+      if (result.success) {
+        // Success — remove from queue and call the callback
+        this.retryQueue.shift();
+        this.metrics.retrySuccesses++;
+        this.metrics.retryQueueSize = this.retryQueue.length;
+
+        this.logger.info({ id: req.id, attempts: req.attempts }, "Retry queue: AI request succeeded");
+
+        try {
+          req.onSuccess(result.response);
+        } catch (cbErr) {
+          this.logger.warn({ err: cbErr, id: req.id }, "Retry queue: onSuccess callback failed");
+        }
+      } else if (req.attempts >= this.RETRY_MAX_ATTEMPTS) {
+        // Max attempts reached — drop it
+        this.retryQueue.shift();
+        this.metrics.retryQueueSize = this.retryQueue.length;
+        this.logger.warn({ id: req.id, attempts: req.attempts }, "Retry queue: request dropped after max attempts");
+      }
+      // Otherwise leave it in queue for next cycle
+    } catch (err) {
+      if (req.attempts >= this.RETRY_MAX_ATTEMPTS) {
+        this.retryQueue.shift();
+        this.metrics.retryQueueSize = this.retryQueue.length;
+      }
+      this.logger.debug({ err, id: req.id }, "Retry queue: attempt failed");
+    }
+  }
+
+  /** Get retry queue stats. */
+  public getRetryQueueStats(): { size: number; successes: number } {
+    return {
+      size: this.retryQueue.length,
+      successes: this.metrics.retrySuccesses,
+    };
+  }
+
+  /** Stop the retry queue processor. */
+  public stopRetryQueue(): void {
+    if (this.retryTimer) {
+      clearInterval(this.retryTimer);
+      this.retryTimer = null;
     }
   }
 
@@ -212,9 +372,12 @@ export class AIService {
     Respond ONLY with a JSON object: { "safe": boolean, "reason": string | null }`;
 
     try {
-      const { response } = await this.generateResponse(content, systemPrompt);
+      const result = await this.generateResponse(content, systemPrompt, undefined, '{ "safe": true|false, "reason": "string|null" }');
+      if (!result.success) {
+        return { safe: true, reason: "Moderation service unavailable" };
+      }
 
-      const jsonMatch = response.match(/\{.*\}/s);
+      const jsonMatch = result.response.match(/\{.*\}/s);
       if (jsonMatch) {
         const parsed = JSON.parse(jsonMatch[0]);
         return {
@@ -233,8 +396,9 @@ export class AIService {
   public async summarize(content: string): Promise<string> {
     const systemPrompt =
       "Summarize the following text concisely, retaining key facts and entities.";
-    const { response } = await this.generateResponse(content, systemPrompt);
-    return response;
+    const result = await this.generateResponse(content, systemPrompt);
+    if (!result.success) return content; // fallback to original content
+    return result.response;
   }
 
   public async checkHealth(): Promise<boolean> {

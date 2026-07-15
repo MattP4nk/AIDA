@@ -222,6 +222,43 @@ async function initialize(): Promise<void> {
     }), "Story ledger error on mission:failed");
   });
 
+  // Mission feedback → AI learns from outcomes
+  missionService.on("mission:feedback", (data: any) => {
+    defer(async () => {
+      // Record as faction leader knowledge (if faction mission)
+      if (data.factionId) {
+        const factionLeader = await db.client.aIPersona.findFirst({
+          where: { type: "faction_leader", faction: { id: data.factionId } },
+          select: { id: true },
+        });
+        if (factionLeader) {
+          const gradeEmoji = data.difficultyGrade === "too_easy" ? "trivial" : data.difficultyGrade === "too_hard" ? "overwhelming" : "well-calibrated";
+          const abandonNote = data.abandoned ? " (ABANDONED)" : "";
+          await personaService.addKnowledge(factionLeader.id, {
+            source: "mission_feedback",
+            type: "mission_feedback",
+            content: `Mission feedback${abandonNote}: Level ${data.playerLevel} operative graded difficulty-${data.missionDifficulty} ${data.missionType} mission as "${gradeEmoji}". Time: ${data.timeToCompleteMin}min. Efficiency: ${data.efficiencyScore}%. Objectives: ${data.objectiveTypes.join(", ")}.`,
+            confidence: 1.0,
+          });
+        }
+      }
+
+      // Also inform the Game Master
+      const gm = await db.client.aIPersona.findFirst({
+        where: { type: "game_master" },
+        select: { id: true },
+      });
+      if (gm) {
+        await personaService.addKnowledge(gm.id, {
+          source: "mission_feedback",
+          type: "mission_feedback",
+          content: `Mission outcome: Level ${data.playerLevel} player ${data.abandoned ? "abandoned" : "completed"} difficulty-${data.missionDifficulty} ${data.missionType} mission. Grade: ${data.difficultyGrade}. Time: ${data.timeToCompleteMin}min.`,
+          confidence: 1.0,
+        });
+      }
+    }, "Mission feedback knowledge error");
+  });
+
   // Faction events → story ledger
   factionService.on("faction:member_joined", (data: any) => {
     defer(() => storyProgression.recordEvent({
@@ -230,6 +267,7 @@ async function initialize(): Promise<void> {
       data: { factionId: data.factionId },
       impact: { factions: { [data.factionId]: 5 } }, weight: 5,
     }), "Story ledger error on faction:member_joined");
+    defer(() => dynamicContent.processEvent("faction:member_joined", data), "Dynamic content error on faction:member_joined");
   });
 
   factionService.on("faction:member_left", (data: any) => {
@@ -239,6 +277,7 @@ async function initialize(): Promise<void> {
       data: { factionId: data.factionId },
       impact: { factions: { [data.factionId]: -5 } }, weight: 4,
     }), "Story ledger error on faction:member_left");
+    defer(() => dynamicContent.processEvent("faction:member_left", data), "Dynamic content error on faction:member_left");
   });
 
   factionService.on("faction:reputation_changed", (data: any) => {
@@ -272,6 +311,7 @@ async function initialize(): Promise<void> {
       data: { fragmentId: data.fragmentId, keyType: data.keyType, fragmentNum: data.fragmentNum },
       impact: { discoveryWeight: 5, tension: 2 }, weight: 7,
     }), "Story ledger error on fragment:claimed");
+    defer(() => dynamicContent.processEvent("fragment:claimed", data), "Dynamic content error on fragment:claimed");
   });
 
   keyFragmentService.on("fragment:stolen", (data: any) => {
@@ -282,6 +322,7 @@ async function initialize(): Promise<void> {
       data: { fragmentId: data.fragmentId, keyType: data.keyType, fragmentNum: data.fragmentNum, attackerUserId: data.attackerUserId, victimUserId: data.victimUserId },
       impact: { discoveryWeight: 7, tension: 4 }, weight: 8,
     }), "Story ledger error on fragment:stolen");
+    defer(() => dynamicContent.processEvent("fragment:stolen", data), "Dynamic content error on fragment:stolen");
   });
 
   keyFragmentService.on("fragment:transferred", (data: any) => {
@@ -310,6 +351,12 @@ async function initialize(): Promise<void> {
       data: { userId: data.userId, choice: data.choice },
       impact: { discoveryWeight: 10, tension: 10 }, weight: 10,
     }), "Story ledger error on endgame:completed");
+    defer(() => dynamicContent.processEvent("endgame:completed", data), "Dynamic content error on endgame:completed");
+  });
+
+  // Level up → dynamic content (home server log)
+  missionService.on("player:levelup", (data: any) => {
+    defer(() => dynamicContent.processEvent("player:levelup", data), "Dynamic content error on player:levelup");
   });
 
   // Tutorial system: advance tutorial when tutorial missions complete
@@ -400,6 +447,20 @@ async function initialize(): Promise<void> {
     DUNGEON_EXPIRATION_INTERVAL_MS,
   );
   logger.info("✅ DarkNet Dungeon expiration checker scheduled (every 1h)");
+
+  // Tier 3: Batch-provision all seeded servers that lack content
+  try {
+    const { SERVER_CONTENT_SERVICE } = await import("./di/tokens");
+    const contentService = getService<any>(SERVER_CONTENT_SERVICE);
+    if (contentService?.provisionAllUnpopulatedServers) {
+      contentService.provisionAllUnpopulatedServers().catch((err: unknown) => {
+        logger.warn({ err }, "Batch server content provisioning failed (non-critical)");
+      });
+      logger.info("✅ Server content batch provisioning started");
+    }
+  } catch {
+    logger.debug("ServerContentService not available for batch provisioning");
+  }
 
   const resourceService =
     getService<import("./services/resourceService").default>(RESOURCE_SERVICE);

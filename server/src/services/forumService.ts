@@ -19,6 +19,7 @@ import {
 } from "../di/tokens";
 import type MissionIntegrationService from "./missionIntegration";
 import type { FactionKnowledgeService } from "./factionKnowledgeService";
+import { validateOrRetry, validateForumPosts, validateForumReply } from "../utils/aiOutputValidator";
 
 /**
  * ForumService - Underground forum networks and darkweb system
@@ -951,35 +952,40 @@ ${forum.description ? `Description: ${forum.description}` : ""}`;
       userPrompt += `\n\nSPECIAL: This forum is a HONEYPOT trap. Posts should be enticing — free tools, leaked credentials, too-good-to-be-true offers. Authors should seem enthusiastic and helpful (suspiciously so).`;
     }
 
-    const { response } = await aiService.generateResponse(
+    const result = await aiService.generateResponse(
       userPrompt,
       systemPrompt,
+      undefined,
+      '[{"authorHandle": "string", "authorPersonality": "string", "title": "string", "content": "string"}]',
     );
 
-    // Parse JSON array from response
-    const jsonMatch = response.match(/\[[\s\S]*\]/);
-    if (!jsonMatch) {
-      throw new Error("No JSON array found in AI response");
+    if (!result.success) {
+      // Queue for retry — when AI comes back, create the forum posts
+      const forumId = forum.id;
+      aiService.queueForRetry(userPrompt, systemPrompt, async (response: string) => {
+        try {
+          const posts = validateOrRetry(response, validateForumPosts, undefined, undefined, "array");
+          if (!posts) return;
+
+          for (const post of posts.slice(0, 8)) {
+            try {
+              await this.createNPCPost(forumId, post);
+            } catch { /* skip individual post errors */ }
+          }
+        } catch { /* ignore retry errors */ }
+      });
+
+      throw new Error(`AI generation failed: ${result.error || "unknown error"}`);
     }
 
-    const posts: Array<{
-      authorHandle: string;
-      authorPersonality: string;
-      title: string;
-      content: string;
-      isSticky?: boolean;
-      storyRelevant?: boolean;
-    }> = JSON.parse(jsonMatch[0]);
-
-    if (!Array.isArray(posts) || posts.length === 0) {
-      throw new Error("AI returned empty or invalid posts array");
+    // Parse and validate forum posts from AI response
+    const posts = validateOrRetry(result.response, validateForumPosts, undefined, undefined, "array");
+    if (!posts) {
+      throw new Error("AI returned invalid or empty posts array");
     }
 
     // Create each NPC post
     for (const postData of posts) {
-      if (!postData.authorHandle || !postData.title || !postData.content)
-        continue;
-
       await this.createNPCPost(forum.id, postData);
     }
 
@@ -1306,24 +1312,18 @@ YOUR POST TITLE: "${post.title}"`;
 
       userPrompt += `\n\nPLAYER "${replyUser.username}" REPLIED:\n"${replyContent}"`;
 
-      const { response } = await aiService.generateResponse(
+      const result = await aiService.generateResponse(
         userPrompt,
         systemPrompt,
+        undefined,
+        '{ "reply": "string (5+ chars)", "memoryEntry": {"summary": "string", "topic": "string"} | null }',
       );
 
-      // Parse response
-      const jsonMatch = response.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) return;
+      if (!result.success) return;
 
-      let parsed: {
-        reply: string;
-        memoryEntry?: { summary: string; topic: string } | null;
-      };
-      try {
-        parsed = JSON.parse(jsonMatch[0]);
-      } catch {
-        return;
-      }
+      // Parse and validate response
+      const parsed = validateOrRetry(result.response, validateForumReply);
+      if (!parsed) return;
 
       // Update memory regardless of reply
       if (parsed.memoryEntry && parsed.memoryEntry.summary) {

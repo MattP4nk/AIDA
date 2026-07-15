@@ -571,7 +571,31 @@ export class TutorialService {
           userPrompt,
           ARCHITECT_SYSTEM_PROMPT,
         );
-        replyContent = aiResult.response;
+        if (!aiResult.success) {
+          this.logger.warn(
+            { error: aiResult.error, userId: senderId },
+            "AI response failed, falling back to static hint",
+          );
+          replyContent =
+            `${step.hint}\n\n` +
+            "— The Architect\n\n" +
+            "[AI response unavailable — static hint provided]";
+
+          // Queue for retry — when AI comes back, send the real AI hint as a follow-up
+          const aiSvc = this.aiService;
+          const msgSvc = this.messageService;
+          const architectId = architectPersona.id;
+          const replySubject = `Re: ${step.architectMail.subject}`;
+          aiSvc.queueForRetry(userPrompt, ARCHITECT_SYSTEM_PROMPT, async (response) => {
+            try {
+              if (response && response.trim().length > 0) {
+                await msgSvc.sendAIMessage(architectId, senderId, replySubject, response);
+              }
+            } catch { /* ignore retry errors */ }
+          });
+        } else {
+          replyContent = aiResult.response;
+        }
       } catch (aiError) {
         // AI unavailable — fall back to the raw hint text
         this.logger.warn(

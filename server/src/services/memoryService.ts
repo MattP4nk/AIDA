@@ -460,10 +460,22 @@ class MemoryService extends EventEmitter {
 
     // Push Socket.IO event
     if (this.io) {
+      // Build contextual description for the ProcessBar
+      const descriptions: Record<string, string> = {
+        hack_prep: `Preparing hack on ${targetLabel || "target"}`,
+        scan: `Scanning ${targetLabel || "network"}`,
+        download: `Downloading ${targetLabel || "file"}`,
+        decrypt: `Decrypting ${targetLabel || "file"}`,
+        backdoor_install: `Installing backdoor on ${targetLabel || "server"}`,
+        traceroute: `Tracing route to ${targetLabel || "target"}`,
+        trace_evade: `Evading active trace`,
+      };
+
       this.io.to(`player:${userId}`).emit("process:started", {
         pid,
         type,
         targetLabel,
+        description: descriptions[type] || `Running ${type}`,
         eta: Math.ceil(adjusted.duration / 1000),
         cpuCost: adjusted.cpuCost,
         ramCost: cost.ramCost,

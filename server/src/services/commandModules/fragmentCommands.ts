@@ -681,7 +681,13 @@ export class FragmentCommandsModule implements CommandModule {
       lines.push(boxDivider(W));
       lines.push(boxRow(`  ${result.message}`, W));
       lines.push(boxBottom(W));
-      return { success: true, output: render(lines), timestamp: new Date() };
+      return {
+        success: true,
+        output: render(lines),
+        renderMode: "cinematic" as const,
+        soundEvent: "levelUp" as const,
+        timestamp: new Date(),
+      };
     } catch (error) {
       return {
         success: false,

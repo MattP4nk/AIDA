@@ -128,12 +128,13 @@ export class AISchedulerService {
       return; // ResourceService not available
     }
 
-    // Expire stale faction knowledge entries + decay confidence
+    // Knowledge lifecycle: expire, source-weighted decay, purge old, verify assets
     let fkService: FactionKnowledgeService | null = null;
     try {
       fkService = getService<FactionKnowledgeService>(FACTION_KNOWLEDGE_SERVICE);
       await fkService.expireEntries();
       await fkService.decayConfidence();
+      await fkService.purgeOldEntries(14, 0.3);
     } catch {
       // FactionKnowledgeService not available — not fatal
     }
@@ -371,6 +372,21 @@ export class AISchedulerService {
     });
 
     this.logger.info({ count: result.count }, "Daily counters reset");
+
+    // Daily knowledge verification — check assets still exist
+    try {
+      const fkService = getService<FactionKnowledgeService>(FACTION_KNOWLEDGE_SERVICE);
+      const factions = await this.prisma.faction.findMany({ select: { id: true } });
+      let totalRemoved = 0;
+      for (const faction of factions) {
+        totalRemoved += await fkService.verifyKnowledge(faction.id);
+      }
+      if (totalRemoved > 0) {
+        this.logger.info({ totalRemoved }, "Knowledge verification removed stale entries");
+      }
+    } catch {
+      // Non-critical
+    }
   }
 
   /**

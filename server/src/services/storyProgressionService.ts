@@ -20,6 +20,7 @@ import { db } from "../database/client";
 import type { AIService } from "./aiService";
 import type EventService from "./eventService";
 import { EventType, EventSeverity } from "../../../shared/types";
+import { validateOrRetry, validateArchitectEvaluation } from "../utils/aiOutputValidator";
 
 // ═══════════════════════════════════════════════════════════════════
 // Types
@@ -91,6 +92,10 @@ export interface ArchitectIntervention {
 
 @injectable()
 export class StoryProgressionService {
+  /** Cooldown for reactive Architect — max 1 immediate response per 10 minutes. */
+  private lastReactiveAt: number = 0;
+  private readonly REACTIVE_COOLDOWN_MS = 10 * 60 * 1000;
+
   constructor(
     @inject(LOGGER) private logger: Logger,
     @inject(AI_SERVICE) private aiService: AIService,
@@ -158,6 +163,93 @@ export class StoryProgressionService {
           "Failed to broadcast high-weight story event",
         );
       }
+    }
+
+    // ── Reactive Architect: immediate response to critical events ──
+    if (weight >= 8) {
+      this.onHighWeightEvent(input, weight).catch((err) => {
+        this.logger.debug({ err }, "Reactive Architect failed (non-critical)");
+      });
+    }
+  }
+
+  /**
+   * Reactive Architect — immediate mini-evaluation for critical events.
+   * Responds to weight >= 8 events (fragment stolen, endgame, war) within seconds
+   * instead of waiting for the 2-hour evaluation cycle.
+   * Cooldown: max 1 immediate response per 10 minutes.
+   */
+  private async onHighWeightEvent(event: StoryEventInput, weight: number): Promise<void> {
+    const now = Date.now();
+    if (now - this.lastReactiveAt < this.REACTIVE_COOLDOWN_MS) {
+      this.logger.debug({ weight, type: event.type }, "Reactive Architect on cooldown — skipping");
+      return;
+    }
+    this.lastReactiveAt = now;
+
+    this.logger.info(
+      { type: event.type, weight, summary: event.summary?.slice(0, 80) },
+      "Reactive Architect triggered by high-weight event",
+    );
+
+    const prompt = `URGENT EVENT just occurred in the AIDA simulation:
+
+Type: ${event.type}
+Category: ${event.category}
+Weight: ${weight}/10
+Summary: ${event.summary}
+Actor: ${event.actorId} (${event.actorType})
+${event.targetId ? `Target: ${event.targetId}` : ""}
+
+You are The Architect. This event JUST happened. Respond with ONE immediate action, or "none" if no response is needed.
+
+Choose from:
+- send_message: Send a cryptic in-character message to a player (targetId = userId, data.subject, data.content)
+- trigger_event: Create a world event notification (data.eventTitle, data.eventDescription)
+- none: No immediate action needed
+
+Consider: Is this event narratively significant enough for an immediate Architect response?
+Fragment discoveries, endgame events, and major faction shifts usually warrant a response.
+Routine hacks or mission completions usually don't.`;
+
+    const result = await this.aiService.generateResponse(
+      prompt,
+      "You are The Architect — the omniscient game master of AIDA. Respond with a single JSON action. Be cryptic and in-character.",
+      undefined,
+      '{ "action": "send_message|trigger_event|none", "targetId": "string", "data": { "subject": "string", "content": "string" }, "reasoning": "string" }',
+    );
+
+    if (!result.success) {
+      this.logger.debug("Reactive Architect: AI unavailable");
+      return;
+    }
+
+    try {
+      const { extractJSON } = await import("../utils/aiOutputValidator");
+      const parsed = extractJSON(result.response);
+      if (!parsed || parsed.action === "none") return;
+
+      // Validate the action type
+      if (parsed.action !== "send_message" && parsed.action !== "trigger_event") return;
+
+      // Execute via the intervention executor
+      const { getService } = await import("../di/container");
+      const { ARCHITECT_INTERVENTION_EXECUTOR } = await import("../di/tokens");
+      const executor = getService<any>(ARCHITECT_INTERVENTION_EXECUTOR);
+
+      await executor.execute({
+        type: parsed.action,
+        targetId: parsed.targetId || event.actorId,
+        data: parsed.data || {},
+        reasoning: parsed.reasoning || `Reactive response to ${event.type}`,
+      });
+
+      this.logger.info(
+        { action: parsed.action, targetId: parsed.targetId, eventType: event.type },
+        "Reactive Architect executed immediate intervention",
+      );
+    } catch (err) {
+      this.logger.debug({ err }, "Reactive Architect: failed to parse/execute response");
     }
   }
 
@@ -264,6 +356,39 @@ export class StoryProgressionService {
     // Derive narrative themes from recent high-weight events
     const narrativeThemes = this.deriveNarrativeThemes(recentEvents);
 
+    // Store current themes for staleness tracking
+    if (currentEpoch) {
+      try {
+        const ws = (currentEpoch.worldState as any) || {};
+        const previousThemes: string[] = ws.lastThemes || [];
+        const previousThemeDate: string | null = ws.lastThemeDate || null;
+
+        // Check for staleness — if themes haven't changed in 7 days
+        const themesChanged = narrativeThemes.length !== previousThemes.length ||
+          narrativeThemes.some((t, i) => t !== previousThemes[i]);
+        const daysSinceChange = previousThemeDate
+          ? Math.floor((Date.now() - new Date(previousThemeDate).getTime()) / (1000 * 60 * 60 * 24))
+          : 0;
+
+        if (themesChanged) {
+          // Themes changed — update
+          await (db.client as any).narrativeEpoch.update({
+            where: { id: currentEpoch.id },
+            data: {
+              worldState: {
+                ...ws,
+                lastThemes: narrativeThemes,
+                lastThemeDate: new Date().toISOString(),
+              },
+            },
+          });
+        } else if (daysSinceChange >= 7) {
+          // Themes stale — add warning to themes list
+          narrativeThemes.push("⚠ NARRATIVE STAGNATION — themes unchanged for 7+ days. Consider a disruptive event.");
+        }
+      } catch { /* non-critical */ }
+    }
+
     return {
       currentEpoch: currentEpoch
         ? {
@@ -311,8 +436,20 @@ export class StoryProgressionService {
       "Architect beginning evaluation",
     );
 
-    // Build the Architect's evaluation prompt
-    const prompt = this.buildArchitectPrompt(worldState);
+    // Fetch intervention outcomes for Architect self-evaluation
+    let interventionOutcomes = "";
+    try {
+      const { getService } = await import("../di/container");
+      const { ARCHITECT_INTERVENTION_EXECUTOR } = await import("../di/tokens");
+      const executor = getService<any>(ARCHITECT_INTERVENTION_EXECUTOR);
+      if (executor?.checkInterventionOutcomes) {
+        interventionOutcomes = await executor.checkInterventionOutcomes();
+      }
+    } catch { /* non-critical */ }
+
+    // Build the Architect's evaluation prompt (includes intervention outcomes)
+    const prompt = this.buildArchitectPrompt(worldState) +
+      (interventionOutcomes ? `\n\n${interventionOutcomes}` : "");
     const systemPrompt =
       "You are The Architect — the omniscient game master AI of AIDA. " +
       "You observe all events in the simulation and decide how the narrative should evolve. " +
@@ -321,12 +458,22 @@ export class StoryProgressionService {
     let evaluation: ArchitectEvaluation;
 
     try {
-      const { response } = await this.aiService.generateResponse(
+      const result = await this.aiService.generateResponse(
         prompt,
         systemPrompt,
+        undefined,
+        '{ "narrativeSummary": "string", "interventions": [{"type": "send_message|plant_clue|trigger_event|adjust_tension|create_mission|grant_token|reveal_faction", "target": "string", "data": {}, "reasoning": "string"}], "shouldTransitionEpoch": false }',
       );
 
-      evaluation = this.parseArchitectResponse(response);
+      if (!result.success) {
+        this.logger.error(
+          { error: result.error },
+          "Architect evaluation failed — AI returned error",
+        );
+        return null;
+      }
+
+      evaluation = this.parseArchitectResponse(result.response);
     } catch (err) {
       this.logger.error(
         { err },
@@ -670,21 +817,32 @@ Respond with ONLY valid JSON (no markdown, no commentary):
    * Handles malformed responses gracefully.
    */
   private parseArchitectResponse(raw: string): ArchitectEvaluation {
-    // Try to extract JSON from the response (AI may wrap it in backticks)
+    // Strip markdown code fences if present before extraction
     let jsonStr = raw.trim();
-
-    // Strip markdown code fences if present
     const fenceMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
     if (fenceMatch && fenceMatch[1]) {
       jsonStr = fenceMatch[1].trim();
     }
 
-    // Try to find a JSON object
-    const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
+    // Wrapper validator that maps flat epoch fields before validation
+    const architectValidator = (parsed: any) => {
+      if (!parsed) return null;
+      if (parsed.shouldTransitionEpoch && parsed.newEpochTitle && !parsed.epochTransition) {
+        parsed.epochTransition = {
+          title: parsed.newEpochTitle,
+          summary: parsed.newEpochSummary || parsed.newEpochTitle,
+        };
+      }
+      return validateArchitectEvaluation(parsed);
+    };
+
+    // No retry context — story progression naturally retries on next cycle
+    const validated = validateOrRetry(jsonStr, architectValidator);
+
+    if (!validated) {
       this.logger.warn(
         { rawLength: raw.length },
-        "Architect response contained no JSON — returning empty evaluation",
+        "Architect response failed validation — returning empty evaluation",
       );
       return {
         shouldTransitionEpoch: false,
@@ -693,70 +851,23 @@ Respond with ONLY valid JSON (no markdown, no commentary):
       };
     }
 
-    try {
-      const parsed = JSON.parse(jsonMatch[0]);
+    // Map validated result to ArchitectEvaluation interface
+    const evaluation: ArchitectEvaluation = {
+      shouldTransitionEpoch: Boolean(validated.epochTransition),
+      interventions: validated.interventions.map((i) => ({
+        type: i.type as ArchitectIntervention["type"],
+        ...(i.target ? { targetId: i.target } : {}),
+        data: i.data && typeof i.data === "object" ? i.data : {},
+        reasoning: i.reasoning || "No reasoning provided",
+      })),
+      narrativeSummary: validated.narrativeSummary,
+    };
 
-      // Validate and coerce the response shape
-      const evaluation: ArchitectEvaluation = {
-        shouldTransitionEpoch: Boolean(parsed.shouldTransitionEpoch),
-        interventions: [],
-        narrativeSummary:
-          typeof parsed.narrativeSummary === "string"
-            ? parsed.narrativeSummary
-            : "No summary provided.",
-      };
-
-      if (parsed.shouldTransitionEpoch) {
-        evaluation.newEpochTitle =
-          typeof parsed.newEpochTitle === "string"
-            ? parsed.newEpochTitle
-            : undefined;
-        evaluation.newEpochSummary =
-          typeof parsed.newEpochSummary === "string"
-            ? parsed.newEpochSummary
-            : undefined;
-      }
-
-      // Validate interventions array
-      if (Array.isArray(parsed.interventions)) {
-        const validTypes = new Set([
-          "send_message",
-          "plant_clue",
-          "trigger_event",
-          "adjust_tension",
-          "create_mission",
-          "grant_token",
-          "reveal_faction",
-        ]);
-
-        for (const item of parsed.interventions) {
-          if (item && typeof item === "object" && validTypes.has(item.type)) {
-            evaluation.interventions.push({
-              type: item.type,
-              targetId:
-                typeof item.targetId === "string" ? item.targetId : undefined,
-              data: item.data && typeof item.data === "object" ? item.data : {},
-              reasoning:
-                typeof item.reasoning === "string"
-                  ? item.reasoning
-                  : "No reasoning provided",
-            });
-          }
-        }
-      }
-
-      return evaluation;
-    } catch (err) {
-      this.logger.warn(
-        { err, rawSnippet: jsonMatch[0].slice(0, 200) },
-        "Failed to parse Architect JSON response",
-      );
-      return {
-        shouldTransitionEpoch: false,
-        interventions: [],
-        narrativeSummary:
-          "Architect evaluation failed to parse — raw response was malformed.",
-      };
+    if (validated.epochTransition) {
+      evaluation.newEpochTitle = validated.epochTransition.title;
+      evaluation.newEpochSummary = validated.epochTransition.summary;
     }
+
+    return evaluation;
   }
 }

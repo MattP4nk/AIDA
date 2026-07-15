@@ -67,6 +67,7 @@ export interface FileSystemEntry {
   isEncrypted: boolean;
   isHidden: boolean;
   isProtected: boolean;
+  childCount?: number | undefined; // Number of items inside (directories only)
 }
 
 export interface FileOperationResult {
@@ -164,8 +165,20 @@ export class FileService {
         ],
       });
 
-      // Filter by permissions
+      // Filter by permissions and count children for directories
       const visibleEntries: FileSystemEntry[] = [];
+      const dirIds = children.filter(c => c.type === "directory").map(c => c.id);
+
+      // Batch-count children for all directories in one query
+      const childCounts = dirIds.length > 0
+        ? await prisma.fileSystemNode.groupBy({
+            by: ["parentId"],
+            where: { parentId: { in: dirIds }, ...(showHidden ? {} : { isHidden: false }) },
+            _count: { _all: true },
+          })
+        : [];
+      const countMap = new Map(childCounts.map(c => [c.parentId, c._count._all]));
+
       for (const child of children) {
         const permissions = child.permissions as unknown as FilePermissions;
         if (await this.canRead(userId, child.id, accessLevel)) {
@@ -178,6 +191,7 @@ export class FileService {
             isEncrypted: child.isEncrypted,
             isHidden: child.isHidden,
             isProtected: child.isProtected,
+            childCount: child.type === "directory" ? (countMap.get(child.id) ?? 0) : undefined,
           });
         }
       }
@@ -1097,20 +1111,35 @@ export class FileService {
 
     const permissions = node.permissions as unknown as FilePermissions;
 
+    // Owner always gets owner-level permissions
+    if (node.createdBy === userId) {
+      return (permissions.owner & PermissionLevel.READ) !== 0;
+    }
+
     // Game mechanic: file requires a minimum hack access level
     if (
       permissions.requiredAccessLevel &&
       accessLevel < permissions.requiredAccessLevel
     ) {
-      return false;
+      // Connected players (accessLevel >= 0) can always read non-restricted directories
+      // Only block if requiredAccessLevel > 1 (i.e., needs actual hacking)
+      if (permissions.requiredAccessLevel > 1) {
+        return false;
+      }
     }
 
-    // Owner identity lives on the node, not inside permissions
-    if (node.createdBy === userId) {
-      return (permissions.owner & PermissionLevel.READ) !== 0;
+    // If others permission allows read, allow it
+    if ((permissions.others & PermissionLevel.READ) !== 0) {
+      return true;
     }
 
-    return (permissions.others & PermissionLevel.READ) !== 0;
+    // Connected player with any access can read basic filesystem structure
+    // (directories with requiredAccessLevel <= 1 are navigable)
+    if (node.type === "directory" && (!permissions.requiredAccessLevel || permissions.requiredAccessLevel <= 1)) {
+      return true;
+    }
+
+    return false;
   }
 
   /**
@@ -1395,8 +1424,8 @@ export class FileService {
     return {
       owner: PermissionLevel.FULL, // owner can read/write/execute/delete
       faction: PermissionLevel.READ, // faction members can read
-      others: PermissionLevel.NONE, // others have no access
-      requiredAccessLevel: 1,
+      others: PermissionLevel.READ, // connected players can read
+      requiredAccessLevel: 0, // no hack required for basic access
     };
   }
 
@@ -1536,7 +1565,7 @@ export class FileService {
             permissions: {
               owner: PermissionLevel.FULL,
               faction: PermissionLevel.READ | PermissionLevel.EXECUTE,
-              others: PermissionLevel.NONE,
+              others: PermissionLevel.READ | PermissionLevel.EXECUTE,
               requiredAccessLevel: 0,
             } as unknown as Prisma.JsonObject,
           },

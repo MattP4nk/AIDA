@@ -1349,10 +1349,47 @@ export class MessageService {
       `Respond in character. Keep your reply concise (1-3 paragraphs).`;
 
     // 4. Generate response via AI
-    const { response: replyContent } = await aiService.generateResponse(
+    const aiResult = await aiService.generateResponse(
       prompt,
       persona.systemPrompt,
     );
+
+    if (!aiResult.success) {
+      this.logger.warn(
+        { personaId: persona.id, error: aiResult.error },
+        "AI persona reply generation failed — sending generic reply",
+      );
+    }
+
+    let replyContent: string;
+    if (aiResult.success) {
+      replyContent = aiResult.response;
+    } else {
+      // Smart fallback — determine faction from persona name and use in-character template
+      const { fallbackPersonaReply } = await import("../utils/aiFallbacks");
+      const personaRecord = await prisma.aIPersona.findUnique({
+        where: { id: persona.id },
+        include: { faction: { select: { shortName: true } } },
+      });
+      replyContent = fallbackPersonaReply(
+        persona.name,
+        (personaRecord as any)?.faction?.shortName || null,
+      );
+
+      // Queue for retry — when AI comes back, send the real AI reply as a follow-up
+      const personaId = persona.id;
+      const replySubjectForRetry = originalSubject.startsWith("Re: ")
+        ? originalSubject
+        : `Re: ${originalSubject}`;
+      const msgSvc = this;
+      aiService.queueForRetry(prompt, persona.systemPrompt, async (response) => {
+        try {
+          if (response && response.trim().length > 0) {
+            await msgSvc.sendAIMessage(personaId, playerId, replySubjectForRetry, response);
+          }
+        } catch { /* ignore retry errors */ }
+      });
+    }
 
     // 5. Send the reply as an AI message (persona → player)
     const replySubject = originalSubject.startsWith("Re: ")

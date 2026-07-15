@@ -275,7 +275,7 @@ const createTerminalTabsStore = () => {
 
       update((state) => {
         const history = state.commandHistories.get(terminalId) || [];
-        let index = state.historyIndices.get(terminalId) || -1;
+        let index = state.historyIndices.get(terminalId) ?? -1;
 
         if (direction === "up") {
           if (index < history.length - 1) {

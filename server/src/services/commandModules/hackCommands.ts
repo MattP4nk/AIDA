@@ -338,6 +338,10 @@ export class HackCommandsModule implements CommandModule {
             // Push minigame start to player via Socket.IO
             if (context.io) {
               if (result.success) {
+                const cbSubmitCmds: Record<string, string> = {
+                  cipher: "crack.submit", port_sequence: "firewall.knock", memory_trace: "memory.extract",
+                };
+                const cbChallengeType = result.challenge?.type || "cipher";
                 context.io.to(`player:${context.userId}`).emit("command:result", {
                   success: true,
                   output: result.output || ["Exploit ready. Security challenge initiated."],
@@ -347,6 +351,8 @@ export class HackCommandsModule implements CommandModule {
                     challenge: result.challenge,
                     totalLayers: result.session?.totalLayers,
                   },
+                  suggestedCommand: cbSubmitCmds[cbChallengeType] || "crack.submit",
+                  soundEvent: "alert",
                   timestamp: new Date(),
                 });
               } else {
@@ -441,6 +447,15 @@ export class HackCommandsModule implements CommandModule {
       };
     }
 
+    // Determine the submit command for this challenge type
+    const challengeSubmitCmds: Record<string, string> = {
+      cipher: "crack.submit",
+      port_sequence: "firewall.knock",
+      memory_trace: "memory.extract",
+    };
+    const challengeType = result.challenge?.type || "cipher";
+    const submitCmd = challengeSubmitCmds[challengeType] || "crack.submit";
+
     return {
       success: true,
       output: result.output || ["Hack session initiated."],
@@ -450,6 +465,8 @@ export class HackCommandsModule implements CommandModule {
         challenge: result.challenge,
         totalLayers: result.session?.totalLayers,
       },
+      suggestedCommand: submitCmd,
+      soundEvent: "alert" as const,
       timestamp: new Date(),
     };
   }

@@ -102,6 +102,9 @@ export interface CommandResult {
   executionTime?: number;
   openDialog?: "mail" | "chat" | "forum"; // Trigger ASCII dialog overlay
   terminalId?: string; // ID of the terminal tab this result belongs to
+  suggestedCommand?: string; // Command to fill on Tab (e.g., "handshake.ack", "hack 10.0.0.1")
+  soundEvent?: "submit" | "success" | "error" | "connected" | "hackSuccess" | "processComplete" | "levelUp" | "alert" | "notification";
+  renderMode?: "instant" | "typewriter" | "cinematic";
 }
 
 export interface ValidationResult {

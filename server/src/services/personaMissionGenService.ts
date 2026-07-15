@@ -12,6 +12,7 @@ import {
   type RewardScaling,
 } from "./missionTemplatePool";
 import { OBJECTIVE_TYPES } from "./missionObjectiveTypes";
+import { validateOrRetry, validateMissionOutput } from "../utils/aiOutputValidator";
 
 // ── Faction Leader Profiles ────────────────────────────────────────────────
 
@@ -137,6 +138,20 @@ export class PersonaMissionGenService {
           ? this.factionKnowledge.serializeForPrompt(snapshot)
           : "No known targets.";
 
+        // Include recent mission feedback so AI can adjust difficulty/tone
+        let feedbackBlock = "";
+        try {
+          const feedbackKnowledge = await this.prisma.aIKnowledge.findMany({
+            where: { personaId: leader.id, type: "mission_feedback" },
+            orderBy: { id: "desc" },
+            take: 5,
+            select: { content: true },
+          });
+          if (feedbackKnowledge.length > 0) {
+            feedbackBlock = `\nRECENT MISSION FEEDBACK (adjust difficulty and style based on this):\n${feedbackKnowledge.map(k => `- ${k.content}`).join("\n")}\n`;
+          }
+        } catch { /* non-critical */ }
+
         const flavorPrompt = `You are ${leader.name}, faction leader of ${leader.faction.name}.
 Voice: ${profile?.voice || "authoritative"}.
 Situation: ${situation}
@@ -148,7 +163,7 @@ ${objectivesSummary}
 Difficulty: ${difficulty}/10
 
 ${knownTargetsBlock}
-
+${feedbackBlock}
 Write a mission title and briefing description IN CHARACTER. Keep the title under 60 chars.
 The description should be 1-3 sentences that motivate the operative.
 Respond ONLY with JSON:
@@ -157,16 +172,19 @@ Respond ONLY with JSON:
   "description": "..."
 }`;
 
-        const { response } = await this.aiService.generateResponse(flavorPrompt, leader.systemPrompt);
-        const match = response.match(/\{[\s\S]*\}/);
-        if (match) {
-          const parsed = JSON.parse(match[0]);
-          if (parsed.title && typeof parsed.title === "string" && parsed.title.length <= 80) {
-            title = parsed.title;
-          }
-          if (parsed.description && typeof parsed.description === "string" && parsed.description.length <= 500) {
-            description = parsed.description;
-          }
+        const result = await this.aiService.generateResponse(flavorPrompt, leader.systemPrompt, undefined, '{ "title": "string (3-80 chars)", "description": "string (10-500 chars)" }');
+        if (!result.success) throw new Error(result.error || "AI generation failed");
+        const validated = validateOrRetry(result.response, validateMissionOutput, this.aiService, {
+          prompt: flavorPrompt,
+          systemPrompt: leader.systemPrompt,
+          expectedFormat: '{ "title": "string (3-80 chars, non-empty)", "description": "string (10-500 chars)" }',
+          onSuccess: (_response) => {
+            // Retry is best-effort flavor text — no side effect needed, mission already created with template defaults
+          },
+        });
+        if (validated) {
+          title = validated.title;
+          description = validated.description;
         }
       } catch (aiError) {
         this.logger.warn({ err: aiError, factionId }, "AI flavor generation failed, using template defaults");

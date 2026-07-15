@@ -19,6 +19,7 @@ import { LOGGER, AI_SERVICE, SERVER_CONTENT_SERVICE } from "../di/tokens";
 import { db } from "../database/client";
 import type { AIService } from "./aiService";
 import type { ServerContentService } from "./serverContentService";
+import { validateOrRetry, validateStoryArcPlan, validateMissionOutput } from "../utils/aiOutputValidator";
 
 // ═══════════════════════════════════════════════════════════════════
 // Types
@@ -492,46 +493,87 @@ For failureBranch: use a step number to skip ahead, "adapt" to create an alterna
       const aiResult = await this.aiService.generateResponse(
         prompt,
         persona.systemPrompt,
+        undefined,
+        '{ "premise": "string", "steps": [{"title": "string", "description": "string", "objectiveType": "string", "successBranch": "next|complete", "failureBranch": "next|fail|adapt"}] }',
       );
-      if (!aiResult?.response) return null;
-
-      // Extract JSON from response
-      const jsonMatch = aiResult.response.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) return null;
-
-      const parsed = JSON.parse(jsonMatch[0]);
-
-      // Validate structure
-      if (
-        !parsed.title ||
-        !parsed.steps ||
-        !Array.isArray(parsed.steps) ||
-        parsed.steps.length < 2
-      ) {
+      if (!aiResult.success || !aiResult.response) {
+        // Queue for retry — when AI comes back, we can't create the arc retroactively
+        // but we queue for narrative update if an arc was created with fallback data
+        // Note: The caller returns error when null, so no arc to update — skip queue
         return null;
       }
 
-      // Ensure steps have required fields
-      const steps: StoryStep[] = parsed.steps.map((s: any, i: number) => ({
-        stepNumber: i,
-        templateId: s.templateId || "data_heist",
-        title: (s.title || `Step ${i + 1}`).substring(0, 80),
-        narrativeBrief: (
-          s.narrativeBrief || "Continue the operation."
-        ).substring(0, 300),
-        status: "pending" as const,
-        successBranch:
-          i === parsed.steps.length - 1
-            ? "complete"
-            : (s.successBranch ?? i + 1),
-        failureBranch: s.failureBranch ?? "adapt",
-      }));
+      // Extended type that preserves raw fields the validator strips
+      type ArcPlanWithRaw = {
+        premise: string;
+        rawTitle?: string;
+        steps: Array<{
+          title: string;
+          description: string;
+          templateId?: string;
+          successBranch?: string;
+          failureBranch?: string;
+        }>;
+      };
+
+      // Wrapper validator that maps AI's "description" -> "premise" and preserves raw fields
+      const arcPlanValidator = (parsed: any): ArcPlanWithRaw | null => {
+        if (!parsed) return null;
+        if (!parsed.premise && parsed.description) {
+          parsed.premise = parsed.description;
+        }
+        const validated = validateStoryArcPlan(parsed);
+        if (!validated) return null;
+        // Merge templateId from raw steps + raw title back into the validated result
+        return {
+          ...validated,
+          rawTitle: typeof parsed.title === "string" ? parsed.title : undefined,
+          steps: validated.steps.map((s, i: number) => ({
+            ...s,
+            templateId: (parsed.steps?.[i] as any)?.templateId,
+          })),
+        };
+      };
+
+      const validated = validateOrRetry(aiResult.response, arcPlanValidator);
+      if (!validated) return null;
+
+      // Map validated steps to StoryStep format
+      const steps: StoryStep[] = validated.steps.map((s, i: number) => {
+        // Parse failureBranch: could be a number, "fail", or "adapt"
+        let failureBranch: number | "fail" | "adapt" = "adapt";
+        if (s.failureBranch === "fail" || s.failureBranch === "adapt") {
+          failureBranch = s.failureBranch;
+        } else if (s.failureBranch) {
+          const num = parseInt(s.failureBranch, 10);
+          if (!isNaN(num)) failureBranch = num;
+        }
+
+        return {
+          stepNumber: i,
+          templateId: s.templateId || "data_heist",
+          title: s.title,
+          narrativeBrief: s.description.substring(0, 300),
+          status: "pending" as const,
+          successBranch:
+            i === validated.steps.length - 1
+              ? ("complete" as const)
+              : (s.successBranch ? parseInt(s.successBranch, 10) || (i + 1) : i + 1),
+          failureBranch,
+        };
+      });
+
+      // Auto-upgrade failure branches: only the FINAL step can have "fail".
+      // Earlier steps get "adapt" so the arc isn't unrecoverable on first mistake.
+      for (let i = 0; i < steps.length - 1; i++) {
+        if (steps[i]!.failureBranch === "fail") {
+          steps[i]!.failureBranch = "adapt";
+        }
+      }
 
       return {
-        title: parsed.title.substring(0, 80),
-        description:
-          parsed.description?.substring(0, 500) ||
-          "A faction operation awaits.",
+        title: (validated.rawTitle || validated.premise).substring(0, 80),
+        description: validated.premise,
         steps,
       };
     } catch (err) {
@@ -572,19 +614,48 @@ Write a mission briefing for this step. Respond with JSON:
       const aiResult = await this.aiService.generateResponse(
         prompt,
         persona.systemPrompt,
+        undefined,
+        '{ "title": "string (3-80 chars)", "description": "string (10-500 chars)" }',
       );
-      if (!aiResult?.response) return null;
+      if (!aiResult.success || !aiResult.response) {
+        // Queue for retry — when AI comes back, update the step mission description
+        const stepMissionId = step.missionId;
+        this.aiService.queueForRetry(prompt, persona.systemPrompt, async (response) => {
+          try {
+            const validated = validateOrRetry(response, validateMissionOutput);
+            // Update the mission if it was already created
+            if (stepMissionId && validated) {
+              await db.client.mission.update({
+                where: { id: stepMissionId },
+                data: { title: validated.title, description: validated.description },
+              });
+            }
+          } catch { /* ignore retry errors */ }
+        });
+        return null;
+      }
 
-      const jsonMatch = aiResult.response.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) return null;
+      const validated = validateOrRetry(aiResult.response, validateMissionOutput, this.aiService, {
+        prompt,
+        systemPrompt: persona.systemPrompt,
+        expectedFormat: '{ "title": "string (3-80 chars)", "description": "string (10-500 chars)" }',
+        onSuccess: async (response) => {
+          try {
+            const retryValidated = validateOrRetry(response, validateMissionOutput);
+            if (step.missionId && retryValidated) {
+              await db.client.mission.update({
+                where: { id: step.missionId },
+                data: { title: retryValidated.title, description: retryValidated.description },
+              });
+            }
+          } catch { /* ignore retry errors */ }
+        },
+      });
+      if (!validated) return null;
 
-      const parsed = JSON.parse(jsonMatch[0]);
       return {
-        title: (parsed.title || step.title).substring(0, 80),
-        description: (parsed.description || step.narrativeBrief).substring(
-          0,
-          500,
-        ),
+        title: validated.title || step.title,
+        description: validated.description || step.narrativeBrief,
       };
     } catch {
       return null;
@@ -620,21 +691,32 @@ Create an adapted follow-up step that accounts for the failure. Respond with JSO
         prompt,
         persona.systemPrompt,
       );
-      if (!aiResult?.response) return null;
+      if (!aiResult.success || !aiResult.response) {
+        // Queue for retry — adapted step generation is narrative-only,
+        // but the arc will have failed by then so no action to take
+        // (the arc status is set to "failed" by the caller when this returns null)
+        return null;
+      }
 
-      const jsonMatch = aiResult.response.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) return null;
+      const validateAdaptedStep = (parsed: any): { templateId: string; title: string; narrativeBrief: string } | null => {
+        if (!parsed || typeof parsed !== "object") return null;
+        return {
+          templateId: typeof parsed.templateId === "string" ? parsed.templateId : "ghost_protocol",
+          title: (typeof parsed.title === "string" ? parsed.title.trim() : "Contingency Plan").substring(0, 80),
+          narrativeBrief: (typeof parsed.narrativeBrief === "string" ? parsed.narrativeBrief.trim() : "Plans have changed. Adapt.").substring(0, 300),
+        };
+      };
 
-      const parsed = JSON.parse(jsonMatch[0]);
+      const validated = validateOrRetry(aiResult.response, validateAdaptedStep);
+      if (!validated) return null;
+
       const nextNum = context.completedSteps.length + 1;
 
       return {
         stepNumber: nextNum,
-        templateId: parsed.templateId || "ghost_protocol",
-        title: (parsed.title || "Contingency Plan").substring(0, 80),
-        narrativeBrief: (
-          parsed.narrativeBrief || "Plans have changed. Adapt."
-        ).substring(0, 300),
+        templateId: validated.templateId,
+        title: validated.title,
+        narrativeBrief: validated.narrativeBrief,
         status: "pending",
         successBranch: "complete", // Adapted steps lead to completion
         failureBranch: "fail", // Second failure ends the arc

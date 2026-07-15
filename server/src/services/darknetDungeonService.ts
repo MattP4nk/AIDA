@@ -23,6 +23,7 @@ import {
   CRYPTIC_QUOTES,
   WORLD_BACKSTORY_SHORT,
 } from "../lore/worldLore";
+import { validateOrRetry } from "../utils/aiOutputValidator";
 
 // ═══════════════════════════════════════════════════════════════════
 // Constants — Procedural Generation Building Blocks
@@ -624,30 +625,92 @@ Respond ONLY with JSON:
       const systemPrompt =
         "You are The Architect, the omniscient game master of AIDA. You speak in riddles and metaphors. You test players by hiding secrets in plain sight.";
 
-      const { response } = await this.aiService.generateResponse(
+      const result = await this.aiService.generateResponse(
         prompt,
         systemPrompt,
+        undefined,
+        '{ "title": "string", "content": "string (forum riddle with disguised gateway IP and passkey)" }',
       );
 
       // e. Parse AI response and create forum post
       let title = `Signal from the Void — ${instance.name}`;
       let content = `The signal shifts. A new path awaits those who listen.\n\nGateway: ${instance.gatewayIp}\nKey: ${instance.passkey}`;
 
-      try {
-        const jsonMatch = response.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-          const parsed = JSON.parse(jsonMatch[0]);
-          if (parsed.title && typeof parsed.title === "string") {
-            title = parsed.title;
-          }
-          if (parsed.content && typeof parsed.content === "string") {
-            content = parsed.content;
+      const validateTitleContent = (parsed: any): { title: string; content: string } | null => {
+        if (!parsed || typeof parsed !== "object") return null;
+        if (typeof parsed.title !== "string" || typeof parsed.content !== "string") return null;
+        if (!parsed.title.trim() || !parsed.content.trim()) return null;
+        return { title: parsed.title.trim(), content: parsed.content.trim() };
+      };
+
+      // Validate riddle is solvable — IP octets and passkey segments must appear in content
+      const isRiddleSolvable = (riddleContent: string, ip: string, passkey: string): boolean => {
+        const lower = riddleContent.toLowerCase();
+        // Check if at least 3 of 4 IP octets appear somewhere in the text
+        const octets = ip.split(".");
+        const octetsFound = octets.filter((o) => lower.includes(o)).length;
+        // Check if passkey characters appear (at least first 3 chars as a sequence)
+        const passKeyChars = passkey.toLowerCase().slice(0, 3);
+        const passKeyFound = lower.includes(passKeyChars) ||
+          lower.includes(passkey.toLowerCase()) ||
+          lower.includes(passkey.toUpperCase());
+        return octetsFound >= 3 && passKeyFound;
+      };
+
+      if (result.success) {
+        const validated = validateOrRetry(result.response, validateTitleContent, this.aiService, {
+          prompt,
+          systemPrompt,
+          expectedFormat: '{ "title": "string (non-empty)", "content": "string (non-empty, must embed IP octets and passkey)" }',
+          onSuccess: async (response) => {
+            try {
+              const retryParsed = validateOrRetry(response, validateTitleContent);
+              const inst = await prismaAny.darkNetInstance.findUnique({
+                where: { id: instanceId },
+              });
+              if (inst?.forumClueId && retryParsed && isRiddleSolvable(retryParsed.content, instance.gatewayIp, instance.passkey)) {
+                await db.client.post.update({
+                  where: { id: inst.forumClueId },
+                  data: {
+                    title: retryParsed.title,
+                    content: retryParsed.content,
+                  },
+                });
+              }
+            } catch { /* ignore retry errors */ }
+          },
+        });
+        if (validated) {
+          // Verify the riddle is solvable before using it
+          if (isRiddleSolvable(validated.content, instance.gatewayIp, instance.passkey)) {
+            title = validated.title;
+            content = validated.content;
+          } else {
+            this.logger.warn("AI riddle failed solvability check — using fallback with direct clues");
+            // Fallback content already has the IP and passkey in plain text
           }
         }
-      } catch {
-        this.logger.warn(
-          "Failed to parse AI riddle response — using fallback text",
-        );
+      } else {
+        // Queue for retry if AI failed — on success, update the forum post content
+        const riddleInstanceId = instanceId;
+        this.aiService.queueForRetry(prompt, systemPrompt, async (response) => {
+          try {
+            const retryParsed = validateOrRetry(response, validateTitleContent);
+            // Find the forum post linked to this instance and update it
+            const inst = await prismaAny.darkNetInstance.findUnique({
+              where: { id: riddleInstanceId },
+            });
+            if (inst?.forumClueId && retryParsed) {
+              await db.client.post.update({
+                where: { id: inst.forumClueId },
+                data: {
+                  title: retryParsed.title,
+                  content: retryParsed.content,
+                },
+              });
+            }
+          } catch { /* ignore retry errors */ }
+        });
       }
 
       // Lazy-load ForumService to avoid circular DI
@@ -1223,31 +1286,80 @@ Respond ONLY with JSON:
           "called The Emperor, and warring factions. Your tone is dark, " +
           "technical, and mysterious. Never break character.";
 
-        const { response } = await this.aiService.generateResponse(
+        const result = await this.aiService.generateResponse(
           prompt,
           systemPrompt,
+          undefined,
+          '{ "files": [{"name": "string", "content": "string"}] }',
         );
 
-        // Parse the response
-        const jsonMatch = response.match(/\{[\s\S]*\}/);
-        if (!jsonMatch) {
+        const validateLoreFiles = (parsed: any): { files: Array<{ name: string; content: string }> } | null => {
+          if (!parsed || typeof parsed !== "object") return null;
+          if (!Array.isArray(parsed.files) || parsed.files.length === 0) return null;
+          const files = parsed.files.filter(
+            (f: any) => typeof f.name === "string" && f.name.trim() && typeof f.content === "string" && f.content.trim(),
+          );
+          if (files.length === 0) return null;
+          return { files };
+        };
+
+        if (!result.success) {
+          this.logger.warn(
+            { serverId: server.id, error: result.error },
+            "AI lore content generation failed — using fallback",
+          );
+          await this.plantFallbackContent(server.id, theme, quote);
+
+          // Queue for retry — when AI comes back, add lore files to the server
+          const sId = server.id;
+          const depthTierCopy = depthTier;
+          this.aiService.queueForRetry(prompt, systemPrompt, async (response) => {
+            try {
+              const validated = validateOrRetry(response, validateLoreFiles);
+              if (!validated) return;
+
+              let rootDir = await db.client.fileSystemNode.findFirst({
+                where: { serverId: sId, name: "/", type: "directory", parentId: null },
+              });
+              if (!rootDir) {
+                rootDir = await db.client.fileSystemNode.create({
+                  data: { serverId: sId, name: "/", type: "directory" },
+                });
+              }
+
+              for (const file of validated.files) {
+                if (!file.name || !file.content) continue;
+                const fileName = file.name.replace(/[^a-zA-Z0-9._\-]/g, "_").slice(0, 60);
+                const fileContent = String(file.content).slice(0, 3000);
+                const shouldHide = depthTierCopy !== "gateway" && Math.random() < 0.4;
+                const shouldEncrypt = (depthTierCopy === "deep" || depthTierCopy === "vault") && Math.random() < 0.5;
+
+                await db.client.fileSystemNode.create({
+                  data: {
+                    serverId: sId,
+                    name: `ai_${fileName}`,
+                    type: "file",
+                    content: fileContent,
+                    parentId: rootDir.id,
+                    isHidden: shouldHide,
+                    isEncrypted: shouldEncrypt,
+                    size: fileContent.length,
+                  },
+                });
+              }
+            } catch { /* ignore retry errors */ }
+          });
+
+          return;
+        }
+
+        // Parse and validate the response
+        const parsed = validateOrRetry(result.response, validateLoreFiles);
+        if (!parsed) {
           this.logger.warn(
             { serverId: server.id },
             "AI lore content response was not valid JSON — using fallback",
           );
-          await this.plantFallbackContent(server.id, theme, quote);
-          return;
-        }
-
-        let parsed: { files: Array<{ name: string; content: string }> };
-        try {
-          parsed = JSON.parse(jsonMatch[0]);
-        } catch {
-          await this.plantFallbackContent(server.id, theme, quote);
-          return;
-        }
-
-        if (!parsed.files || !Array.isArray(parsed.files)) {
           await this.plantFallbackContent(server.id, theme, quote);
           return;
         }

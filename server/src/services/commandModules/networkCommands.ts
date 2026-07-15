@@ -207,6 +207,20 @@ export class NetworkCommandsModule implements CommandModule {
               scanLevel,
             );
             logger.debug({ count: results.length }, "discoverNeighbors returned results");
+
+            // Tier 3: Pre-warm discovered servers — provision content before player connects
+            try {
+              const { getService } = await import("../../di/container");
+              const { SERVER_CONTENT_SERVICE } = await import("../../di/tokens");
+              const contentSvc = getService<any>(SERVER_CONTENT_SERVICE);
+              for (const r of results) {
+                const sid = (r as any).serverId || (r as any).server?.id || (r as any).id;
+                if (sid) {
+                  contentSvc.provisionServerContent(sid).catch(() => {});
+                }
+              }
+            } catch { /* non-critical */ }
+
             const currentServer =
               await context.services.serverService.getServer(currentServerId);
             const output = this.formatScanResults(
@@ -222,17 +236,7 @@ export class NetworkCommandsModule implements CommandModule {
               });
             }
 
-            // Also emit as notification for guaranteed delivery
-            if (context.io) {
-              context.io.to(`player:${context.userId}`).emit("notification", {
-                title: "Network Scan Complete",
-                message:
-                  results.length > 0
-                    ? `Discovered ${results.length} adjacent server(s). Check terminal for details.`
-                    : `No new servers found nearby.`,
-                severity: "info",
-              });
-            }
+            // Notification handled by process:completed event — no duplicate needed
           } catch (err) {
             logger.error({ err }, "Adjacency scan callback error");
             if (context.io) {
@@ -321,14 +325,7 @@ export class NetworkCommandsModule implements CommandModule {
                 terminalId,
                 timestamp: new Date(),
               });
-              context.io.to(`player:${context.userId}`).emit("notification", {
-                title: "Subnet Sweep Complete",
-                message:
-                  servers.length > 0
-                    ? `Found ${servers.length} server(s) on ${partialIp}. Check terminal for details.`
-                    : `No servers found on ${partialIp}.`,
-                severity: "info",
-              });
+              // Notification handled by process:completed event — no duplicate needed
             }
           } catch (err) {
             logger.error({ err }, "Subnet sweep callback error");
@@ -785,7 +782,12 @@ export class NetworkCommandsModule implements CommandModule {
           lines.push(sBoxRow(` Try: hack ${target}`, W));
         }
         lines.push(sBoxBottom(W));
-        return { success: false, output: render(lines), timestamp: new Date() };
+        return {
+          success: false,
+          output: render(lines),
+          ...(access.requiresHack ? { suggestedCommand: `hack ${target}` } : {}),
+          timestamp: new Date(),
+        };
       }
     }
 
@@ -846,6 +848,7 @@ export class NetworkCommandsModule implements CommandModule {
           } catch { /* non-critical */ }
         }
 
+        const submitCmd = challenge.type === "handshake" ? "handshake.ack" : "signal.trace";
         return {
           success: true,
           output: challenge.displayText,
@@ -854,6 +857,8 @@ export class NetworkCommandsModule implements CommandModule {
             targetIp: targetServer.ipAddress,
             connectionChallenge: challenge,
           },
+          suggestedCommand: submitCmd,
+          soundEvent: "alert" as const,
           timestamp: new Date(),
         };
       }
@@ -920,7 +925,12 @@ export class NetworkCommandsModule implements CommandModule {
       return {
         success: true,
         output: render(lines),
-        data: { connectionResolved: true },
+        data: {
+          connectionResolved: true,
+          server: { name: targetServer.ipAddress, id: targetServer.id },
+          directory: { path: "/" },
+        },
+        soundEvent: "connected" as const,
         timestamp: new Date(),
       };
     } catch (error) {
@@ -956,9 +966,19 @@ export class NetworkCommandsModule implements CommandModule {
         serverId,
       );
 
+      // Get home info for client context update
+      const user = await context.db.client.user.findUnique({
+        where: { id: context.userId },
+        select: { homeIp: true },
+      });
+
       return {
         success: true,
         output: "Disconnected. Returned to home server.",
+        data: {
+          server: { name: user?.homeIp || "local" },
+          directory: { path: "~" },
+        },
         timestamp: new Date(),
       };
     } catch (error) {
@@ -1506,7 +1526,11 @@ export class NetworkCommandsModule implements CommandModule {
         return {
           success: true,
           output: [`  [+] ${result.feedback}`, "", ...output],
-          data: { connectionResolved: true },
+          data: {
+            ...connectResult.data,
+            connectionResolved: true,
+          },
+          soundEvent: "connected" as const,
           timestamp: new Date(),
         };
       }

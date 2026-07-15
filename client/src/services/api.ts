@@ -624,10 +624,11 @@ class ApiClient {
 
   // ==================== COMMAND EXECUTION ====================
 
-  async executeCommand(command: string, serverId?: string): Promise<any> {
+  async executeCommand(command: string, serverId?: string, terminalCols?: number): Promise<any> {
     const response = await this.post("/command/execute", {
       command,
       ...(serverId ? { serverId } : {}),
+      ...(terminalCols ? { terminalCols } : {}),
     });
     return response;
   }

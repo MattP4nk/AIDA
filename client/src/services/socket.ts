@@ -2,6 +2,7 @@ import { io, Socket } from "socket.io-client";
 import { writable, get, type Writable } from "svelte/store";
 import { apiClient } from "./api";
 import { terminalTabsStore } from "./terminalTabs";
+import { sound } from "./sound";
 
 // Socket connection configuration — override via VITE_SOCKET_URL env var
 const SOCKET_URL =
@@ -292,7 +293,7 @@ class SocketService {
     });
 
     this.on("hack:successful", (data: any) => {
-      console.log("🔓 Successful hack:", data);
+      sound.hackSuccess();
       hackAttempts.update((attempts) => [
         { type: "successful", data, timestamp: new Date() },
         ...attempts.slice(0, 19),
@@ -432,8 +433,18 @@ class SocketService {
     });
 
     this.on("mission:assigned", (data: any) => {
-      console.log("🎯 Mission assigned:", data);
-      this.showNotification("New Mission", `Mission assigned: ${data.title}`);
+      sound.notification();
+      const ns = getNotifService();
+      if (ns) {
+        ns.add({
+          type: "game",
+          title: "New Mission",
+          message: `Mission assigned: ${data.title}`,
+          priority: "high",
+          data,
+          action: { label: "View missions", command: "missions" },
+        });
+      }
     });
 
     this.on("faction:event", (data: any) => {
@@ -470,14 +481,7 @@ class SocketService {
     });
 
     this.on("process:completed", (data: any) => {
-      console.log(
-        "[process:completed] PID:",
-        data.pid,
-        "type:",
-        data.type,
-        "hasOutput:",
-        !!data.output,
-      );
+      sound.processComplete();
       activeProcesses.update((procs) =>
         procs.filter((p) => p.pid !== data.pid),
       );
@@ -608,6 +612,7 @@ class SocketService {
     // ==================== PLAYER PROGRESSION EVENTS ====================
 
     this.on("player:levelup", (data: any) => {
+      sound.levelUp();
       const ns = getNotifService();
       if (ns) {
         ns.add({
@@ -677,6 +682,12 @@ class SocketService {
       if (data.data?.connectionResolved) {
         activeConnectionSession.set(null);
       }
+      // Play sound event from server if provided
+      if (data.soundEvent) {
+        const sfn = (sound as any)[data.soundEvent];
+        if (typeof sfn === "function") sfn();
+      }
+
       // Render output text from background processes (hack prep, scan, traceroute, etc.)
       if (data.output) {
         const activeTab = terminalTabsStore.getActiveTerminal();
@@ -839,18 +850,9 @@ class SocketService {
     return null;
   }
 
-  private showNotification(title: string, message: string): void {
-    // Browser notification (if permission granted)
-    if ("Notification" in window && Notification.permission === "granted") {
-      new Notification(title, {
-        body: message,
-        icon: "/favicon.ico",
-        tag: "aida-notification",
-      });
-    }
-
-    // You can also emit to a notification store for in-app notifications
-    console.log(`🔔 ${title}: ${message}`);
+  private showNotification(_title: string, _message: string): void {
+    // Browser notifications disabled — in-terminal toasts handle all notifications
+    // via notificationService.add() which feeds TerminalToast component.
   }
 
   private handleHackResult(result: any): void {

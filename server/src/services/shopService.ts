@@ -1,5 +1,5 @@
 import { EventEmitter } from "events";
-import { prisma, Prisma } from "../database/client";
+import { prisma } from "../database/client";
 
 /**
  * Tool/Software Item Interface
@@ -463,7 +463,7 @@ class ShopService extends EventEmitter {
   public async getPlayerInventory(userId: string): Promise<InventoryItem[]> {
     const dbItems = await prisma.inventoryItem.findMany({
       where: { userId },
-      include: { item: true },
+      include: { shopItem: true },
       orderBy: { acquiredAt: "desc" },
     });
 

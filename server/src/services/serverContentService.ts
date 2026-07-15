@@ -29,6 +29,7 @@ import type { Logger } from "pino";
 import { LOGGER, AI_SERVICE } from "../di/tokens";
 import type { AIService } from "./aiService";
 import { ContentEncoder } from "../utils/contentEncoder";
+import { validateOrRetry, validateContentPlan } from "../utils/aiOutputValidator";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -1480,6 +1481,16 @@ export class ServerContentService {
    * @param serverId  - The GameServer ID
    * @param options   - Optional overrides
    */
+  /** Track which servers have had AI enrichment to avoid duplicate AI calls. */
+  private aiEnrichedServers = new Set<string>();
+
+  /**
+   * Provision server content using the 4-tier approach:
+   *   Tier 1 (instant): Static role-based content — ALWAYS applied, never empty
+   *   Tier 2 (background): AI enrichment — unique files appear 5-30s later
+   *
+   * Tiers 3 (pre-warm) and 4 (event-driven) are triggered externally.
+   */
   public async provisionServerContent(
     serverId: string,
     options: {
@@ -1505,21 +1516,24 @@ export class ServerContentService {
         return;
       }
 
-      // Check if server already has content beyond the base scaffold
-      if (!options.force) {
-        const fileCount = await this.prisma.fileSystemNode.count({
-          where: { serverId },
-        });
-        // Base scaffold creates ~7 nodes (root + home/bin/etc/var/tmp/logs).
-        // If we have more than that, content was already provisioned.
-        if (fileCount > 8) {
-          this.logger.debug(
-            { serverId, fileCount },
-            "Server already has content, skipping provision",
-          );
-          return;
+      // Check if Tier 1 already applied
+      const fileCount = await this.prisma.fileSystemNode.count({
+        where: { serverId },
+      });
+
+      if (!options.force && fileCount > 12) {
+        // Tier 1 already applied (base scaffold ~7 + static content ~8-15 = ~15-22)
+        // Only try Tier 2 AI enrichment if not already done
+        if (!options.skipAI && !this.aiEnrichedServers.has(serverId)) {
+          this.provisionAIContent(serverId, server).catch((err) => {
+            this.logger.debug({ err, serverId }, "Tier 2 AI enrichment failed (non-critical)");
+          });
         }
+        return;
       }
+
+      // ═══ TIER 1: Instant Static Content ═══
+      // ALWAYS applied. Server is never empty after this step.
 
       // Ensure base filesystem exists
       await this.ensureBaseFilesystem(serverId, server.ownerId || "system");
@@ -1527,63 +1541,19 @@ export class ServerContentService {
       // Build network context for content generation
       const networkCtx = await this.buildNetworkContext(server);
 
-      // Resolve faction identity for content generation
-      const factionKey = resolveFactionKey(networkCtx);
+      // Generate static content plan (role-based with real employee names, IPs)
+      const staticPlan: ServerContentPlan = networkCtx
+        ? generateRoleContent(networkCtx)
+        : this.getStaticContentPlan(server.type);
 
-      // ═══ PROCESS 1: Lore Content (faction servers only) ═══
-      // Serious, dark, enigmatic. Faction intel, AIDA fragments, buried secrets.
-      let lorePlan: ServerContentPlan = { directories: [], files: [] };
-      if (factionKey && !options.skipAI && networkCtx) {
-        try {
-          const loreResult = await this.generatePlanFromAI(
-            LORE_SYSTEM_PROMPT,
-            buildLorePrompt(networkCtx),
-            server.faction?.aiPersona?.systemPrompt ?? undefined,
-          );
-          if (loreResult) lorePlan = loreResult;
-        } catch (err) {
-          this.logger.debug({ err }, "Lore content generation failed");
-        }
-      }
-
-      // ═══ PROCESS 2: Ambient Content (all servers) ═══
-      // World-building. Mundane files, gossip, news, easter eggs.
-      let ambientPlan: ServerContentPlan = { directories: [], files: [] };
-      if (!options.skipAI && networkCtx) {
-        try {
-          const ambientResult = await this.generatePlanFromAI(
-            AMBIENT_SYSTEM_PROMPT,
-            buildAmbientPrompt(networkCtx),
-          );
-          if (ambientResult) ambientPlan = ambientResult;
-        } catch (err) {
-          this.logger.debug({ err }, "Ambient content generation failed");
-        }
-      }
-
-      // Merge both AI plans
-      const plan: ServerContentPlan = {
-        directories: [...lorePlan.directories, ...ambientPlan.directories],
-        files: [...lorePlan.files, ...ambientPlan.files],
-      };
-
-      // If both AI processes failed, fall back to static content
-      if (plan.directories.length === 0 && plan.files.length === 0) {
-        const fallback = networkCtx
-          ? generateRoleContent(networkCtx)
-          : this.getStaticContentPlan(server.type);
-        plan.directories = fallback.directories;
-        plan.files = fallback.files;
-      }
-
-      // Plant faction secrets on the appropriate server role (existing behavior)
+      // Plant faction secrets on the appropriate server role
       if (networkCtx) {
         const matchingSecrets = networkCtx.secrets.filter(
           (s) =>
             s.targetRole === (server as any).role || s.targetRole === "general",
         );
         for (const secret of matchingSecrets) {
-          plan.files.push({
+          staticPlan.files.push({
             path: `/data/${secret.fileName}`,
             content: secret.content,
             isHidden: secret.isHidden,
@@ -1593,30 +1563,168 @@ export class ServerContentService {
 
         // Add encoded content files (decodable by players using `decode` command)
         const encodedFiles = generateEncodedFiles(networkCtx);
-        plan.files.push(...encodedFiles);
+        staticPlan.files.push(...encodedFiles);
       }
 
-      // Apply the merged plan
-      await this.applyContentPlan(serverId, server.ownerId || "system", plan);
+      // Apply Tier 1 content immediately (awaited — player sees files right away)
+      await this.applyContentPlan(serverId, server.ownerId || "system", staticPlan);
 
       this.logger.info(
         {
           serverId,
           serverName: server.name,
-          serverType: server.type,
-          loreFiles: lorePlan.files.length,
-          ambientFiles: ambientPlan.files.length,
-          totalDirs: plan.directories.length,
-          totalFiles: plan.files.length,
+          tier: 1,
+          dirs: staticPlan.directories.length,
+          files: staticPlan.files.length,
         },
-        "Server content provisioned (two-process)",
+        "Tier 1 static content applied",
       );
+
+      // ═══ TIER 2: AI Enrichment (fire-and-forget) ═══
+      // Adds unique AI-generated files in the background.
+      if (!options.skipAI) {
+        this.provisionAIContent(serverId, server).catch((err) => {
+          this.logger.debug({ err, serverId }, "Tier 2 AI enrichment failed (non-critical)");
+        });
+      }
     } catch (error) {
       this.logger.error(
         { err: error, serverId },
         "Failed to provision server content",
       );
-      // Fire-and-forget: don't rethrow
+    }
+  }
+
+  /**
+   * Tier 2: AI Content Enrichment (background).
+   * Generates 3-5 unique files via AI and applies them on top of Tier 1 content.
+   * Non-blocking, safe to fail.
+   */
+  private async provisionAIContent(
+    serverId: string,
+    server: any,
+  ): Promise<void> {
+    // Deduplicate: only enrich once per server per runtime
+    if (this.aiEnrichedServers.has(serverId)) return;
+    this.aiEnrichedServers.add(serverId);
+
+    const networkCtx = await this.buildNetworkContext(server);
+    const factionKey = resolveFactionKey(networkCtx);
+
+    // Lore content (faction servers only)
+    let lorePlan: ServerContentPlan = { directories: [], files: [] };
+    if (factionKey && networkCtx) {
+      try {
+        const loreResult = await this.generatePlanFromAI(
+          LORE_SYSTEM_PROMPT,
+          buildLorePrompt(networkCtx),
+          server.faction?.aiPersona?.systemPrompt ?? undefined,
+        );
+        if (loreResult) lorePlan = loreResult;
+      } catch (err) {
+        this.logger.debug({ err }, "Tier 2 lore generation failed");
+      }
+    }
+
+    // Ambient content (all servers)
+    let ambientPlan: ServerContentPlan = { directories: [], files: [] };
+    if (networkCtx) {
+      try {
+        const ambientResult = await this.generatePlanFromAI(
+          AMBIENT_SYSTEM_PROMPT,
+          buildAmbientPrompt(networkCtx),
+        );
+        if (ambientResult) ambientPlan = ambientResult;
+      } catch (err) {
+        this.logger.debug({ err }, "Tier 2 ambient generation failed");
+      }
+    }
+
+    const aiPlan: ServerContentPlan = {
+      directories: [...lorePlan.directories, ...ambientPlan.directories],
+      files: [...lorePlan.files, ...ambientPlan.files],
+    };
+
+    if (aiPlan.files.length === 0 && aiPlan.directories.length === 0) {
+      this.logger.debug({ serverId }, "Tier 2: AI produced no content — queueing for retry");
+
+      // Queue ambient prompt for retry if AI is temporarily down
+      if (networkCtx && this.aiService) {
+        const ambientPrompt = buildAmbientPrompt(networkCtx);
+        const sId = serverId;
+        const ownerId = server.ownerId || "system";
+        this.aiService.queueForRetry(ambientPrompt, AMBIENT_SYSTEM_PROMPT, async (response: string) => {
+          try {
+            const retryPlan = validateOrRetry(response, validateContentPlan);
+            if (retryPlan) {
+              await this.applyContentPlan(sId, ownerId, retryPlan);
+              this.logger.info({ serverId: sId, files: retryPlan.files.length }, "Tier 2 retry: AI content applied from queue");
+            }
+          } catch { /* retry callback failed — non-critical */ }
+        });
+      }
+      return;
+    }
+
+    // Apply AI-generated content on top of existing Tier 1 content
+    await this.applyContentPlan(serverId, server.ownerId || "system", aiPlan);
+
+    this.logger.info(
+      {
+        serverId,
+        serverName: server.name,
+        tier: 2,
+        loreFiles: lorePlan.files.length,
+        ambientFiles: ambientPlan.files.length,
+      },
+      "Tier 2 AI content applied",
+    );
+
+    // Notify connected players that new files appeared
+    try {
+      const { getService } = await import("../di/container");
+      const { SOCKET_IO } = await import("../di/tokens");
+      const io = getService<any>(SOCKET_IO);
+      io.to(`server:${serverId}`).emit("command:result", {
+        success: true,
+        output: `[${server.name}] New files detected.`,
+        timestamp: new Date(),
+      });
+    } catch {
+      // Socket.IO not available — no notification
+    }
+  }
+
+  /**
+   * Tier 3 helper: Provision all seeded servers that lack content.
+   * Called once on server startup.
+   */
+  public async provisionAllUnpopulatedServers(): Promise<void> {
+    const servers = await this.prisma.gameServer.findMany({
+      where: {
+        isPlayerHome: false,
+        type: { notIn: ["player_home"] },
+      },
+      select: { id: true, name: true },
+    });
+
+    let provisioned = 0;
+    for (const server of servers) {
+      const fileCount = await this.prisma.fileSystemNode.count({
+        where: { serverId: server.id },
+      });
+      if (fileCount <= 8) {
+        try {
+          await this.provisionServerContent(server.id, { skipAI: true });
+          provisioned++;
+        } catch (err) {
+          this.logger.warn({ err, serverId: server.id }, "Batch provision failed for server");
+        }
+      }
+    }
+
+    if (provisioned > 0) {
+      this.logger.info({ provisioned, total: servers.length }, "Batch provisioned unpopulated servers (Tier 1)");
     }
   }
 
@@ -2048,59 +2156,26 @@ export class ServerContentService {
         ? `${factionSystemPrompt}\n\n${systemPrompt}`
         : systemPrompt;
 
-      const { response } = await aiService.generateResponse(
+      const result = await aiService.generateResponse(
         userPrompt,
         fullSystemPrompt,
+        undefined,
+        '{ "directories": [{"path": "/..."}], "files": [{"path": "/...", "content": "string (100-3000 chars)", "isHidden": false}] }',
       );
 
-      // Extract JSON from the response
-      const jsonMatch = response.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) {
-        this.logger.debug("AI response did not contain valid JSON");
+      if (!result.success) {
+        this.logger.debug({ error: result.error }, "AI content plan generation returned error");
         return null;
       }
 
-      const parsed = JSON.parse(jsonMatch[0]);
-
-      // Validate structure
-      if (!Array.isArray(parsed.directories) || !Array.isArray(parsed.files)) {
-        this.logger.debug("AI JSON missing directories or files arrays");
+      // Extract and validate content plan from AI response
+      const validated = validateOrRetry(result.response, validateContentPlan);
+      if (!validated) {
+        this.logger.debug("AI content plan validation failed");
         return null;
       }
 
-      // Sanitize paths and enforce content quality
-      const plan: ServerContentPlan = {
-        directories: parsed.directories
-          .filter(
-            (d: any) => typeof d.path === "string" && d.path.startsWith("/"),
-          )
-          .map((d: any) => ({
-            path: d.path,
-            isHidden: Boolean(d.isHidden),
-            isProtected: Boolean(d.isProtected),
-          })),
-        files: parsed.files
-          .filter(
-            (f: any) =>
-              typeof f.path === "string" &&
-              f.path.startsWith("/") &&
-              typeof f.content === "string",
-          )
-          .map((f: any) => ({
-            path: f.path,
-            content: String(f.content).slice(0, 3000), // Cap content length (raised from 2000 for richer files)
-            isHidden: Boolean(f.isHidden),
-            isEncrypted: Boolean(f.isEncrypted),
-            isProtected: Boolean(f.isProtected),
-          })),
-      };
-
-      // Must have at least some content to be useful
-      if (plan.directories.length === 0 && plan.files.length === 0) {
-        return null;
-      }
-
-      return plan;
+      return validated;
     } catch (error) {
       this.logger.debug({ err: error }, "AI content plan generation failed");
       return null;
@@ -2730,33 +2805,37 @@ export class ServerContentService {
       serverName,
     );
 
-    const { response } = await aiService.generateResponse(
+    const result = await aiService.generateResponse(
       prompt,
       MISSION_FILES_SYSTEM_PROMPT,
     );
 
-    const jsonMatch = response.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) return [];
+    if (!result.success) return [];
 
-    const parsed = JSON.parse(jsonMatch[0]);
-    if (!Array.isArray(parsed.files)) return [];
+    const validateMissionFiles = (parsed: any): Array<PlannedFile & { purpose: string }> | null => {
+      if (!parsed || typeof parsed !== "object") return null;
+      if (!Array.isArray(parsed.files) || parsed.files.length === 0) return null;
+      const files = parsed.files
+        .filter(
+          (f: any) =>
+            typeof f.path === "string" &&
+            f.path.startsWith("/") &&
+            typeof f.content === "string" &&
+            typeof f.purpose === "string",
+        )
+        .map((f: any) => ({
+          path: f.path,
+          content: String(f.content).slice(0, 2000),
+          isHidden: Boolean(f.isHidden),
+          isEncrypted: Boolean(f.isEncrypted),
+          isProtected: false,
+          purpose: f.purpose,
+        }));
+      return files.length > 0 ? files : null;
+    };
 
-    return parsed.files
-      .filter(
-        (f: any) =>
-          typeof f.path === "string" &&
-          f.path.startsWith("/") &&
-          typeof f.content === "string" &&
-          typeof f.purpose === "string",
-      )
-      .map((f: any) => ({
-        path: f.path,
-        content: String(f.content).slice(0, 2000),
-        isHidden: Boolean(f.isHidden),
-        isEncrypted: Boolean(f.isEncrypted),
-        isProtected: false,
-        purpose: f.purpose,
-      }));
+    const validated = validateOrRetry(result.response, validateMissionFiles);
+    return validated ?? [];
   }
 
   /**

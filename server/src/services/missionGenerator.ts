@@ -403,13 +403,63 @@ Format as JSON:
   ]
 }`;
 
-      const response = await this.aiService.generateResponse(
+      const result = await this.aiService.generateResponse(
         prompt,
         gameMaster.systemPrompt,
+        undefined,
+        '{ "title": "string (3-80 chars)", "description": "string", "difficulty": "number (1-10)", "type": "hack|steal|explore|social", "objectives": [{"type": "string", "description": "string", "target": "number"}] }',
       );
 
+      if (!result.success) {
+        this.logger.warn({ error: result.error }, "AI mission generation failed");
+
+        // Queue for retry — when AI comes back, create the AI mission
+        const aiSvc = this.aiService;
+        const missionSvc = this.missionService;
+        const gmId = gameMaster.id;
+        const gmSystemPrompt = gameMaster.systemPrompt;
+        const pLevel = playerLevel;
+        aiSvc.queueForRetry(prompt, gmSystemPrompt, async (response) => {
+          try {
+            const m = response.match(/\{[\s\S]*\}/);
+            if (!m) return;
+            const aiMission = JSON.parse(m[0]);
+            if (!aiMission.title || !aiMission.objectives) return;
+
+            const difficulty = Math.min(10, Math.max(1, Math.floor(pLevel / 5)));
+            const objectives = (aiMission.objectives || []).map((obj: any) => ({
+              id: `obj_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+              type: obj.type || "hack",
+              description: obj.description || "Complete the objective",
+              target: obj.target || 1,
+              current: typeof obj.target === "number" ? 0 : false,
+              completed: false,
+            }));
+
+            if (objectives.length === 0) return;
+
+            await missionSvc.createMission({
+              title: aiMission.title,
+              description: aiMission.description || "Complete the mission.",
+              type: aiMission.type || "mixed",
+              difficulty,
+              objectives,
+              reward: {
+                xp: Math.floor(100 + 50 * pLevel),
+                credits: Math.floor(500 + 200 * pLevel),
+                reputation: difficulty * 5,
+              },
+              issuedBy: gmId,
+              createdBy: gmId,
+            });
+          } catch { /* ignore retry errors */ }
+        });
+
+        return null;
+      }
+
       // Parse AI response
-      const jsonMatch = response.response.match(/\{[\s\S]*\}/);
+      const jsonMatch = result.response.match(/\{[\s\S]*\}/);
       if (!jsonMatch) {
         return null;
       }

@@ -184,6 +184,30 @@ export class ArchitectInterventionExecutor {
           { type: intervention.type, output: result.output },
           "Intervention executed successfully",
         );
+
+        // Track intervention for outcome analysis
+        try {
+          const trackingId = `intv_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+          await db.client.storyLedger.create({
+            data: {
+              type: "architect_intervention",
+              category: "system",
+              actorId: "architect",
+              actorType: "system",
+              summary: `Architect ${intervention.type}: ${(intervention.reasoning || "").slice(0, 200)}`,
+              data: {
+                trackingId,
+                interventionType: intervention.type,
+                targetId: intervention.targetId || null,
+                output: result.output || null,
+              } as any,
+              weight: 3,
+              isProcessed: true,
+            },
+          });
+        } catch (trackErr) {
+          this.logger.debug({ err: trackErr }, "Failed to track intervention (non-critical)");
+        }
       } else {
         this.logger.warn(
           { type: intervention.type, error: result.error },
@@ -205,6 +229,116 @@ export class ArchitectInterventionExecutor {
         reasoning: intervention.reasoning,
         error: message,
       };
+    }
+  }
+
+  // ── Intervention Outcome Analysis ────────────────────────────────
+
+  /**
+   * Check outcomes of recent interventions (last 7 days).
+   * Returns a human-readable summary for the Architect's next evaluation.
+   */
+  async checkInterventionOutcomes(): Promise<string> {
+    try {
+      const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+
+      const interventions = await db.client.storyLedger.findMany({
+        where: {
+          type: "architect_intervention",
+          createdAt: { gte: sevenDaysAgo },
+        },
+        orderBy: { createdAt: "desc" },
+        take: 10,
+        select: { data: true, createdAt: true },
+      });
+
+      if (interventions.length === 0) return "";
+
+      const outcomes: string[] = [];
+      let cluesFound = 0;
+      let cluesPlanted = 0;
+      let missionsCreated = 0;
+      let missionsEngaged = 0;
+      let messagesSent = 0;
+      let messagesReplied = 0;
+
+      for (const intv of interventions) {
+        const d = intv.data as any;
+        if (!d?.interventionType) continue;
+
+        const ageHours = Math.round((Date.now() - intv.createdAt.getTime()) / (1000 * 60 * 60));
+        const ageLabel = ageHours < 24 ? `${ageHours}h ago` : `${Math.round(ageHours / 24)}d ago`;
+
+        switch (d.interventionType) {
+          case "plant_clue": {
+            cluesPlanted++;
+            // Check if clue file was accessed
+            if (d.output?.fileId) {
+              const file = await db.client.fileSystemNode.findUnique({
+                where: { id: d.output.fileId },
+                select: { lastAccessedAt: true },
+              });
+              const found = file?.lastAccessedAt && file.lastAccessedAt > intv.createdAt;
+              if (found) cluesFound++;
+              outcomes.push(`- ${ageLabel}: Planted clue → ${found ? "FOUND by player ✓" : "Not yet found ✗"}`);
+            } else {
+              outcomes.push(`- ${ageLabel}: Planted clue → Status unknown`);
+            }
+            break;
+          }
+          case "create_mission": {
+            missionsCreated++;
+            // Check if mission was accepted/completed
+            if (d.output?.missionId) {
+              const mission = await db.client.mission.findUnique({
+                where: { id: d.output.missionId },
+                select: { status: true },
+              });
+              const engaged = mission?.status === "active" || mission?.status === "completed";
+              if (engaged) missionsEngaged++;
+              outcomes.push(`- ${ageLabel}: Created mission → ${mission?.status || "unknown"}`);
+            } else {
+              outcomes.push(`- ${ageLabel}: Created mission → Status unknown`);
+            }
+            break;
+          }
+          case "send_message": {
+            messagesSent++;
+            // Check if player replied (look for PersonaMessage from player after this date)
+            if (d.targetId) {
+              const reply = await db.client.message.findFirst({
+                where: {
+                  senderId: d.targetId,
+                  timestamp: { gt: intv.createdAt },
+                },
+                select: { id: true },
+              });
+              if (reply) messagesReplied++;
+              outcomes.push(`- ${ageLabel}: Sent message → ${reply ? "Player replied ✓" : "No reply ✗"}`);
+            } else {
+              outcomes.push(`- ${ageLabel}: Sent message`);
+            }
+            break;
+          }
+          case "trigger_event": {
+            outcomes.push(`- ${ageLabel}: Triggered event "${(d.output?.title || "").slice(0, 40)}"`);
+            break;
+          }
+          default:
+            outcomes.push(`- ${ageLabel}: ${d.interventionType}`);
+        }
+      }
+
+      // Summary stats
+      const stats: string[] = [];
+      if (cluesPlanted > 0) stats.push(`Clues: ${cluesFound}/${cluesPlanted} found (${Math.round(cluesFound / cluesPlanted * 100)}%)`);
+      if (missionsCreated > 0) stats.push(`Missions: ${missionsEngaged}/${missionsCreated} engaged (${Math.round(missionsEngaged / missionsCreated * 100)}%)`);
+      if (messagesSent > 0) stats.push(`Messages: ${messagesReplied}/${messagesSent} replied (${Math.round(messagesReplied / messagesSent * 100)}%)`);
+
+      return `YOUR RECENT INTERVENTIONS & OUTCOMES (last 7 days):\n${outcomes.join("\n")}\n\nEffectiveness: ${stats.join(". ") || "No data yet."}`;
+    } catch (err) {
+      this.logger.debug({ err }, "Failed to check intervention outcomes");
+      return "";
     }
   }
 
