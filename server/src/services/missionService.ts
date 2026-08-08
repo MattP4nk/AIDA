@@ -1063,12 +1063,18 @@ class MissionService extends EventEmitter {
         if (newLevel > progress.level) {
           updateData.level = newLevel;
 
-          // Emit level up event to client
+          // Emit level up event + notification toast to client
           if (this.io) {
             this.io.to(`player:${userId}`).emit("player:levelup", {
               newLevel,
               experience: updateData.experience,
               userId,
+            });
+            this.io.to(`player:${userId}`).emit("notification", {
+              type: "levelup",
+              title: "Level Up!",
+              message: `You reached Level ${newLevel}!`,
+              severity: "success",
             });
           }
           // Emit for internal listeners (dynamic content, etc.)
@@ -1089,6 +1095,20 @@ class MissionService extends EventEmitter {
         where: { userId },
         data: updateData,
       });
+
+      // Send reward notification toast
+      if (this.io && (rewards.xp > 0 || rewards.credits > 0)) {
+        const parts: string[] = [];
+        if (rewards.xp > 0) parts.push(`+${rewards.xp} XP`);
+        if (rewards.credits > 0) parts.push(`+${rewards.credits} Credits`);
+        if (rewards.skillPoints && rewards.skillPoints > 0) parts.push(`+${rewards.skillPoints} Skill Points`);
+        this.io.to(`player:${userId}`).emit("notification", {
+          type: "reward",
+          title: "Rewards",
+          message: parts.join(", "),
+          severity: "success",
+        });
+      }
 
       // Grant items (shop items by name)
       if (rewards.items && rewards.items.length > 0) {

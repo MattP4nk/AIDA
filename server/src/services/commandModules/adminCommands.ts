@@ -1,5 +1,6 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext, CommandInfo } from "./interface";
+import { successResult, errorResult } from "./helpers";
 import type { Prisma } from "@prisma/client";
 import bcrypt from "bcryptjs";
 
@@ -46,12 +47,7 @@ export class AdminCommandsModule implements CommandModule {
     const userRole = context.role;
 
     if (roleLevel(userRole) < roleLevel("moderator")) {
-      return {
-        success: false,
-        output:
-          "ACCESS DENIED: Insufficient privileges.\nThis incident has been logged.",
-        timestamp: new Date(),
-      };
+      return errorResult("ACCESS DENIED: Insufficient privileges.\nThis incident has been logged.");
     }
 
     const sub = command.args[0]?.toLowerCase();
@@ -70,11 +66,7 @@ export class AdminCommandsModule implements CommandModule {
       "config",
     ]);
     if (ADMIN_ONLY.has(sub) && roleLevel(userRole) < roleLevel("admin")) {
-      return {
-        success: false,
-        output: "ACCESS DENIED: Admin clearance required.",
-        timestamp: new Date(),
-      };
+      return errorResult("ACCESS DENIED: Admin clearance required.");
     }
 
     switch (sub) {
@@ -109,11 +101,7 @@ export class AdminCommandsModule implements CommandModule {
       case "help":
         return this.showHelp(userRole);
       default:
-        return {
-          success: false,
-          output: `Unknown admin subcommand: ${sub}\nType 'admin help' for available commands.`,
-          timestamp: new Date(),
-        };
+        return errorResult(`Unknown admin subcommand: ${sub}\nType 'admin help' for available commands.`);
     }
   }
 
@@ -153,7 +141,7 @@ export class AdminCommandsModule implements CommandModule {
       `╚${"═".repeat(w + 2)}╝`,
     ];
 
-    return { success: true, output: lines.join("\n"), timestamp: new Date() };
+    return successResult(lines.join("\n"));
   }
 
   private async handlePlayers(context: CommandContext): Promise<CommandResult> {
@@ -162,11 +150,7 @@ export class AdminCommandsModule implements CommandModule {
     const now = Date.now();
 
     if (stats.sessions.length === 0) {
-      return {
-        success: true,
-        output: "No players currently online.",
-        timestamp: new Date(),
-      };
+      return successResult("No players currently online.");
     }
 
     // Fetch usernames and roles for all online users
@@ -209,7 +193,7 @@ export class AdminCommandsModule implements CommandModule {
       footer,
       ` ${stats.sessions.length} player(s) online`,
     ];
-    return { success: true, output: lines.join("\n"), timestamp: new Date() };
+    return successResult(lines.join("\n"));
   }
 
   private async handleWhois(
@@ -218,11 +202,7 @@ export class AdminCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const target = command.args[1];
     if (!target) {
-      return {
-        success: false,
-        output: "Usage: admin whois <username>",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: admin whois <username>");
     }
 
     const user = await context.db.client.user.findUnique({
@@ -242,11 +222,7 @@ export class AdminCommandsModule implements CommandModule {
     });
 
     if (!user) {
-      return {
-        success: false,
-        output: `User '${target}' not found.`,
-        timestamp: new Date(),
-      };
+      return errorResult(`User '${target}' not found.`);
     }
 
     const progress = await context.db.client.playerProgress.findUnique({
@@ -325,7 +301,7 @@ export class AdminCommandsModule implements CommandModule {
 
     lines.push(`╚${"═".repeat(w + 2)}╝`);
 
-    return { success: true, output: lines.join("\n"), timestamp: new Date() };
+    return successResult(lines.join("\n"));
   }
 
   private async handleAudit(
@@ -334,11 +310,7 @@ export class AdminCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const target = command.args[1];
     if (!target) {
-      return {
-        success: false,
-        output: "Usage: admin audit <username> [limit]",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: admin audit <username> [limit]");
     }
 
     const limit = Math.min(parseInt(command.args[2] ?? "10") || 10, 50);
@@ -349,11 +321,7 @@ export class AdminCommandsModule implements CommandModule {
     });
 
     if (!user) {
-      return {
-        success: false,
-        output: `User '${target}' not found.`,
-        timestamp: new Date(),
-      };
+      return errorResult(`User '${target}' not found.`);
     }
 
     const logs = await context.db.client.auditLog.findMany({
@@ -369,11 +337,7 @@ export class AdminCommandsModule implements CommandModule {
     });
 
     if (logs.length === 0) {
-      return {
-        success: true,
-        output: `No audit log entries for '${target}'.`,
-        timestamp: new Date(),
-      };
+      return successResult(`No audit log entries for '${target}'.`);
     }
 
     const lines = [`Audit log for ${target} (last ${logs.length}):\n`];
@@ -384,7 +348,7 @@ export class AdminCommandsModule implements CommandModule {
       );
     }
 
-    return { success: true, output: lines.join("\n"), timestamp: new Date() };
+    return successResult(lines.join("\n"));
   }
 
   private async handleKick(
@@ -393,11 +357,7 @@ export class AdminCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const target = command.args[1];
     if (!target) {
-      return {
-        success: false,
-        output: "Usage: admin kick <username> [reason]",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: admin kick <username> [reason]");
     }
 
     const user = await context.db.client.user.findUnique({
@@ -406,20 +366,12 @@ export class AdminCommandsModule implements CommandModule {
     });
 
     if (!user) {
-      return {
-        success: false,
-        output: `User '${target}' not found.`,
-        timestamp: new Date(),
-      };
+      return errorResult(`User '${target}' not found.`);
     }
 
     // Can't kick someone of equal or higher role
     if (roleLevel(user.role) >= roleLevel(context.role)) {
-      return {
-        success: false,
-        output: "Cannot kick a user of equal or higher rank.",
-        timestamp: new Date(),
-      };
+      return errorResult("Cannot kick a user of equal or higher rank.");
     }
 
     const reason = command.args.slice(2).join(" ") || "Kicked by administrator";
@@ -438,11 +390,7 @@ export class AdminCommandsModule implements CommandModule {
       reason,
     });
 
-    return {
-      success: true,
-      output: `Kicked '${target}': ${reason}`,
-      timestamp: new Date(),
-    };
+    return successResult(`Kicked '${target}': ${reason}`);
   }
 
   private async handleMute(
@@ -453,11 +401,7 @@ export class AdminCommandsModule implements CommandModule {
     const minutes = parseInt(command.args[2] ?? "");
 
     if (!target || !minutes || minutes < 1) {
-      return {
-        success: false,
-        output: "Usage: admin mute <username> <minutes>",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: admin mute <username> <minutes>");
     }
 
     const user = await context.db.client.user.findUnique({
@@ -466,19 +410,11 @@ export class AdminCommandsModule implements CommandModule {
     });
 
     if (!user) {
-      return {
-        success: false,
-        output: `User '${target}' not found.`,
-        timestamp: new Date(),
-      };
+      return errorResult(`User '${target}' not found.`);
     }
 
     if (roleLevel(user.role) >= roleLevel(context.role)) {
-      return {
-        success: false,
-        output: "Cannot mute a user of equal or higher rank.",
-        timestamp: new Date(),
-      };
+      return errorResult("Cannot mute a user of equal or higher rank.");
     }
 
     const mutedUntil = new Date(Date.now() + minutes * 60 * 1000);
@@ -492,11 +428,7 @@ export class AdminCommandsModule implements CommandModule {
       minutes,
     });
 
-    return {
-      success: true,
-      output: `Muted '${target}' for ${minutes} minute(s). Expires: ${mutedUntil.toISOString().slice(0, 16)}`,
-      timestamp: new Date(),
-    };
+    return successResult(`Muted '${target}' for ${minutes} minute(s). Expires: ${mutedUntil.toISOString().slice(0, 16)}`);
   }
 
   private async handleUnmute(
@@ -505,11 +437,7 @@ export class AdminCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const target = command.args[1];
     if (!target) {
-      return {
-        success: false,
-        output: "Usage: admin unmute <username>",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: admin unmute <username>");
     }
 
     const user = await context.db.client.user.findUnique({
@@ -518,11 +446,7 @@ export class AdminCommandsModule implements CommandModule {
     });
 
     if (!user) {
-      return {
-        success: false,
-        output: `User '${target}' not found.`,
-        timestamp: new Date(),
-      };
+      return errorResult(`User '${target}' not found.`);
     }
 
     await context.db.client.user.update({
@@ -534,11 +458,7 @@ export class AdminCommandsModule implements CommandModule {
       target,
     });
 
-    return {
-      success: true,
-      output: `Unmuted '${target}'.`,
-      timestamp: new Date(),
-    };
+    return successResult(`Unmuted '${target}'.`);
   }
 
   // ==================== ADMIN-ONLY COMMANDS ====================
@@ -549,11 +469,7 @@ export class AdminCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const target = command.args[1];
     if (!target) {
-      return {
-        success: false,
-        output: "Usage: admin ban <username> [reason]",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: admin ban <username> [reason]");
     }
 
     const user = await context.db.client.user.findUnique({
@@ -562,27 +478,15 @@ export class AdminCommandsModule implements CommandModule {
     });
 
     if (!user) {
-      return {
-        success: false,
-        output: `User '${target}' not found.`,
-        timestamp: new Date(),
-      };
+      return errorResult(`User '${target}' not found.`);
     }
 
     if (roleLevel(user.role) >= roleLevel(context.role)) {
-      return {
-        success: false,
-        output: "Cannot ban a user of equal or higher rank.",
-        timestamp: new Date(),
-      };
+      return errorResult("Cannot ban a user of equal or higher rank.");
     }
 
     if (!user.isActive) {
-      return {
-        success: false,
-        output: `'${target}' is already banned.`,
-        timestamp: new Date(),
-      };
+      return errorResult(`'${target}' is already banned.`);
     }
 
     const reason = command.args.slice(2).join(" ") || "Banned by administrator";
@@ -613,11 +517,7 @@ export class AdminCommandsModule implements CommandModule {
       reason,
     });
 
-    return {
-      success: true,
-      output: `Banned '${target}': ${reason}`,
-      timestamp: new Date(),
-    };
+    return successResult(`Banned '${target}': ${reason}`);
   }
 
   private async handleUnban(
@@ -626,11 +526,7 @@ export class AdminCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const target = command.args[1];
     if (!target) {
-      return {
-        success: false,
-        output: "Usage: admin unban <username>",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: admin unban <username>");
     }
 
     const user = await context.db.client.user.findUnique({
@@ -639,19 +535,11 @@ export class AdminCommandsModule implements CommandModule {
     });
 
     if (!user) {
-      return {
-        success: false,
-        output: `User '${target}' not found.`,
-        timestamp: new Date(),
-      };
+      return errorResult(`User '${target}' not found.`);
     }
 
     if (user.isActive) {
-      return {
-        success: false,
-        output: `'${target}' is not banned.`,
-        timestamp: new Date(),
-      };
+      return errorResult(`'${target}' is not banned.`);
     }
 
     await context.db.client.user.update({
@@ -661,11 +549,7 @@ export class AdminCommandsModule implements CommandModule {
 
     await this.auditAction(context, "admin_unban", "user", user.id, { target });
 
-    return {
-      success: true,
-      output: `Unbanned '${target}'. They can now log in again.`,
-      timestamp: new Date(),
-    };
+    return successResult(`Unbanned '${target}'. They can now log in again.`);
   }
 
   private async handleSetRole(
@@ -676,19 +560,11 @@ export class AdminCommandsModule implements CommandModule {
     const newRole = command.args[2]?.toLowerCase();
 
     if (!target || !newRole) {
-      return {
-        success: false,
-        output: "Usage: admin setrole <username> <player|moderator|admin>",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: admin setrole <username> <player|moderator|admin>");
     }
 
     if (!["player", "moderator", "admin"].includes(newRole)) {
-      return {
-        success: false,
-        output: "Invalid role. Must be: player, moderator, or admin",
-        timestamp: new Date(),
-      };
+      return errorResult("Invalid role. Must be: player, moderator, or admin");
     }
 
     const user = await context.db.client.user.findUnique({
@@ -697,38 +573,22 @@ export class AdminCommandsModule implements CommandModule {
     });
 
     if (!user) {
-      return {
-        success: false,
-        output: `User '${target}' not found.`,
-        timestamp: new Date(),
-      };
+      return errorResult(`User '${target}' not found.`);
     }
 
     // Prevent self-demotion
     if (user.id === context.userId) {
-      return {
-        success: false,
-        output: "Cannot change your own role.",
-        timestamp: new Date(),
-      };
+      return errorResult("Cannot change your own role.");
     }
 
     // Can't modify someone of equal or higher role
     if (roleLevel(user.role) >= roleLevel(context.role)) {
-      return {
-        success: false,
-        output: "Cannot change role of a user with equal or higher rank.",
-        timestamp: new Date(),
-      };
+      return errorResult("Cannot change role of a user with equal or higher rank.");
     }
 
     // Can't promote above own level
     if (roleLevel(newRole) >= roleLevel(context.role)) {
-      return {
-        success: false,
-        output: "Cannot set a role equal to or above your own.",
-        timestamp: new Date(),
-      };
+      return errorResult("Cannot set a role equal to or above your own.");
     }
 
     await context.db.client.user.update({
@@ -742,11 +602,7 @@ export class AdminCommandsModule implements CommandModule {
       newRole,
     });
 
-    return {
-      success: true,
-      output: `Changed '${target}' role: ${user.role} → ${newRole}`,
-      timestamp: new Date(),
-    };
+    return successResult(`Changed '${target}' role: ${user.role} → ${newRole}`);
   }
 
   private async handleBroadcast(
@@ -755,11 +611,7 @@ export class AdminCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const message = command.args.slice(1).join(" ");
     if (!message) {
-      return {
-        success: false,
-        output: "Usage: admin broadcast <message>",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: admin broadcast <message>");
     }
 
     if (context.io) {
@@ -774,11 +626,7 @@ export class AdminCommandsModule implements CommandModule {
       message,
     });
 
-    return {
-      success: true,
-      output: `Broadcast sent: ${message}`,
-      timestamp: new Date(),
-    };
+    return successResult(`Broadcast sent: ${message}`);
   }
 
   private async handleCleanup(context: CommandContext): Promise<CommandResult> {
@@ -786,11 +634,7 @@ export class AdminCommandsModule implements CommandModule {
     await this.auditAction(context, "admin_cleanup", "system", null, {
       sessionsRemoved: count,
     });
-    return {
-      success: true,
-      output: `Cleaned up ${count} idle session(s).`,
-      timestamp: new Date(),
-    };
+    return successResult(`Cleaned up ${count} idle session(s).`);
   }
 
   private async handleServers(context: CommandContext): Promise<CommandResult> {
@@ -810,11 +654,7 @@ export class AdminCommandsModule implements CommandModule {
     });
 
     if (servers.length === 0) {
-      return {
-        success: true,
-        output: "No game servers found.",
-        timestamp: new Date(),
-      };
+      return successResult("No game servers found.");
     }
 
     const header = `┌${"─".repeat(22)}┬${"─".repeat(17)}┬${"─".repeat(12)}┬${"─".repeat(8)}┬${"─".repeat(10)}┐`;
@@ -836,7 +676,7 @@ export class AdminCommandsModule implements CommandModule {
       footer,
       ` ${servers.length} server(s)`,
     ];
-    return { success: true, output: lines.join("\n"), timestamp: new Date() };
+    return successResult(lines.join("\n"));
   }
 
   private async handleResetPassword(
@@ -845,11 +685,7 @@ export class AdminCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const target = command.args[1];
     if (!target) {
-      return {
-        success: false,
-        output: "Usage: admin resetpw <username>",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: admin resetpw <username>");
     }
 
     const user = await context.db.client.user.findUnique({
@@ -858,19 +694,11 @@ export class AdminCommandsModule implements CommandModule {
     });
 
     if (!user) {
-      return {
-        success: false,
-        output: `User '${target}' not found.`,
-        timestamp: new Date(),
-      };
+      return errorResult(`User '${target}' not found.`);
     }
 
     if (roleLevel(user.role) >= roleLevel(context.role)) {
-      return {
-        success: false,
-        output: "Cannot reset password of a user with equal or higher rank.",
-        timestamp: new Date(),
-      };
+      return errorResult("Cannot reset password of a user with equal or higher rank.");
     }
 
     // Generate temp password
@@ -896,11 +724,7 @@ export class AdminCommandsModule implements CommandModule {
       target,
     });
 
-    return {
-      success: true,
-      output: `Password reset for '${target}'.\nTemporary password: ${tempPw}\nAll sessions invalidated.`,
-      timestamp: new Date(),
-    };
+    return successResult(`Password reset for '${target}'.\nTemporary password: ${tempPw}\nAll sessions invalidated.`);
   }
 
   // ==================== HELP ====================
@@ -936,7 +760,7 @@ export class AdminCommandsModule implements CommandModule {
 
     lines.push("╚══════════════════════════════════════════════╝");
 
-    return { success: true, output: lines.join("\n"), timestamp: new Date() };
+    return successResult(lines.join("\n"));
   }
 
   // ==================== HELPERS ====================

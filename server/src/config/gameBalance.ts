@@ -203,6 +203,9 @@ export const BOUNTY_BASE_REP = 5;
 /** Security threshold below which revisits skip the challenge. */
 export const CONNECTION_CHALLENGE_SKIP_THRESHOLD = 2;
 
+/** Security level above which a backdoor suggestion is shown after challenge success. */
+export const BACKDOOR_CHALLENGE_SUGGESTION_THRESHOLD = 3;
+
 /** Handshake challenge settings by difficulty tier. */
 export const HANDSHAKE_CONFIG = {
   easy:   { packets: 3, real: 2, decoys: 1, timeLimit: 45, maxAttempts: 3 },

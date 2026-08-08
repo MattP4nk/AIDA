@@ -1,4 +1,4 @@
-import express, { Application } from "express";
+import express, { Application, Request, Response, NextFunction, RequestHandler } from "express";
 import logger from "../logger";
 import cors from "cors";
 import helmet from "helmet";
@@ -14,6 +14,20 @@ import {
   detectPathTraversal,
 } from "./validation";
 import { csrfProtection, csrfTokenEndpoint } from "./csrf";
+import { GameError } from "../../../shared/types";
+import { formatServerError } from "../utils/safeExecute";
+
+/**
+ * Wrap an async Express route handler to catch errors automatically.
+ * GameError subclasses map to their statusCode; all others bubble to the global handler.
+ */
+export function asyncHandler(
+  fn: (req: Request, res: Response, next: NextFunction) => Promise<any>
+): RequestHandler {
+  return (req, res, next) => {
+    Promise.resolve(fn(req as Request, res as Response, next)).catch(next);
+  };
+}
 
 /**
  * Configure all Express middleware in the correct order.
@@ -109,13 +123,22 @@ export async function setupRoutes(app: Application): Promise<void> {
   const adminRoutes = (await import("../routes/admin")).default;
   app.use(adminRoutes);
 
+  // Admin API (CRUD for game entities)
+  const adminApi = (await import("../routes/adminApi")).default;
+  app.use("/api/admin", adminApi);
+
+  // Admin panel static files
+  const path = await import("path");
+  const adminPanelPath = path.join(__dirname, "../../public/admin");
+  app.use("/admin", (await import("express")).static(adminPanelPath));
+
   // Command execution route — THE MAIN INTERFACE
   app.use("/api/command", (await import("../routes/command")).default);
 
   // Command list endpoint — for client command palette
-  app.get("/api/commands", (_req, res) => {
+  app.get("/api/commands", async (_req, res) => {
     try {
-      const { createAllModules } = require("../services/commandModules/registry");
+      const { createAllModules } = await import("../services/commandModules/registry");
       const modules = createAllModules();
       const commands: Array<{ name: string; category: string; description: string }> = [];
       for (const mod of modules) {
@@ -164,14 +187,26 @@ export function setupErrorHandling(app: Application): void {
       res: express.Response,
       _next: express.NextFunction,
     ) => {
-      logger.error({ err }, "Unhandled error");
+      // formatServerError classifies ALL errors uniformly:
+      // Prisma errors → clean message + correct status code
+      // GameError subclasses → preserve code + statusCode
+      // JWT errors → 401
+      // Generic errors → 500 with safe message
+      const formatted = formatServerError(err, "HTTP Request");
 
-      const isDev = config.NODE_ENV === "development";
+      // Log with full error details (pino serializes the stack trace)
+      if (formatted.statusCode >= 500) {
+        logger.error({ err, code: formatted.code }, formatted.logMessage);
+      } else {
+        logger.warn({ err, code: formatted.code }, formatted.logMessage);
+      }
 
-      res.status(500).json({
+      res.status(formatted.statusCode).json({
         success: false,
-        error: isDev ? err.message : "Internal server error",
-        stack: isDev ? err.stack : undefined,
+        error: formatted.message,
+        code: formatted.code,
+        // Include GameError details if present
+        ...(err instanceof GameError && err.details ? { details: err.details } : {}),
         timestamp: new Date().toISOString(),
       });
     },

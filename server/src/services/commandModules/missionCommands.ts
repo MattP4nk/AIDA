@@ -1,5 +1,6 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
+import { successResult, errorResult } from "./helpers";
 import logger from "../../logger";
 import {
   boxTop,
@@ -53,19 +54,10 @@ export class MissionCommandsModule implements CommandModule {
         case "story":
           return await this.handleStory(command, context);
         default:
-          return {
-            success: false,
-            output: `Mission command not implemented: ${command.command}`,
-            timestamp: new Date(),
-          };
+          return errorResult(`Mission command not implemented: ${command.command}`);
       }
     } catch (error) {
-      return {
-        success: false,
-        output: "Mission command failed",
-        error: error instanceof Error ? error.message : "Unknown error",
-        timestamp: new Date(),
-      };
+      return errorResult("Mission command failed", error instanceof Error ? error.message : "Unknown error");
     }
   }
 
@@ -206,7 +198,7 @@ export class MissionCommandsModule implements CommandModule {
       lines.push(boxRow("  No missions found.", W));
       lines.push(boxRow("  Check back later or explore the network.", W));
       lines.push(boxBottom(W));
-      return { success: true, output: render(lines), timestamp: new Date() };
+      return successResult(render(lines));
     }
 
     // Group by status
@@ -323,11 +315,7 @@ export class MissionCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const missionId = command.args?.[0];
     if (!missionId) {
-      return {
-        success: false,
-        output: "Usage: mission <mission_id>",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: mission <mission_id>");
     }
 
     const missionService = context.services.missionService;
@@ -339,11 +327,7 @@ export class MissionCommandsModule implements CommandModule {
     ) as any;
 
     if (!mission) {
-      return {
-        success: false,
-        output: `Mission not found: ${missionId}`,
-        timestamp: new Date(),
-      };
+      return errorResult(`Mission not found: ${missionId}`);
     }
 
     const W = 56;
@@ -463,7 +447,7 @@ export class MissionCommandsModule implements CommandModule {
     }
     lines.push(boxBottom(W));
 
-    return { success: true, output: render(lines), timestamp: new Date() };
+    return successResult(render(lines));
   }
 
   private async handleAccept(
@@ -472,11 +456,7 @@ export class MissionCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const missionId = command.args?.[0];
     if (!missionId) {
-      return {
-        success: false,
-        output: "Usage: accept <mission_id>",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: accept <mission_id>");
     }
 
     const missionService = context.services.missionService;
@@ -501,7 +481,7 @@ export class MissionCommandsModule implements CommandModule {
       );
       const accepted = this.resolveMissionId(missions, fullMissionId) as any;
 
-      const W = 52;
+      const W = context.terminalWidth;
       const lines: string[] = [];
       lines.push(boxTop(W));
       lines.push(boxCenter("MISSION ACCEPTED", W));
@@ -554,14 +534,10 @@ export class MissionCommandsModule implements CommandModule {
       lines.push(boxRow(" Use 'progress' to track objectives.", W));
       lines.push(boxBottom(W));
 
-      return { success: true, output: render(lines), timestamp: new Date() };
+      return successResult(render(lines));
     } catch (error) {
       const msg = error instanceof Error ? error.message : "Unknown error";
-      return {
-        success: false,
-        output: `Failed to accept mission: ${msg}`,
-        timestamp: new Date(),
-      };
+      return errorResult(`Failed to accept mission: ${msg}`);
     }
   }
 
@@ -571,11 +547,7 @@ export class MissionCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const missionId = command.args?.[0];
     if (!missionId) {
-      return {
-        success: false,
-        output: "Usage: abandon <mission_id>",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: abandon <mission_id>");
     }
 
     const missionService = context.services.missionService;
@@ -593,7 +565,7 @@ export class MissionCommandsModule implements CommandModule {
 
       await missionService.abandonMission(context.userId, fullMissionId);
 
-      const W = 52;
+      const W = context.terminalWidth;
       const lines: string[] = [];
       lines.push(sBoxTop(W));
       lines.push(sBoxRow(" [!] MISSION ABANDONED", W));
@@ -608,14 +580,10 @@ export class MissionCommandsModule implements CommandModule {
       }
       lines.push(sBoxBottom(W));
 
-      return { success: true, output: render(lines), timestamp: new Date() };
+      return successResult(render(lines));
     } catch (error) {
       const msg = error instanceof Error ? error.message : "Unknown error";
-      return {
-        success: false,
-        output: `Failed to abandon mission: ${msg}`,
-        timestamp: new Date(),
-      };
+      return errorResult(`Failed to abandon mission: ${msg}`);
     }
   }
 
@@ -630,12 +598,7 @@ export class MissionCommandsModule implements CommandModule {
     );
 
     if (!missions || missions.length === 0) {
-      return {
-        success: true,
-        output:
-          "No active missions. Use 'missions' to browse available missions.",
-        timestamp: new Date(),
-      };
+      return successResult("No active missions. Use 'missions' to browse available missions.");
     }
 
     const W = 56;
@@ -721,22 +684,13 @@ export class MissionCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const storyService = context.services.storyMissionService;
     if (!storyService) {
-      return {
-        success: false,
-        output: "Story system unavailable.",
-        timestamp: new Date(),
-      };
+      return errorResult("Story system unavailable.");
     }
 
     const arcs = await storyService.getPlayerStoryArcs(context.userId);
 
     if (arcs.length === 0) {
-      return {
-        success: true,
-        output:
-          "No story arcs available.\nStory arcs are offered by faction leaders — increase your faction standing to unlock them.",
-        timestamp: new Date(),
-      };
+      return successResult("No story arcs available.\nStory arcs are offered by faction leaders — increase your faction standing to unlock them.");
     }
 
     const W = 58;
@@ -770,7 +724,7 @@ export class MissionCommandsModule implements CommandModule {
     lines.push(boxRow(" 'story abandon <id>' to abandon", W));
     lines.push(boxBottom(W));
 
-    return { success: true, output: render(lines), timestamp: new Date() };
+    return successResult(render(lines));
   }
 
   private async handleStory(
@@ -779,46 +733,25 @@ export class MissionCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const storyService = context.services.storyMissionService;
     if (!storyService) {
-      return {
-        success: false,
-        output: "Story system unavailable.",
-        timestamp: new Date(),
-      };
+      return errorResult("Story system unavailable.");
     }
 
     const action = command.args?.[0];
     if (!action) {
-      return {
-        success: false,
-        output: "Usage: story <arc_id>\n       story abandon <arc_id>",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: story <arc_id>\n       story abandon <arc_id>");
     }
 
     // Handle abandon
     if (action === "abandon") {
       const arcId = command.args?.[1];
       if (!arcId) {
-        return {
-          success: false,
-          output: "Usage: story abandon <arc_id>",
-          timestamp: new Date(),
-        };
+        return errorResult("Usage: story abandon <arc_id>");
       }
       const result = await storyService.abandonStoryArc(context.userId, arcId);
       if (!result.success) {
-        return {
-          success: false,
-          output: result.error || "Failed to abandon story arc.",
-          timestamp: new Date(),
-        };
+        return errorResult(result.error || "Failed to abandon story arc.");
       }
-      return {
-        success: true,
-        output:
-          "Story arc abandoned. Any active missions from this arc have been cancelled.",
-        timestamp: new Date(),
-      };
+      return successResult("Story arc abandoned. Any active missions from this arc have been cancelled.");
     }
 
     // View story arc details
@@ -826,11 +759,7 @@ export class MissionCommandsModule implements CommandModule {
     const arc = await storyService.getStoryArc(arcId);
 
     if (!arc) {
-      return {
-        success: false,
-        output: `Story arc not found: ${arcId}`,
-        timestamp: new Date(),
-      };
+      return errorResult(`Story arc not found: ${arcId}`);
     }
 
     const steps = arc.steps as any[];
@@ -870,6 +799,6 @@ export class MissionCommandsModule implements CommandModule {
     }
 
     lines.push(boxBottom(W));
-    return { success: true, output: render(lines), timestamp: new Date() };
+    return successResult(render(lines));
   }
 }

@@ -96,3 +96,12 @@ export const KEY_FRAGMENT_SERVICE = "KeyFragmentService";
 
 // Connection Challenge
 export const CONNECTION_CHALLENGE_SERVICE = "ConnectionChallengeService";
+
+// Content Draft (AI-created content review pipeline)
+export const CONTENT_DRAFT_SERVICE = "ContentDraftService";
+
+// Reference Validation (AI content coherence — backfill missing servers/forums)
+export const REFERENCE_VALIDATION_SERVICE = "ReferenceValidationService";
+
+// Epoch Scheduling (timed story events)
+export const EPOCH_SCHEDULER_SERVICE = "EpochSchedulerService";

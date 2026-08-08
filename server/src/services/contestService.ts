@@ -5,6 +5,7 @@ import { Server as SocketIOServer } from "socket.io";
 import { ServerContestInfo, FactionResources } from "../../../shared/types";
 import { getService } from "../di/container";
 import { LOGGER, PERSONA_SERVICE, DYNAMIC_CONTENT_SERVICE } from "../di/tokens";
+import { safeExecute } from "../utils/safeExecute";
 
 /** Cost to initiate a contest */
 const CONTEST_COST: Partial<FactionResources> = { credits: 500, compute: 200 };
@@ -209,7 +210,7 @@ export default class ContestService {
       where: { userId },
     });
 
-    let factionId: string | null = membership?.factionId || null;
+    const factionId: string | null = membership?.factionId || null;
 
     // Validate side matches faction
     if (side === "attack" && factionId !== contest.attackingFactionId) {
@@ -399,34 +400,40 @@ export default class ContestService {
     });
 
     // Notify faction leaders via PersonaService (lazy resolution to avoid circular dep)
-    try {
-      const personaService = getService<import("./personaService").PersonaService>(PERSONA_SERVICE);
-      const attackerWon = winnerId === contest.attackingFactionId;
+    await safeExecute({
+      fn: async () => {
+        const personaService = getService<import("./personaService").PersonaService>(PERSONA_SERVICE);
+        const attackerWon = winnerId === contest.attackingFactionId;
 
-      // Notify attacker
-      await personaService.onServerContestResolved(contest.attackingFactionId, contest.serverId, attackerWon);
+        // Notify attacker
+        await personaService.onServerContestResolved(contest.attackingFactionId, contest.serverId, attackerWon);
 
-      // Notify defender (if any)
-      if (contest.defendingFactionId) {
-        await personaService.onServerContestResolved(contest.defendingFactionId, contest.serverId, !attackerWon);
-      }
-    } catch (error) {
-      this.logger.warn({ error }, "Could not notify personas of contest resolution");
-    }
+        // Notify defender (if any)
+        if (contest.defendingFactionId) {
+          await personaService.onServerContestResolved(contest.defendingFactionId, contest.serverId, !attackerWon);
+        }
+      },
+      context: "Notify personas of contest resolution",
+      logger: this.logger,
+      silent: true,
+    })();
 
     // Inject territory notice on conquered server
-    try {
-      const dynamicContent = getService<import("./dynamicContentService").DynamicContentService>(DYNAMIC_CONTENT_SERVICE);
-      const attackerWon = winnerId === contest.attackingFactionId;
-      await dynamicContent.processEvent("contest:resolved", {
-        serverId: contest.serverId,
-        contestId,
-        winnerName: attackerWon ? contest.attackingFaction.name : (contest.defendingFaction?.name || "defenders"),
-        loserName: attackerWon ? (contest.defendingFaction?.name || "uncontested") : contest.attackingFaction.name,
-      });
-    } catch {
-      // DynamicContentService may not be available
-    }
+    await safeExecute({
+      fn: async () => {
+        const dynamicContent = getService<import("./dynamicContentService").DynamicContentService>(DYNAMIC_CONTENT_SERVICE);
+        const attackerWon = winnerId === contest.attackingFactionId;
+        await dynamicContent.processEvent("contest:resolved", {
+          serverId: contest.serverId,
+          contestId,
+          winnerName: attackerWon ? contest.attackingFaction.name : (contest.defendingFaction?.name || "defenders"),
+          loserName: attackerWon ? (contest.defendingFaction?.name || "uncontested") : contest.attackingFaction.name,
+        });
+      },
+      context: "Inject territory notice on conquered server",
+      logger: this.logger,
+      silent: true,
+    })();
 
     this.logger.info(
       { contestId, winnerId, serverId: contest.serverId },

@@ -1432,20 +1432,72 @@ model Bounty {
 }
 
 model NarrativeEpoch {
-  id         String    @id @default(cuid())
-  epochNum   Int       @unique @map("epoch_num")
-  title      String // "The Awakening", "Faction Wars", etc.
-  summary    String    @db.Text // AI-generated summary of what defines this epoch
-  worldState Json      @default("{}") @map("world_state") // Snapshot: faction standings, tensions, key events
-  triggers   Json      @default("[]") // What conditions/events triggered this epoch
-  decisions  Json      @default("[]") // Key Architect decisions during this epoch
-  startedAt  DateTime  @default(now()) @map("started_at")
-  endedAt    DateTime? @map("ended_at")
+  id          String    @id @default(cuid())
+  epochNum    Int       @unique @map("epoch_num")
+  title       String // "The Awakening", "Faction Wars", etc.
+  description String?   @db.Text // Admin-friendly longer description
+  summary     String    @db.Text // AI-generated summary of what defines this epoch
+  worldState  Json      @default("{}") @map("world_state") // Snapshot: faction standings, tensions, key events
+  triggers    Json      @default("[]") // What conditions/events triggered this epoch
+  decisions   Json      @default("[]") // Key Architect decisions during this epoch
+  status      String    @default("draft") // "draft" | "active" | "completed" | "archived"
+  order       Int       @default(0) // Explicit ordering for admin timeline
+  metadata    Json      @default("{}") // Arbitrary admin metadata
+  startedAt   DateTime  @default(now()) @map("started_at")
+  endedAt     DateTime? @map("ended_at")
+
+  events EpochEvent[]
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
+  @@index([status])
   @@map("narrative_epochs")
+}
+
+model EpochEvent {
+  id          String    @id @default(cuid())
+  epochId     String    @map("epoch_id")
+  name        String
+  description String    @db.Text
+  triggerType String    @default("manual") // "scheduled" | "manual" | "condition"
+  scheduledAt DateTime? @map("scheduled_at")
+  condition   Json? // For condition-based triggers
+  payload     Json      @default("{}") // { action: "create_draft"|"architect_intervention"|"world_event"|"advance_epoch"|"toggle_feature", ...data }
+  status      String    @default("pending") // "pending" | "fired" | "cancelled" | "failed"
+  firedAt     DateTime? @map("fired_at")
+  result      Json? // Outcome after firing
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  epoch NarrativeEpoch @relation(fields: [epochId], references: [id], onDelete: Cascade)
+
+  @@index([epochId])
+  @@index([status, scheduledAt])
+  @@map("epoch_events")
+}
+
+model ContentDraft {
+  id          String    @id @default(cuid())
+  type        String // "server" | "file" | "link" | "mission" | "forum_post" | "network" | "forum"
+  title       String
+  description String    @db.Text
+  payload     Json // Full creation data
+  source      String // "ai_content" | "architect" | "admin" | "epoch_event"
+  sourceId    String?   @map("source_id")
+  status      String    @default("draft") // "draft" | "approved" | "rejected" | "applied"
+  reviewNote  String?   @map("review_note") @db.Text
+  reviewedBy  String?   @map("reviewed_by")
+  reviewedAt  DateTime? @map("reviewed_at")
+  appliedAt   DateTime? @map("applied_at")
+  resultId    String?   @map("result_id") // ID of created entity after approval
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  @@index([status])
+  @@index([source])
+  @@index([type])
+  @@map("content_drafts")
 }
 
 model StoryLedger {

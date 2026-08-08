@@ -177,10 +177,15 @@
 
         try {
             // Use 'mail' command if subject is provided, otherwise 'msg'
+            // Quote recipient if it contains spaces (e.g., "The Architect")
             const encryptFlag = isEncrypted ? " --encrypt" : "";
+            const cleanRecipient = composeRecipient.replace(/"/g, "");
+            const safeRecipient = cleanRecipient.includes(" ")
+                ? `"${cleanRecipient}"`
+                : cleanRecipient;
             const command = composeSubject.trim()
-                ? `mail ${composeRecipient} ${composeSubject} ${composeBody}${encryptFlag}`
-                : `msg ${composeRecipient} ${composeBody}${encryptFlag}`;
+                ? `mail ${safeRecipient} ${composeSubject} ${composeBody}${encryptFlag}`
+                : `msg ${safeRecipient} ${composeBody}${encryptFlag}`;
             const response = await terminalService.executeCommand(command);
 
             if (response.success) {

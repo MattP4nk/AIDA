@@ -355,13 +355,14 @@ async function handleCommandExecute(
     args?: string[];
     serverId?: string;
     terminalId?: string;
+    terminalCols?: number;
   },
 ): Promise<void> {
   const userId = getUserId(socket, "command:error");
   if (!userId) return;
 
   try {
-    const { command, args, serverId, terminalId } = data;
+    const { command, args, serverId, terminalId, terminalCols } = data;
 
     if (!command || typeof command !== "string") {
       socket.emit("command:error", {
@@ -396,6 +397,7 @@ async function handleCommandExecute(
       parsed,
       serverId,
       terminalId,
+      terminalCols ? Number(terminalCols) : undefined,
     );
 
     // Send result

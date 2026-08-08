@@ -10,6 +10,8 @@ import type {
 import { CommandModule, CommandContext } from "./commandModules/interface";
 import { createAllModules } from "./commandModules/registry";
 import { checkSkillRequirement } from "./commandModules/skillRequirements";
+import { TERM_WIDTH } from "./commandModules/asciiBox";
+import { formatCommandOutput } from "./commandModules/outputFormatter";
 import { injectable, inject } from "tsyringe";
 import type { Logger } from "pino";
 import {
@@ -18,6 +20,7 @@ import {
   PROGRESS_SERVICE,
   GAME_STATE_MANAGER,
 } from "../di/tokens";
+import { safeExecute } from "../utils/safeExecute";
 import { getService } from "../di/container";
 import * as TOKENS from "../di/tokens";
 import {
@@ -123,7 +126,7 @@ class CommandProcessor extends EventEmitter {
     }
   }
 
-  private async buildCommandContext(userId: string): Promise<CommandContext> {
+  private async buildCommandContext(userId: string, terminalCols?: number): Promise<CommandContext> {
     const fileService = this.resolveService<FileService>(TOKENS.FILE_SERVICE)!;
     const shopService = this.resolveService<ShopService>(TOKENS.SHOP_SERVICE)!;
     const missionService = this.resolveService<MissionService>(
@@ -211,6 +214,7 @@ class CommandProcessor extends EventEmitter {
     return {
       userId,
       role: user?.role ?? "player",
+      terminalWidth: terminalCols && terminalCols > 40 ? Math.min(terminalCols - 2, 200) : TERM_WIDTH,
       db,
       fileService,
       ...(this.io ? { io: this.io } : {}),
@@ -420,12 +424,11 @@ class CommandProcessor extends EventEmitter {
 
       return { valid: true };
     } catch (error) {
-      this.logger.error({ err: error }, "Command validation error");
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.logger.error({ err, context: "Command validation" }, `[Command validation] ${err.message}`);
       return {
         valid: false,
-        error:
-          "Validation failed: " +
-          (error instanceof Error ? error.message : "Unknown error"),
+        error: `Validation failed: ${err.message}`,
       };
     }
   }
@@ -507,6 +510,7 @@ class CommandProcessor extends EventEmitter {
     parsedCommand: ParsedCommand,
     serverId?: string,
     terminalId?: string,
+    terminalCols?: number,
   ): Promise<CommandResult> {
     const startTime = Date.now();
 
@@ -547,7 +551,7 @@ class CommandProcessor extends EventEmitter {
 
       if (this.commandMap.has(command.command)) {
         const module = this.commandMap.get(command.command)!;
-        const context = await this.buildCommandContext(userId);
+        const context = await this.buildCommandContext(userId, terminalCols);
         result = await module.execute(command, context);
       } else {
         result = {
@@ -557,6 +561,9 @@ class CommandProcessor extends EventEmitter {
           timestamp: new Date(),
         };
       }
+
+      // Reformat output to fit client terminal width
+      result.output = formatCommandOutput(result.output, terminalCols);
 
       // Add execution time and terminal ID to result
       result.executionTime = Date.now() - startTime;
@@ -579,11 +586,12 @@ class CommandProcessor extends EventEmitter {
 
       return result;
     } catch (error) {
-      this.logger.error({ err: error }, "Command execution error");
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.logger.error({ err, context: "Command execution" }, `[Command execution] ${err.message}`);
       return {
         success: false,
         output: "Command execution failed",
-        error: error instanceof Error ? error.message : "Unknown error",
+        error: err.message,
         timestamp: new Date(),
         executionTime: Date.now() - startTime,
       };
@@ -631,8 +639,8 @@ class CommandProcessor extends EventEmitter {
     command: Command,
     _result: CommandResult,
   ): Promise<void> {
-    try {
-      await db.client.auditLog.create({
+    await safeExecute({
+      fn: () => db.client.auditLog.create({
         data: {
           userId,
           action: `command:${command.command}`,
@@ -640,10 +648,11 @@ class CommandProcessor extends EventEmitter {
           ipAddress: command.serverId || "local",
           timestamp: new Date(),
         },
-      });
-    } catch (error) {
-      this.logger.error({ err: error }, "Failed to log command execution");
-    }
+      }),
+      context: "Log command execution",
+      logger: this.logger,
+      silent: true,
+    })();
   }
 
   // ==================== ADMIN/DEBUG METHODS ====================

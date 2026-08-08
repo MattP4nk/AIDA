@@ -3,6 +3,7 @@ import { writable, get, type Writable } from "svelte/store";
 import { apiClient } from "./api";
 import { terminalTabsStore } from "./terminalTabs";
 import { sound } from "./sound";
+import { ReservedPID } from "../../../shared/types";
 
 // Socket connection configuration — override via VITE_SOCKET_URL env var
 const SOCKET_URL =
@@ -666,6 +667,13 @@ class SocketService {
           totalLayers: data.data.totalLayers,
           challenge: data.data.challenge,
         });
+
+        // Register as process in ProcessBar for live countdown
+        const hackTimeLimit = data.data.challenge?.timeLimit || 60;
+        activeProcesses.update(procs => [
+          ...procs.filter((p: any) => p.pid !== ReservedPID.HACK_CHALLENGE),
+          { pid: ReservedPID.HACK_CHALLENGE, type: "hack_challenge", description: `Hack challenge — ${data.data.targetIp}`, progress: 0, eta: hackTimeLimit },
+        ]);
       }
 
       // Check if this is a connection challenge start
@@ -676,11 +684,19 @@ class SocketService {
           challenge: data.data.connectionChallenge,
           sessionId: data.data.connectionSessionId,
         });
+
+        // Register as process in ProcessBar for live countdown
+        const connTimeLimit = data.data.connectionChallenge?.timeLimit || 45;
+        activeProcesses.update(procs => [
+          ...procs.filter((p: any) => p.pid !== ReservedPID.CONNECTION_CHALLENGE),
+          { pid: ReservedPID.CONNECTION_CHALLENGE, type: "connection_challenge", description: `Connection challenge — ${data.data.targetIp}`, progress: 0, eta: connTimeLimit },
+        ]);
       }
 
-      // Clear connection challenge panel on resolution
+      // Clear challenge panels + remove from ProcessBar on resolution
       if (data.data?.connectionResolved) {
         activeConnectionSession.set(null);
+        activeProcesses.update(procs => procs.filter((p: any) => p.pid !== ReservedPID.CONNECTION_CHALLENGE));
       }
       // Play sound event from server if provided
       if (data.soundEvent) {
@@ -856,8 +872,28 @@ class SocketService {
   }
 
   private handleHackResult(result: any): void {
-    // This will be implemented to handle hack results in the UI
-    console.log("Handling hack result:", result);
+    // Check for next layer BEFORE clearing the session
+    if (result.nextChallenge) {
+      activeHackSession.update(session => {
+        if (!session) return session;
+        return {
+          ...session,
+          currentLayer: (session.currentLayer || 0) + 1,
+          challenge: result.nextChallenge,
+        };
+      });
+      return; // Still hacking — don't clear
+    }
+
+    // Terminal status with no next challenge: clear everything
+    if (result.status === "completed" || result.status === "failed" || result.status === "expired") {
+      activeHackSession.set(null);
+      activeProcesses.update(procs => procs.filter((p: any) => p.pid !== ReservedPID.HACK_CHALLENGE));
+
+      if (result.status === "completed" && result.success) {
+        sound.hackSuccess();
+      }
+    }
   }
 
   // Request notification permission

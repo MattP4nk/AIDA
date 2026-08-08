@@ -1,5 +1,6 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
+import { successResult, errorResult } from "./helpers";
 import type { ShopItem } from "../shopService";
 import type { InventoryItem } from "../shopService";
 import {
@@ -51,19 +52,10 @@ export class ShopCommandsModule implements CommandModule {
         case "gear":
           return await this.handleEquipment(command, context);
         default:
-          return {
-            success: false,
-            output: `Shop command not implemented: ${command.command}`,
-            timestamp: new Date(),
-          };
+          return errorResult(`Shop command not implemented: ${command.command}`);
       }
     } catch (error) {
-      return {
-        success: false,
-        output: "Shop command failed",
-        error: error instanceof Error ? error.message : "Unknown error",
-        timestamp: new Date(),
-      };
+      return errorResult("Shop command failed", error instanceof Error ? error.message : "Unknown error");
     }
   }
 
@@ -144,11 +136,7 @@ export class ShopCommandsModule implements CommandModule {
     const bonuses = await shopService.getPlayerBonuses(context.userId);
 
     if (inventory.length === 0) {
-      return {
-        success: true,
-        output: "Your scripts folder is empty. Type 'shop' to browse items.",
-        timestamp: new Date(),
-      };
+      return successResult("Your scripts folder is empty. Type 'shop' to browse items.");
     }
 
     const W = 48;
@@ -230,11 +218,7 @@ export class ShopCommandsModule implements CommandModule {
     });
 
     if (!progress) {
-      return {
-        success: false,
-        output: "Player progress not found",
-        timestamp: new Date(),
-      };
+      return errorResult("Player progress not found");
     }
 
     const category = command.args?.[0]?.toUpperCase();
@@ -258,14 +242,10 @@ export class ShopCommandsModule implements CommandModule {
     }
 
     if (items.length === 0) {
-      return {
-        success: true,
-        output: "No items found matching your criteria.",
-        timestamp: new Date(),
-      };
+      return successResult("No items found matching your criteria.");
     }
 
-    const W = 52;
+    const W = context.terminalWidth;
     const lines: string[] = [];
 
     lines.push(boxTop(W));
@@ -334,11 +314,7 @@ export class ShopCommandsModule implements CommandModule {
     const itemId = command.args?.[0];
 
     if (!itemId) {
-      return {
-        success: false,
-        output: "Usage: buy <item_id> [quantity]",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: buy <item_id> [quantity]");
     }
 
     const quantity = parseInt(command.args?.[1] || "1");
@@ -365,11 +341,7 @@ export class ShopCommandsModule implements CommandModule {
     const itemId = command.args?.[0];
 
     if (!itemId) {
-      return {
-        success: false,
-        output: "Usage: sell <item_id> [quantity]",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: sell <item_id> [quantity]");
     }
 
     const quantity = parseInt(command.args?.[1] || "1");
@@ -392,11 +364,7 @@ export class ShopCommandsModule implements CommandModule {
     const itemId = command.args[0];
 
     if (!itemId) {
-      return {
-        success: false,
-        output: "Usage: use <item_id>",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: use <item_id>");
     }
 
     const shopService = context.services.shopService;
@@ -417,11 +385,7 @@ export class ShopCommandsModule implements CommandModule {
     const itemId = command.args[0];
 
     if (!itemId) {
-      return {
-        success: false,
-        output: "Usage: equip <item_id>\nExample: equip port_scanner",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: equip <item_id>\nExample: equip port_scanner");
     }
 
     const shopService = context.services.shopService;
@@ -430,11 +394,7 @@ export class ShopCommandsModule implements CommandModule {
     // Get the item from catalog
     const item = shopService.getItem(itemId);
     if (!item) {
-      return {
-        success: false,
-        output: `Item not found: ${itemId}`,
-        timestamp: new Date(),
-      };
+      return errorResult(`Item not found: ${itemId}`);
     }
 
     // Equip the item
@@ -459,12 +419,7 @@ export class ShopCommandsModule implements CommandModule {
     const arg = command.args[0];
 
     if (!arg) {
-      return {
-        success: false,
-        output:
-          "Usage: unequip <slot|item_id>\nSlots: TOOL, SOFTWARE, EXPLOIT, DEFENSE, UPGRADE",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: unequip <slot|item_id>\nSlots: TOOL, SOFTWARE, EXPLOIT, DEFENSE, UPGRADE");
     }
 
     const inventoryService = context.services.inventoryService;
@@ -476,20 +431,12 @@ export class ShopCommandsModule implements CommandModule {
         context.userId,
         arg.toUpperCase() as import("../inventoryService").EquipmentSlot,
       );
-      return {
-        success: result.success,
-        output: result.message,
-        timestamp: new Date(),
-      };
+      return result.success ? successResult(result.message) : errorResult(result.message);
     }
 
     // Otherwise treat it as an item ID
     const result = await inventoryService.unequipItemById(context.userId, arg);
-    return {
-      success: result.success,
-      output: result.message,
-      timestamp: new Date(),
-    };
+    return result.success ? successResult(result.message) : errorResult(result.message);
   }
 
   private async handleEquipment(

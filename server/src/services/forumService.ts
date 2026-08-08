@@ -11,6 +11,7 @@ import type {
 import type { Server as SocketIOServer } from "socket.io";
 import { injectable, inject } from "tsyringe";
 import type { Logger } from "pino";
+import { safeExecute, safeAI } from "../utils/safeExecute";
 import {
   SOCKET_IO,
   MISSION_INTEGRATION_SERVICE,
@@ -19,7 +20,8 @@ import {
 } from "../di/tokens";
 import type MissionIntegrationService from "./missionIntegration";
 import type { FactionKnowledgeService } from "./factionKnowledgeService";
-import { validateOrRetry, validateForumPosts, validateForumReply } from "../utils/aiOutputValidator";
+import { validateForumPosts, validateForumReply } from "../utils/aiOutputValidator";
+import { fallbackForumPost } from "../utils/aiFallbacks";
 
 /**
  * ForumService - Underground forum networks and darkweb system
@@ -705,14 +707,17 @@ export class ForumService extends EventEmitter {
       }
 
       // Apply faction reputation via ReputationEngine
-      try {
-        const { getService } = await import("../di/container");
-        const { REPUTATION_ENGINE } = await import("../di/tokens");
-        const reputationEngine = getService<any>(REPUTATION_ENGINE);
-        await reputationEngine.onForumPost(userId, forumId);
-      } catch (error) {
-        this.logger.error({ err: error }, "Failed to apply forum reputation");
-      }
+      await safeExecute({
+        fn: async () => {
+          const { getService } = await import("../di/container");
+          const { REPUTATION_ENGINE } = await import("../di/tokens");
+          const reputationEngine = getService<any>(REPUTATION_ENGINE);
+          await reputationEngine.onForumPost(userId, forumId);
+        },
+        context: "Apply forum post reputation",
+        logger: this.logger,
+        silent: true,
+      })();
 
       return post;
     } catch (error) {
@@ -838,45 +843,47 @@ export class ForumService extends EventEmitter {
    * Fire-and-forget from index.ts.
    */
   public async populateForumContent(): Promise<void> {
-    try {
-      const totalPosts = await prisma.post.count();
-      if (totalPosts > 0) {
-        this.logger.info(
-          "Forums already populated (%d posts), skipping",
-          totalPosts,
-        );
-        return;
-      }
-
-      const forums = await prisma.forum.findMany({
-        include: { faction: true },
-      });
-
-      this.logger.info(
-        "Populating %d forums with NPC content...",
-        forums.length,
-      );
-
-      for (const forum of forums) {
-        try {
-          await this.generateForumPosts(forum);
-        } catch (err) {
-          this.logger.error(
-            { err, forumId: forum.id, forumName: forum.name },
-            "Failed to populate forum, using fallback",
+    await safeExecute({
+      fn: async () => {
+        const totalPosts = await prisma.post.count();
+        if (totalPosts > 0) {
+          this.logger.info(
+            "Forums already populated (%d posts), skipping",
+            totalPosts,
           );
-          await this.insertFallbackPosts(forum);
+          return;
         }
-      }
 
-      const finalCount = await prisma.post.count();
-      this.logger.info(
-        "Forum population complete: %d posts created",
-        finalCount,
-      );
-    } catch (error) {
-      this.logger.error({ err: error }, "Error populating forum content");
-    }
+        const forums = await prisma.forum.findMany({
+          include: { faction: true },
+        });
+
+        this.logger.info(
+          "Populating %d forums with NPC content...",
+          forums.length,
+        );
+
+        for (const forum of forums) {
+          try {
+            await this.generateForumPosts(forum);
+          } catch (err) {
+            this.logger.error(
+              { err, forumId: forum.id, forumName: forum.name },
+              "Failed to populate forum, using fallback",
+            );
+            await this.insertFallbackPosts(forum);
+          }
+        }
+
+        const finalCount = await prisma.post.count();
+        this.logger.info(
+          "Forum population complete: %d posts created",
+          finalCount,
+        );
+      },
+      context: "Populate forum content",
+      logger: this.logger,
+    })();
   }
 
   /**
@@ -924,7 +931,7 @@ CRITICAL RULES:
 - Mix: 60% mundane forum chatter (complaints, questions, tips, drama), 30% faction/community-relevant, 10% subtle story hints
 - ONE post should contain a buried clue: an IP address mentioned in passing, a rumor about a hidden server, or a cryptic reference
 - Never break the fourth wall — these are real people posting on a real forum in a cyberpunk world
-- Return ONLY valid JSON array: [{\"authorHandle\": \"...\", \"authorPersonality\": \"one sentence\", \"title\": \"...\", \"content\": \"...\", \"isSticky\": false, \"storyRelevant\": false}]`;
+- Return ONLY valid JSON array: [{"authorHandle": "...", "authorPersonality": "one sentence", "title": "...", "content": "...", "isSticky": false, "storyRelevant": false}]`;
 
     let userPrompt = `FORUM: "${forum.name}" (${forum.category})
 URL: ${forum.url}
@@ -952,37 +959,32 @@ ${forum.description ? `Description: ${forum.description}` : ""}`;
       userPrompt += `\n\nSPECIAL: This forum is a HONEYPOT trap. Posts should be enticing — free tools, leaked credentials, too-good-to-be-true offers. Authors should seem enthusiastic and helpful (suspiciously so).`;
     }
 
-    const result = await aiService.generateResponse(
-      userPrompt,
-      systemPrompt,
-      undefined,
-      '[{"authorHandle": "string", "authorPersonality": "string", "title": "string", "content": "string"}]',
-    );
+    const { enrichWithTopology } = await import("./worldTopologyContext");
+    const enrichedSystemPrompt = await enrichWithTopology(systemPrompt, prisma, this.logger);
 
-    if (!result.success) {
-      // Queue for retry — when AI comes back, create the forum posts
-      const forumId = forum.id;
-      aiService.queueForRetry(userPrompt, systemPrompt, async (response: string) => {
-        try {
-          const posts = validateOrRetry(response, validateForumPosts, undefined, undefined, "array");
-          if (!posts) return;
-
-          for (const post of posts.slice(0, 8)) {
-            try {
-              await this.createNPCPost(forumId, post);
-            } catch { /* skip individual post errors */ }
-          }
-        } catch { /* ignore retry errors */ }
-      });
-
-      throw new Error(`AI generation failed: ${result.error || "unknown error"}`);
-    }
-
-    // Parse and validate forum posts from AI response
-    const posts = validateOrRetry(result.response, validateForumPosts, undefined, undefined, "array");
-    if (!posts) {
-      throw new Error("AI returned invalid or empty posts array");
-    }
+    const forumId = forum.id;
+    const posts = await safeAI({
+      aiService,
+      prompt: userPrompt,
+      systemPrompt: enrichedSystemPrompt,
+      expectedFormat: '[{"authorHandle": "string", "authorPersonality": "string", "title": "string", "content": "string"}]',
+      validate: validateForumPosts,
+      fallback: () => {
+        const fb = fallbackForumPost(factionKey, "anon_user");
+        return fb ? [{ authorHandle: "anon_user", authorPersonality: "Regular forum user", ...fb }] : [];
+      },
+      context: "Generate forum posts",
+      logger: this.logger,
+      jsonType: "array",
+      retry: true,
+      onRetrySuccess: async (retryPosts) => {
+        for (const post of retryPosts.slice(0, 8)) {
+          try {
+            await this.createNPCPost(forumId, post);
+          } catch { /* skip individual post errors */ }
+        }
+      },
+    });
 
     // Create each NPC post
     for (const postData of posts) {
@@ -1248,7 +1250,8 @@ ${forum.description ? `Description: ${forum.description}` : ""}`;
     replyUserId: string,
     replyContent: string,
   ): Promise<void> {
-    try {
+    await safeExecute({
+      fn: async () => {
       // Fetch the original post
       const post = await prisma.post.findUnique({
         where: { id: postId },
@@ -1312,18 +1315,19 @@ YOUR POST TITLE: "${post.title}"`;
 
       userPrompt += `\n\nPLAYER "${replyUser.username}" REPLIED:\n"${replyContent}"`;
 
-      const result = await aiService.generateResponse(
-        userPrompt,
-        systemPrompt,
-        undefined,
-        '{ "reply": "string (5+ chars)", "memoryEntry": {"summary": "string", "topic": "string"} | null }',
-      );
+      const { enrichWithTopology } = await import("./worldTopologyContext");
+      const enrichedReplySystemPrompt = await enrichWithTopology(systemPrompt, prisma, this.logger);
 
-      if (!result.success) return;
-
-      // Parse and validate response
-      const parsed = validateOrRetry(result.response, validateForumReply);
-      if (!parsed) return;
+      const parsed = await safeAI({
+        aiService,
+        prompt: userPrompt,
+        systemPrompt: enrichedReplySystemPrompt,
+        expectedFormat: '{ "reply": "string (5+ chars)", "memoryEntry": {"summary": "string", "topic": "string"} | null }',
+        validate: validateForumReply,
+        fallback: { reply: "PASS", memoryEntry: null },
+        context: "Generate NPC forum reply",
+        logger: this.logger,
+      });
 
       // Update memory regardless of reply
       if (parsed.memoryEntry && parsed.memoryEntry.summary) {
@@ -1379,12 +1383,10 @@ YOUR POST TITLE: "${post.title}"`;
           "NPC forum reply generated",
         );
       }
-    } catch (error) {
-      this.logger.error(
-        { err: error, postId, replyUserId },
-        "Error handling NPC reply",
-      );
-    }
+      },
+      context: "Handle NPC reply",
+      logger: this.logger,
+    })();
   }
 
   // ── Helpers ──────────────────────────────────────────────────────────
@@ -1578,76 +1580,78 @@ YOUR POST TITLE: "${post.title}"`;
     userId: string,
     forumId: string,
   ): Promise<void> {
-    try {
-      const forum = await prisma.forum.findUnique({
-        where: { id: forumId },
-        include: { faction: true },
-      });
+    await safeExecute({
+      fn: async () => {
+        const forum = await prisma.forum.findUnique({
+          where: { id: forumId },
+          include: { faction: true },
+        });
 
-      if (!forum) return;
+        if (!forum) return;
 
-      this.logger.info({ userId, forumName: forum.name }, "Honeypot triggered");
+        this.logger.info({ userId, forumName: forum.name }, "Honeypot triggered");
 
-      // Get player's home IP for tracking
-      const user = await prisma.user.findUnique({
-        where: { id: userId },
-        select: { homeIp: true },
-      });
+        // Get player's home IP for tracking
+        const user = await prisma.user.findUnique({
+          where: { id: userId },
+          select: { homeIp: true },
+        });
 
-      // Create audit log
-      await prisma.auditLog.create({
-        data: {
-          userId,
-          action: "HONEYPOT_TRIGGERED",
-          resource: "forum",
-          resourceId: forumId,
-          ipAddress: user?.homeIp || null,
-          metadata: {
-            forumName: forum.name,
-            factionId: forum.factionId,
-            timestamp: new Date(),
-          },
-        },
-      });
-
-      // If forum belongs to a faction, decrease reputation via ReputationEngine
-      if (forum.factionId) {
-        try {
-          const { getService } = await import("../di/container");
-          const { REPUTATION_ENGINE } = await import("../di/tokens");
-          const reputationEngine = getService<any>(REPUTATION_ENGINE);
-          await reputationEngine.onCaughtByFaction(
+        // Create audit log
+        await prisma.auditLog.create({
+          data: {
             userId,
-            forum.factionId,
-            "high",
-          );
-        } catch (error) {
-          this.logger.error(
-            { err: error },
-            "Failed to apply honeypot reputation",
-          );
+            action: "HONEYPOT_TRIGGERED",
+            resource: "forum",
+            resourceId: forumId,
+            ipAddress: user?.homeIp || null,
+            metadata: {
+              forumName: forum.name,
+              factionId: forum.factionId,
+              timestamp: new Date(),
+            },
+          },
+        });
+
+        // If forum belongs to a faction, decrease reputation via ReputationEngine
+        if (forum.factionId) {
+          await safeExecute({
+            fn: async () => {
+              const { getService } = await import("../di/container");
+              const { REPUTATION_ENGINE } = await import("../di/tokens");
+              const reputationEngine = getService<any>(REPUTATION_ENGINE);
+              await reputationEngine.onCaughtByFaction(
+                userId,
+                forum.factionId,
+                "high",
+              );
+            },
+            context: "Apply honeypot reputation",
+            logger: this.logger,
+            silent: true,
+          })();
+
+          this.emit("honeypot:triggered", {
+            userId,
+            forumId,
+            factionId: forum.factionId,
+          });
         }
 
-        this.emit("honeypot:triggered", {
-          userId,
-          forumId,
-          factionId: forum.factionId,
-        });
-      }
-
-      // Emit warning to player
-      if (this.io) {
-        this.io.to(`user:${userId}`).emit("security:warning", {
-          type: "honeypot",
-          message:
-            "SECURITY ALERT: Your activities have been logged. IP address recorded.",
-          forumName: forum.name,
-          severity: "high",
-        });
-      }
-    } catch (error) {
-      this.logger.error({ err: error }, "Error triggering honeypot");
-    }
+        // Emit warning to player
+        if (this.io) {
+          this.io.to(`user:${userId}`).emit("security:warning", {
+            type: "honeypot",
+            message:
+              "SECURITY ALERT: Your activities have been logged. IP address recorded.",
+            forumName: forum.name,
+            severity: "high",
+          });
+        }
+      },
+      context: "Trigger honeypot",
+      logger: this.logger,
+    })();
   }
 
   /**
@@ -1681,74 +1685,80 @@ YOUR POST TITLE: "${post.title}"`;
    * Check if post triggers story progression
    */
   private async checkStoryTriggers(userId: string, post: Post): Promise<void> {
-    try {
-      if (!post.storyRelevant) return;
+    await safeExecute({
+      fn: async () => {
+        if (!post.storyRelevant) return;
 
-      // Emit story event for StoryService to handle
-      this.emit("story:post-read", {
-        userId,
-        postId: post.id,
-        forumId: post.forumId,
-        title: post.title,
-      });
+        // Emit story event for StoryService to handle
+        this.emit("story:post-read", {
+          userId,
+          postId: post.id,
+          forumId: post.forumId,
+          title: post.title,
+        });
 
-      this.logger.info(
-        { userId, postTitle: post.title },
-        "Story-relevant post read",
-      );
-    } catch (error) {
-      this.logger.error({ err: error }, "Error checking story triggers");
-    }
+        this.logger.info(
+          { userId, postTitle: post.title },
+          "Story-relevant post read",
+        );
+      },
+      context: "Check story triggers",
+      logger: this.logger,
+      silent: true,
+    })();
   }
 
   /**
    * Check if post contains a key fragment
    */
   private async checkKeyFragment(userId: string, post: Post): Promise<void> {
-    try {
-      if (!post.keyFragmentId) return;
+    await safeExecute({
+      fn: async () => {
+        if (!post.keyFragmentId) return;
 
-      // Delegate to KeyFragmentService for ownership-based claiming
-      let keyFragmentService:
-        | import("./keyFragmentService").KeyFragmentService
-        | null = null;
-      try {
-        const { getService } = await import("../di/container");
-        const { KEY_FRAGMENT_SERVICE } = await import("../di/tokens");
-        keyFragmentService =
-          getService<import("./keyFragmentService").KeyFragmentService>(
-            KEY_FRAGMENT_SERVICE,
-          );
-      } catch {
-        // KeyFragmentService not available — fall through silently
-        return;
-      }
-
-      const result = await keyFragmentService.claimFragment(
-        userId,
-        post.keyFragmentId,
-        "forum_post",
-      );
-
-      if (result.claimed && result.fragment) {
-        this.logger.info(
-          { userId, fragmentName: result.fragment.name },
-          "Key fragment claimed via forum post",
-        );
-      } else if (result.currentHolder) {
-        // Fragment already held — notify player who has it
-        if (this.io) {
-          this.io.to(`user:${userId}`).emit("story:fragment-intel", {
-            fragmentId: post.keyFragmentId,
-            currentHolder: result.currentHolder,
-            message: `This fragment is held by ${result.currentHolder}. You'll need to negotiate or take it by force.`,
-          });
+        // Delegate to KeyFragmentService for ownership-based claiming
+        let keyFragmentService:
+          | import("./keyFragmentService").KeyFragmentService
+          | null = null;
+        try {
+          const { getService } = await import("../di/container");
+          const { KEY_FRAGMENT_SERVICE } = await import("../di/tokens");
+          keyFragmentService =
+            getService<import("./keyFragmentService").KeyFragmentService>(
+              KEY_FRAGMENT_SERVICE,
+            );
+        } catch {
+          // KeyFragmentService not available — fall through silently
+          return;
         }
-      }
-      // If alreadyHeld (player already has it), do nothing
-    } catch (error) {
-      this.logger.error({ err: error }, "Error checking key fragment");
-    }
+
+        const result = await keyFragmentService.claimFragment(
+          userId,
+          post.keyFragmentId,
+          "forum_post",
+        );
+
+        if (result.claimed && result.fragment) {
+          this.logger.info(
+            { userId, fragmentName: result.fragment.name },
+            "Key fragment claimed via forum post",
+          );
+        } else if (result.currentHolder) {
+          // Fragment already held — notify player who has it
+          if (this.io) {
+            this.io.to(`user:${userId}`).emit("story:fragment-intel", {
+              fragmentId: post.keyFragmentId,
+              currentHolder: result.currentHolder,
+              message: `This fragment is held by ${result.currentHolder}. You'll need to negotiate or take it by force.`,
+            });
+          }
+        }
+        // If alreadyHeld (player already has it), do nothing
+      },
+      context: "Check key fragment",
+      logger: this.logger,
+      silent: true,
+    })();
   }
 
   // ==================== ADMIN HELPER ====================

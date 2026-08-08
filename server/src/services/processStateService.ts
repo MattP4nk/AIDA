@@ -3,6 +3,7 @@ import { CommandResult } from "../../../shared/types";
 import { injectable, inject } from "tsyringe";
 import type { Logger } from "pino";
 import { LOGGER } from "../di/tokens";
+import { safeExecute } from "../utils/safeExecute";
 
 /**
  * ProcessStateService - Manages command execution state and process lifecycle
@@ -137,11 +138,11 @@ class ProcessStateService extends EventEmitter {
 
     // Call cancel handler if registered
     if (process.onCancel) {
-      try {
-        await process.onCancel();
-      } catch (error) {
-        this.logger.error({ err: error, pid }, "Error in cancel handler");
-      }
+      await safeExecute({
+        fn: () => process.onCancel!(),
+        context: "Process cancel handler",
+        logger: this.logger,
+      })();
     }
 
     this.emit("process:cancelled", { pid, sessionId: process.sessionId });

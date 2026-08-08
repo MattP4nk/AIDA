@@ -2,7 +2,7 @@
     import { onMount, onDestroy, tick } from "svelte";
     import { get } from "svelte/store";
     import { terminalService } from "../services/terminal";
-    import type { CommandResult } from "../../../shared/types";
+    import { ReservedPID, type CommandResult } from "../../../shared/types";
     import { apiClient } from "../services/api";
     // New ASCII Dialog system
     import MailDialog from "./MailDialog.svelte";
@@ -168,6 +168,7 @@
         "tutorial",
         "settings",
         "clear",
+        "report",
     ];
     let tabMatches: string[] = [];
     let tabIndex: number = -1;
@@ -197,7 +198,7 @@
             shop: ["shop","buy","sell","use","equip","unequip","equipment","gear","scripts"],
             mission: ["missions","mission","accept","abandon","progress","stories","story"],
             fragment: ["fragment","fragments","endgame"],
-            player: ["status","skills","players","who","whois","share_intel","bounties","bounty","leaderboard","achievements"],
+            player: ["status","skills","players","who","whois","share_intel","bounties","bounty","leaderboard","achievements","report"],
             help: ["help","man","history","stats"],
             process: ["ps","top","kill","pkill","nice","renice","free","uptime"],
             math: ["calc","expr","math","vars","set","unset","convert","random","decode","subnet"],
@@ -222,6 +223,7 @@
             msg: "Send a message", mail: "Read/send mail", chat: "Open chat",
             forum: "Browse forums", faction: "Faction commands", alias: "Manage identity alias",
             fragment: "View AIDA fragments", endgame: "Make the final choice",
+            report: "Report intel to faction or submit mission findings",
             traceroute: "Trace route to server", probe: "Probe server details", netmap: "Network topology map",
         };
         return descs[cmd] || "";
@@ -298,15 +300,19 @@
 
     function updateTerminalWidth() {
         if (!outputElement) return;
-        // Estimate character width from monospace font
+        // Measure actual character width from monospace font (10-char sample for accuracy)
         const testSpan = document.createElement("span");
         testSpan.style.cssText = "position:absolute;visibility:hidden;font:inherit;white-space:pre";
-        testSpan.textContent = "M";
+        testSpan.textContent = "MMMMMMMMMM";
         outputElement.appendChild(testSpan);
-        const charWidth = testSpan.getBoundingClientRect().width || 8;
+        const charWidth = (testSpan.getBoundingClientRect().width / 10) || 8;
         outputElement.removeChild(testSpan);
-        const containerWidth = outputElement.clientWidth - 80; // subtract padding
-        terminalCols = Math.floor(containerWidth / charWidth);
+        // Calculate usable width: container minus padding, scrollbar, and safety margin
+        const style = getComputedStyle(outputElement);
+        const padH = (parseFloat(style.paddingLeft) || 0) + (parseFloat(style.paddingRight) || 0);
+        const scrollbar = outputElement.offsetWidth - outputElement.clientWidth;
+        const usable = outputElement.clientWidth - padH - scrollbar;
+        terminalCols = Math.max(40, Math.floor(usable / charWidth) - 2);
         terminalTier = terminalCols > 90 ? "full" : terminalCols > 55 ? "medium" : "compact";
     }
 
@@ -751,6 +757,28 @@
                 openDialog(result.openDialog, result.data);
             }
 
+            // Handle challenge starts from HTTP results (connection/hack)
+            if (result.data?.connectionSessionId && result.data?.connectionChallenge) {
+                activeConnectionSession.set({
+                    active: true,
+                    targetIp: result.data.targetIp,
+                    challenge: result.data.connectionChallenge,
+                    sessionId: result.data.connectionSessionId,
+                });
+                // Register in ProcessBar for countdown
+                const connTimeLimit = result.data.connectionChallenge?.timeLimit || 45;
+                const { activeProcesses } = await import("../services/socket");
+                activeProcesses.update(procs => [
+                    ...procs.filter((p: any) => p.pid !== ReservedPID.CONNECTION_CHALLENGE),
+                    { pid: ReservedPID.CONNECTION_CHALLENGE, type: "connection_challenge", description: `Connection challenge — ${result.data.targetIp}`, progress: 0, eta: connTimeLimit },
+                ]);
+            }
+            if (result.data?.connectionResolved) {
+                activeConnectionSession.set(null);
+                const { activeProcesses } = await import("../services/socket");
+                activeProcesses.update(procs => procs.filter((p: any) => p.pid !== ReservedPID.CONNECTION_CHALLENGE));
+            }
+
             // Display command result (with typewriter if enabled)
             const resultOutput = Array.isArray(result.output)
                 ? result.output.join("\n")
@@ -785,14 +813,20 @@
             if (result.suggestedCommand) {
                 suggestedCommand = result.suggestedCommand;
             } else {
+                // Regex fallback: only match when followed by a KNOWN command name
+                // This prevents matching random words from file content (e.g., "report to...")
                 const outputText = Array.isArray(result.output)
                     ? result.output.join("\n")
                     : result.output || "";
                 const suggestionMatch = outputText.match(
-                    /(?:Submit with|Submit|Try|Use|Run|Type)[:\s]+([a-z][a-z0-9_.]+(?:\s+\S+)*)/i,
+                    /(?:Submit with|Submit:|Try:|Use:|Run:|Type:)\s+([a-z][a-z0-9_.]+(?:\s+\S+)*)/i,
                 );
                 if (suggestionMatch?.[1]) {
-                    suggestedCommand = suggestionMatch[1].trim();
+                    const firstWord = suggestionMatch[1].split(/\s+/)[0]?.toLowerCase() || "";
+                    // Only accept if the first word is a known command
+                    if (KNOWN_COMMANDS.includes(firstWord)) {
+                        suggestedCommand = suggestionMatch[1].trim();
+                    }
                 }
             }
 

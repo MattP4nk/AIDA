@@ -30,6 +30,7 @@ import { PrismaClient } from "@prisma/client";
 import { Server as SocketIOServer } from "socket.io";
 import { EventEmitter } from "events";
 import { LOGGER, PRISMA_CLIENT, SOCKET_IO } from "../di/tokens";
+import { safeExecute } from "../utils/safeExecute";
 
 // ═══════════════════════════════════════════════════════════════════
 // Types
@@ -192,110 +193,114 @@ export class KeyFragmentService extends EventEmitter {
     currentHolder?: string;
     alreadyHeld?: boolean;
   }> {
-    try {
-      // Use interactive transaction for atomicity — prevents two players
-      // from claiming the same unclaimed fragment simultaneously.
-      const result = await this.prisma.$transaction(async (tx) => {
-        // Lock the row via findFirst + FOR UPDATE (Prisma raw fallback)
-        // Using findUnique inside a transaction provides serializable reads
-        const fragment = await tx.keyFragment.findUnique({
-          where: { id: fragmentId },
-        });
-
-        if (!fragment) {
-          this.logger.warn(
-            { userId, fragmentId },
-            "Attempted to claim non-existent key fragment",
-          );
-          return { claimed: false } as const;
-        }
-
-        // Already held by this player
-        if (fragment.heldByUserId === userId) {
-          return { claimed: false, alreadyHeld: true } as const;
-        }
-
-        // Held by someone else — look up their username
-        if (fragment.heldByUserId) {
-          const holder = await tx.user.findUnique({
-            where: { id: fragment.heldByUserId },
-            select: { username: true },
+    return await safeExecute({
+      fn: async () => {
+        // Use interactive transaction for atomicity — prevents two players
+        // from claiming the same unclaimed fragment simultaneously.
+        const result = await this.prisma.$transaction(async (tx) => {
+          // Lock the row via findFirst + FOR UPDATE (Prisma raw fallback)
+          // Using findUnique inside a transaction provides serializable reads
+          const fragment = await tx.keyFragment.findUnique({
+            where: { id: fragmentId },
           });
-          return {
-            claimed: false,
-            currentHolder: holder?.username ?? "unknown",
-          } as const;
+
+          if (!fragment) {
+            this.logger.warn(
+              { userId, fragmentId },
+              "Attempted to claim non-existent key fragment",
+            );
+            return { claimed: false } as const;
+          }
+
+          // Already held by this player
+          if (fragment.heldByUserId === userId) {
+            return { claimed: false, alreadyHeld: true } as const;
+          }
+
+          // Held by someone else — look up their username
+          if (fragment.heldByUserId) {
+            const holder = await tx.user.findUnique({
+              where: { id: fragment.heldByUserId },
+              select: { username: true },
+            });
+            return {
+              claimed: false,
+              currentHolder: holder?.username ?? "unknown",
+            } as const;
+          }
+
+          // Unclaimed — claim it atomically
+          const now = new Date();
+          const updatedFragment = await tx.keyFragment.update({
+            where: { id: fragmentId },
+            data: {
+              heldByUserId: userId,
+              heldSince: now,
+            },
+          });
+
+          // Create historical discovery record (idempotent via upsert)
+          await tx.keyFragmentDiscovery.upsert({
+            where: {
+              userId_fragmentId: { userId, fragmentId },
+            },
+            create: {
+              userId,
+              fragmentId,
+              method,
+            },
+            update: {},
+          });
+
+          return { claimed: true, fragment: updatedFragment } as const;
+        });
+
+        if (!result.claimed) {
+          return result;
         }
 
-        // Unclaimed — claim it atomically
-        const now = new Date();
-        const updatedFragment = await tx.keyFragment.update({
-          where: { id: fragmentId },
-          data: {
-            heldByUserId: userId,
-            heldSince: now,
-          },
-        });
+        // Post-transaction side effects (notifications, counters)
+        await this.updatePlayerCounters(userId);
+        await this.checkEndgameUnlock(userId);
 
-        // Create historical discovery record (idempotent via upsert)
-        await tx.keyFragmentDiscovery.upsert({
-          where: {
-            userId_fragmentId: { userId, fragmentId },
-          },
-          create: {
-            userId,
-            fragmentId,
-            method,
-          },
-          update: {},
-        });
-
-        return { claimed: true, fragment: updatedFragment } as const;
-      });
-
-      if (!result.claimed) {
-        return result;
-      }
-
-      // Post-transaction side effects (notifications, counters)
-      await this.updatePlayerCounters(userId);
-      await this.checkEndgameUnlock(userId);
-
-      this.emit("fragment:claimed", {
-        userId,
-        fragmentId: result.fragment.id,
-        keyType: result.fragment.keyType,
-        fragmentNum: result.fragment.fragmentNum,
-        name: result.fragment.name,
-      });
-
-      this.io.to(`user:${userId}`).emit("story:key-fragment", {
-        name: result.fragment.name,
-        keyType: result.fragment.keyType,
-        fragmentNum: result.fragment.fragmentNum,
-        description: result.fragment.description,
-        method,
-      });
-
-      this.logger.info(
-        {
+        this.emit("fragment:claimed", {
           userId,
           fragmentId: result.fragment.id,
           keyType: result.fragment.keyType,
           fragmentNum: result.fragment.fragmentNum,
-        },
-        "Key fragment claimed: %s",
-        result.fragment.name,
-      );
+          name: result.fragment.name,
+        });
 
-      return { claimed: true, fragment: result.fragment };
-    } catch (error) {
-      this.logger.error(
-        { err: error, userId, fragmentId, method },
-        "Error claiming key fragment",
-      );
-      throw error;
-    }
+        this.io.to(`user:${userId}`).emit("story:key-fragment", {
+          name: result.fragment.name,
+          keyType: result.fragment.keyType,
+          fragmentNum: result.fragment.fragmentNum,
+          description: result.fragment.description,
+          method,
+        });
+
+        this.logger.info(
+          {
+            userId,
+            fragmentId: result.fragment.id,
+            keyType: result.fragment.keyType,
+            fragmentNum: result.fragment.fragmentNum,
+          },
+          "Key fragment claimed: %s",
+          result.fragment.name,
+        );
+
+        return { claimed: true, fragment: result.fragment };
+      },
+      context: "Claim key fragment",
+      logger: this.logger,
+      rethrow: true,
+    })() as {
+      claimed: boolean;
+      fragment?: any;
+      currentHolder?: string;
+      alreadyHeld?: boolean;
+    };
   }
 
   // ── STEAL — Take a fragment from another player ──────────────────
@@ -322,121 +327,125 @@ export class KeyFragmentService extends EventEmitter {
     fragment?: any;
     message: string;
   }> {
-    try {
-      // Use interactive transaction for atomicity — prevents two attackers
-      // from stealing the same fragment simultaneously.
-      const result = await this.prisma.$transaction(async (tx) => {
-        const fragment = await tx.keyFragment.findUnique({
-          where: { id: fragmentId },
+    return await safeExecute({
+      fn: async () => {
+        // Use interactive transaction for atomicity — prevents two attackers
+        // from stealing the same fragment simultaneously.
+        const result = await this.prisma.$transaction(async (tx) => {
+          const fragment = await tx.keyFragment.findUnique({
+            where: { id: fragmentId },
+          });
+
+          if (!fragment) {
+            return {
+              stolen: false,
+              success: false,
+              message: "Fragment does not exist.",
+            } as const;
+          }
+
+          // Verify the victim actually holds it (inside transaction)
+          if (fragment.heldByUserId !== victimUserId) {
+            return {
+              stolen: false,
+              success: false,
+              message: "The target player does not hold this fragment.",
+            } as const;
+          }
+
+          // Transfer ownership atomically
+          const now = new Date();
+          const updatedFragment = await tx.keyFragment.update({
+            where: { id: fragmentId },
+            data: {
+              heldByUserId: attackerUserId,
+              heldSince: now,
+            },
+          });
+
+          // Create historical discovery record for attacker (idempotent)
+          await tx.keyFragmentDiscovery.upsert({
+            where: {
+              userId_fragmentId: { userId: attackerUserId, fragmentId },
+            },
+            create: {
+              userId: attackerUserId,
+              fragmentId,
+              method: "steal",
+            },
+            update: {},
+          });
+
+          return {
+            stolen: true,
+            success: true,
+            fragment: updatedFragment,
+            message: `Successfully stole "${updatedFragment.name}"!`,
+          } as const;
         });
 
-        if (!fragment) {
-          return {
-            stolen: false,
-            success: false,
-            message: "Fragment does not exist.",
-          } as const;
+        if (!result.stolen) {
+          return result;
         }
 
-        // Verify the victim actually holds it (inside transaction)
-        if (fragment.heldByUserId !== victimUserId) {
-          return {
-            stolen: false,
-            success: false,
-            message: "The target player does not hold this fragment.",
-          } as const;
-        }
+        // Post-transaction side effects
+        await this.updatePlayerCounters(attackerUserId);
+        await this.updatePlayerCounters(victimUserId);
+        await this.checkEndgameUnlock(attackerUserId);
 
-        // Transfer ownership atomically
-        const now = new Date();
-        const updatedFragment = await tx.keyFragment.update({
-          where: { id: fragmentId },
-          data: {
-            heldByUserId: attackerUserId,
-            heldSince: now,
-          },
-        });
-
-        // Create historical discovery record for attacker (idempotent)
-        await tx.keyFragmentDiscovery.upsert({
-          where: {
-            userId_fragmentId: { userId: attackerUserId, fragmentId },
-          },
-          create: {
-            userId: attackerUserId,
-            fragmentId,
-            method: "steal",
-          },
-          update: {},
-        });
-
-        return {
-          stolen: true,
-          success: true,
-          fragment: updatedFragment,
-          message: `Successfully stole "${updatedFragment.name}"!`,
-        } as const;
-      });
-
-      if (!result.stolen) {
-        return result;
-      }
-
-      // Post-transaction side effects
-      await this.updatePlayerCounters(attackerUserId);
-      await this.updatePlayerCounters(victimUserId);
-      await this.checkEndgameUnlock(attackerUserId);
-
-      this.emit("fragment:stolen", {
-        attackerUserId,
-        victimUserId,
-        fragmentId: result.fragment.id,
-        keyType: result.fragment.keyType,
-        fragmentNum: result.fragment.fragmentNum,
-        name: result.fragment.name,
-      });
-
-      this.io.to(`user:${victimUserId}`).emit("story:fragment-stolen", {
-        fragmentId: result.fragment.id,
-        name: result.fragment.name,
-        keyType: result.fragment.keyType,
-        fragmentNum: result.fragment.fragmentNum,
-        message: `Your fragment "${result.fragment.name}" has been stolen!`,
-      });
-
-      this.io.to(`user:${attackerUserId}`).emit("story:key-fragment", {
-        name: result.fragment.name,
-        keyType: result.fragment.keyType,
-        fragmentNum: result.fragment.fragmentNum,
-        description: result.fragment.description,
-        method: "steal",
-      });
-
-      this.logger.info(
-        {
+        this.emit("fragment:stolen", {
           attackerUserId,
           victimUserId,
           fragmentId: result.fragment.id,
           keyType: result.fragment.keyType,
           fragmentNum: result.fragment.fragmentNum,
-        },
-        "Key fragment stolen: %s",
-        result.fragment.name,
-      );
+          name: result.fragment.name,
+        });
 
-      return {
-        stolen: true,
-        success: true,
-        fragment: result.fragment,
-        message: result.message,
-      };
-    } catch (error) {
-      this.logger.error(
-        { err: error, attackerUserId, victimUserId, fragmentId },
-        "Error stealing key fragment",
-      );
-      throw error;
-    }
+        this.io.to(`user:${victimUserId}`).emit("story:fragment-stolen", {
+          fragmentId: result.fragment.id,
+          name: result.fragment.name,
+          keyType: result.fragment.keyType,
+          fragmentNum: result.fragment.fragmentNum,
+          message: `Your fragment "${result.fragment.name}" has been stolen!`,
+        });
+
+        this.io.to(`user:${attackerUserId}`).emit("story:key-fragment", {
+          name: result.fragment.name,
+          keyType: result.fragment.keyType,
+          fragmentNum: result.fragment.fragmentNum,
+          description: result.fragment.description,
+          method: "steal",
+        });
+
+        this.logger.info(
+          {
+            attackerUserId,
+            victimUserId,
+            fragmentId: result.fragment.id,
+            keyType: result.fragment.keyType,
+            fragmentNum: result.fragment.fragmentNum,
+          },
+          "Key fragment stolen: %s",
+          result.fragment.name,
+        );
+
+        return {
+          stolen: true,
+          success: true,
+          fragment: result.fragment,
+          message: result.message,
+        };
+      },
+      context: "Steal key fragment",
+      logger: this.logger,
+      rethrow: true,
+    })() as {
+      stolen: boolean;
+      success: boolean;
+      fragment?: any;
+      message: string;
+    };
   }
 
   // ── TRANSFER — Voluntarily give a fragment to another player ─────
@@ -462,121 +471,125 @@ export class KeyFragmentService extends EventEmitter {
     fragment?: any;
     message: string;
   }> {
-    try {
-      // Use interactive transaction for atomicity — prevents the sender
-      // from transferring a fragment they no longer hold.
-      const result = await this.prisma.$transaction(async (tx) => {
-        const fragment = await tx.keyFragment.findUnique({
-          where: { id: fragmentId },
+    return await safeExecute({
+      fn: async () => {
+        // Use interactive transaction for atomicity — prevents the sender
+        // from transferring a fragment they no longer hold.
+        const result = await this.prisma.$transaction(async (tx) => {
+          const fragment = await tx.keyFragment.findUnique({
+            where: { id: fragmentId },
+          });
+
+          if (!fragment) {
+            return {
+              transferred: false,
+              success: false,
+              message: "Fragment does not exist.",
+            } as const;
+          }
+
+          // Verify the sender actually holds it (inside transaction)
+          if (fragment.heldByUserId !== fromUserId) {
+            return {
+              transferred: false,
+              success: false,
+              message: "You do not hold this fragment.",
+            } as const;
+          }
+
+          // Transfer ownership atomically
+          const now = new Date();
+          const updatedFragment = await tx.keyFragment.update({
+            where: { id: fragmentId },
+            data: {
+              heldByUserId: toUserId,
+              heldSince: now,
+            },
+          });
+
+          // Create historical discovery record for recipient (idempotent)
+          await tx.keyFragmentDiscovery.upsert({
+            where: {
+              userId_fragmentId: { userId: toUserId, fragmentId },
+            },
+            create: {
+              userId: toUserId,
+              fragmentId,
+              method: "transfer",
+            },
+            update: {},
+          });
+
+          return {
+            transferred: true,
+            success: true,
+            fragment: updatedFragment,
+            message: `Successfully transferred "${updatedFragment.name}".`,
+          } as const;
         });
 
-        if (!fragment) {
-          return {
-            transferred: false,
-            success: false,
-            message: "Fragment does not exist.",
-          } as const;
+        if (!result.transferred) {
+          return result;
         }
 
-        // Verify the sender actually holds it (inside transaction)
-        if (fragment.heldByUserId !== fromUserId) {
-          return {
-            transferred: false,
-            success: false,
-            message: "You do not hold this fragment.",
-          } as const;
-        }
+        // Post-transaction side effects
+        await this.updatePlayerCounters(fromUserId);
+        await this.updatePlayerCounters(toUserId);
+        await this.checkEndgameUnlock(toUserId);
 
-        // Transfer ownership atomically
-        const now = new Date();
-        const updatedFragment = await tx.keyFragment.update({
-          where: { id: fragmentId },
-          data: {
-            heldByUserId: toUserId,
-            heldSince: now,
-          },
-        });
-
-        // Create historical discovery record for recipient (idempotent)
-        await tx.keyFragmentDiscovery.upsert({
-          where: {
-            userId_fragmentId: { userId: toUserId, fragmentId },
-          },
-          create: {
-            userId: toUserId,
-            fragmentId,
-            method: "transfer",
-          },
-          update: {},
-        });
-
-        return {
-          transferred: true,
-          success: true,
-          fragment: updatedFragment,
-          message: `Successfully transferred "${updatedFragment.name}".`,
-        } as const;
-      });
-
-      if (!result.transferred) {
-        return result;
-      }
-
-      // Post-transaction side effects
-      await this.updatePlayerCounters(fromUserId);
-      await this.updatePlayerCounters(toUserId);
-      await this.checkEndgameUnlock(toUserId);
-
-      this.emit("fragment:transferred", {
-        fromUserId,
-        toUserId,
-        fragmentId: result.fragment.id,
-        keyType: result.fragment.keyType,
-        fragmentNum: result.fragment.fragmentNum,
-        name: result.fragment.name,
-      });
-
-      this.io.to(`user:${toUserId}`).emit("story:key-fragment", {
-        name: result.fragment.name,
-        keyType: result.fragment.keyType,
-        fragmentNum: result.fragment.fragmentNum,
-        description: result.fragment.description,
-        method: "transfer",
-      });
-
-      this.io.to(`user:${fromUserId}`).emit("story:fragment-transferred", {
-        fragmentId: result.fragment.id,
-        name: result.fragment.name,
-        keyType: result.fragment.keyType,
-        fragmentNum: result.fragment.fragmentNum,
-        message: `You transferred "${result.fragment.name}" successfully.`,
-      });
-
-      this.logger.info(
-        {
+        this.emit("fragment:transferred", {
           fromUserId,
           toUserId,
           fragmentId: result.fragment.id,
           keyType: result.fragment.keyType,
           fragmentNum: result.fragment.fragmentNum,
-        },
-        "Key fragment transferred: %s",
-        result.fragment.name,
-      );
+          name: result.fragment.name,
+        });
 
-      return {
-        transferred: true,
-        success: true,
-        fragment: result.fragment,
-        message: result.message,
-      };
-    } catch (error) {
-      this.logger.error(
-        { err: error, fromUserId, toUserId, fragmentId },
-        "Error transferring key fragment",
-      );
-      throw error;
-    }
+        this.io.to(`user:${toUserId}`).emit("story:key-fragment", {
+          name: result.fragment.name,
+          keyType: result.fragment.keyType,
+          fragmentNum: result.fragment.fragmentNum,
+          description: result.fragment.description,
+          method: "transfer",
+        });
+
+        this.io.to(`user:${fromUserId}`).emit("story:fragment-transferred", {
+          fragmentId: result.fragment.id,
+          name: result.fragment.name,
+          keyType: result.fragment.keyType,
+          fragmentNum: result.fragment.fragmentNum,
+          message: `You transferred "${result.fragment.name}" successfully.`,
+        });
+
+        this.logger.info(
+          {
+            fromUserId,
+            toUserId,
+            fragmentId: result.fragment.id,
+            keyType: result.fragment.keyType,
+            fragmentNum: result.fragment.fragmentNum,
+          },
+          "Key fragment transferred: %s",
+          result.fragment.name,
+        );
+
+        return {
+          transferred: true,
+          success: true,
+          fragment: result.fragment,
+          message: result.message,
+        };
+      },
+      context: "Transfer key fragment",
+      logger: this.logger,
+      rethrow: true,
+    })() as {
+      transferred: boolean;
+      success: boolean;
+      fragment?: any;
+      message: string;
+    };
   }
 
   // ── SERVER CHECK — Auto-claim fragments from server files ────────
@@ -600,26 +613,25 @@ export class KeyFragmentService extends EventEmitter {
     fragment?: any;
     currentHolder?: string;
   }> {
-    try {
-      const fragment = await this.prisma.keyFragment.findFirst({
-        where: {
-          sourceType: "server",
-          sourceId: serverId,
-        },
-      });
+    return await safeExecute({
+      fn: async () => {
+        const fragment = await this.prisma.keyFragment.findFirst({
+          where: {
+            sourceType: "server",
+            sourceId: serverId,
+          },
+        });
 
-      if (!fragment) {
-        return { claimed: false };
-      }
+        if (!fragment) {
+          return { claimed: false };
+        }
 
-      return await this.claimFragment(userId, fragment.id, "server_file_read");
-    } catch (error) {
-      this.logger.error(
-        { err: error, userId, serverId },
-        "Error checking server for key fragment",
-      );
-      return { claimed: false };
-    }
+        return await this.claimFragment(userId, fragment.id, "server_file_read");
+      },
+      context: "Check server for key fragment",
+      logger: this.logger,
+      fallback: { claimed: false } as { claimed: boolean; fragment?: any; currentHolder?: string },
+    })() as { claimed: boolean; fragment?: any; currentHolder?: string };
   }
 
   // ── PROGRESS — Get complete fragment progress for a player ───────
@@ -634,101 +646,100 @@ export class KeyFragmentService extends EventEmitter {
    * @returns Complete fragment progress with per-type breakdowns
    */
   async getPlayerFragments(userId: string): Promise<FragmentProgress> {
-    try {
-      const storyProgress = await this.ensureStoryProgress(userId);
+    return await safeExecute({
+      fn: async () => {
+        const storyProgress = await this.ensureStoryProgress(userId);
 
-      // Fetch ALL 9 fragments
-      const allFragments = await this.prisma.keyFragment.findMany({
-        orderBy: [{ keyType: "asc" }, { fragmentNum: "asc" }],
-      });
+        // Fetch ALL 9 fragments
+        const allFragments = await this.prisma.keyFragment.findMany({
+          orderBy: [{ keyType: "asc" }, { fragmentNum: "asc" }],
+        });
 
-      // Collect unique holder user IDs for username lookup
-      const holderUserIds = new Set<string>();
-      for (const frag of allFragments) {
-        if (frag.heldByUserId) {
-          holderUserIds.add(frag.heldByUserId);
-        }
-      }
-
-      // Look up usernames for all holders in a single query
-      const holderUsers =
-        holderUserIds.size > 0
-          ? await this.prisma.user.findMany({
-              where: { id: { in: Array.from(holderUserIds) } },
-              select: { id: true, username: true },
-            })
-          : [];
-
-      const usernameMap = new Map<string, string>();
-      for (const user of holderUsers) {
-        usernameMap.set(user.id, user.username);
-      }
-
-      // Group fragments by type
-      const grouped: Record<FragmentType, DiscoveredFragment[]> = {
-        sword: [],
-        key: [],
-        collar: [],
-      };
-
-      let totalHeld = 0;
-
-      for (const frag of allFragments) {
-        const keyType = frag.keyType as FragmentType;
-        const isHeldByPlayer = frag.heldByUserId === userId;
-
-        if (isHeldByPlayer) {
-          totalHeld++;
+        // Collect unique holder user IDs for username lookup
+        const holderUserIds = new Set<string>();
+        for (const frag of allFragments) {
+          if (frag.heldByUserId) {
+            holderUserIds.add(frag.heldByUserId);
+          }
         }
 
-        const discoveredFrag: DiscoveredFragment = {
-          id: frag.id,
-          name: frag.name,
-          keyType: frag.keyType,
-          fragmentNum: frag.fragmentNum,
-          description: frag.description,
-          heldByUsername: frag.heldByUserId
-            ? (usernameMap.get(frag.heldByUserId) ?? null)
-            : null,
-          heldByUserId: frag.heldByUserId,
-          heldSince: frag.heldSince,
-          isHeldByPlayer,
+        // Look up usernames for all holders in a single query
+        const holderUsers =
+          holderUserIds.size > 0
+            ? await this.prisma.user.findMany({
+                where: { id: { in: Array.from(holderUserIds) } },
+                select: { id: true, username: true },
+              })
+            : [];
+
+        const usernameMap = new Map<string, string>();
+        for (const user of holderUsers) {
+          usernameMap.set(user.id, user.username);
+        }
+
+        // Group fragments by type
+        const grouped: Record<FragmentType, DiscoveredFragment[]> = {
+          sword: [],
+          key: [],
+          collar: [],
         };
 
-        if (grouped[keyType]) {
-          grouped[keyType].push(discoveredFrag);
-        }
-      }
+        let totalHeld = 0;
 
-      return {
-        sword: {
-          found: grouped.sword.filter((f) => f.isHeldByPlayer).length,
-          total: TOTAL_FRAGMENTS_PER_TYPE,
-          fragments: grouped.sword,
-        },
-        key: {
-          found: grouped.key.filter((f) => f.isHeldByPlayer).length,
-          total: TOTAL_FRAGMENTS_PER_TYPE,
-          fragments: grouped.key,
-        },
-        collar: {
-          found: grouped.collar.filter((f) => f.isHeldByPlayer).length,
-          total: TOTAL_FRAGMENTS_PER_TYPE,
-          fragments: grouped.collar,
-        },
-        totalHeld,
-        totalRequired: TOTAL_FRAGMENTS_REQUIRED,
-        endgameUnlocked: storyProgress.endgameUnlocked,
-        endgameChoice: storyProgress.endgameChoice,
-        gameCompleted: storyProgress.gameCompleted,
-      };
-    } catch (error) {
-      this.logger.error(
-        { err: error, userId },
-        "Error fetching player fragment progress",
-      );
-      throw error;
-    }
+        for (const frag of allFragments) {
+          const keyType = frag.keyType as FragmentType;
+          const isHeldByPlayer = frag.heldByUserId === userId;
+
+          if (isHeldByPlayer) {
+            totalHeld++;
+          }
+
+          const discoveredFrag: DiscoveredFragment = {
+            id: frag.id,
+            name: frag.name,
+            keyType: frag.keyType,
+            fragmentNum: frag.fragmentNum,
+            description: frag.description,
+            heldByUsername: frag.heldByUserId
+              ? (usernameMap.get(frag.heldByUserId) ?? null)
+              : null,
+            heldByUserId: frag.heldByUserId,
+            heldSince: frag.heldSince,
+            isHeldByPlayer,
+          };
+
+          if (grouped[keyType]) {
+            grouped[keyType].push(discoveredFrag);
+          }
+        }
+
+        return {
+          sword: {
+            found: grouped.sword.filter((f) => f.isHeldByPlayer).length,
+            total: TOTAL_FRAGMENTS_PER_TYPE,
+            fragments: grouped.sword,
+          },
+          key: {
+            found: grouped.key.filter((f) => f.isHeldByPlayer).length,
+            total: TOTAL_FRAGMENTS_PER_TYPE,
+            fragments: grouped.key,
+          },
+          collar: {
+            found: grouped.collar.filter((f) => f.isHeldByPlayer).length,
+            total: TOTAL_FRAGMENTS_PER_TYPE,
+            fragments: grouped.collar,
+          },
+          totalHeld,
+          totalRequired: TOTAL_FRAGMENTS_REQUIRED,
+          endgameUnlocked: storyProgress.endgameUnlocked,
+          endgameChoice: storyProgress.endgameChoice,
+          gameCompleted: storyProgress.gameCompleted,
+        };
+      },
+      context: "Fetch player fragment progress",
+      logger: this.logger,
+      rethrow: true,
+    })() as FragmentProgress;
   }
 
   // ── WORLD STATUS — Overview of all fragment holders ──────────────
@@ -739,60 +750,62 @@ export class KeyFragmentService extends EventEmitter {
    * @returns World fragment status with holder info for each fragment
    */
   async getWorldFragmentStatus(): Promise<WorldFragmentStatus> {
-    try {
-      const allFragments = await this.prisma.keyFragment.findMany({
-        orderBy: [{ keyType: "asc" }, { fragmentNum: "asc" }],
-      });
+    return await safeExecute({
+      fn: async () => {
+        const allFragments = await this.prisma.keyFragment.findMany({
+          orderBy: [{ keyType: "asc" }, { fragmentNum: "asc" }],
+        });
 
-      // Collect holder user IDs for username lookup
-      const holderUserIds = new Set<string>();
-      for (const frag of allFragments) {
-        if (frag.heldByUserId) {
-          holderUserIds.add(frag.heldByUserId);
-        }
-      }
-
-      const holderUsers =
-        holderUserIds.size > 0
-          ? await this.prisma.user.findMany({
-              where: { id: { in: Array.from(holderUserIds) } },
-              select: { id: true, username: true },
-            })
-          : [];
-
-      const usernameMap = new Map<string, string>();
-      for (const user of holderUsers) {
-        usernameMap.set(user.id, user.username);
-      }
-
-      let totalClaimed = 0;
-      let totalUnclaimed = 0;
-
-      const fragments: FragmentHolder[] = allFragments.map((frag) => {
-        if (frag.heldByUserId) {
-          totalClaimed++;
-        } else {
-          totalUnclaimed++;
+        // Collect holder user IDs for username lookup
+        const holderUserIds = new Set<string>();
+        for (const frag of allFragments) {
+          if (frag.heldByUserId) {
+            holderUserIds.add(frag.heldByUserId);
+          }
         }
 
-        return {
-          fragmentId: frag.id,
-          name: frag.name,
-          keyType: frag.keyType as FragmentType,
-          fragmentNum: frag.fragmentNum,
-          heldBy: frag.heldByUserId
-            ? (usernameMap.get(frag.heldByUserId) ?? null)
-            : null,
-          heldByUserId: frag.heldByUserId,
-          heldSince: frag.heldSince,
-        };
-      });
+        const holderUsers =
+          holderUserIds.size > 0
+            ? await this.prisma.user.findMany({
+                where: { id: { in: Array.from(holderUserIds) } },
+                select: { id: true, username: true },
+              })
+            : [];
 
-      return { fragments, totalClaimed, totalUnclaimed };
-    } catch (error) {
-      this.logger.error("Error fetching world fragment status");
-      throw error;
-    }
+        const usernameMap = new Map<string, string>();
+        for (const user of holderUsers) {
+          usernameMap.set(user.id, user.username);
+        }
+
+        let totalClaimed = 0;
+        let totalUnclaimed = 0;
+
+        const fragments: FragmentHolder[] = allFragments.map((frag) => {
+          if (frag.heldByUserId) {
+            totalClaimed++;
+          } else {
+            totalUnclaimed++;
+          }
+
+          return {
+            fragmentId: frag.id,
+            name: frag.name,
+            keyType: frag.keyType as FragmentType,
+            fragmentNum: frag.fragmentNum,
+            heldBy: frag.heldByUserId
+              ? (usernameMap.get(frag.heldByUserId) ?? null)
+              : null,
+            heldByUserId: frag.heldByUserId,
+            heldSince: frag.heldSince,
+          };
+        });
+
+        return { fragments, totalClaimed, totalUnclaimed };
+      },
+      context: "Fetch world fragment status",
+      logger: this.logger,
+      rethrow: true,
+    })() as WorldFragmentStatus;
   }
 
   // ── ENDGAME UNLOCK — Check if the player holds all 9 fragments ──
@@ -806,58 +819,57 @@ export class KeyFragmentService extends EventEmitter {
    * @returns Whether the endgame is (now) unlocked
    */
   async checkEndgameUnlock(userId: string): Promise<boolean> {
-    try {
-      const storyProgress = await this.prisma.storyProgress.findUnique({
-        where: { userId },
-      });
+    return await safeExecute({
+      fn: async () => {
+        const storyProgress = await this.prisma.storyProgress.findUnique({
+          where: { userId },
+        });
 
-      if (!storyProgress) {
-        return false;
-      }
+        if (!storyProgress) {
+          return false;
+        }
 
-      // Already unlocked — nothing to do
-      if (storyProgress.endgameUnlocked) {
+        // Already unlocked — nothing to do
+        if (storyProgress.endgameUnlocked) {
+          return true;
+        }
+
+        // Count fragments currently held by this player
+        const heldCount = await this.prisma.keyFragment.count({
+          where: { heldByUserId: userId },
+        });
+
+        if (heldCount < TOTAL_FRAGMENTS_REQUIRED) {
+          return false;
+        }
+
+        // Unlock the endgame!
+        await this.prisma.storyProgress.update({
+          where: { userId },
+          data: { endgameUnlocked: true },
+        });
+
+        // Emit internal event
+        this.emit("endgame:unlocked", { userId });
+
+        // Push real-time notification
+        this.io.to(`user:${userId}`).emit("story:endgame-unlocked", {
+          userId,
+          message:
+            "All fragments of AIDA have been found. The final choice awaits.",
+        });
+
+        this.logger.info(
+          { userId },
+          "Endgame unlocked — all 9 key fragments held by one player",
+        );
+
         return true;
-      }
-
-      // Count fragments currently held by this player
-      const heldCount = await this.prisma.keyFragment.count({
-        where: { heldByUserId: userId },
-      });
-
-      if (heldCount < TOTAL_FRAGMENTS_REQUIRED) {
-        return false;
-      }
-
-      // Unlock the endgame!
-      await this.prisma.storyProgress.update({
-        where: { userId },
-        data: { endgameUnlocked: true },
-      });
-
-      // Emit internal event
-      this.emit("endgame:unlocked", { userId });
-
-      // Push real-time notification
-      this.io.to(`user:${userId}`).emit("story:endgame-unlocked", {
-        userId,
-        message:
-          "All fragments of AIDA have been found. The final choice awaits.",
-      });
-
-      this.logger.info(
-        { userId },
-        "Endgame unlocked — all 9 key fragments held by one player",
-      );
-
-      return true;
-    } catch (error) {
-      this.logger.error(
-        { err: error, userId },
-        "Error checking endgame unlock",
-      );
-      return false;
-    }
+      },
+      context: "Check endgame unlock",
+      logger: this.logger,
+      fallback: false,
+    })() as boolean;
   }
 
   // ── ENDGAME CHOICE — Make the final decision about AIDA ──────────
@@ -887,113 +899,112 @@ export class KeyFragmentService extends EventEmitter {
       };
     }
 
-    try {
-      const storyProgress = await this.prisma.storyProgress.findUnique({
-        where: { userId },
-      });
-
-      if (!storyProgress) {
-        return {
-          success: false,
-          message:
-            "No story progress found. You must discover fragments before making a choice.",
-          narrative: "",
-          choice,
-        };
-      }
-
-      if (!storyProgress.endgameUnlocked) {
-        return {
-          success: false,
-          message:
-            "The endgame has not been unlocked. Collect all 9 fragments first.",
-          narrative: "",
-          choice,
-        };
-      }
-
-      if (storyProgress.endgameChoice !== null) {
-        return {
-          success: false,
-          message: `You have already made your choice: "${storyProgress.endgameChoice}". The story is written.`,
-          narrative: "",
-          choice,
-        };
-      }
-
-      // Verify the player STILL holds all 9 fragments
-      const heldCount = await this.prisma.keyFragment.count({
-        where: { heldByUserId: userId },
-      });
-
-      if (heldCount < TOTAL_FRAGMENTS_REQUIRED) {
-        // Someone stole fragments between unlock and choice — revoke endgame
-        await this.prisma.storyProgress.update({
+    return await safeExecute({
+      fn: async () => {
+        const storyProgress = await this.prisma.storyProgress.findUnique({
           where: { userId },
-          data: { endgameUnlocked: false },
         });
 
+        if (!storyProgress) {
+          return {
+            success: false,
+            message:
+              "No story progress found. You must discover fragments before making a choice.",
+            narrative: "",
+            choice,
+          };
+        }
+
+        if (!storyProgress.endgameUnlocked) {
+          return {
+            success: false,
+            message:
+              "The endgame has not been unlocked. Collect all 9 fragments first.",
+            narrative: "",
+            choice,
+          };
+        }
+
+        if (storyProgress.endgameChoice !== null) {
+          return {
+            success: false,
+            message: `You have already made your choice: "${storyProgress.endgameChoice}". The story is written.`,
+            narrative: "",
+            choice,
+          };
+        }
+
+        // Verify the player STILL holds all 9 fragments
+        const heldCount = await this.prisma.keyFragment.count({
+          where: { heldByUserId: userId },
+        });
+
+        if (heldCount < TOTAL_FRAGMENTS_REQUIRED) {
+          // Someone stole fragments between unlock and choice — revoke endgame
+          await this.prisma.storyProgress.update({
+            where: { userId },
+            data: { endgameUnlocked: false },
+          });
+
+          return {
+            success: false,
+            message: `You no longer hold all 9 fragments (currently holding ${heldCount}). Someone has stolen from you. Reclaim them to proceed.`,
+            narrative: "",
+            choice,
+          };
+        }
+
+        // Retrieve the narrative for this choice
+        const narrative = ENDGAME_NARRATIVES[choice];
+
+        // Record the choice — this is irreversible
+        const now = new Date();
+        await this.prisma.storyProgress.update({
+          where: { userId },
+          data: {
+            endgameChoice: choice,
+            gameCompleted: true,
+            completedAt: now,
+          },
+        });
+
+        // Emit internal event
+        this.emit("endgame:completed", { userId, choice });
+
+        // Push narrative to the player
+        this.io.to(`user:${userId}`).emit("story:endgame-completed", {
+          userId,
+          choice,
+          narrative,
+          completedAt: now,
+        });
+
+        // Broadcast a world event — a player has completed the game
+        this.io.emit("game:event", {
+          type: "endgame_completed",
+          message:
+            "A player has made their final choice about AIDA. The net trembles.",
+          choice,
+          timestamp: now,
+        });
+
+        this.logger.info(
+          { userId, choice },
+          "Endgame completed — player chose: %s",
+          choice,
+        );
+
         return {
-          success: false,
-          message: `You no longer hold all 9 fragments (currently holding ${heldCount}). Someone has stolen from you. Reclaim them to proceed.`,
-          narrative: "",
+          success: true,
+          message: "Your choice has been made. There is no going back.",
+          narrative,
           choice,
         };
-      }
-
-      // Retrieve the narrative for this choice
-      const narrative = ENDGAME_NARRATIVES[choice];
-
-      // Record the choice — this is irreversible
-      const now = new Date();
-      await this.prisma.storyProgress.update({
-        where: { userId },
-        data: {
-          endgameChoice: choice,
-          gameCompleted: true,
-          completedAt: now,
-        },
-      });
-
-      // Emit internal event
-      this.emit("endgame:completed", { userId, choice });
-
-      // Push narrative to the player
-      this.io.to(`user:${userId}`).emit("story:endgame-completed", {
-        userId,
-        choice,
-        narrative,
-        completedAt: now,
-      });
-
-      // Broadcast a world event — a player has completed the game
-      this.io.emit("game:event", {
-        type: "endgame_completed",
-        message:
-          "A player has made their final choice about AIDA. The net trembles.",
-        choice,
-        timestamp: now,
-      });
-
-      this.logger.info(
-        { userId, choice },
-        "Endgame completed — player chose: %s",
-        choice,
-      );
-
-      return {
-        success: true,
-        message: "Your choice has been made. There is no going back.",
-        narrative,
-        choice,
-      };
-    } catch (error) {
-      this.logger.error(
-        { err: error, userId, choice },
-        "Error processing endgame choice",
-      );
-      throw error;
-    }
+      },
+      context: "Process endgame choice",
+      logger: this.logger,
+      rethrow: true,
+    })() as EndgameResult;
   }
 
   // ── HINTS — Provide hints for undiscovered fragments ─────────────
@@ -1009,35 +1020,32 @@ export class KeyFragmentService extends EventEmitter {
   async getFragmentHints(
     userId: string,
   ): Promise<{ keyType: string; hint: string }[]> {
-    try {
-      // Get all fragments in the game
-      const allFragments = await this.prisma.keyFragment.findMany({
-        orderBy: [{ keyType: "asc" }, { fragmentNum: "asc" }],
-      });
+    return await safeExecute({
+      fn: async () => {
+        // Get all fragments in the game
+        const allFragments = await this.prisma.keyFragment.findMany({
+          orderBy: [{ keyType: "asc" }, { fragmentNum: "asc" }],
+        });
 
-      // Get the player's discovered fragment IDs
-      const discoveries = await this.prisma.keyFragmentDiscovery.findMany({
-        where: { userId },
-        select: { fragmentId: true },
-      });
-      const discoveredIds = new Set(discoveries.map((d) => d.fragmentId));
+        // Get the player's discovered fragment IDs
+        const discoveries = await this.prisma.keyFragmentDiscovery.findMany({
+          where: { userId },
+          select: { fragmentId: true },
+        });
+        const discoveredIds = new Set(discoveries.map((d) => d.fragmentId));
 
-      // Return hints for undiscovered fragments only
-      const hints = allFragments
-        .filter((f) => !discoveredIds.has(f.id))
-        .map((f) => ({
-          keyType: f.keyType,
-          hint: f.hint,
-        }));
-
-      return hints;
-    } catch (error) {
-      this.logger.error(
-        { err: error, userId },
-        "Error fetching fragment hints",
-      );
-      throw error;
-    }
+        // Return hints for undiscovered fragments only
+        return allFragments
+          .filter((f) => !discoveredIds.has(f.id))
+          .map((f) => ({
+            keyType: f.keyType,
+            hint: f.hint,
+          }));
+      },
+      context: "Fetch fragment hints",
+      logger: this.logger,
+      rethrow: true,
+    })() as { keyType: string; hint: string }[];
   }
 
   // ── PRIVATE HELPERS ──────────────────────────────────────────────
@@ -1050,63 +1058,62 @@ export class KeyFragmentService extends EventEmitter {
    * @param userId - The player's user ID
    */
   private async updatePlayerCounters(userId: string): Promise<void> {
-    try {
-      // Count fragments held by this user, grouped by keyType
-      const holdings = await this.prisma.keyFragment.groupBy({
-        by: ["keyType"],
-        where: { heldByUserId: userId },
-        _count: { _all: true },
-      });
+    await safeExecute({
+      fn: async () => {
+        // Count fragments held by this user, grouped by keyType
+        const holdings = await this.prisma.keyFragment.groupBy({
+          by: ["keyType"],
+          where: { heldByUserId: userId },
+          _count: { _all: true },
+        });
 
-      // Build counts map — concrete type so .sword/.key/.collar are `number`, not `number | undefined`
-      const counts = { sword: 0, key: 0, collar: 0 };
+        // Build counts map — concrete type so .sword/.key/.collar are `number`, not `number | undefined`
+        const counts = { sword: 0, key: 0, collar: 0 };
 
-      for (const group of holdings) {
-        if (group.keyType in counts) {
-          counts[group.keyType as keyof typeof counts] = group._count._all;
+        for (const group of holdings) {
+          if (group.keyType in counts) {
+            counts[group.keyType as keyof typeof counts] = group._count._all;
+          }
         }
-      }
 
-      // Build the fragments array (IDs of all held fragments)
-      const heldFragments = await this.prisma.keyFragment.findMany({
-        where: { heldByUserId: userId },
-        select: { id: true },
-        orderBy: [{ keyType: "asc" }, { fragmentNum: "asc" }],
-      });
-      const fragmentIds = heldFragments.map((f) => f.id);
+        // Build the fragments array (IDs of all held fragments)
+        const heldFragments = await this.prisma.keyFragment.findMany({
+          where: { heldByUserId: userId },
+          select: { id: true },
+          orderBy: [{ keyType: "asc" }, { fragmentNum: "asc" }],
+        });
+        const fragmentIds = heldFragments.map((f) => f.id);
 
-      // Upsert StoryProgress with recomputed counts
-      await this.prisma.storyProgress.upsert({
-        where: { userId },
-        create: {
-          userId,
-          discoveryLevel: 0,
-          swordFragments: counts.sword,
-          keyFragments: counts.key,
-          collarFragments: counts.collar,
-          fragments: fragmentIds,
-          hasContactedAIDA: false,
-          aidaContactCount: 0,
-          aidaTrustLevel: 0,
-          endgameUnlocked: false,
-          gameCompleted: false,
-          lastDiscoveryAt: new Date(),
-        },
-        update: {
-          swordFragments: counts.sword,
-          keyFragments: counts.key,
-          collarFragments: counts.collar,
-          fragments: fragmentIds,
-          lastDiscoveryAt: new Date(),
-        },
-      });
-    } catch (error) {
-      this.logger.error(
-        { err: error, userId },
-        "Error updating player fragment counters",
-      );
-      throw error;
-    }
+        // Upsert StoryProgress with recomputed counts
+        await this.prisma.storyProgress.upsert({
+          where: { userId },
+          create: {
+            userId,
+            discoveryLevel: 0,
+            swordFragments: counts.sword,
+            keyFragments: counts.key,
+            collarFragments: counts.collar,
+            fragments: fragmentIds,
+            hasContactedAIDA: false,
+            aidaContactCount: 0,
+            aidaTrustLevel: 0,
+            endgameUnlocked: false,
+            gameCompleted: false,
+            lastDiscoveryAt: new Date(),
+          },
+          update: {
+            swordFragments: counts.sword,
+            keyFragments: counts.key,
+            collarFragments: counts.collar,
+            fragments: fragmentIds,
+            lastDiscoveryAt: new Date(),
+          },
+        });
+      },
+      context: "Update player fragment counters",
+      logger: this.logger,
+      rethrow: true,
+    })();
   }
 
   /**

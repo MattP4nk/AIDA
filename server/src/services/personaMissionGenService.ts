@@ -12,7 +12,8 @@ import {
   type RewardScaling,
 } from "./missionTemplatePool";
 import { OBJECTIVE_TYPES } from "./missionObjectiveTypes";
-import { validateOrRetry, validateMissionOutput } from "../utils/aiOutputValidator";
+import { validateMissionOutput } from "../utils/aiOutputValidator";
+import { safeAI } from "../utils/safeExecute";
 
 // ── Faction Leader Profiles ────────────────────────────────────────────────
 
@@ -172,20 +173,21 @@ Respond ONLY with JSON:
   "description": "..."
 }`;
 
-        const result = await this.aiService.generateResponse(flavorPrompt, leader.systemPrompt, undefined, '{ "title": "string (3-80 chars)", "description": "string (10-500 chars)" }');
-        if (!result.success) throw new Error(result.error || "AI generation failed");
-        const validated = validateOrRetry(result.response, validateMissionOutput, this.aiService, {
+        const { enrichWithTopology } = await import("./worldTopologyContext");
+        const enrichedSystemPrompt = await enrichWithTopology(leader.systemPrompt, this.prisma, this.logger);
+
+        const validated = await safeAI({
+          aiService: this.aiService,
           prompt: flavorPrompt,
-          systemPrompt: leader.systemPrompt,
-          expectedFormat: '{ "title": "string (3-80 chars, non-empty)", "description": "string (10-500 chars)" }',
-          onSuccess: (_response) => {
-            // Retry is best-effort flavor text — no side effect needed, mission already created with template defaults
-          },
+          systemPrompt: enrichedSystemPrompt,
+          expectedFormat: '{ "title": "string (3-80 chars)", "description": "string (10-500 chars)" }',
+          validate: validateMissionOutput,
+          fallback: { title, description },
+          context: "Mission flavor text for dynamic faction mission",
+          logger: this.logger,
         });
-        if (validated) {
-          title = validated.title;
-          description = validated.description;
-        }
+        title = validated.title;
+        description = validated.description;
       } catch (aiError) {
         this.logger.warn({ err: aiError, factionId }, "AI flavor generation failed, using template defaults");
       }

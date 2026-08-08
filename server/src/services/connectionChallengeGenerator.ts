@@ -200,7 +200,7 @@ export function generateSignalTraceChallenge(
   // Place the signal path: start at a random cell, move through adjacent cells
   const startRow = Math.floor(Math.random() * config.rows);
   const startCol = Math.floor(Math.random() * (config.cols - config.hops));
-  let startVal = 0x10 + Math.floor(Math.random() * 0x80); // Keep in readable range
+  const startVal = 0x10 + Math.floor(Math.random() * 0x80); // Keep in readable range
 
   // The path moves generally right/down through the grid
   const pathCells: Array<{ row: number; col: number }> = [];

@@ -1,5 +1,6 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
+import { successResult, errorResult } from "./helpers";
 
 export class AliasCommandsModule implements CommandModule {
   public category = "alias";
@@ -29,18 +30,10 @@ export class AliasCommandsModule implements CommandModule {
         case "help":
           return this.handleHelp();
         default:
-          return {
-            success: false,
-            output: `Unknown alias command: ${subcommand}\nType 'alias help' for usage.`,
-            timestamp: new Date(),
-          };
+          return errorResult(`Unknown alias command: ${subcommand}\nType 'alias help' for usage.`);
       }
     } catch (error) {
-      return {
-        success: false,
-        output: `Error: ${error instanceof Error ? error.message : "Unknown error"}`,
-        timestamp: new Date(),
-      };
+      return errorResult(`Error: ${error instanceof Error ? error.message : "Unknown error"}`);
     }
   }
 
@@ -48,7 +41,7 @@ export class AliasCommandsModule implements CommandModule {
     return [
       {
         command: "alias",
-        category: "gameplay",
+        category: "alias",
         description: "Manage your identity alias",
         usage: "alias <subcommand> [args]",
         examples: [
@@ -73,7 +66,7 @@ export class AliasCommandsModule implements CommandModule {
     output +=
       "  alias reveal <player>   - [Social 20] Attempt to reveal a player's true identity\n";
 
-    return { success: true, output, timestamp: new Date() };
+    return successResult(output);
   }
 
   private async handleCreate(
@@ -82,11 +75,7 @@ export class AliasCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const aliasName = args.join(" ").trim();
     if (!aliasName || aliasName.length < 2 || aliasName.length > 30) {
-      return {
-        success: false,
-        output: "Usage: alias create <name> (2-30 characters)",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: alias create <name> (2-30 characters)");
     }
 
     const { getService } = await import("../../di/container");
@@ -94,11 +83,9 @@ export class AliasCommandsModule implements CommandModule {
       getService<import("../aliasService").default>("AliasService");
     const result = await aliasService.createAlias(context.userId, aliasName);
 
-    return {
-      success: result.success,
-      output: result.message,
-      timestamp: new Date(),
-    };
+    return result.success
+      ? successResult(result.message)
+      : errorResult(result.message);
   }
 
   private async handleDestroy(context: CommandContext): Promise<CommandResult> {
@@ -107,11 +94,9 @@ export class AliasCommandsModule implements CommandModule {
       getService<import("../aliasService").default>("AliasService");
     const result = await aliasService.destroyAlias(context.userId);
 
-    return {
-      success: result.success,
-      output: result.message,
-      timestamp: new Date(),
-    };
+    return result.success
+      ? successResult(result.message)
+      : errorResult(result.message);
   }
 
   private async handleInfo(context: CommandContext): Promise<CommandResult> {
@@ -121,12 +106,7 @@ export class AliasCommandsModule implements CommandModule {
     const alias = await aliasService.getAlias(context.userId);
 
     if (!alias) {
-      return {
-        success: true,
-        output:
-          "You don't have an active alias. Use 'alias create <name>' to create one.",
-        timestamp: new Date(),
-      };
+      return successResult("You don't have an active alias. Use 'alias create <name>' to create one.");
     }
 
     let output = "🎭 YOUR ALIAS\n\n";
@@ -136,7 +116,7 @@ export class AliasCommandsModule implements CommandModule {
       output += `  Apparent Faction: ${alias.apparentFactionId}\n`;
     }
 
-    return { success: true, output, timestamp: new Date() };
+    return successResult(output);
   }
 
   private async handleReveal(
@@ -145,11 +125,7 @@ export class AliasCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const targetName = args.join(" ").trim();
     if (!targetName) {
-      return {
-        success: false,
-        output: "Usage: alias reveal <player_name>",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: alias reveal <player_name>");
     }
 
     // Find target user by username
@@ -158,11 +134,7 @@ export class AliasCommandsModule implements CommandModule {
     });
 
     if (!targetUser) {
-      return {
-        success: false,
-        output: `Player "${targetName}" not found.`,
-        timestamp: new Date(),
-      };
+      return errorResult(`Player "${targetName}" not found.`);
     }
 
     const { getService } = await import("../../di/container");
@@ -173,10 +145,8 @@ export class AliasCommandsModule implements CommandModule {
       targetUser.id,
     );
 
-    return {
-      success: result.success,
-      output: result.message,
-      timestamp: new Date(),
-    };
+    return result.success
+      ? successResult(result.message)
+      : errorResult(result.message);
   }
 }

@@ -13,6 +13,7 @@
 import { injectable, inject } from "tsyringe";
 import type { Logger } from "pino";
 import crypto from "crypto";
+import { safeExecute } from "../utils/safeExecute";
 import { LOGGER, AI_SERVICE, EVENT_SERVICE } from "../di/tokens";
 import { db } from "../database/client";
 import type { AIService } from "./aiService";
@@ -23,7 +24,7 @@ import {
   CRYPTIC_QUOTES,
   WORLD_BACKSTORY_SHORT,
 } from "../lore/worldLore";
-import { validateOrRetry } from "../utils/aiOutputValidator";
+import { safeAI } from "../utils/safeExecute";
 
 // ═══════════════════════════════════════════════════════════════════
 // Constants — Procedural Generation Building Blocks
@@ -407,64 +408,63 @@ export class DarkNetDungeonService {
       const server = servers[index]!;
       const nextServer = servers[index + 1]!;
 
-      try {
-        // Ensure root directory exists
-        let rootDir = await db.client.fileSystemNode.findFirst({
-          where: {
-            serverId: server.id,
-            name: "/",
-            type: "directory",
-            parentId: null,
-          },
-        });
-
-        if (!rootDir) {
-          rootDir = await db.client.fileSystemNode.create({
-            data: {
+      await safeExecute({
+        fn: async () => {
+          // Ensure root directory exists
+          let rootDir = await db.client.fileSystemNode.findFirst({
+            where: {
               serverId: server.id,
               name: "/",
               type: "directory",
+              parentId: null,
             },
           });
-        }
 
-        // Create hidden .signal directory
-        const hiddenDir = await db.client.fileSystemNode.create({
-          data: {
-            serverId: server.id,
-            name: ".signal",
-            type: "directory",
-            parentId: rootDir.id,
-            isHidden: true,
-          },
-        });
+          if (!rootDir) {
+            rootDir = await db.client.fileSystemNode.create({
+              data: {
+                serverId: server.id,
+                name: "/",
+                type: "directory",
+              },
+            });
+          }
 
-        // Build clue content and create file
-        const clueContent = generateClueContent(
-          index,
-          nextServer.ipAddress,
-          dungeonName,
-          totalHops,
-        );
+          // Create hidden .signal directory
+          const hiddenDir = await db.client.fileSystemNode.create({
+            data: {
+              serverId: server.id,
+              name: ".signal",
+              type: "directory",
+              parentId: rootDir.id,
+              isHidden: true,
+            },
+          });
 
-        await db.client.fileSystemNode.create({
-          data: {
-            serverId: server.id,
-            name: `trace_${index}.dat`,
-            type: "file",
-            content: clueContent,
-            parentId: hiddenDir.id,
-            isHidden: true,
-            isEncrypted: index > 1, // later clues require decryption
-            size: clueContent.length,
-          },
-        });
-      } catch (error) {
-        this.logger.error(
-          { err: error, serverId: server.id, index },
-          "Failed to plant clue file on server",
-        );
-      }
+          // Build clue content and create file
+          const clueContent = generateClueContent(
+            index,
+            nextServer.ipAddress,
+            dungeonName,
+            totalHops,
+          );
+
+          await db.client.fileSystemNode.create({
+            data: {
+              serverId: server.id,
+              name: `trace_${index}.dat`,
+              type: "file",
+              content: clueContent,
+              parentId: hiddenDir.id,
+              isHidden: true,
+              isEncrypted: index > 1, // later clues require decryption
+              size: clueContent.length,
+            },
+          });
+        },
+        context: "Plant clue file on server",
+        logger: this.logger,
+      })();
     }
   }
 
@@ -566,7 +566,8 @@ export class DarkNetDungeonService {
    * @returns The forum post ID, or `null` if posting failed.
    */
   async postForumRiddle(instanceId: string): Promise<string | null> {
-    try {
+    return await safeExecute({
+      fn: async () => {
       // a. Find The Architect persona
       const architect = await db.client.aIPersona.findFirst({
         where: { type: "game_master" },
@@ -625,31 +626,18 @@ Respond ONLY with JSON:
       const systemPrompt =
         "You are The Architect, the omniscient game master of AIDA. You speak in riddles and metaphors. You test players by hiding secrets in plain sight.";
 
-      const result = await this.aiService.generateResponse(
-        prompt,
-        systemPrompt,
-        undefined,
-        '{ "title": "string", "content": "string (forum riddle with disguised gateway IP and passkey)" }',
-      );
+      const { enrichWithTopology } = await import("./worldTopologyContext");
+      const enrichedSystemPrompt = await enrichWithTopology(systemPrompt, db.client, this.logger);
 
-      // e. Parse AI response and create forum post
-      let title = `Signal from the Void — ${instance.name}`;
-      let content = `The signal shifts. A new path awaits those who listen.\n\nGateway: ${instance.gatewayIp}\nKey: ${instance.passkey}`;
-
-      const validateTitleContent = (parsed: any): { title: string; content: string } | null => {
-        if (!parsed || typeof parsed !== "object") return null;
-        if (typeof parsed.title !== "string" || typeof parsed.content !== "string") return null;
-        if (!parsed.title.trim() || !parsed.content.trim()) return null;
-        return { title: parsed.title.trim(), content: parsed.content.trim() };
-      };
+      // e. Generate and validate riddle
+      const fallbackTitle = `Signal from the Void — ${instance.name}`;
+      const fallbackContent = `The signal shifts. A new path awaits those who listen.\n\nGateway: ${instance.gatewayIp}\nKey: ${instance.passkey}`;
 
       // Validate riddle is solvable — IP octets and passkey segments must appear in content
       const isRiddleSolvable = (riddleContent: string, ip: string, passkey: string): boolean => {
         const lower = riddleContent.toLowerCase();
-        // Check if at least 3 of 4 IP octets appear somewhere in the text
         const octets = ip.split(".");
         const octetsFound = octets.filter((o) => lower.includes(o)).length;
-        // Check if passkey characters appear (at least first 3 chars as a sequence)
         const passKeyChars = passkey.toLowerCase().slice(0, 3);
         const passKeyFound = lower.includes(passKeyChars) ||
           lower.includes(passkey.toLowerCase()) ||
@@ -657,61 +645,41 @@ Respond ONLY with JSON:
         return octetsFound >= 3 && passKeyFound;
       };
 
-      if (result.success) {
-        const validated = validateOrRetry(result.response, validateTitleContent, this.aiService, {
-          prompt,
-          systemPrompt,
-          expectedFormat: '{ "title": "string (non-empty)", "content": "string (non-empty, must embed IP octets and passkey)" }',
-          onSuccess: async (response) => {
-            try {
-              const retryParsed = validateOrRetry(response, validateTitleContent);
-              const inst = await prismaAny.darkNetInstance.findUnique({
-                where: { id: instanceId },
-              });
-              if (inst?.forumClueId && retryParsed && isRiddleSolvable(retryParsed.content, instance.gatewayIp, instance.passkey)) {
-                await db.client.post.update({
-                  where: { id: inst.forumClueId },
-                  data: {
-                    title: retryParsed.title,
-                    content: retryParsed.content,
-                  },
-                });
-              }
-            } catch { /* ignore retry errors */ }
-          },
-        });
-        if (validated) {
-          // Verify the riddle is solvable before using it
-          if (isRiddleSolvable(validated.content, instance.gatewayIp, instance.passkey)) {
-            title = validated.title;
-            content = validated.content;
-          } else {
-            this.logger.warn("AI riddle failed solvability check — using fallback with direct clues");
-            // Fallback content already has the IP and passkey in plain text
-          }
-        }
-      } else {
-        // Queue for retry if AI failed — on success, update the forum post content
-        const riddleInstanceId = instanceId;
-        this.aiService.queueForRetry(prompt, systemPrompt, async (response) => {
-          try {
-            const retryParsed = validateOrRetry(response, validateTitleContent);
-            // Find the forum post linked to this instance and update it
-            const inst = await prismaAny.darkNetInstance.findUnique({
-              where: { id: riddleInstanceId },
+      // Combined validator: parse + solvability check
+      const validateSolvableRiddle = (parsed: any): { title: string; content: string } | null => {
+        if (!parsed || typeof parsed !== "object") return null;
+        if (typeof parsed.title !== "string" || typeof parsed.content !== "string") return null;
+        if (!parsed.title.trim() || !parsed.content.trim()) return null;
+        const result = { title: parsed.title.trim(), content: parsed.content.trim() };
+        if (!isRiddleSolvable(result.content, instance.gatewayIp, instance.passkey)) return null;
+        return result;
+      };
+
+      const riddleInstanceId = instanceId;
+      const riddle = await safeAI({
+        aiService: this.aiService,
+        prompt,
+        systemPrompt: enrichedSystemPrompt,
+        expectedFormat: '{ "title": "string", "content": "string (forum riddle with disguised gateway IP and passkey)" }',
+        validate: validateSolvableRiddle,
+        fallback: { title: fallbackTitle, content: fallbackContent },
+        context: "Dark network forum riddle",
+        logger: this.logger,
+        retry: true,
+        onRetrySuccess: async (result) => {
+          const inst = await prismaAny.darkNetInstance.findUnique({
+            where: { id: riddleInstanceId },
+          });
+          if (inst?.forumClueId) {
+            await db.client.post.update({
+              where: { id: inst.forumClueId },
+              data: { title: result.title, content: result.content },
             });
-            if (inst?.forumClueId && retryParsed) {
-              await db.client.post.update({
-                where: { id: inst.forumClueId },
-                data: {
-                  title: retryParsed.title,
-                  content: retryParsed.content,
-                },
-              });
-            }
-          } catch { /* ignore retry errors */ }
-        });
-      }
+          }
+        },
+      });
+
+      const { title, content } = riddle;
 
       // Lazy-load ForumService to avoid circular DI
       const { getService } = await import("../di/container");
@@ -737,13 +705,11 @@ Respond ONLY with JSON:
       );
 
       return post.id;
-    } catch (error) {
-      this.logger.error(
-        { err: error, instanceId },
-        "Failed to post forum riddle",
-      );
-      return null;
-    }
+      },
+      context: "Post forum riddle",
+      logger: this.logger,
+      fallback: null,
+    })();
   }
 
   // ─────────────────────────────────────────────────────────────────
@@ -765,7 +731,8 @@ Respond ONLY with JSON:
     userId: string,
     vaultServerId: string,
   ): Promise<{ conquered: boolean; reward?: any }> {
-    try {
+    return await safeExecute({
+      fn: async () => {
       // a. Find active instance for this vault
       const instance = await prismaAny.darkNetInstance.findFirst({
         where: { vaultServerId, status: "active" },
@@ -850,13 +817,11 @@ Respond ONLY with JSON:
           ...(instance.rewardData as Record<string, unknown>),
         },
       };
-    } catch (error) {
-      this.logger.error(
-        { err: error, userId, vaultServerId },
-        "Error during vault conquest",
-      );
-      return { conquered: false };
-    }
+      },
+      context: "Conquer vault",
+      logger: this.logger,
+      fallback: { conquered: false } as { conquered: boolean; reward?: any },
+    })() as unknown as Promise<{ conquered: boolean; reward?: any }>;
   }
 
   // ─────────────────────────────────────────────────────────────────
@@ -873,7 +838,8 @@ Respond ONLY with JSON:
    * @param conqueredInstanceId - The DarkNetInstance to replace.
    */
   async regenerateDungeon(conqueredInstanceId: string): Promise<void> {
-    try {
+    await safeExecute({
+      fn: async () => {
       const instance = await prismaAny.darkNetInstance.findUnique({
         where: { id: conqueredInstanceId },
       });
@@ -940,12 +906,10 @@ Respond ONLY with JSON:
         },
         "Dark network dungeon regenerated",
       );
-    } catch (error) {
-      this.logger.error(
-        { err: error, conqueredInstanceId },
-        "Failed to regenerate dungeon",
-      );
-    }
+      },
+      context: "Regenerate dungeon",
+      logger: this.logger,
+    })();
   }
 
   // ─────────────────────────────────────────────────────────────────
@@ -987,22 +951,21 @@ Respond ONLY with JSON:
    * dungeon exists, one is generated and a riddle is posted for it.
    */
   async ensureActiveDungeon(): Promise<void> {
-    try {
-      const active = await prismaAny.darkNetInstance.count({
-        where: { status: "active" },
-      });
+    await safeExecute({
+      fn: async () => {
+        const active = await prismaAny.darkNetInstance.count({
+          where: { status: "active" },
+        });
 
-      if (active === 0) {
-        const { instanceId } = await this.generateDungeon();
-        await this.postForumRiddle(instanceId);
-        this.logger.info("Generated initial dark network dungeon");
-      }
-    } catch (error) {
-      this.logger.error(
-        { err: error },
-        "Failed to ensure an active dungeon exists",
-      );
-    }
+        if (active === 0) {
+          const { instanceId } = await this.generateDungeon();
+          await this.postForumRiddle(instanceId);
+          this.logger.info("Generated initial dark network dungeon");
+        }
+      },
+      context: "Ensure active dungeon exists",
+      logger: this.logger,
+    })();
   }
 
   // ─────────────────────────────────────────────────────────────────
@@ -1016,27 +979,29 @@ Respond ONLY with JSON:
    * prevent stale dungeons from lingering forever.
    */
   async expireOldDungeons(): Promise<void> {
-    try {
-      const expired = await prismaAny.darkNetInstance.findMany({
-        where: { status: "active", expiresAt: { lt: new Date() } },
-      });
-
-      for (const instance of expired) {
-        this.logger.info(
-          { instanceId: instance.id, name: instance.name },
-          "Expiring stale dungeon",
-        );
-
-        await prismaAny.darkNetInstance.update({
-          where: { id: instance.id },
-          data: { status: "expired" },
+    await safeExecute({
+      fn: async () => {
+        const expired = await prismaAny.darkNetInstance.findMany({
+          where: { status: "active", expiresAt: { lt: new Date() } },
         });
 
-        await this.regenerateDungeon(instance.id);
-      }
-    } catch (error) {
-      this.logger.error({ err: error }, "Failed to expire old dungeons");
-    }
+        for (const instance of expired) {
+          this.logger.info(
+            { instanceId: instance.id, name: instance.name },
+            "Expiring stale dungeon",
+          );
+
+          await prismaAny.darkNetInstance.update({
+            where: { id: instance.id },
+            data: { status: "expired" },
+          });
+
+          await this.regenerateDungeon(instance.id);
+        }
+      },
+      context: "Expire old dungeons",
+      logger: this.logger,
+    })();
   }
 
   // ─────────────────────────────────────────────────────────────────
@@ -1089,7 +1054,8 @@ Respond ONLY with JSON:
       rewardData: unknown;
     },
   ): Promise<void> {
-    try {
+    await safeExecute({
+      fn: async () => {
       if (instance.rewardType === "aida_token") {
         const tokenName = (instance.rewardData as any).tokenName;
         const shopItem = await db.client.shopItem.findFirst({
@@ -1175,12 +1141,10 @@ Respond ONLY with JSON:
           },
         });
       }
-    } catch (error) {
-      this.logger.error(
-        { err: error, userId, rewardType: instance.rewardType },
-        "Failed to grant dungeon reward",
-      );
-    }
+      },
+      context: "Grant dungeon reward",
+      logger: this.logger,
+    })();
   }
 
   /**
@@ -1286,12 +1250,8 @@ Respond ONLY with JSON:
           "called The Emperor, and warring factions. Your tone is dark, " +
           "technical, and mysterious. Never break character.";
 
-        const result = await this.aiService.generateResponse(
-          prompt,
-          systemPrompt,
-          undefined,
-          '{ "files": [{"name": "string", "content": "string"}] }',
-        );
+        const { enrichWithTopology } = await import("./worldTopologyContext");
+        const enrichedLoreSystemPrompt = await enrichWithTopology(systemPrompt, db.client, this.logger);
 
         const validateLoreFiles = (parsed: any): { files: Array<{ name: string; content: string }> } | null => {
           if (!parsed || typeof parsed !== "object") return null;
@@ -1303,63 +1263,55 @@ Respond ONLY with JSON:
           return { files };
         };
 
-        if (!result.success) {
-          this.logger.warn(
-            { serverId: server.id, error: result.error },
-            "AI lore content generation failed — using fallback",
-          );
-          await this.plantFallbackContent(server.id, theme, quote);
+        const sId = server.id;
+        const depthTierCopy = depthTier;
 
-          // Queue for retry — when AI comes back, add lore files to the server
-          const sId = server.id;
-          const depthTierCopy = depthTier;
-          this.aiService.queueForRetry(prompt, systemPrompt, async (response) => {
-            try {
-              const validated = validateOrRetry(response, validateLoreFiles);
-              if (!validated) return;
-
-              let rootDir = await db.client.fileSystemNode.findFirst({
-                where: { serverId: sId, name: "/", type: "directory", parentId: null },
+        const loreResult = await safeAI({
+          aiService: this.aiService,
+          prompt,
+          systemPrompt: enrichedLoreSystemPrompt,
+          expectedFormat: '{ "files": [{"name": "string", "content": "string"}] }',
+          validate: validateLoreFiles,
+          fallback: null as { files: Array<{ name: string; content: string }> } | null,
+          context: "Dark network lore content generation",
+          logger: this.logger,
+          retry: true,
+          onRetrySuccess: async (result) => {
+            if (!result) return;
+            let rootDir = await db.client.fileSystemNode.findFirst({
+              where: { serverId: sId, name: "/", type: "directory", parentId: null },
+            });
+            if (!rootDir) {
+              rootDir = await db.client.fileSystemNode.create({
+                data: { serverId: sId, name: "/", type: "directory" },
               });
-              if (!rootDir) {
-                rootDir = await db.client.fileSystemNode.create({
-                  data: { serverId: sId, name: "/", type: "directory" },
-                });
-              }
+            }
 
-              for (const file of validated.files) {
-                if (!file.name || !file.content) continue;
-                const fileName = file.name.replace(/[^a-zA-Z0-9._\-]/g, "_").slice(0, 60);
-                const fileContent = String(file.content).slice(0, 3000);
-                const shouldHide = depthTierCopy !== "gateway" && Math.random() < 0.4;
-                const shouldEncrypt = (depthTierCopy === "deep" || depthTierCopy === "vault") && Math.random() < 0.5;
+            for (const file of result.files) {
+              if (!file.name || !file.content) continue;
+              const fileName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 60);
+              const fileContent = String(file.content).slice(0, 3000);
+              const shouldHide = depthTierCopy !== "gateway" && Math.random() < 0.4;
+              const shouldEncrypt = (depthTierCopy === "deep" || depthTierCopy === "vault") && Math.random() < 0.5;
 
-                await db.client.fileSystemNode.create({
-                  data: {
-                    serverId: sId,
-                    name: `ai_${fileName}`,
-                    type: "file",
-                    content: fileContent,
-                    parentId: rootDir.id,
-                    isHidden: shouldHide,
-                    isEncrypted: shouldEncrypt,
-                    size: fileContent.length,
-                  },
-                });
-              }
-            } catch { /* ignore retry errors */ }
-          });
+              await db.client.fileSystemNode.create({
+                data: {
+                  serverId: sId,
+                  name: `ai_${fileName}`,
+                  type: "file",
+                  content: fileContent,
+                  parentId: rootDir.id,
+                  isHidden: shouldHide,
+                  isEncrypted: shouldEncrypt,
+                  size: fileContent.length,
+                },
+              });
+            }
+          },
+        });
 
-          return;
-        }
-
-        // Parse and validate the response
-        const parsed = validateOrRetry(result.response, validateLoreFiles);
-        if (!parsed) {
-          this.logger.warn(
-            { serverId: server.id },
-            "AI lore content response was not valid JSON — using fallback",
-          );
+        if (!loreResult) {
+          // AI failed — use template fallback content
           await this.plantFallbackContent(server.id, theme, quote);
           return;
         }
@@ -1380,12 +1332,12 @@ Respond ONLY with JSON:
         }
 
         // Create the lore files
-        for (const file of parsed.files) {
+        for (const file of loreResult.files) {
           if (!file.name || !file.content) continue;
 
           // Sanitize name
           const fileName = file.name
-            .replace(/[^a-zA-Z0-9._\-]/g, "_")
+            .replace(/[^a-zA-Z0-9._-]/g, "_")
             .slice(0, 60);
           const content = String(file.content).slice(0, 3000);
 
@@ -1412,7 +1364,7 @@ Respond ONLY with JSON:
         this.logger.debug(
           {
             serverId: server.id,
-            fileCount: parsed.files.length,
+            fileCount: loreResult.files.length,
             depthTier,
           },
           "Populated server with lore content",

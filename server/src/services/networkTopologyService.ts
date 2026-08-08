@@ -9,6 +9,7 @@ import {
 } from "../di/tokens";
 import { CacheService } from "./cacheService";
 import type { FactionKnowledgeService } from "./factionKnowledgeService";
+import { safeExecute } from "../utils/safeExecute";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -247,6 +248,7 @@ export class NetworkTopologyService {
       where: {
         installerId: userId,
         serverId: targetServerId,
+        isActive: true,
         OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
       },
     });
@@ -717,7 +719,7 @@ export class NetworkTopologyService {
       case "open":
         return { allowed: true, reason: "Open access.", requiresHack: false, requiresKey: false };
 
-      case "hackable":
+      case "hackable": {
         // Check if player has previously hacked (has a ServerConnection with accessLevel > 0)
         const hackConnection = await this.prisma.serverConnection.findFirst({
           where: { userId, serverId, accessLevel: { gt: 0 } },
@@ -726,6 +728,7 @@ export class NetworkTopologyService {
           return { allowed: true, reason: "Previously hacked.", requiresHack: false, requiresKey: false };
         }
         return { allowed: false, reason: `${server.name} requires hacking to gain access. Use 'hack ${serverId}'.`, requiresHack: true, requiresKey: false };
+      }
 
       case "keycard": {
         const hasKey = await this.playerHasAccessKey(userId, serverId);
@@ -776,18 +779,20 @@ export class NetworkTopologyService {
     sourceDetail?: string,
     sourceFileId?: string,
   ): Promise<boolean> {
-    try {
-      await this.prisma.serverAccessKey.upsert({
-        where: { userId_serverId: { userId, serverId } },
-        create: { userId, serverId, keyValue, source, sourceDetail: sourceDetail ?? null, sourceFileId: sourceFileId ?? null },
-        update: { keyValue, source, sourceDetail: sourceDetail ?? null, sourceFileId: sourceFileId ?? null },
-      });
-      this.logger.info({ userId, serverId, source }, "Access key granted to player");
-      return true;
-    } catch (error) {
-      this.logger.error({ error, userId, serverId }, "Failed to grant access key");
-      return false;
-    }
+    return await safeExecute({
+      fn: async () => {
+        await this.prisma.serverAccessKey.upsert({
+          where: { userId_serverId: { userId, serverId } },
+          create: { userId, serverId, keyValue, source, sourceDetail: sourceDetail ?? null, sourceFileId: sourceFileId ?? null },
+          update: { keyValue, source, sourceDetail: sourceDetail ?? null, sourceFileId: sourceFileId ?? null },
+        });
+        this.logger.info({ userId, serverId, source }, "Access key granted to player");
+        return true;
+      },
+      context: "Grant access key",
+      logger: this.logger,
+      fallback: false,
+    })() as boolean;
   }
 }
 

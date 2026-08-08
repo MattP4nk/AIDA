@@ -78,7 +78,7 @@ export const validateCommand = (): ValidationChain =>
     .withMessage("Command cannot be empty")
     .isLength({ max: 1000 })
     .withMessage("Command too long (max 1000 characters)")
-    .matches(/^[a-zA-Z0-9\s\-_./,@:=+*#]*$/)
+    .matches(/^[a-zA-Z0-9\s_./,@:=+*#"'()!?~%^-]*$/)
     .withMessage("Command contains invalid characters");
 
 /**
@@ -140,7 +140,7 @@ export const validateFilePath = (): ValidationChain =>
     .withMessage("File path cannot be empty")
     .isLength({ max: 500 })
     .withMessage("File path too long")
-    .matches(/^[a-zA-Z0-9\/._-]+$/)
+    .matches(/^[a-zA-Z0-9/._-]+$/)
     .withMessage("File path contains invalid characters")
     .custom((value) => {
       // Prevent directory traversal

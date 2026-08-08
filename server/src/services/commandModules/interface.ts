@@ -34,6 +34,7 @@ import type { ConnectionChallengeService } from "../connectionChallengeService";
 export interface CommandContext {
   userId: string;
   role: string;
+  terminalWidth: number;
   db: { client: PrismaClient };
   fileService: FileService;
   io?: SocketIOServer;

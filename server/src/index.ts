@@ -121,6 +121,22 @@ async function initialize(): Promise<void> {
   await storyProgression.initializeFirstEpoch();
   logger.info("✅ Story Progression initialized (Epoch 0)");
 
+  // 5c. Initialize AI content review pipeline + epoch scheduler
+  const { ContentDraftService } = await import("./services/contentDraftService");
+  const { ReferenceValidationService } = await import("./services/referenceValidationService");
+  const { EpochSchedulerService } = await import("./services/epochSchedulerService");
+  const { CONTENT_DRAFT_SERVICE, REFERENCE_VALIDATION_SERVICE, EPOCH_SCHEDULER_SERVICE } = await import("./di/tokens");
+
+  const contentDraftService = getService<InstanceType<typeof ContentDraftService>>(CONTENT_DRAFT_SERVICE);
+  const refValidation = getService<InstanceType<typeof ReferenceValidationService>>(REFERENCE_VALIDATION_SERVICE);
+  const epochScheduler = getService<InstanceType<typeof EpochSchedulerService>>(EPOCH_SCHEDULER_SERVICE);
+
+  // Late-bind services to avoid circular DI
+  refValidation.setDraftService(contentDraftService);
+  epochScheduler.setDraftService(contentDraftService);
+  epochScheduler.start();
+  logger.info("✅ Content Draft + Reference Validation + Epoch Scheduler initialized");
+
   // 6. Wire dynamic content hooks to game events
   //
   // All event side-effects are deferred via queueMicrotask so the EventEmitter

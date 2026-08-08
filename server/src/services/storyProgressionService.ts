@@ -21,6 +21,7 @@ import type { AIService } from "./aiService";
 import type EventService from "./eventService";
 import { EventType, EventSeverity } from "../../../shared/types";
 import { validateOrRetry, validateArchitectEvaluation } from "../utils/aiOutputValidator";
+import { safeAI } from "../utils/safeExecute";
 
 // ═══════════════════════════════════════════════════════════════════
 // Types
@@ -212,26 +213,34 @@ Consider: Is this event narratively significant enough for an immediate Architec
 Fragment discoveries, endgame events, and major faction shifts usually warrant a response.
 Routine hacks or mission completions usually don't.`;
 
-    const result = await this.aiService.generateResponse(
-      prompt,
-      "You are The Architect — the omniscient game master of AIDA. Respond with a single JSON action. Be cryptic and in-character.",
-      undefined,
-      '{ "action": "send_message|trigger_event|none", "targetId": "string", "data": { "subject": "string", "content": "string" }, "reasoning": "string" }',
-    );
+    type ReactiveAction = { action: string; targetId?: string; data?: any; reasoning?: string };
 
-    if (!result.success) {
-      this.logger.debug("Reactive Architect: AI unavailable");
-      return;
-    }
+    const validateReactiveAction = (parsed: any): ReactiveAction | null => {
+      if (!parsed || typeof parsed !== "object") return null;
+      if (typeof parsed.action !== "string") return null;
+      return {
+        action: parsed.action,
+        targetId: parsed.targetId,
+        data: parsed.data,
+        reasoning: parsed.reasoning,
+      };
+    };
+
+    const parsed = await safeAI<ReactiveAction>({
+      aiService: this.aiService,
+      prompt,
+      systemPrompt: "You are The Architect — the omniscient game master of AIDA. Respond with a single JSON action. Be cryptic and in-character.",
+      expectedFormat: '{ "action": "send_message|trigger_event|none", "targetId": "string", "data": { "subject": "string", "content": "string" }, "reasoning": "string" }',
+      validate: validateReactiveAction,
+      fallback: { action: "none" },
+      context: "Reactive Architect response",
+      logger: this.logger,
+    });
+
+    if (parsed.action === "none") return;
+    if (parsed.action !== "send_message" && parsed.action !== "trigger_event") return;
 
     try {
-      const { extractJSON } = await import("../utils/aiOutputValidator");
-      const parsed = extractJSON(result.response);
-      if (!parsed || parsed.action === "none") return;
-
-      // Validate the action type
-      if (parsed.action !== "send_message" && parsed.action !== "trigger_event") return;
-
       // Execute via the intervention executor
       const { getService } = await import("../di/container");
       const { ARCHITECT_INTERVENTION_EXECUTOR } = await import("../di/tokens");
@@ -249,7 +258,7 @@ Routine hacks or mission completions usually don't.`;
         "Reactive Architect executed immediate intervention",
       );
     } catch (err) {
-      this.logger.debug({ err }, "Reactive Architect: failed to parse/execute response");
+      this.logger.debug({ err }, "Reactive Architect: failed to execute intervention");
     }
   }
 
@@ -457,29 +466,66 @@ Routine hacks or mission completions usually don't.`;
 
     let evaluation: ArchitectEvaluation;
 
+    const expectedFormat = '{ "narrativeSummary": "string", "interventions": [{"type": "send_message|plant_clue|trigger_event|adjust_tension|create_mission|grant_token|reveal_faction", "target": "string", "data": {}, "reasoning": "string"}], "shouldTransitionEpoch": false }';
+
+    // Try agent loop first so Architect can query DB and create entities
+    let responseText: string | null = null;
     try {
-      const result = await this.aiService.generateResponse(
+      const { runAgentLoop } = await import("./aiAgentTools");
+      const agentPrompt = prompt + `\n\nYour final response MUST be JSON in this format:\n${expectedFormat}`;
+      responseText = await runAgentLoop(
+        this.aiService, db.client as any, systemPrompt, agentPrompt, this.logger, 6,
+      );
+    } catch { /* fall through to direct call */ }
+
+    if (responseText) {
+      evaluation = this.parseArchitectResponse(responseText);
+    } else {
+      // Agent loop failed — fall back to direct AI call via safeAI
+      const fallbackEval: ArchitectEvaluation = {
+        shouldTransitionEpoch: false,
+        interventions: [],
+        narrativeSummary: "Architect evaluation produced no actionable output.",
+      };
+
+      const result = await safeAI<ArchitectEvaluation>({
+        aiService: this.aiService,
         prompt,
         systemPrompt,
-        undefined,
-        '{ "narrativeSummary": "string", "interventions": [{"type": "send_message|plant_clue|trigger_event|adjust_tension|create_mission|grant_token|reveal_faction", "target": "string", "data": {}, "reasoning": "string"}], "shouldTransitionEpoch": false }',
-      );
+        expectedFormat,
+        validate: (parsed) => {
+          // Re-use the existing parseArchitectResponse via validateArchitectEvaluation
+          if (!parsed) return null;
+          if (parsed.shouldTransitionEpoch && parsed.newEpochTitle && !parsed.epochTransition) {
+            parsed.epochTransition = {
+              title: parsed.newEpochTitle,
+              summary: parsed.newEpochSummary || parsed.newEpochTitle,
+            };
+          }
+          const validated = validateArchitectEvaluation(parsed);
+          if (!validated) return null;
+          // Map to ArchitectEvaluation
+          return {
+            shouldTransitionEpoch: Boolean(validated.epochTransition),
+            ...(validated.epochTransition ? {
+              newEpochTitle: validated.epochTransition.title,
+              newEpochSummary: validated.epochTransition.summary,
+            } : {}),
+            interventions: validated.interventions.map((i) => ({
+              type: i.type as ArchitectIntervention["type"],
+              ...(i.target ? { targetId: i.target } : {}),
+              data: i.data && typeof i.data === "object" ? i.data : {},
+              reasoning: i.reasoning || "No reasoning provided",
+            })),
+            narrativeSummary: validated.narrativeSummary,
+          };
+        },
+        fallback: fallbackEval,
+        context: "Architect evaluation",
+        logger: this.logger,
+      });
 
-      if (!result.success) {
-        this.logger.error(
-          { error: result.error },
-          "Architect evaluation failed — AI returned error",
-        );
-        return null;
-      }
-
-      evaluation = this.parseArchitectResponse(result.response);
-    } catch (err) {
-      this.logger.error(
-        { err },
-        "Architect evaluation failed — AI response error",
-      );
-      return null;
+      evaluation = result;
     }
 
     // Mark all unprocessed events as processed
@@ -669,6 +715,8 @@ Routine hacks or mission completions usually don't.`;
         title: "Genesis",
         summary:
           "The network awakens. Players enter the simulation for the first time.",
+        status: "active",
+        order: 0,
         worldState: {},
         triggers: [],
         decisions: [],
@@ -695,6 +743,11 @@ Routine hacks or mission completions usually don't.`;
     startedAt: Date;
     endedAt: Date | null;
   } | null> {
+    // Prefer the active epoch; fall back to latest by number
+    const active = await (db.client as any).narrativeEpoch.findFirst({
+      where: { status: "active" },
+    });
+    if (active) return active;
     return (db.client as any).narrativeEpoch.findFirst({
       orderBy: { epochNum: "desc" },
     });

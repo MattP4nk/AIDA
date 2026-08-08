@@ -1,5 +1,6 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
+import { successResult, errorResult } from "./helpers";
 import {
   helpPanel,
   table,
@@ -53,21 +54,15 @@ export class FactionCommandsModule implements CommandModule {
         case "wars":
         case "war":
           return await this.handleWar(context, args.slice(1));
+        case "neutral":
+          return await this.handleNeutral(context);
         case "help":
           return this.handleHelp();
         default:
-          return {
-            success: false,
-            output: `Unknown faction command: ${subcommand}\nType 'faction help' for usage.`,
-            timestamp: new Date(),
-          };
+          return errorResult(`Unknown faction command: ${subcommand}\nType 'faction help' for usage.`);
       }
     } catch (error) {
-      return {
-        success: false,
-        output: `Error executing faction command: ${error instanceof Error ? error.message : "Unknown error"}`,
-        timestamp: new Date(),
-      };
+      return errorResult(`Error executing faction command: ${error instanceof Error ? error.message : "Unknown error"}`);
     }
   }
 
@@ -75,22 +70,21 @@ export class FactionCommandsModule implements CommandModule {
     return [
       {
         command: "faction",
-        category: "gameplay",
+        category: "faction",
         description: "Manage faction membership and view status",
         usage: "faction <subcommand> [args]",
         examples: [
           "faction list",
-          "faction join <faction_name>",
+          "faction join <name>",
+          "faction neutral",
+          "faction leave",
           "faction status",
           "faction missions",
           "faction rank",
-          "faction promote",
           "faction standings",
-          "faction resources",
           "faction servers",
-          "faction contest <server_ip>",
-          "faction contest status",
-          "faction contest join <id> <attack|defend>",
+          "faction contest <ip>",
+          "faction wars",
         ],
       },
     ];
@@ -100,6 +94,7 @@ export class FactionCommandsModule implements CommandModule {
     const entries: HelpEntry[] = [
       { command: "faction list", description: "List all available factions" },
       { command: "faction join <name>", description: "Join a faction" },
+      { command: "faction neutral", description: "Remain independent — report to any faction without joining" },
       { command: "faction leave", description: "Leave your current faction" },
       { command: "faction status", description: "View your faction standing" },
       {
@@ -145,13 +140,9 @@ export class FactionCommandsModule implements CommandModule {
       },
     ];
 
-    const lines = helpPanel("FACTION MANAGEMENT SYSTEM", entries, 50);
+    const lines = helpPanel("FACTION MANAGEMENT SYSTEM", entries);
 
-    return {
-      success: true,
-      output: render(lines),
-      timestamp: new Date(),
-    };
+    return successResult(render(lines));
   }
 
   private async handleList(context: CommandContext): Promise<CommandResult> {
@@ -159,36 +150,29 @@ export class FactionCommandsModule implements CommandModule {
     const factions = await factionService.getAllFactions(false, context.userId);
 
     if (factions.length === 0) {
-      return {
-        success: true,
-        output: "No factions currently active.",
-        timestamp: new Date(),
-      };
+      return successResult("No factions currently active.");
     }
 
     const columns: Column[] = [
       { header: "NAME", width: 20 },
       { header: "MEMBERS", width: 7, align: "right" },
-      { header: "IDEOLOGY", width: 20 },
+      { header: "IDEOLOGY", width: 30 },
     ];
 
     const rows = factions.map((faction) => [
-      (faction.fullName || faction.name).substring(0, 20),
+      faction.fullName || faction.name,
       faction.activeMembers.toString(),
-      (faction.ideology || "Unknown").substring(0, 20),
+      faction.ideology || "Unknown",
     ]);
 
     const lines = table(
       columns,
       rows,
-      "Use 'faction join <name>' to join a faction.",
+      "Use 'faction join <name>' or 'faction neutral' to choose.",
+      context.terminalWidth,
     );
 
-    return {
-      success: true,
-      output: render(lines),
-      timestamp: new Date(),
-    };
+    return successResult(render(lines));
   }
 
   private async handleJoin(
@@ -196,11 +180,7 @@ export class FactionCommandsModule implements CommandModule {
     args: string[],
   ): Promise<CommandResult> {
     if (args.length === 0) {
-      return {
-        success: false,
-        output: "Usage: faction join <faction_name>",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: faction join <faction_name>");
     }
 
     const factionName = args.join(" ");
@@ -208,11 +188,7 @@ export class FactionCommandsModule implements CommandModule {
       await context.services.factionService.getFactionByName(factionName);
 
     if (!faction) {
-      return {
-        success: false,
-        output: `Faction not found: ${factionName}`,
-        timestamp: new Date(),
-      };
+      return errorResult(`Faction not found: ${factionName}`);
     }
 
     const result = await context.services.factionService.joinFaction(
@@ -220,11 +196,33 @@ export class FactionCommandsModule implements CommandModule {
       faction.id,
     );
 
-    return {
-      success: result.success,
-      output: result.message,
-      timestamp: new Date(),
-    };
+    return result.success ? successResult(result.message) : errorResult(result.message);
+  }
+
+  private async handleNeutral(context: CommandContext): Promise<CommandResult> {
+    // Check if player is already in a faction
+    const membership = await context.db.client.factionMember.findFirst({
+      where: { userId: context.userId },
+    });
+
+    if (membership) {
+      return errorResult("You are already in a faction. Use 'faction leave' first if you want to go neutral.");
+    }
+
+    // Fire faction event for tutorial tracking (faction_choice objective)
+    const missionIntegration = context.services.missionIntegrationService;
+    if (missionIntegration) {
+      try {
+        await (missionIntegration as any).onFactionEvent(context.userId, "neutral", null);
+      } catch { /* non-critical */ }
+    }
+
+    return successResult([
+      "You have chosen to remain neutral — a lone wolf in the digital underground.",
+      "",
+      "You can still report intel to any faction using 'report ... to <faction>'.",
+      "Join a faction at any time with 'faction join <name>'.",
+    ]);
   }
 
   private async handleLeave(context: CommandContext): Promise<CommandResult> {
@@ -232,11 +230,7 @@ export class FactionCommandsModule implements CommandModule {
       context.userId,
     );
 
-    return {
-      success: result.success,
-      output: result.message,
-      timestamp: new Date(),
-    };
+    return result.success ? successResult(result.message) : errorResult(result.message);
   }
 
   private async handleStatus(context: CommandContext): Promise<CommandResult> {
@@ -245,12 +239,7 @@ export class FactionCommandsModule implements CommandModule {
     );
 
     if (!membership) {
-      return {
-        success: true,
-        output:
-          "You are not a member of any faction.\nUse 'faction list' to see available factions.",
-        timestamp: new Date(),
-      };
+      return successResult("You are not a member of any faction.\nUse 'faction list' to see available factions.");
     }
 
     const faction = membership.faction;
@@ -281,11 +270,7 @@ export class FactionCommandsModule implements CommandModule {
       46,
     );
 
-    return {
-      success: true,
-      output: render(lines),
-      timestamp: new Date(),
-    };
+    return successResult(render(lines));
   }
 
   private async handleMissions(
@@ -296,11 +281,7 @@ export class FactionCommandsModule implements CommandModule {
     );
 
     if (!membership) {
-      return {
-        success: false,
-        output: "You must be in a faction to view faction missions.",
-        timestamp: new Date(),
-      };
+      return errorResult("You must be in a faction to view faction missions.");
     }
 
     const missions = await context.services.factionService.getFactionMissions(
@@ -308,11 +289,7 @@ export class FactionCommandsModule implements CommandModule {
     );
 
     if (missions.length === 0) {
-      return {
-        success: true,
-        output: `No active missions for ${membership.faction.name} at this time.`,
-        timestamp: new Date(),
-      };
+      return successResult(`No active missions for ${membership.faction.name} at this time.`);
     }
 
     const columns: Column[] = [
@@ -338,13 +315,10 @@ export class FactionCommandsModule implements CommandModule {
       columns,
       rows,
       "Use 'mission accept <id>' to start a mission.",
+      context.terminalWidth,
     );
 
-    return {
-      success: true,
-      output: render(lines),
-      timestamp: new Date(),
-    };
+    return successResult(render(lines));
   }
 
   private async handleRank(context: CommandContext): Promise<CommandResult> {
@@ -353,11 +327,7 @@ export class FactionCommandsModule implements CommandModule {
     );
 
     if (!membership) {
-      return {
-        success: false,
-        output: "You must be in a faction to view rank information.",
-        timestamp: new Date(),
-      };
+      return errorResult("You must be in a faction to view rank information.");
     }
 
     const check = await context.services.factionService.checkRankRequirements(
@@ -411,13 +381,9 @@ export class FactionCommandsModule implements CommandModule {
       });
     }
 
-    const lines = panel(`RANK STATUS: ${membership.faction.name}`, rows, 48);
+    const lines = panel(`RANK STATUS: ${membership.faction.name}`, rows, context.terminalWidth);
 
-    return {
-      success: true,
-      output: render(lines),
-      timestamp: new Date(),
-    };
+    return successResult(render(lines));
   }
 
   private async handlePromote(context: CommandContext): Promise<CommandResult> {
@@ -426,11 +392,7 @@ export class FactionCommandsModule implements CommandModule {
     );
 
     if (!membership) {
-      return {
-        success: false,
-        output: "You must be in a faction to request promotion.",
-        timestamp: new Date(),
-      };
+      return errorResult("You must be in a faction to request promotion.");
     }
 
     const result = await context.services.factionService.promoteUser(
@@ -438,11 +400,7 @@ export class FactionCommandsModule implements CommandModule {
       membership.factionId,
     );
 
-    return {
-      success: result.success,
-      output: result.message,
-      timestamp: new Date(),
-    };
+    return result.success ? successResult(result.message) : errorResult(result.message);
   }
 
   private async handleStandings(
@@ -453,11 +411,7 @@ export class FactionCommandsModule implements CommandModule {
     );
 
     if (standings.length === 0) {
-      return {
-        success: true,
-        output: "No faction standings recorded yet.",
-        timestamp: new Date(),
-      };
+      return successResult("No faction standings recorded yet.");
     }
 
     const columns: Column[] = [
@@ -482,13 +436,9 @@ export class FactionCommandsModule implements CommandModule {
       ];
     });
 
-    const lines = table(columns, rows);
+    const lines = table(columns, rows, undefined, context.terminalWidth);
 
-    return {
-      success: true,
-      output: render(lines),
-      timestamp: new Date(),
-    };
+    return successResult(render(lines));
   }
 
   private async handleResources(
@@ -499,11 +449,7 @@ export class FactionCommandsModule implements CommandModule {
     );
 
     if (!membership) {
-      return {
-        success: false,
-        output: "You must be in a faction to view resources.",
-        timestamp: new Date(),
-      };
+      return errorResult("You must be in a faction to view resources.");
     }
 
     const { getService } = await import("../../di/container");
@@ -538,9 +484,9 @@ export class FactionCommandsModule implements CommandModule {
       }
     }
 
-    const lines = panel(`${membership.faction.name} RESOURCES`, rows, 46);
+    const lines = panel(`${membership.faction.name} RESOURCES`, rows, context.terminalWidth);
 
-    return { success: true, output: render(lines), timestamp: new Date() };
+    return successResult(render(lines));
   }
 
   private async handleServers(context: CommandContext): Promise<CommandResult> {
@@ -549,11 +495,7 @@ export class FactionCommandsModule implements CommandModule {
     );
 
     if (!membership) {
-      return {
-        success: false,
-        output: "You must be in a faction to view servers.",
-        timestamp: new Date(),
-      };
+      return errorResult("You must be in a faction to view servers.");
     }
 
     const servers = await context.services.factionService.getFactionServers(
@@ -561,11 +503,7 @@ export class FactionCommandsModule implements CommandModule {
     );
 
     if (servers.length === 0) {
-      return {
-        success: true,
-        output: `${membership.faction.name} does not control any servers.`,
-        timestamp: new Date(),
-      };
+      return successResult(`${membership.faction.name} does not control any servers.`);
     }
 
     const columns: Column[] = [
@@ -592,9 +530,9 @@ export class FactionCommandsModule implements CommandModule {
       ];
     });
 
-    const lines = table(columns, rows);
+    const lines = table(columns, rows, undefined, context.terminalWidth);
 
-    return { success: true, output: render(lines), timestamp: new Date() };
+    return successResult(render(lines));
   }
 
   private async handleContest(
@@ -634,11 +572,7 @@ export class FactionCommandsModule implements CommandModule {
     );
 
     if (contests.length === 0) {
-      return {
-        success: true,
-        output: "No active territory contests.",
-        timestamp: new Date(),
-      };
+      return successResult("No active territory contests.");
     }
 
     const columns: Column[] = [
@@ -665,9 +599,9 @@ export class FactionCommandsModule implements CommandModule {
 
     const footer =
       "Use 'faction contest join <id> <attack|defend>' to participate.\n Use 'faction contest contribute <id>' to contribute to the contest.";
-    const lines = table(columns, rows, footer);
+    const lines = table(columns, rows, footer, context.terminalWidth);
 
-    return { success: true, output: render(lines), timestamp: new Date() };
+    return successResult(render(lines));
   }
 
   private async handleContestJoin(
@@ -675,12 +609,7 @@ export class FactionCommandsModule implements CommandModule {
     args: string[],
   ): Promise<CommandResult> {
     if (args.length < 1) {
-      return {
-        success: false,
-        output:
-          "Usage: faction contest join <contest_id> [attack|defend|neutral]",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: faction contest join <contest_id> [attack|defend|neutral]");
     }
 
     const { getService } = await import("../../di/container");
@@ -694,20 +623,12 @@ export class FactionCommandsModule implements CommandModule {
       | "neutral";
 
     if (!["attack", "defend", "neutral"].includes(side)) {
-      return {
-        success: false,
-        output: "Side must be: attack, defend, or neutral.",
-        timestamp: new Date(),
-      };
+      return errorResult("Side must be: attack, defend, or neutral.");
     }
 
     const contestId = await contestService.findContestByShortId(shortId);
     if (!contestId) {
-      return {
-        success: false,
-        output: `Contest '${shortId}' not found.`,
-        timestamp: new Date(),
-      };
+      return errorResult(`Contest '${shortId}' not found.`);
     }
 
     const result = await contestService.joinContest(
@@ -715,11 +636,7 @@ export class FactionCommandsModule implements CommandModule {
       context.userId,
       side,
     );
-    return {
-      success: result.success,
-      output: result.message,
-      timestamp: new Date(),
-    };
+    return result.success ? successResult(result.message) : errorResult(result.message);
   }
 
   private async handleContestContribute(
@@ -727,11 +644,7 @@ export class FactionCommandsModule implements CommandModule {
     args: string[],
   ): Promise<CommandResult> {
     if (args.length < 1) {
-      return {
-        success: false,
-        output: "Usage: faction contest contribute <contest_id>",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: faction contest contribute <contest_id>");
     }
 
     const { getService } = await import("../../di/container");
@@ -741,11 +654,7 @@ export class FactionCommandsModule implements CommandModule {
     const shortId = args[0]!;
     const contestId = await contestService.findContestByShortId(shortId);
     if (!contestId) {
-      return {
-        success: false,
-        output: `Contest '${shortId}' not found.`,
-        timestamp: new Date(),
-      };
+      return errorResult(`Contest '${shortId}' not found.`);
     }
 
     // Calculate contribution based on player skills
@@ -754,11 +663,7 @@ export class FactionCommandsModule implements CommandModule {
     });
 
     if (!progress) {
-      return {
-        success: false,
-        output: "Could not load player skills.",
-        timestamp: new Date(),
-      };
+      return errorResult("Could not load player skills.");
     }
 
     // Contribution = (hacking + cryptography) / 2000 → roughly 0.01-0.05 per action
@@ -770,11 +675,7 @@ export class FactionCommandsModule implements CommandModule {
       context.userId,
       contribution,
     );
-    return {
-      success: result.success,
-      output: result.message,
-      timestamp: new Date(),
-    };
+    return result.success ? successResult(result.message) : errorResult(result.message);
   }
 
   private async handleContestDeclare(
@@ -786,11 +687,7 @@ export class FactionCommandsModule implements CommandModule {
     );
 
     if (!membership) {
-      return {
-        success: false,
-        output: "You must be in a faction to declare a contest.",
-        timestamp: new Date(),
-      };
+      return errorResult("You must be in a faction to declare a contest.");
     }
 
     // Find server by IP
@@ -799,11 +696,7 @@ export class FactionCommandsModule implements CommandModule {
     });
 
     if (!server) {
-      return {
-        success: false,
-        output: `No server found at ${serverIp}.`,
-        timestamp: new Date(),
-      };
+      return errorResult(`No server found at ${serverIp}.`);
     }
 
     const { getService } = await import("../../di/container");
@@ -816,11 +709,7 @@ export class FactionCommandsModule implements CommandModule {
       membership.factionId,
     );
 
-    return {
-      success: result.success,
-      output: result.message,
-      timestamp: new Date(),
-    };
+    return result.success ? successResult(result.message) : errorResult(result.message);
   }
 
   private async handleWar(
@@ -839,20 +728,12 @@ export class FactionCommandsModule implements CommandModule {
         context.userId,
       );
       if (!membership) {
-        return {
-          success: false,
-          output: "You are not in a faction.",
-          timestamp: new Date(),
-        };
+        return errorResult("You are not in a faction.");
       }
 
       const war = await warfareService.getActiveWar(membership.factionId);
       if (!war) {
-        return {
-          success: true,
-          output: "Your faction is not currently at war.",
-          timestamp: new Date(),
-        };
+        return successResult("Your faction is not currently at war.");
       }
 
       const daysLeft = Math.max(
@@ -879,19 +760,15 @@ export class FactionCommandsModule implements CommandModule {
         { label: "Ceasefire in: ", value: `${daysLeft} days` },
       ];
 
-      const lines = panel("ACTIVE WAR", rows, 44);
+      const lines = panel("ACTIVE WAR", rows, context.terminalWidth);
 
-      return { success: true, output: render(lines), timestamp: new Date() };
+      return successResult(render(lines));
     }
 
     // Default: list all wars
     const wars = await warfareService.getWars(5);
     if (wars.length === 0) {
-      return {
-        success: true,
-        output: "No wars have been declared.",
-        timestamp: new Date(),
-      };
+      return successResult("No wars have been declared.");
     }
 
     const columns: Column[] = [
@@ -923,8 +800,8 @@ export class FactionCommandsModule implements CommandModule {
       ];
     });
 
-    const lines = table(columns, rows);
+    const lines = table(columns, rows, undefined, context.terminalWidth);
 
-    return { success: true, output: render(lines), timestamp: new Date() };
+    return successResult(render(lines));
   }
 }

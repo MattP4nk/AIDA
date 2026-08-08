@@ -1,5 +1,6 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
+import { successResult, errorResult } from "./helpers";
 import { ExpressionEngine } from "../../utils/expressionEngine";
 
 export class MathCommandsModule implements CommandModule {
@@ -54,19 +55,10 @@ export class MathCommandsModule implements CommandModule {
           return await this.handleSubnet(command, context);
 
         default:
-          return {
-            success: false,
-            output: `Math command not implemented: ${command.command}`,
-            timestamp: new Date(),
-          };
+          return errorResult(`Math command not implemented: ${command.command}`);
       }
     } catch (error) {
-      return {
-        success: false,
-        output: "Math command failed",
-        error: error instanceof Error ? error.message : "Unknown error",
-        timestamp: new Date(),
-      };
+      return errorResult("Math command failed", error instanceof Error ? error.message : "Unknown error");
     }
   }
 
@@ -173,11 +165,7 @@ export class MathCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const args = command.args || [];
     if (args.length === 0) {
-      return {
-        success: true,
-        output: ExpressionEngine.getHelp(),
-        timestamp: new Date(),
-      };
+      return successResult(ExpressionEngine.getHelp());
     }
 
     const expression = args.join(" ");
@@ -185,23 +173,10 @@ export class MathCommandsModule implements CommandModule {
     const result = engine.evaluate(expression);
 
     if (!result.success) {
-      return {
-        success: false,
-        output: `Error: ${result.error}`,
-        timestamp: new Date(),
-      };
+      return errorResult(`Error: ${result.error}`);
     }
 
-    let output = `🧮 Result: ${result.result}`;
-    if (result.type && result.type !== "info") {
-      output += ` (${result.type})`;
-    }
-
-    return {
-      success: true,
-      output: result.result,
-      timestamp: new Date(),
-    };
+    return successResult(result.result);
   }
 
   private async handleListVariables(
@@ -212,11 +187,7 @@ export class MathCommandsModule implements CommandModule {
     const variables = engine.getAllVariables();
 
     if (variables.size === 0) {
-      return {
-        success: true,
-        output: "No variables defined",
-        timestamp: new Date(),
-      };
+      return successResult("No variables defined");
     }
 
     let output = "📊 Variables:\n\n";
@@ -231,11 +202,7 @@ export class MathCommandsModule implements CommandModule {
 
     output += vars.join("\n");
 
-    return {
-      success: true,
-      output,
-      timestamp: new Date(),
-    };
+    return successResult(output);
   }
 
   private async handleSetVariable(
@@ -244,11 +211,7 @@ export class MathCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const args = command.args || [];
     if (args.length < 2) {
-      return {
-        success: false,
-        output: "Usage: set <variable> <value>\nExample: set x 10",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: set <variable> <value>\nExample: set x 10");
     }
 
     const varName = args[0];
@@ -256,12 +219,7 @@ export class MathCommandsModule implements CommandModule {
 
     // Validate variable name
     if (!varName || !/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(varName)) {
-      return {
-        success: false,
-        output:
-          "Invalid variable name. Use letters, numbers, and underscores only.",
-        timestamp: new Date(),
-      };
+      return errorResult("Invalid variable name. Use letters, numbers, and underscores only.");
     }
 
     const engine = this.getEngine(context.userId);
@@ -270,31 +228,19 @@ export class MathCommandsModule implements CommandModule {
     const numValue = parseFloat(valueStr);
     if (!isNaN(numValue) && valueStr.trim() === numValue.toString()) {
       engine.setVariable(varName, numValue, "number");
-      return {
-        success: true,
-        output: `Set ${varName} = ${numValue}`,
-        timestamp: new Date(),
-      };
+      return successResult(`Set ${varName} = ${numValue}`);
     }
 
     // Check for boolean
     if (valueStr === "true" || valueStr === "false") {
       const boolValue = valueStr === "true";
       engine.setVariable(varName, boolValue, "boolean");
-      return {
-        success: true,
-        output: `Set ${varName} = ${boolValue}`,
-        timestamp: new Date(),
-      };
+      return successResult(`Set ${varName} = ${boolValue}`);
     }
 
     // Treat as string
     engine.setVariable(varName, valueStr, "string");
-    return {
-      success: true,
-      output: `Set ${varName} = "${valueStr}"`,
-      timestamp: new Date(),
-    };
+    return successResult(`Set ${varName} = "${valueStr}"`);
   }
 
   private async handleUnsetVariable(
@@ -303,32 +249,20 @@ export class MathCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const args = command.args || [];
     if (args.length === 0) {
-      return {
-        success: false,
-        output: "Usage: unset <variable>\nExample: unset x",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: unset <variable>\nExample: unset x");
     }
 
     const varName = args[0];
     const engine = this.getEngine(context.userId);
 
     if (!engine.hasVariable(varName || "")) {
-      return {
-        success: false,
-        output: `Variable '${varName}' not found`,
-        timestamp: new Date(),
-      };
+      return errorResult(`Variable '${varName}' not found`);
     }
 
     const result = engine.evaluate(`delete ${varName}`);
-    return {
-      success: result.success,
-      output: result.success
-        ? result.result
-        : result.error || "Failed to delete variable",
-      timestamp: new Date(),
-    };
+    return result.success
+      ? successResult(result.result)
+      : errorResult(result.error || "Failed to delete variable");
   }
 
   private async handleConvert(
@@ -337,11 +271,7 @@ export class MathCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const args = command.args || [];
     if (args.length < 3) {
-      return {
-        success: false,
-        output: "Usage: convert <value> <from> <to>\nExamples:\n  convert 255 dec hex    → 0xFF\n  convert 0xFF hex dec   → 255\n  convert 10 km mi       → 6.21371\n  convert 11111111 bin dec → 255\n  convert 255 dec bin    → 11111111\n  convert 255 dec oct    → 377",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: convert <value> <from> <to>\nExamples:\n  convert 255 dec hex    → 0xFF\n  convert 0xFF hex dec   → 255\n  convert 10 km mi       → 6.21371\n  convert 11111111 bin dec → 255\n  convert 255 dec bin    → 11111111\n  convert 255 dec oct    → 377");
     }
 
     const rawValue = args[0] || "";
@@ -357,19 +287,15 @@ export class MathCommandsModule implements CommandModule {
     // ── Physical unit conversions ──
     const value = parseFloat(rawValue);
     if (isNaN(value)) {
-      return { success: false, output: `Invalid value: ${rawValue}`, timestamp: new Date() };
+      return errorResult(`Invalid value: ${rawValue}`);
     }
 
     const result = this.performConversion(value, fromUnit, toUnit);
     if (result === null) {
-      return { success: false, output: `Conversion not supported: ${fromUnit} → ${toUnit}`, timestamp: new Date() };
+      return errorResult(`Conversion not supported: ${fromUnit} → ${toUnit}`);
     }
 
-    return {
-      success: true,
-      output: `${value} ${fromUnit} = ${result.toFixed(6).replace(/\.?0+$/, "")} ${toUnit}`,
-      timestamp: new Date(),
-    };
+    return successResult(`${value} ${fromUnit} = ${result.toFixed(6).replace(/\.?0+$/, "")} ${toUnit}`);
   }
 
   private convertBase(rawValue: string, from: string, to: string): CommandResult {
@@ -393,11 +319,11 @@ export class MathCommandsModule implements CommandModule {
           break;
       }
     } catch {
-      return { success: false, output: `Invalid ${from} value: ${rawValue}`, timestamp: new Date() };
+      return errorResult(`Invalid ${from} value: ${rawValue}`);
     }
 
     if (isNaN(decimal)) {
-      return { success: false, output: `Invalid ${from} value: ${rawValue}`, timestamp: new Date() };
+      return errorResult(`Invalid ${from} value: ${rawValue}`);
     }
 
     // Convert decimal to target base
@@ -418,7 +344,7 @@ export class MathCommandsModule implements CommandModule {
         break;
     }
 
-    return { success: true, output: `${rawValue} (${from}) = ${result} (${to})`, timestamp: new Date() };
+    return successResult(`${rawValue} (${from}) = ${result} (${to})`);
   }
 
   private performConversion(
@@ -494,29 +420,17 @@ export class MathCommandsModule implements CommandModule {
     // Default: random float 0-1
     if (args.length === 0) {
       const value = Math.random();
-      return {
-        success: true,
-        output: value.toFixed(6).replace(/\\.?0+$/, ""),
-        timestamp: new Date(),
-      };
+      return successResult(value.toFixed(6).replace(/\\.?0+$/, ""));
     }
 
     // One arg: random int 0 to max
     if (args.length === 1) {
       const max = parseInt(args[0] || "", 10);
       if (isNaN(max)) {
-        return {
-          success: false,
-          output: `Invalid number: ${args[0]}`,
-          timestamp: new Date(),
-        };
+        return errorResult(`Invalid number: ${args[0]}`);
       }
       const value = Math.floor(Math.random() * (max + 1));
-      return {
-        success: true,
-        output: value.toString(),
-        timestamp: new Date(),
-      };
+      return successResult(value.toString());
     }
 
     // Two args: random int min to max
@@ -524,19 +438,11 @@ export class MathCommandsModule implements CommandModule {
     const max = parseInt(args[1] || "", 10);
 
     if (isNaN(min) || isNaN(max)) {
-      return {
-        success: false,
-        output: "Usage: random [max] or random <min> <max>",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: random [max] or random <min> <max>");
     }
 
     const value = Math.floor(Math.random() * (max - min + 1)) + min;
-    return {
-      success: true,
-      output: value.toString(),
-      timestamp: new Date(),
-    };
+    return successResult(value.toString());
   }
 
   // ══════════════════════════════════════════════════════════════════
@@ -552,30 +458,26 @@ export class MathCommandsModule implements CommandModule {
     const method = args[0]?.toLowerCase();
 
     if (!method || args.length < 2) {
-      return {
-        success: true,
-        output: [
-          "Usage: decode <method> <args...>",
-          "",
-          "Methods:",
-          "  decode xor <text> <key>       — XOR decode with numeric key",
-          "  decode caesar <text> <shift>   — Caesar cipher shift",
-          "  decode rot13 <text>            — ROT13 decode",
-          "  decode base64 <encoded>        — Base64 decode",
-          "  decode reverse <text>          — Reverse string",
-          "  decode ascii <numbers...>      — ASCII codes to text",
-          "  decode hex <hexstring>         — Hex string to text",
-          "",
-          "Examples:",
-          "  decode xor KHOOR 3             → HELLO",
-          "  decode caesar KHOOR 3          → HELLO",
-          "  decode rot13 URYYB             → HELLO",
-          "  decode base64 SEVFVA==         → FRIVIN",
-          "  decode ascii 72 69 76 76 79    → HELLO",
-          "  decode hex 48454C4C4F          → HELLO",
-        ].join("\n"),
-        timestamp: new Date(),
-      };
+      return successResult([
+        "Usage: decode <method> <args...>",
+        "",
+        "Methods:",
+        "  decode xor <text> <key>       — XOR decode with numeric key",
+        "  decode caesar <text> <shift>   — Caesar cipher shift",
+        "  decode rot13 <text>            — ROT13 decode",
+        "  decode base64 <encoded>        — Base64 decode",
+        "  decode reverse <text>          — Reverse string",
+        "  decode ascii <numbers...>      — ASCII codes to text",
+        "  decode hex <hexstring>         — Hex string to text",
+        "",
+        "Examples:",
+        "  decode xor KHOOR 3             → HELLO",
+        "  decode caesar KHOOR 3          → HELLO",
+        "  decode rot13 URYYB             → HELLO",
+        "  decode base64 SEVFVA==         → FRIVIN",
+        "  decode ascii 72 69 76 76 79    → HELLO",
+        "  decode hex 48454C4C4F          → HELLO",
+      ]);
     }
 
     const text = args.slice(1).join(" ");
@@ -585,14 +487,14 @@ export class MathCommandsModule implements CommandModule {
       case "xor": {
         const parts = this.splitLastArg(args.slice(1));
         const key = parseInt(parts.last, 10);
-        if (isNaN(key)) return { success: false, output: "XOR key must be a number. Usage: decode xor <text> <key>", timestamp: new Date() };
+        if (isNaN(key)) return errorResult("XOR key must be a number. Usage: decode xor <text> <key>");
         decoded = parts.rest.split("").map(c => String.fromCharCode(c.charCodeAt(0) ^ key)).join("");
         break;
       }
       case "caesar": {
         const parts = this.splitLastArg(args.slice(1));
         const shift = parseInt(parts.last, 10);
-        if (isNaN(shift)) return { success: false, output: "Shift must be a number. Usage: decode caesar <text> <shift>", timestamp: new Date() };
+        if (isNaN(shift)) return errorResult("Shift must be a number. Usage: decode caesar <text> <shift>");
         decoded = parts.rest.split("").map(c => {
           if (c >= "A" && c <= "Z") return String.fromCharCode(((c.charCodeAt(0) - 65 - shift + 260) % 26) + 65);
           if (c >= "a" && c <= "z") return String.fromCharCode(((c.charCodeAt(0) - 97 - shift + 260) % 26) + 97);
@@ -612,7 +514,7 @@ export class MathCommandsModule implements CommandModule {
         try {
           decoded = Buffer.from(args[1] || "", "base64").toString("utf8");
         } catch {
-          return { success: false, output: "Invalid base64 input.", timestamp: new Date() };
+          return errorResult("Invalid base64 input.");
         }
         break;
       }
@@ -622,13 +524,13 @@ export class MathCommandsModule implements CommandModule {
       }
       case "ascii": {
         const codes = args.slice(1).map(a => parseInt(a, 10)).filter(n => !isNaN(n));
-        if (codes.length === 0) return { success: false, output: "Provide ASCII codes. Usage: decode ascii 72 69 76 76 79", timestamp: new Date() };
+        if (codes.length === 0) return errorResult("Provide ASCII codes. Usage: decode ascii 72 69 76 76 79");
         decoded = codes.map(c => String.fromCharCode(c)).join("");
         break;
       }
       case "hex": {
         const hexStr = (args[1] || "").replace(/\s+/g, "");
-        if (hexStr.length % 2 !== 0) return { success: false, output: "Hex string must have even length.", timestamp: new Date() };
+        if (hexStr.length % 2 !== 0) return errorResult("Hex string must have even length.");
         decoded = "";
         for (let i = 0; i < hexStr.length; i += 2) {
           decoded += String.fromCharCode(parseInt(hexStr.substring(i, i + 2), 16));
@@ -636,7 +538,7 @@ export class MathCommandsModule implements CommandModule {
         break;
       }
       default:
-        return { success: false, output: `Unknown decode method: ${method}. Use: xor, caesar, rot13, base64, reverse, ascii, hex`, timestamp: new Date() };
+        return errorResult(`Unknown decode method: ${method}. Use: xor, caesar, rot13, base64, reverse, ascii, hex`);
     }
 
     // Fire mission integration hook on successful decode
@@ -644,7 +546,7 @@ export class MathCommandsModule implements CommandModule {
       context.services.missionIntegrationService.onDecodeSuccess(context.userId, method, decoded).catch(() => {});
     }
 
-    return { success: true, output: `Decoded: ${decoded}`, timestamp: new Date() };
+    return successResult(`Decoded: ${decoded}`);
   }
 
   /** Split args so that the last word is separate from the rest */
@@ -664,40 +566,36 @@ export class MathCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const args = command.args || [];
     if (args.length === 0) {
-      return {
-        success: true,
-        output: [
-          "Usage: subnet <ip/cidr>",
-          "",
-          "Examples:",
-          "  subnet 192.168.1.0/24     → Network info for /24",
-          "  subnet 172.16.1.137/24    → Find network containing IP",
-          "  subnet 10.0.0.0/16        → Large subnet info",
-          "",
-          "Shows: network address, broadcast, host range, total hosts",
-        ].join("\n"),
-        timestamp: new Date(),
-      };
+      return successResult([
+        "Usage: subnet <ip/cidr>",
+        "",
+        "Examples:",
+        "  subnet 192.168.1.0/24     → Network info for /24",
+        "  subnet 172.16.1.137/24    → Find network containing IP",
+        "  subnet 10.0.0.0/16        → Large subnet info",
+        "",
+        "Shows: network address, broadcast, host range, total hosts",
+      ]);
     }
 
     const input = args[0]!;
     const cidrMatch = input.match(/^(\d+\.\d+\.\d+\.\d+)\/(\d+)$/);
 
     if (!cidrMatch) {
-      return { success: false, output: "Invalid format. Use: subnet <ip>/<cidr>\nExample: subnet 192.168.1.0/24", timestamp: new Date() };
+      return errorResult("Invalid format. Use: subnet <ip>/<cidr>\nExample: subnet 192.168.1.0/24");
     }
 
     const ip = cidrMatch[1]!;
     const cidr = parseInt(cidrMatch[2]!, 10);
 
     if (cidr < 0 || cidr > 32) {
-      return { success: false, output: "CIDR must be between 0 and 32.", timestamp: new Date() };
+      return errorResult("CIDR must be between 0 and 32.");
     }
 
     // Parse IP to 32-bit number
     const ipParts = ip.split(".").map(Number);
     if (ipParts.length !== 4 || ipParts.some(p => isNaN(p) || p < 0 || p > 255)) {
-      return { success: false, output: `Invalid IP address: ${ip}`, timestamp: new Date() };
+      return errorResult(`Invalid IP address: ${ip}`);
     }
     const ipNum = ((ipParts[0]! << 24) | (ipParts[1]! << 16) | (ipParts[2]! << 8) | ipParts[3]!) >>> 0;
 
@@ -728,6 +626,6 @@ export class MathCommandsModule implements CommandModule {
       context.services.missionIntegrationService.onSubnetUsed(context.userId).catch(() => {});
     }
 
-    return { success: true, output: lines.join("\n"), timestamp: new Date() };
+    return successResult(lines.join("\n"));
   }
 }

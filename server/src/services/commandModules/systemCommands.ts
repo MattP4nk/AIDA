@@ -5,6 +5,8 @@ import {
   resolvePath,
   getSession,
   getServerId,
+  successResult,
+  errorResult,
 } from "./helpers";
 import { VAULT_PAYLOAD_FILENAME, AIDA_FILE_PREFIX } from "../../config/gameBalance";
 
@@ -30,11 +32,7 @@ export class SystemCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const session = getSession(context);
     if (!session) {
-      return {
-        success: false,
-        output: "No active session",
-        timestamp: new Date(),
-      };
+      return errorResult("No active session");
     }
 
     try {
@@ -73,19 +71,10 @@ export class SystemCommandsModule implements CommandModule {
           return await this.handleWriteFile(command, context);
 
         default:
-          return {
-            success: false,
-            output: `System command not implemented: ${command.command}`,
-            timestamp: new Date(),
-          };
+          return errorResult(`System command not implemented: ${command.command}`);
       }
     } catch (error) {
-      return {
-        success: false,
-        output: "System command failed",
-        error: error instanceof Error ? error.message : "Unknown error",
-        timestamp: new Date(),
-      };
+      return errorResult("System command failed", error instanceof Error ? error.message : "Unknown error");
     }
   }
 
@@ -187,11 +176,7 @@ export class SystemCommandsModule implements CommandModule {
     try {
       const serverId = getServerId(context);
       if (!serverId) {
-        return {
-          success: false,
-          output: "No file system context available",
-          timestamp: new Date(),
-        };
+        return errorResult("No file system context available");
       }
 
       const session = getSession(context);
@@ -209,11 +194,7 @@ export class SystemCommandsModule implements CommandModule {
       );
 
       if (!result.success) {
-        return {
-          success: false,
-          output: `ls: ${result.message}`,
-          timestamp: new Date(),
-        };
+        return errorResult(`ls: ${result.message}`);
       }
 
       // Format output
@@ -245,7 +226,7 @@ export class SystemCommandsModule implements CommandModule {
             name,
           ];
         });
-        output = render(table(columns, rows));
+        output = render(table(columns, rows, undefined, context.terminalWidth));
       } else {
         // Short format — bordered list with item counts for directories
         const items = entries.map((entry: any) => {
@@ -266,18 +247,9 @@ export class SystemCommandsModule implements CommandModule {
         output += `\n  ${dirCount} director${dirCount !== 1 ? "ies" : "y"}, ${fileCount} file${fileCount !== 1 ? "s" : ""}`;
       }
 
-      return {
-        success: true,
-        output,
-        timestamp: new Date(),
-      };
+      return successResult(output);
     } catch (error) {
-      return {
-        success: false,
-        output: "Failed to list directory",
-        error: error instanceof Error ? error.message : "Unknown error",
-        timestamp: new Date(),
-      };
+      return errorResult("Failed to list directory", error instanceof Error ? error.message : "Unknown error");
     }
   }
 
@@ -288,11 +260,7 @@ export class SystemCommandsModule implements CommandModule {
     try {
       const serverId = getServerId(context);
       if (!serverId) {
-        return {
-          success: false,
-          output: "No file system context available",
-          timestamp: new Date(),
-        };
+        return errorResult("No file system context available");
       }
 
       const session = getSession(context);
@@ -316,11 +284,7 @@ export class SystemCommandsModule implements CommandModule {
       );
 
       if (!result.success) {
-        return {
-          success: false,
-          output: `cd: ${result.message}`,
-          timestamp: new Date(),
-        };
+        return errorResult(`cd: ${result.message}`);
       }
 
       // Update session
@@ -328,19 +292,9 @@ export class SystemCommandsModule implements CommandModule {
         session.currentDirectory = result.data.path; // Use resolved path from service
       }
 
-      return {
-        success: true,
-        output: `Changed directory to ${result.data.path}`,
-        data: { currentDirectory: result.data.path },
-        timestamp: new Date(),
-      };
+      return successResult(`Changed directory to ${result.data.path}`, { currentDirectory: result.data.path });
     } catch (error) {
-      return {
-        success: false,
-        output: "Failed to change directory",
-        error: error instanceof Error ? error.message : "Unknown error",
-        timestamp: new Date(),
-      };
+      return errorResult("Failed to change directory", error instanceof Error ? error.message : "Unknown error");
     }
   }
 
@@ -351,11 +305,7 @@ export class SystemCommandsModule implements CommandModule {
     const session = getSession(context);
     const currentDir = session?.currentDirectory || "/";
 
-    return {
-      success: true,
-      output: currentDir,
-      timestamp: new Date(),
-    };
+    return successResult(currentDir);
   }
 
   private async handleReadFile(
@@ -364,21 +314,13 @@ export class SystemCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     try {
       if (command.args.length === 0) {
-        return {
-          success: false,
-          output: "cat: missing file argument",
-          timestamp: new Date(),
-        };
+        return errorResult("cat: missing file argument");
       }
 
       const filename = command.args[0]!;
       const serverId = getServerId(context);
       if (!serverId) {
-        return {
-          success: false,
-          output: "No file system context available",
-          timestamp: new Date(),
-        };
+        return errorResult("No file system context available");
       }
 
       const session = getSession(context);
@@ -392,11 +334,7 @@ export class SystemCommandsModule implements CommandModule {
       );
 
       if (!result.success) {
-        return {
-          success: false,
-          output: `cat: ${filename}: ${result.message}`,
-          timestamp: new Date(),
-        };
+        return errorResult(`cat: ${filename}: ${result.message}`);
       }
 
       let output = result.data?.content || "";
@@ -498,18 +436,9 @@ export class SystemCommandsModule implements CommandModule {
         /* Censorship service not available */
       }
 
-      return {
-        success: true,
-        output,
-        timestamp: new Date(),
-      };
+      return successResult(output);
     } catch (error) {
-      return {
-        success: false,
-        output: "Failed to read file",
-        error: error instanceof Error ? error.message : "Unknown error",
-        timestamp: new Date(),
-      };
+      return errorResult("Failed to read file", error instanceof Error ? error.message : "Unknown error");
     }
   }
 
@@ -519,21 +448,13 @@ export class SystemCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     try {
       if (command.args.length === 0) {
-        return {
-          success: false,
-          output: "mkdir: missing directory name",
-          timestamp: new Date(),
-        };
+        return errorResult("mkdir: missing directory name");
       }
 
       const dirName = command.args[0]!;
       const serverId = getServerId(context);
       if (!serverId) {
-        return {
-          success: false,
-          output: "No file system context available",
-          timestamp: new Date(),
-        };
+        return errorResult("No file system context available");
       }
 
       const session = getSession(context);
@@ -547,25 +468,12 @@ export class SystemCommandsModule implements CommandModule {
       );
 
       if (!result.success) {
-        return {
-          success: false,
-          output: `mkdir: ${result.message}`,
-          timestamp: new Date(),
-        };
+        return errorResult(`mkdir: ${result.message}`);
       }
 
-      return {
-        success: true,
-        output: `Directory created: ${dirName}`,
-        timestamp: new Date(),
-      };
+      return successResult(`Directory created: ${dirName}`);
     } catch (error) {
-      return {
-        success: false,
-        output: "Failed to create directory",
-        error: error instanceof Error ? error.message : "Unknown error",
-        timestamp: new Date(),
-      };
+      return errorResult("Failed to create directory", error instanceof Error ? error.message : "Unknown error");
     }
   }
 
@@ -575,21 +483,13 @@ export class SystemCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     try {
       if (command.args.length === 0) {
-        return {
-          success: false,
-          output: "touch: missing file name",
-          timestamp: new Date(),
-        };
+        return errorResult("touch: missing file name");
       }
 
       const fileName = command.args[0]!;
       const serverId = getServerId(context);
       if (!serverId) {
-        return {
-          success: false,
-          output: "No file system context available",
-          timestamp: new Date(),
-        };
+        return errorResult("No file system context available");
       }
 
       const session = getSession(context);
@@ -605,25 +505,12 @@ export class SystemCommandsModule implements CommandModule {
       );
 
       if (!result.success) {
-        return {
-          success: false,
-          output: `touch: ${result.message}`,
-          timestamp: new Date(),
-        };
+        return errorResult(`touch: ${result.message}`);
       }
 
-      return {
-        success: true,
-        output: `File created: ${fileName}`,
-        timestamp: new Date(),
-      };
+      return successResult(`File created: ${fileName}`);
     } catch (error) {
-      return {
-        success: false,
-        output: "Failed to create file",
-        error: error instanceof Error ? error.message : "Unknown error",
-        timestamp: new Date(),
-      };
+      return errorResult("Failed to create file", error instanceof Error ? error.message : "Unknown error");
     }
   }
 
@@ -633,11 +520,7 @@ export class SystemCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     try {
       if (command.args.length === 0) {
-        return {
-          success: false,
-          output: "rm: missing file name",
-          timestamp: new Date(),
-        };
+        return errorResult("rm: missing file name");
       }
 
       const fileName = command.args[0]!;
@@ -645,11 +528,7 @@ export class SystemCommandsModule implements CommandModule {
         command.args.includes("-r") || command.args.includes("-R");
       const serverId = getServerId(context);
       if (!serverId) {
-        return {
-          success: false,
-          output: "No file system context available",
-          timestamp: new Date(),
-        };
+        return errorResult("No file system context available");
       }
 
       const session = getSession(context);
@@ -664,25 +543,12 @@ export class SystemCommandsModule implements CommandModule {
       );
 
       if (!result.success) {
-        return {
-          success: false,
-          output: `rm: ${result.message}`,
-          timestamp: new Date(),
-        };
+        return errorResult(`rm: ${result.message}`);
       }
 
-      return {
-        success: true,
-        output: `Removed: ${fileName}`,
-        timestamp: new Date(),
-      };
+      return successResult(`Removed: ${fileName}`);
     } catch (error) {
-      return {
-        success: false,
-        output: "Failed to remove file",
-        error: error instanceof Error ? error.message : "Unknown error",
-        timestamp: new Date(),
-      };
+      return errorResult("Failed to remove file", error instanceof Error ? error.message : "Unknown error");
     }
   }
 
@@ -692,22 +558,14 @@ export class SystemCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     try {
       if (command.args.length < 2) {
-        return {
-          success: false,
-          output: "cp: missing source or destination",
-          timestamp: new Date(),
-        };
+        return errorResult("cp: missing source or destination");
       }
 
       const source = command.args[0]!;
       const dest = command.args[1]!;
       const serverId = getServerId(context);
       if (!serverId) {
-        return {
-          success: false,
-          output: "No file system context available",
-          timestamp: new Date(),
-        };
+        return errorResult("No file system context available");
       }
 
       const session = getSession(context);
@@ -723,25 +581,12 @@ export class SystemCommandsModule implements CommandModule {
       );
 
       if (!result.success) {
-        return {
-          success: false,
-          output: `cp: ${result.message}`,
-          timestamp: new Date(),
-        };
+        return errorResult(`cp: ${result.message}`);
       }
 
-      return {
-        success: true,
-        output: `Copied ${source} to ${dest}`,
-        timestamp: new Date(),
-      };
+      return successResult(`Copied ${source} to ${dest}`);
     } catch (error) {
-      return {
-        success: false,
-        output: "Failed to copy file",
-        error: error instanceof Error ? error.message : "Unknown error",
-        timestamp: new Date(),
-      };
+      return errorResult("Failed to copy file", error instanceof Error ? error.message : "Unknown error");
     }
   }
 
@@ -751,22 +596,14 @@ export class SystemCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     try {
       if (command.args.length < 2) {
-        return {
-          success: false,
-          output: "mv: missing source or destination",
-          timestamp: new Date(),
-        };
+        return errorResult("mv: missing source or destination");
       }
 
       const source = command.args[0]!;
       const dest = command.args[1]!;
       const serverId = getServerId(context);
       if (!serverId) {
-        return {
-          success: false,
-          output: "No file system context available",
-          timestamp: new Date(),
-        };
+        return errorResult("No file system context available");
       }
 
       const session = getSession(context);
@@ -782,25 +619,12 @@ export class SystemCommandsModule implements CommandModule {
       );
 
       if (!result.success) {
-        return {
-          success: false,
-          output: `mv: ${result.message}`,
-          timestamp: new Date(),
-        };
+        return errorResult(`mv: ${result.message}`);
       }
 
-      return {
-        success: true,
-        output: `Moved ${source} to ${dest}`,
-        timestamp: new Date(),
-      };
+      return successResult(`Moved ${source} to ${dest}`);
     } catch (error) {
-      return {
-        success: false,
-        output: "Failed to move file",
-        error: error instanceof Error ? error.message : "Unknown error",
-        timestamp: new Date(),
-      };
+      return errorResult("Failed to move file", error instanceof Error ? error.message : "Unknown error");
     }
   }
 
@@ -812,7 +636,7 @@ export class SystemCommandsModule implements CommandModule {
 
     // Check for output redirection (append first since >> contains >)
     const appendMatch = fullCommand.match(/echo\s+(.+?)\s+>>\s+(.+)/);
-    const writeMatch = fullCommand.match(/echo\s+(.+?)\s+>\s+([^\>].+)/);
+    const writeMatch = fullCommand.match(/echo\s+(.+?)\s+>\s+([^>].+)/);
 
     if (appendMatch || writeMatch) {
       const content = (appendMatch ? appendMatch[1] : writeMatch![1])!.replace(
@@ -824,11 +648,7 @@ export class SystemCommandsModule implements CommandModule {
 
       const serverId = getServerId(context);
       if (!serverId) {
-        return {
-          success: false,
-          output: "No file system context available for write operation",
-          timestamp: new Date(),
-        };
+        return errorResult("No file system context available for write operation");
       }
 
       const session = getSession(context);
@@ -860,26 +680,14 @@ export class SystemCommandsModule implements CommandModule {
       }
 
       if (!result.success) {
-        return {
-          success: false,
-          output: `echo: ${result.message}`,
-          timestamp: new Date(),
-        };
+        return errorResult(`echo: ${result.message}`);
       }
 
-      return {
-        success: true,
-        output: `Wrote to ${filename}`,
-        timestamp: new Date(),
-      };
+      return successResult(`Wrote to ${filename}`);
     } else {
       // Just echo to stdout
       const text = command.args.join(" ").replace(/^["']|["']$/g, "");
-      return {
-        success: true,
-        output: text,
-        timestamp: new Date(),
-      };
+      return successResult(text);
     }
   }
 
@@ -888,19 +696,11 @@ export class SystemCommandsModule implements CommandModule {
     context: CommandContext,
   ): Promise<CommandResult> {
     if (command.args.length === 0) {
-      return {
-        success: false,
-        output: "write: missing file name\nUsage: write <filename> <content>",
-        timestamp: new Date(),
-      };
+      return errorResult("write: missing file name\nUsage: write <filename> <content>");
     }
 
     if (command.args.length === 1) {
-      return {
-        success: false,
-        output: "write: missing content\nUsage: write <filename> <content>",
-        timestamp: new Date(),
-      };
+      return errorResult("write: missing content\nUsage: write <filename> <content>");
     }
 
     const filename = command.args[0]!;
@@ -911,11 +711,7 @@ export class SystemCommandsModule implements CommandModule {
 
     const serverId = getServerId(context);
     if (!serverId) {
-      return {
-        success: false,
-        output: "No file system context available",
-        timestamp: new Date(),
-      };
+      return errorResult("No file system context available");
     }
 
     const session = getSession(context);
@@ -943,22 +739,13 @@ export class SystemCommandsModule implements CommandModule {
     }
 
     if (!result.success) {
-      return {
-        success: false,
-        output: `write: ${result.message}`,
-        timestamp: new Date(),
-      };
+      return errorResult(`write: ${result.message}`);
     }
 
-    return {
-      success: true,
-      output: [
-        `Writing to ${filename}...`,
-        `Content: ${content}`,
-        `✓ File written successfully`,
-      ],
-      data: { filename, content, bytes: content.length },
-      timestamp: new Date(),
-    };
+    return successResult([
+      `Writing to ${filename}...`,
+      `Content: ${content}`,
+      `✓ File written successfully`,
+    ], { filename, content, bytes: content.length });
   }
 }

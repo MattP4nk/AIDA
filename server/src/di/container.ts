@@ -61,6 +61,9 @@ import { ArchitectInterventionExecutor } from "../services/architectIntervention
 import { DarkNetDungeonService } from "../services/darknetDungeonService";
 import { KeyFragmentService } from "../services/keyFragmentService";
 import { ConnectionChallengeService } from "../services/connectionChallengeService";
+import { ContentDraftService } from "../services/contentDraftService";
+import { ReferenceValidationService } from "../services/referenceValidationService";
+import { EpochSchedulerService } from "../services/epochSchedulerService";
 
 import * as TOKENS from "./tokens";
 
@@ -196,6 +199,15 @@ export function setupContainer(
 
   // Connection Challenge
   container.registerSingleton(TOKENS.CONNECTION_CHALLENGE_SERVICE, ConnectionChallengeService);
+
+  // Content Draft (AI review pipeline)
+  container.registerSingleton(TOKENS.CONTENT_DRAFT_SERVICE, ContentDraftService);
+
+  // Reference Validation (AI content coherence)
+  container.registerSingleton(TOKENS.REFERENCE_VALIDATION_SERVICE, ReferenceValidationService);
+
+  // Epoch Scheduler (timed story events)
+  container.registerSingleton(TOKENS.EPOCH_SCHEDULER_SERVICE, EpochSchedulerService);
 
   logger.info("DI Container initialized with all services");
 }

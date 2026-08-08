@@ -15,7 +15,9 @@ import {
   getEligibleTemplates,
   selectWeightedTemplate,
 } from "./missionTemplatePool";
-import { validateOrRetry, validateDecisionOutput, validateMissionOutput, validateMessageOutput } from "../utils/aiOutputValidator";
+import { validateOrRetry, validateDecisionOutput, validateMissionOutput, validateMessageOutput, type ValidatedDecision } from "../utils/aiOutputValidator";
+import { safeAI } from "../utils/safeExecute";
+import { fallbackActionDecision } from "../utils/aiFallbacks";
 
 export interface NarrativeContext {
   factionPower: { factionId: string; name: string; score: number; members: number; servers: number }[];
@@ -183,60 +185,80 @@ Respond ONLY with JSON:
   "details": { "title": "...", "content": "...", "targetFaction": "optional faction name", "severity": "info|warning|critical" }
 }`;
 
-      const result = await this.aiService.generateResponse(prompt, persona.systemPrompt, undefined, '{ "action": "issue_mission|create_story_arc|send_message|forum_post|trigger_event|none", "reason": "string", "details": {}, "target": "string" }');
-      if (!result.success) {
-        // Smart fallback: pick a default action based on persona type
-        const { fallbackActionDecision } = await import("../utils/aiFallbacks");
-        const fallback = fallbackActionDecision(persona.type);
-        if (!fallback) return null;
+      // Use agent loop so AI can query DB and create entities
+      const expectedFormat = '{ "action": "issue_mission|create_story_arc|send_message|forum_post|trigger_event|none", "reason": "string", "details": {}, "target": "string" }';
+      const { runAgentLoop } = await import("./aiAgentTools");
+      const agentPrompt = prompt + `\n\nYour final response MUST be JSON:\n${expectedFormat}`;
 
-        this.logger.info({ personaId, fallbackType: fallback.type }, "Director using fallback action (AI unavailable)");
-        const action = await this.prisma.aIAction.create({
-          data: {
-            personaId,
-            type: fallback.type,
-            status: "pending",
-            input: { reasoning: fallback.reasoning, source: "fallback" },
-            triggeredBy: "scheduler_fallback",
-          },
-        });
+      // Try agent loop first, then fall back to safeAI
+      let responseText: string | null = null;
+      try {
+        responseText = await runAgentLoop(this.aiService, this.prisma, persona.systemPrompt, agentPrompt, this.logger, 6);
+      } catch { /* fall through to safeAI */ }
 
-        // Queue for retry — when AI comes back, create a real AI-driven action
-        const prismaRef = this.prisma;
-        this.aiService.queueForRetry(prompt, persona.systemPrompt, async (response) => {
-          try {
-            const decision = validateOrRetry(response, validateDecisionOutput);
-            if (!decision || decision.action === "none") return;
-            await prismaRef.aIAction.create({
-              data: {
-                personaId,
-                type: decision.action,
-                status: "pending",
-                input: {
-                  reason: decision.reason,
-                  details: decision.details,
-                  narrativeContext: {
-                    tensionLevel: ctx.tensionLevel,
-                    dominantFaction: ctx.dominantFaction,
-                    activeWars: ctx.activeWars.length,
-                  },
-                  source: "retry_queue",
+      // If agent loop produced a response, validate it directly
+      if (responseText) {
+        const decision = validateOrRetry(responseText, validateDecisionOutput);
+        if (decision && decision.action !== "none") {
+          return this.prisma.aIAction.create({
+            data: {
+              personaId,
+              type: decision.action,
+              status: "pending",
+              input: {
+                reason: decision.reason,
+                details: (decision as any).details,
+                narrativeContext: {
+                  tensionLevel: ctx.tensionLevel,
+                  dominantFaction: ctx.dominantFaction,
+                  activeWars: ctx.activeWars.length,
                 },
-                triggeredBy: "director_analysis_retry",
               },
-            });
-          } catch { /* ignore retry errors */ }
-        });
-
-        return action;
-      }
-      const decision = validateOrRetry(result.response, validateDecisionOutput);
-      if (!decision) {
-        this.logger.warn({ personaId }, "Director decision response invalid or has no JSON");
-        return null;
+              triggeredBy: "director_analysis",
+            },
+          });
+        }
       }
 
-      if (decision.action === "none") return null;
+      // Agent loop failed or invalid — use safeAI with generateOrThrow
+      const prismaRef = this.prisma;
+      const decision = await safeAI<ValidatedDecision | null>({
+        aiService: this.aiService,
+        prompt,
+        systemPrompt: persona.systemPrompt,
+        expectedFormat,
+        validate: validateDecisionOutput,
+        fallback: () => {
+          const fb = fallbackActionDecision(persona.type);
+          return fb ? { action: fb.type, reason: fb.reasoning } : null;
+        },
+        context: "Director decision (Game Master)",
+        logger: this.logger,
+        retry: true,
+        onRetrySuccess: async (result) => {
+          if (!result || result.action === "none") return;
+          await prismaRef.aIAction.create({
+            data: {
+              personaId,
+              type: result.action,
+              status: "pending",
+              input: {
+                reason: result.reason,
+                details: result.details,
+                narrativeContext: {
+                  tensionLevel: ctx.tensionLevel,
+                  dominantFaction: ctx.dominantFaction,
+                  activeWars: ctx.activeWars.length,
+                },
+                source: "retry_queue",
+              },
+              triggeredBy: "director_analysis_retry",
+            },
+          });
+        },
+      });
+
+      if (!decision || decision.action === "none") return null;
 
       return this.prisma.aIAction.create({
         data: {
@@ -307,70 +329,82 @@ Respond ONLY with JSON:
   "target": "optional target info"
 }`;
 
-      const result = await this.aiService.generateResponse(prompt, persona.systemPrompt, undefined, '{ "action": "issue_mission|create_story_arc|send_message|forum_post|trigger_event|none", "reason": "string", "details": {}, "target": "string" }');
-      if (!result.success) {
-        // Smart fallback: pick a default action for faction leader
-        const { fallbackActionDecision } = await import("../utils/aiFallbacks");
-        const fallback = fallbackActionDecision(persona.type);
-        if (!fallback) return null;
+      // Use agent loop so AI can query DB and create entities
+      const expectedFormat = '{ "action": "issue_mission|create_story_arc|send_message|forum_post|trigger_event|none", "reason": "string", "details": {}, "target": "string" }';
+      const { runAgentLoop } = await import("./aiAgentTools");
+      const agentPrompt = prompt + `\n\nYour final response MUST be JSON:\n${expectedFormat}`;
 
-        this.logger.info({ personaId, fallbackType: fallback.type }, "Persona using fallback action (AI unavailable)");
-        const action = await this.prisma.aIAction.create({
-          data: {
-            personaId,
-            type: fallback.type,
-            status: "pending",
-            input: { reasoning: fallback.reasoning, source: "fallback" },
-            triggeredBy: "scheduler_fallback",
-          },
-        });
+      // Try agent loop first, then fall back to safeAI
+      let responseText: string | null = null;
+      try {
+        responseText = await runAgentLoop(this.aiService, this.prisma, persona.systemPrompt, agentPrompt, this.logger, 6);
+      } catch { /* fall through to safeAI */ }
 
-        // Queue for retry — when AI comes back, create a real AI-driven action
-        const prismaRef = this.prisma;
-        const knowledgeIds = knowledge.map(k => k.id);
-        this.aiService.queueForRetry(prompt, persona.systemPrompt, async (response) => {
-          try {
-            const decision = validateOrRetry(response, validateDecisionOutput);
-            if (!decision || decision.action === "none") return;
-            await prismaRef.aIAction.create({
-              data: {
-                personaId,
-                type: decision.action,
-                status: "pending",
-                input: {
-                  knowledge: knowledgeIds,
-                  reason: decision.reason,
-                  target: decision.target,
-                  source: "retry_queue",
-                },
-                triggeredBy: "intel_analysis_retry",
+      const knowledgeIds = knowledge.map(k => k.id);
+
+      // If agent loop produced a response, validate it directly
+      if (responseText) {
+        const decision = validateOrRetry(responseText, validateDecisionOutput);
+        if (decision && decision.action !== "none") {
+          return this.prisma.aIAction.create({
+            data: {
+              personaId,
+              type: decision.action,
+              status: "pending",
+              input: {
+                knowledge: knowledgeIds,
+                reason: decision.reason,
+                target: decision.target,
               },
-            });
-          } catch { /* ignore retry errors */ }
-        });
-
-        return action;
+              triggeredBy: "intel_analysis",
+            },
+          });
+        }
       }
 
-      // Parse and validate AI decision
-      const decision = validateOrRetry(result.response, validateDecisionOutput);
-      if (!decision) {
-        this.logger.warn({ personaId }, "AI decision response invalid or has no JSON");
-        return null;
-      }
+      // Agent loop failed or invalid — use safeAI with generateOrThrow
+      const prismaRef = this.prisma;
+      const decision = await safeAI<ValidatedDecision | null>({
+        aiService: this.aiService,
+        prompt,
+        systemPrompt: persona.systemPrompt,
+        expectedFormat,
+        validate: validateDecisionOutput,
+        fallback: () => {
+          const fb = fallbackActionDecision(persona.type);
+          return fb ? { action: fb.type, reason: fb.reasoning } : null;
+        },
+        context: "Persona action decision (faction leader)",
+        logger: this.logger,
+        retry: true,
+        onRetrySuccess: async (result) => {
+          if (!result || result.action === "none") return;
+          await prismaRef.aIAction.create({
+            data: {
+              personaId,
+              type: result.action,
+              status: "pending",
+              input: {
+                knowledge: knowledgeIds,
+                reason: result.reason,
+                target: result.target,
+                source: "retry_queue",
+              },
+              triggeredBy: "intel_analysis_retry",
+            },
+          });
+        },
+      });
 
-      if (decision.action === "none") {
-        return null;
-      }
+      if (!decision || decision.action === "none") return null;
 
-      // Create AI action based on decision
       return this.prisma.aIAction.create({
         data: {
           personaId,
           type: decision.action,
           status: "pending",
           input: {
-            knowledge: knowledge.map(k => k.id),
+            knowledge: knowledgeIds,
             reason: decision.reason,
             target: decision.target,
           },
@@ -413,7 +447,7 @@ Respond ONLY with JSON:
 
       // Execute based on type
       switch (action.type) {
-        case "issue_mission":
+        case "issue_mission": {
           if (action.persona.faction) {
             // Knowledge-aware, template-constrained pipeline (same as generateDynamicMission)
             const factionId = action.persona.faction.id;
@@ -481,43 +515,34 @@ ${knownBlock}
 Write a mission title and description IN CHARACTER. Title under 60 chars, description 1-3 sentences.
 Respond ONLY with JSON: { "title": "...", "description": "..." }`;
 
-              const mResult = await this.aiService.generateResponse(flavorPrompt, action.persona.systemPrompt, undefined, '{ "title": "string (3-80 chars)", "description": "string (10-500 chars)" }');
-              if (!mResult.success) {
-                // Queue for retry — when AI comes back, update the mission title/description
-                const aiSvc = this.aiService;
-                const prismaRef = this.prisma;
-                const personaSystemPrompt = action.persona.systemPrompt;
-                // We'll capture the mission ID after creation in a closure
-                const retryPrompt = flavorPrompt;
-                const retrySystemPrompt = personaSystemPrompt;
-                // Schedule retry (mission ID will be set after mission creation below)
-                setTimeout(() => {
-                  aiSvc.queueForRetry(retryPrompt, retrySystemPrompt, async (response) => {
-                    try {
-                      const validated = validateOrRetry(response, validateMissionOutput);
-                      if (validated) {
-                        // Find the most recently created mission by this persona for this faction
-                        const recentMission = await prismaRef.mission.findFirst({
-                          where: { issuedBy: action.persona.id, factionId },
-                          orderBy: { createdAt: "desc" },
-                        });
-                        if (recentMission) {
-                          await prismaRef.mission.update({
-                            where: { id: recentMission.id },
-                            data: { title: validated.title, description: validated.description },
-                          });
-                        }
-                      }
-                    } catch { /* ignore retry errors */ }
+              const prismaRef = this.prisma;
+              const personaId = action.persona.id;
+
+              const validated = await safeAI({
+                aiService: this.aiService,
+                prompt: flavorPrompt,
+                systemPrompt: action.persona.systemPrompt,
+                expectedFormat: '{ "title": "string (3-80 chars)", "description": "string (10-500 chars)" }',
+                validate: validateMissionOutput,
+                fallback: { title: mTitle, description: mDescription },
+                context: "Mission flavor text for issue_mission action",
+                logger: this.logger,
+                retry: true,
+                onRetrySuccess: async (result) => {
+                  const recentMission = await prismaRef.mission.findFirst({
+                    where: { issuedBy: personaId, factionId },
+                    orderBy: { createdAt: "desc" },
                   });
-                }, 0);
-                throw new Error(mResult.error || "AI flavor failed");
-              }
-              const validated = validateOrRetry(mResult.response, validateMissionOutput);
-              if (validated) {
-                mTitle = validated.title;
-                mDescription = validated.description;
-              }
+                  if (recentMission) {
+                    await prismaRef.mission.update({
+                      where: { id: recentMission.id },
+                      data: { title: result.title, description: result.description },
+                    });
+                  }
+                },
+              });
+              mTitle = validated.title;
+              mDescription = validated.description;
             } catch (aiErr) {
               this.logger.warn({ err: aiErr }, "AI flavor failed for issue_mission, using template defaults");
             }
@@ -539,7 +564,7 @@ Respond ONLY with JSON: { "title": "...", "description": "..." }`;
 
             output = { missionId: mission.id, templateId: mTemplate.id };
           }
-          break;
+        } break;
         case "create_story_arc": {
           // Faction leader creates a multi-step story arc for a faction member
           if (action.persona.faction) {
@@ -574,7 +599,7 @@ Respond ONLY with JSON: { "title": "...", "description": "..." }`;
           }
           break;
         }
-        case "send_message":
+        case "send_message": {
           // Use AI to generate message content
           const messageTarget = (action.input as any).target;
           if (!messageTarget) {
@@ -594,24 +619,19 @@ Generate a  message to recruit, warn, or inform the player. Respond ONLY with JS
 }`;
 
           try {
-            const msgResult = await this.aiService.generateResponse(
-              messagePrompt,
-              action.persona.systemPrompt,
-              undefined,
-              '{ "subject": "string", "content": "string" }',
-            );
-
-            let messageData = {
-              subject: "Message from " + action.persona.name,
-              content: "Greetings. We should talk."
-            };
-
-            if (msgResult.success) {
-              const validated = validateOrRetry(msgResult.response, validateMessageOutput);
-              if (validated) {
-                messageData = validated;
-              }
-            }
+            const messageData = await safeAI({
+              aiService: this.aiService,
+              prompt: messagePrompt,
+              systemPrompt: action.persona.systemPrompt,
+              expectedFormat: '{ "subject": "string", "content": "string" }',
+              validate: validateMessageOutput,
+              fallback: {
+                subject: "Message from " + action.persona.name,
+                content: "Greetings. We should talk."
+              },
+              context: "AI persona send_message action",
+              logger: this.logger,
+            });
 
             // Send message via MessageService
             const result = await this.messageService.sendAIMessage(
@@ -633,7 +653,8 @@ Generate a  message to recruit, warn, or inform the player. Respond ONLY with JS
             output = { type: "message", error: "Failed to generate/send" };
           }
           break;
-        case "forum_post":
+        }
+        case "forum_post": {
           // Use AI to generate forum post content
           const forumContext = (action.input as any);
 
@@ -648,30 +669,26 @@ Generate a post for underground hacking forums. Stay in character. Respond ONLY 
 }`;
 
           try {
-            const forumResult = await this.aiService.generateResponse(
-              forumPrompt,
-              action.persona.systemPrompt,
-              undefined,
-              '{ "title": "string", "content": "string" }',
-            );
-
-            let postData = {
-              title: `Message from ${action.persona.name}`,
-              content: "Something interesting is happening..."
+            const validateTitleContent = (parsed: any): { title: string; content: string } | null => {
+              if (!parsed || typeof parsed !== "object") return null;
+              if (typeof parsed.title !== "string" || typeof parsed.content !== "string") return null;
+              if (!parsed.title.trim() || !parsed.content.trim()) return null;
+              return { title: parsed.title.trim(), content: parsed.content.trim() };
             };
 
-            if (forumResult.success) {
-              const validateTitleContent = (parsed: any): { title: string; content: string } | null => {
-                if (!parsed || typeof parsed !== "object") return null;
-                if (typeof parsed.title !== "string" || typeof parsed.content !== "string") return null;
-                if (!parsed.title.trim() || !parsed.content.trim()) return null;
-                return { title: parsed.title.trim(), content: parsed.content.trim() };
-              };
-              const validated = validateOrRetry(forumResult.response, validateTitleContent);
-              if (validated) {
-                postData = validated;
-              }
-            }
+            const postData = await safeAI({
+              aiService: this.aiService,
+              prompt: forumPrompt,
+              systemPrompt: action.persona.systemPrompt,
+              expectedFormat: '{ "title": "string", "content": "string" }',
+              validate: validateTitleContent,
+              fallback: {
+                title: `Message from ${action.persona.name}`,
+                content: "Something interesting is happening..."
+              },
+              context: "AI persona forum_post action",
+              logger: this.logger,
+            });
 
             // Determine target forum based on faction or use neutral forum
             let targetForumId = "neutral_forum"; // Default
@@ -706,6 +723,7 @@ Generate a post for underground hacking forums. Stay in character. Respond ONLY 
             output = { type: "forum_post", error: "Failed to generate/post" };
           }
           break;
+        }
         case "trigger_event": {
           // Game Master creates a game-wide system event
           const details = (action.input as any)?.details || {};

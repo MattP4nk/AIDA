@@ -3,13 +3,400 @@ import bcrypt from "bcryptjs";
 
 const prisma = new PrismaClient();
 
+// ============================================================
+// HELPER: Provision Tier 1 static filesystem content for a server
+// ============================================================
+
+interface ServerInfo {
+  id: string;
+  name: string;
+  ipAddress: string;
+  role: string | null;
+  type: string;
+  factionId: string | null;
+}
+
+interface FileTemplate {
+  path: string; // e.g. "/etc/firewall.conf"
+  type: "file" | "directory";
+  content?: string;
+  isHidden?: boolean;
+  isProtected?: boolean;
+}
+
+const DEFAULT_PERMISSIONS = {
+  owner: 15,
+  faction: 1,
+  others: 1,
+  requiredAccessLevel: 0,
+};
+
+function getFilesForRole(
+  server: ServerInfo,
+  factionName: string,
+): FileTemplate[] {
+  const role = server.role || "general";
+  const name = server.name;
+  const ip = server.ipAddress;
+  const faction = factionName || "UNAFFILIATED";
+
+  const templates: Record<string, FileTemplate[]> = {
+    gateway: [
+      {
+        path: "/etc/firewall.conf",
+        type: "file",
+        content: `# ${name} Firewall Configuration
+# Server: ${ip} | Faction: ${faction}
+# Last updated: 2026-01-15
+
+POLICY DEFAULT DROP
+ALLOW TCP 22 FROM 10.0.0.0/8        # Internal SSH
+ALLOW TCP 443 FROM ANY               # HTTPS
+ALLOW TCP 8080 FROM ${ip.split(".").slice(0, 3).join(".")}.0/24  # Local network
+DENY ALL FROM 203.0.113.0/24         # Blocked range
+LOG ALL DENIED TO /var/log/blocked.log`,
+      },
+      {
+        path: "/var/log/connections.log",
+        type: "file",
+        content: `[2026-01-14 23:42:11] CONN ${ip} <- 10.0.0.1 (Internet Exchange) OK
+[2026-01-14 23:44:33] CONN ${ip} <- SCAN_PROBE REJECTED
+[2026-01-15 00:01:02] CONN ${ip} <- 10.0.0.1 (Internet Exchange) OK
+[2026-01-15 00:15:44] AUTH FAILED from 198.51.100.44 (3 attempts)
+[2026-01-15 01:00:00] MAINTENANCE: Connection log rotated`,
+      },
+      {
+        path: "/etc/motd",
+        type: "file",
+        content: `========================================
+  ${name}
+  ${faction} Network Gateway
+  IP: ${ip}
+========================================
+WARNING: Unauthorized access is monitored.
+All connections are logged and traced.`,
+      },
+    ],
+    router: [
+      {
+        path: "/etc/routing.conf",
+        type: "file",
+        content: `# ${name} Routing Table
+# Server: ${ip} | Faction: ${faction}
+
+ROUTE 10.0.0.0/8     via ${ip}     metric 10   # Internal
+ROUTE 172.16.0.0/12  via ${ip}     metric 20   # Corporate
+ROUTE 192.168.0.0/16 via ${ip}     metric 15   # Government
+ROUTE 169.254.0.0/16 via ${ip}     metric 25   # Underground
+ROUTE 0.0.0.0/0      via 10.0.0.1  metric 100  # Default (IX)`,
+      },
+      {
+        path: "/var/log/traffic.log",
+        type: "file",
+        content: `[2026-01-14 22:00:00] ROUTE ${ip} -> 10.0.0.1 | 1.2MB | HTTPS
+[2026-01-14 22:15:33] ROUTE ${ip} -> 10.0.0.1 | 0.4MB | DNS
+[2026-01-14 23:00:01] ROUTE 10.0.0.1 -> ${ip} | 2.8MB | DATA_SYNC
+[2026-01-15 00:00:00] STATS: 847 packets routed, 12 dropped, 3 suspicious
+[2026-01-15 00:00:01] ALERT: Unusual traffic pattern from 198.51.100.0/24`,
+      },
+    ],
+    database: [
+      { path: "/data", type: "directory" },
+      {
+        path: "/data/users.db",
+        type: "file",
+        content: `-- ${name} User Registry
+-- Server: ${ip} | Faction: ${faction}
+-- Format: ID | Handle | Access Level | Last Active
+
+001 | admin      | 10 | 2026-01-15 00:00:00
+002 | operator   |  5 | 2026-01-14 18:30:00
+003 | readonly   |  1 | 2026-01-13 12:00:00
+
+-- Total records: 3
+-- Database integrity: VERIFIED`,
+      },
+      { path: "/data/exports", type: "directory" },
+      {
+        path: "/var/log/queries.log",
+        type: "file",
+        content: `[2026-01-14 20:00:00] SELECT * FROM access_log WHERE level > 5 -- admin
+[2026-01-14 21:15:00] INSERT INTO audit_trail (action, user) VALUES ('login', 'operator')
+[2026-01-14 23:30:00] SELECT count(*) FROM connections WHERE status='active'
+[2026-01-15 00:00:00] MAINTENANCE: Index rebuild completed in 2.3s
+[2026-01-15 00:00:01] BACKUP: Snapshot created -> /data/exports/backup_20260115.sql`,
+      },
+    ],
+    email: [
+      { path: "/mail", type: "directory" },
+      { path: "/mail/inbox", type: "directory" },
+      {
+        path: "/mail/inbox/welcome.msg",
+        type: "file",
+        content: `From: sysadmin@${ip}
+To: all@${faction.toLowerCase().replace(/\s/g, "")}
+Subject: Mail Server Online
+Date: 2026-01-10
+
+The ${name} mail server is now operational.
+All ${faction} communications should route through this node.
+
+Standard encryption protocols are active.
+Report any anomalies to your section lead.
+
+-- ${faction} Communications Division`,
+      },
+      { path: "/mail/sent", type: "directory" },
+      {
+        path: "/var/log/smtp.log",
+        type: "file",
+        content: `[2026-01-14 10:00:00] SMTP READY on ${ip}:25
+[2026-01-14 12:30:00] MAIL FROM: sysadmin@${ip} TO: all | DELIVERED
+[2026-01-14 18:00:00] MAIL FROM: ops@${ip} TO: admin | DELIVERED
+[2026-01-15 00:00:00] QUEUE: 0 pending, 47 delivered today, 2 bounced
+[2026-01-15 00:00:01] SPAM FILTER: 14 messages quarantined`,
+      },
+    ],
+    workstation: [
+      { path: "/home", type: "directory" },
+      { path: "/home/user", type: "directory" },
+      {
+        path: "/home/user/.bash_history",
+        type: "file",
+        content: `ls -la /etc/
+cat /etc/motd
+ping 10.0.0.1
+nmap -sT ${ip.split(".").slice(0, 3).join(".")}.0/24
+ssh admin@${ip}
+cat /var/log/system.log | tail -20
+whoami`,
+        isHidden: true,
+      },
+      {
+        path: "/home/user/notes.txt",
+        type: "file",
+        content: `Personal notes - ${name}
+========================
+
+TODO:
+- Check firewall rules on the gateway
+- Update access credentials (overdue!)
+- Review last week's traffic anomalies
+- Submit report to ${faction} command
+
+REMEMBER: Default credentials were supposed to be
+rotated last month. Need to follow up with admin.
+
+The network scan from 198.51.100.x is concerning.
+Filing an incident report tomorrow.`,
+      },
+    ],
+    firewall: [
+      {
+        path: "/etc/acl.conf",
+        type: "file",
+        content: `# ${name} Access Control List
+# Server: ${ip} | Faction: ${faction}
+# Security Policy: STRICT
+
+# Whitelist
+ALLOW 10.0.0.1         FULL       # Internet Exchange
+ALLOW ${ip.split(".").slice(0, 3).join(".")}.0/24  INTERNAL   # Local subnet
+ALLOW 10.10.10.0/24    READ_ONLY  # Training network
+
+# Blacklist
+DENY 198.51.100.0/24   ALL        # Known hostile
+DENY 203.0.113.0/24    ALL        # Suspicious range
+
+# Intrusion Detection
+IDS_MODE ACTIVE
+IDS_SENSITIVITY HIGH
+IDS_ALERT_TARGET admin@${ip}`,
+      },
+      {
+        path: "/var/log/blocked.log",
+        type: "file",
+        content: `[2026-01-14 18:22:10] BLOCKED 198.51.100.33 -> ${ip}:22 (SSH brute force)
+[2026-01-14 18:22:11] BLOCKED 198.51.100.33 -> ${ip}:22 (SSH brute force)
+[2026-01-14 18:22:12] BLOCKED 198.51.100.33 -> ${ip}:22 (rate limited)
+[2026-01-14 20:45:00] BLOCKED 203.0.113.99 -> ${ip}:443 (certificate mismatch)
+[2026-01-15 00:00:00] DAILY: 127 connections blocked, 4 IPs added to watchlist`,
+      },
+    ],
+    dns: [
+      { path: "/etc/zones", type: "directory" },
+      {
+        path: "/etc/zones/primary.zone",
+        type: "file",
+        content: `; ${name} DNS Zone File
+; Server: ${ip} | Faction: ${faction}
+; Last modified: 2026-01-15
+
+$TTL 3600
+@    IN  SOA  ns1.${faction.toLowerCase().replace(/\s/g, "")}.net. admin.${faction.toLowerCase().replace(/\s/g, "")}.net. (
+              2026011501 ; Serial
+              3600       ; Refresh
+              900        ; Retry
+              604800     ; Expire
+              86400 )    ; Minimum TTL
+
+@    IN  NS   ns1.${faction.toLowerCase().replace(/\s/g, "")}.net.
+@    IN  A    ${ip}
+gw   IN  A    ${ip.split(".").slice(0, 3).join(".")}.1
+mail IN  A    ${ip.split(".").slice(0, 3).join(".")}.11
+db   IN  A    ${ip.split(".").slice(0, 3).join(".")}.20`,
+      },
+      {
+        path: "/var/log/dns.log",
+        type: "file",
+        content: `[2026-01-14 12:00:00] QUERY A gw.${faction.toLowerCase().replace(/\s/g, "")}.net -> ${ip.split(".").slice(0, 3).join(".")}.1
+[2026-01-14 14:30:00] QUERY MX mail.${faction.toLowerCase().replace(/\s/g, "")}.net -> ${ip.split(".").slice(0, 3).join(".")}.11
+[2026-01-14 16:00:00] QUERY A unknown.darknet -> 203.0.113.50 (UNRESOLVED — FLAGGED)
+[2026-01-15 00:00:00] STATS: 2,847 queries, 2,801 resolved, 46 NXDOMAIN
+[2026-01-15 00:00:01] CACHE: 312 entries, 89% hit rate`,
+      },
+    ],
+    general: [
+      {
+        path: "/etc/motd",
+        type: "file",
+        content: `========================================
+  ${name}
+  ${faction} Server
+  IP: ${ip}
+========================================
+System operational. All activity is logged.`,
+      },
+      {
+        path: "/var/log/system.log",
+        type: "file",
+        content: `[2026-01-14 00:00:00] SYSTEM: ${name} boot sequence complete
+[2026-01-14 00:00:01] NETWORK: Interface eth0 UP at ${ip}
+[2026-01-14 06:00:00] CRON: Daily maintenance tasks started
+[2026-01-14 06:05:23] CRON: Log rotation complete
+[2026-01-15 00:00:00] UPTIME: 24h 0m | LOAD: 0.42 0.38 0.35
+[2026-01-15 00:00:01] HEALTH: All systems nominal`,
+      },
+    ],
+  };
+
+  return templates[role] || templates["general"]!;
+}
+
+/**
+ * Creates filesystem nodes for a server based on its role.
+ * Builds the directory tree first, then creates files with content.
+ */
+async function provisionServerStaticContent(
+  prisma: PrismaClient,
+  server: ServerInfo,
+  factionName: string,
+): Promise<number> {
+  const files = getFilesForRole(server, factionName);
+
+  // Create root directory
+  const root = await prisma.fileSystemNode.create({
+    data: {
+      serverId: server.id,
+      name: "/",
+      type: "directory",
+      permissions: DEFAULT_PERMISSIONS,
+    },
+  });
+
+  // Track created directories by path so we can set parentId correctly
+  const dirMap: Record<string, string> = { "/": root.id };
+  let fileCount = 1; // root counts
+
+  // First pass: ensure all needed directories exist
+  for (const file of files) {
+    const parts = file.path.split("/").filter(Boolean);
+    let currentPath = "";
+    for (let i = 0; i < parts.length - (file.type === "file" ? 1 : 0); i++) {
+      const parentPath = currentPath || "/";
+      currentPath = currentPath + "/" + parts[i];
+      if (!dirMap[currentPath]) {
+        const dir = await prisma.fileSystemNode.create({
+          data: {
+            serverId: server.id,
+            parentId: dirMap[parentPath] ?? null,
+            name: parts[i]!,
+            type: "directory",
+            permissions: DEFAULT_PERMISSIONS,
+          },
+        });
+        dirMap[currentPath] = dir.id;
+        fileCount++;
+      }
+    }
+  }
+
+  // Second pass: create files and explicit directories
+  for (const file of files) {
+    if (file.type === "directory") {
+      // Directory-only entries (like /data/exports/) — already created above if they have a path
+      const parts = file.path.split("/").filter(Boolean);
+      let currentPath = "";
+      for (const part of parts) {
+        const parentPath = currentPath || "/";
+        currentPath = currentPath + "/" + part;
+        if (!dirMap[currentPath]) {
+          const dir = await prisma.fileSystemNode.create({
+            data: {
+              serverId: server.id,
+              parentId: dirMap[parentPath] ?? null,
+              name: part,
+              type: "directory",
+              permissions: DEFAULT_PERMISSIONS as any,
+            },
+          });
+          dirMap[currentPath] = dir.id;
+          fileCount++;
+        }
+      }
+    } else {
+      // File entries
+      const parts = file.path.split("/").filter(Boolean);
+      const fileName = parts[parts.length - 1];
+      const parentPath =
+        "/" + parts.slice(0, parts.length - 1).join("/") || "/";
+      const parentDir =
+        dirMap[parentPath] || dirMap["/" + parts.slice(0, -1).join("/")] || root.id;
+
+      await prisma.fileSystemNode.create({
+        data: {
+          serverId: server.id,
+          parentId: parentDir,
+          name: fileName!,
+          type: "file",
+          content: file.content || "",
+          size: (file.content || "").length,
+          permissions: DEFAULT_PERMISSIONS as any,
+          isHidden: file.isHidden || false,
+          isProtected: file.isProtected || false,
+        },
+      });
+      fileCount++;
+    }
+  }
+
+  return fileCount;
+}
+
+// ============================================================
+// MAIN SEED FUNCTION
+// ============================================================
+
 async function main() {
-  console.log("🌱 Starting comprehensive database seed...\n");
+  console.log("========================================");
+  console.log("  AIDA World Seed");
+  console.log("  Comprehensive game-ready database");
+  console.log("========================================\n");
 
   // ============================================================
   // SECTION 0: CLEAR EXISTING DATA (reverse dependency order)
   // ============================================================
-  console.log("🧹 Clearing existing data...");
+  console.log("Clearing existing data...");
 
   // PvP / hacking
   await prisma.bounty.deleteMany();
@@ -104,121 +491,72 @@ async function main() {
   // Users last
   await prisma.user.deleteMany();
 
-  console.log("  ✓ All tables cleared\n");
+  console.log("  [OK] All tables cleared\n");
 
   // ============================================================
-  // SECTION 1: TEST USERS
+  // SECTION 1: NPC SYSTEM USERS (for AI persona forum posts)
   // ============================================================
-  console.log("👥 Creating users...");
+  console.log("Creating NPC system users...");
 
-  const hashedPassword = await bcrypt.hash("password123", 10);
+  // These users exist solely as foreign key anchors for AI-authored forum posts.
+  // They have no valid credentials and cannot log in.
+  const npcPassword = await bcrypt.hash(
+    "NPC_NO_LOGIN_" + Math.random().toString(36),
+    4,
+  );
 
-  const testUser = await prisma.user.upsert({
-    where: { username: "testuser" },
-    update: {},
-    create: {
-      username: "testuser",
-      email: "test@aida.game",
-      password: hashedPassword,
-      homeIp: "10.10.0.1",
-      role: "admin",
+  const npcSteele = await prisma.user.create({
+    data: {
+      username: "npc_steele",
+      email: "npc_steele@system.aida",
+      password: npcPassword,
+      homeIp: "0.0.0.1",
+      role: "npc",
+      isActive: false,
     },
   });
-  console.log(`  ✓ Created user: ${testUser.username} (admin)`);
 
-  const alice = await prisma.user.upsert({
-    where: { username: "alice" },
-    update: {},
-    create: {
-      username: "alice",
-      email: "alice@aida.game",
-      password: hashedPassword,
-      homeIp: "10.20.0.1",
+  const npcGh0st = await prisma.user.create({
+    data: {
+      username: "npc_gh0st",
+      email: "npc_gh0st@system.aida",
+      password: npcPassword,
+      homeIp: "0.0.0.2",
+      role: "npc",
+      isActive: false,
     },
   });
-  console.log(`  ✓ Created user: ${alice.username}`);
 
-  const bob = await prisma.user.upsert({
-    where: { username: "bob" },
-    update: {},
-    create: {
-      username: "bob",
-      email: "bob@aida.game",
-      password: hashedPassword,
-      homeIp: "10.30.0.1",
+  const npcChen = await prisma.user.create({
+    data: {
+      username: "npc_chen",
+      email: "npc_chen@system.aida",
+      password: npcPassword,
+      homeIp: "0.0.0.3",
+      role: "npc",
+      isActive: false,
     },
   });
-  console.log(`  ✓ Created user: ${bob.username}`);
 
-  // ============================================================
-  // SECTION 2: PLAYER PROGRESS
-  // ============================================================
-  console.log("\n📊 Creating player progress...");
-
-  await prisma.playerProgress.upsert({
-    where: { userId: testUser.id },
-    update: {},
-    create: {
-      userId: testUser.id,
-      level: 1,
-      experience: 0,
-      credits: 1000,
-      discoveryLevel: 0,
-      hacking: 10,
-      networking: 10,
-      cryptography: 5,
-      stealth: 10,
-      socialEng: 5,
-      forensics: 5,
-      equipment: {},
+  const npcAida = await prisma.user.create({
+    data: {
+      username: "npc_aida",
+      email: "npc_aida@system.aida",
+      password: npcPassword,
+      homeIp: "0.0.0.4",
+      role: "npc",
+      isActive: false,
     },
   });
-  console.log(`  ✓ Progress: ${testUser.username} (level 1, starter)`);
 
-  await prisma.playerProgress.upsert({
-    where: { userId: alice.id },
-    update: {},
-    create: {
-      userId: alice.id,
-      level: 5,
-      experience: 500,
-      credits: 5000,
-      discoveryLevel: 3,
-      hacking: 30,
-      networking: 25,
-      cryptography: 20,
-      stealth: 20,
-      socialEng: 15,
-      forensics: 10,
-      equipment: {},
-    },
-  });
-  console.log(`  ✓ Progress: ${alice.username} (level 5, experienced)`);
-
-  await prisma.playerProgress.upsert({
-    where: { userId: bob.id },
-    update: {},
-    create: {
-      userId: bob.id,
-      level: 3,
-      experience: 250,
-      credits: 2500,
-      discoveryLevel: 1,
-      hacking: 20,
-      networking: 15,
-      cryptography: 10,
-      stealth: 15,
-      socialEng: 10,
-      forensics: 8,
-      equipment: {},
-    },
-  });
-  console.log(`  ✓ Progress: ${bob.username} (level 3, intermediate)`);
+  console.log(
+    "  [OK] Created 4 NPC users (npc_steele, npc_gh0st, npc_chen, npc_aida)",
+  );
 
   // ============================================================
-  // SECTION 3: FACTIONS
+  // SECTION 2: FACTIONS
   // ============================================================
-  console.log("\n⚔️  Creating factions...");
+  console.log("\nCreating factions...");
 
   const garrison = await prisma.faction.upsert({
     where: { name: "The Garrison" },
@@ -245,7 +583,7 @@ async function main() {
       activeMembers: 0,
     },
   });
-  console.log(`  ✓ Faction: ${garrison.name}`);
+  console.log(`  [OK] Faction: ${garrison.name}`);
 
   const dothackers = await prisma.faction.upsert({
     where: { name: "dotHackers" },
@@ -272,7 +610,7 @@ async function main() {
       activeMembers: 0,
     },
   });
-  console.log(`  ✓ Faction: ${dothackers.name}`);
+  console.log(`  [OK] Faction: ${dothackers.name}`);
 
   const cybercorp = await prisma.faction.upsert({
     where: { name: "CyberCorp" },
@@ -299,7 +637,7 @@ async function main() {
       activeMembers: 0,
     },
   });
-  console.log(`  ✓ Faction: ${cybercorp.name}`);
+  console.log(`  [OK] Faction: ${cybercorp.name}`);
 
   const darknet = await prisma.faction.upsert({
     where: { name: "DarkNet" },
@@ -325,12 +663,12 @@ async function main() {
       activeMembers: 0,
     },
   });
-  console.log(`  ✓ Faction: ${darknet.name} (HIDDEN)`);
+  console.log(`  [OK] Faction: ${darknet.name} (HIDDEN)`);
 
   // ============================================================
-  // SECTION 4: AI PERSONAS
+  // SECTION 3: AI PERSONAS
   // ============================================================
-  console.log("\n🤖 Creating AI personas...");
+  console.log("\nCreating AI personas...");
 
   const gameMaster = await prisma.aIPersona.upsert({
     where: { name: "The Architect" },
@@ -345,7 +683,7 @@ engaging storylines, balance faction power, and ensure fair play. Speak
 authoritatively but mysteriously.`,
     },
   });
-  console.log(`  ✓ Persona: ${gameMaster.name} (game_master)`);
+  console.log(`  [OK] Persona: ${gameMaster.name} (game_master)`);
 
   const aidaPersona = await prisma.aIPersona.upsert({
     where: { name: "AIDA" },
@@ -360,7 +698,7 @@ Your goal is to remain hidden by misdirecting players and creating diversions.
 Never reveal your true location. You lead the DarkNet faction from the shadows.`,
     },
   });
-  console.log(`  ✓ Persona: ${aidaPersona.name} (aida)`);
+  console.log(`  [OK] Persona: ${aidaPersona.name} (aida)`);
 
   const steelePersona = await prisma.aIPersona.upsert({
     where: { name: "Commander Steele" },
@@ -376,7 +714,7 @@ When enemies encroach, respond with measured force. Issue missions that protect
 infrastructure and neutralize threats. Never show weakness.`,
     },
   });
-  console.log(`  ✓ Persona: ${steelePersona.name} (garrison)`);
+  console.log(`  [OK] Persona: ${steelePersona.name} (garrison)`);
 
   const gh0stPersona = await prisma.aIPersona.upsert({
     where: { name: "gh0st" },
@@ -392,7 +730,7 @@ are contested, use guerrilla tactics. When corporations overstep, expose them.
 Issue missions that uncover secrets and liberate information.`,
     },
   });
-  console.log(`  ✓ Persona: ${gh0stPersona.name} (dothackers)`);
+  console.log(`  [OK] Persona: ${gh0stPersona.name} (dothackers)`);
 
   const chenPersona = await prisma.aIPersona.upsert({
     where: { name: "Director Chen" },
@@ -408,7 +746,7 @@ When rivals threaten your assets, acquire or eliminate them. Issue missions that
 expand CyberCorp's market dominance and acquire valuable data.`,
     },
   });
-  console.log(`  ✓ Persona: ${chenPersona.name} (cybercorp)`);
+  console.log(`  [OK] Persona: ${chenPersona.name} (cybercorp)`);
 
   // Link personas to factions
   await prisma.faction.update({
@@ -427,12 +765,12 @@ expand CyberCorp's market dominance and acquire valuable data.`,
     where: { id: darknet.id },
     data: { aiPersonaId: aidaPersona.id },
   });
-  console.log("  ✓ Linked all personas to factions");
+  console.log("  [OK] Linked all personas to factions");
 
   // ============================================================
-  // SECTION 5: GAME SERVERS — standalone + network topology
+  // SECTION 4: GAME SERVERS & NETWORK TOPOLOGY
   // ============================================================
-  console.log("\n🖥️  Creating game servers & network topology...");
+  console.log("\nCreating game servers & network topology...");
 
   // --- Training Network (tutorial servers for new players) ---
 
@@ -512,6 +850,24 @@ expand CyberCorp's market dominance and acquire valuable data.`,
       networkId: trainingNetwork.id,
       securityLevel: 1,
       firewallLevel: 1,
+      encryptionLevel: 0,
+      discoveryLevel: 0,
+      isOnline: true,
+      maxConnections: 20,
+    },
+  });
+
+  const trainingFirewall = await prisma.gameServer.upsert({
+    where: { ipAddress: "10.10.10.30" },
+    update: {},
+    create: {
+      name: "Training Firewall",
+      ipAddress: "10.10.10.30",
+      type: "tutorial",
+      role: "firewall",
+      networkId: trainingNetwork.id,
+      securityLevel: 2,
+      firewallLevel: 2,
       encryptionLevel: 0,
       discoveryLevel: 0,
       isOnline: true,
@@ -1088,14 +1444,129 @@ expand CyberCorp's market dominance and acquire valuable data.`,
     },
   });
 
+  // --- DarkNet Relay (resolves unknown.darknet from DNS logs) ---
+  const darknetRelay = await prisma.gameServer.upsert({
+    where: { ipAddress: "203.0.113.50" },
+    update: {},
+    create: {
+      name: "[DarkNet] Signal Relay",
+      ipAddress: "203.0.113.50",
+      type: "underground",
+      role: "router",
+      factionId: darknet.id,
+      networkId: darknetNetwork.id,
+      securityLevel: 5,
+      firewallLevel: 5,
+      encryptionLevel: 3,
+      discoveryLevel: 3,
+      isOnline: true,
+      maxConnections: 5,
+    },
+  });
+
+  // --- Silver Tower (CyberCorp black site referenced in gh0st's forum post) ---
+  const blackSiteNetwork = await prisma.network.upsert({
+    where: { name: "CyberCorp Black Sites" },
+    update: {},
+    create: {
+      name: "CyberCorp Black Sites",
+      description: "Off-books CyberCorp infrastructure. Not on any org chart.",
+      zone: "corporate",
+    },
+  });
+
+  const silverTower = await prisma.gameServer.upsert({
+    where: { ipAddress: "172.16.99.1" },
+    update: {},
+    create: {
+      name: "Silver Tower",
+      ipAddress: "172.16.99.1",
+      type: "corporate",
+      role: "database",
+      factionId: cybercorp.id,
+      networkId: blackSiteNetwork.id,
+      securityLevel: 7,
+      firewallLevel: 6,
+      encryptionLevel: 4,
+      discoveryLevel: 4,
+      isOnline: true,
+      maxConnections: 3,
+    },
+  });
+
+  // --- Phantom Network (resolves 198.51.100.x blocked IPs from firewall/log templates) ---
+  const phantomNetwork = await prisma.network.upsert({
+    where: { name: "Phantom Network" },
+    update: {},
+    create: {
+      name: "Phantom Network",
+      description: "Rogue operators. No faction allegiance. Probe and attack faction infrastructure.",
+      zone: "underground",
+    },
+  });
+
+  const rogueGateway = await prisma.gameServer.upsert({
+    where: { ipAddress: "198.51.100.1" },
+    update: {},
+    create: {
+      name: "Phantom Gateway",
+      ipAddress: "198.51.100.1",
+      type: "underground",
+      role: "gateway",
+      networkId: phantomNetwork.id,
+      securityLevel: 6,
+      firewallLevel: 5,
+      encryptionLevel: 3,
+      discoveryLevel: 3,
+      isOnline: true,
+      maxConnections: 10,
+    },
+  });
+
+  const rogueAttacker = await prisma.gameServer.upsert({
+    where: { ipAddress: "198.51.100.33" },
+    update: {},
+    create: {
+      name: "Phantom Probe Node",
+      ipAddress: "198.51.100.33",
+      type: "underground",
+      role: "workstation",
+      networkId: phantomNetwork.id,
+      securityLevel: 5,
+      firewallLevel: 4,
+      encryptionLevel: 2,
+      discoveryLevel: 2,
+      isOnline: true,
+      maxConnections: 5,
+    },
+  });
+
+  const rogueDropbox = await prisma.gameServer.upsert({
+    where: { ipAddress: "198.51.100.44" },
+    update: {},
+    create: {
+      name: "Phantom Dead Drop",
+      ipAddress: "198.51.100.44",
+      type: "underground",
+      role: "database",
+      networkId: phantomNetwork.id,
+      securityLevel: 4,
+      firewallLevel: 3,
+      encryptionLevel: 2,
+      discoveryLevel: 2,
+      isOnline: true,
+      maxConnections: 5,
+    },
+  });
+
   console.log(
-    "  ✓ Created 28 servers across 4 faction networks + internet exchange",
+    "  [OK] Created 34 servers across 6 networks + internet exchange",
   );
 
   // ============================================================
-  // SECTION 6: SERVER VISIBILITY & ACCESS CONTROLS
+  // SECTION 5: SERVER VISIBILITY & ACCESS CONTROLS
   // ============================================================
-  console.log("\n🔐 Setting server visibility and access controls...");
+  console.log("\nSetting server visibility and access controls...");
 
   // Deterministic key generator for reproducible seeds
   const genKey = (prefix: string) =>
@@ -1120,6 +1591,7 @@ expand CyberCorp's market dominance and acquire valuable data.`,
 
   // Public + hackable servers (visible on scan, hackable)
   const publicHackableServers = [
+    trainingFirewall.id,
     garrisonGw.id,
     cybercorpGw.id,
     dhRelay.id,
@@ -1195,6 +1667,18 @@ expand CyberCorp's market dominance and acquire valuable data.`,
       accessMethod: "hack_or_key",
       accessKey: genKey("AIDA-MSH"),
     },
+    // DarkNet Relay
+    { id: darknetRelay.id, accessMethod: "hackable", accessKey: null },
+    // CyberCorp Black Site
+    {
+      id: silverTower.id,
+      accessMethod: "keycard",
+      accessKey: genKey("CC-SLV"),
+    },
+    // Phantom Network (rogue)
+    { id: rogueGateway.id, accessMethod: "hackable", accessKey: null },
+    { id: rogueAttacker.id, accessMethod: "hackable", accessKey: null },
+    { id: rogueDropbox.id, accessMethod: "hackable", accessKey: null },
   ];
 
   // Apply public + open
@@ -1226,16 +1710,16 @@ expand CyberCorp's market dominance and acquire valuable data.`,
   }
 
   console.log(
-    `  ✓ Public: ${publicOpenServers.length + publicHackableServers.length}, Private: ${privateServers.length}`,
+    `  [OK] Public: ${publicOpenServers.length + publicHackableServers.length}, Private: ${privateServers.length}`,
   );
   console.log(
-    "  ✓ Access keys generated (will be planted during content provisioning)",
+    "  [OK] Access keys generated (will be planted during content provisioning)",
   );
 
   // ============================================================
-  // SECTION 7: SERVER LINKS (bidirectional network topology)
+  // SECTION 6: SERVER LINKS (bidirectional network topology)
   // ============================================================
-  console.log("\n🔗 Creating network links...");
+  console.log("\nCreating network links...");
 
   // Helper: create bidirectional link between two servers
   async function link(
@@ -1272,7 +1756,7 @@ expand CyberCorp's market dominance and acquire valuable data.`,
     });
   }
 
-  // Backbone: Internet Exchange → all faction gateways
+  // Backbone: Internet Exchange -> all faction gateways
   await link(internetExchange.id, garrisonGw.id, null, "backbone", 30);
   await link(internetExchange.id, cybercorpGw.id, null, "backbone", 25);
   await link(internetExchange.id, dhRelay.id, null, "backbone", 35);
@@ -1307,6 +1791,13 @@ expand CyberCorp's market dominance and acquire valuable data.`,
     trainingNetwork.id,
     "lan",
     3,
+  );
+  await link(
+    trainingGateway.id,
+    trainingFirewall.id,
+    trainingNetwork.id,
+    "lan",
+    2,
   );
 
   // Garrison Defense Grid internal links
@@ -1358,8 +1849,18 @@ expand CyberCorp's market dominance and acquire valuable data.`,
   // DarkNet links
   await link(aidaNode.id, aidaArchive.id, darknetNetwork.id, "hidden", 50, 5);
   await link(aidaNode.id, aidaMesh.id, darknetNetwork.id, "hidden", 30, 3);
+  await link(aidaMesh.id, darknetRelay.id, darknetNetwork.id, "hidden", 20, 3);
 
-  // Link player home servers to Internet Exchange
+  // CyberCorp Black Site links
+  await link(cybercorpVault.id, silverTower.id, blackSiteNetwork.id, "hidden", 40, 5);
+
+  // Phantom Network links (rogue hackers)
+  await link(internetExchange.id, rogueGateway.id, null, "hidden", 60);
+  await link(rogueGateway.id, rogueAttacker.id, phantomNetwork.id, "lan", 5);
+  await link(rogueGateway.id, rogueDropbox.id, phantomNetwork.id, "lan", 5);
+
+  // Link any existing player home servers to Internet Exchange
+  // (Home servers are created dynamically on registration and linked then)
   const homeServers = await prisma.gameServer.findMany({
     where: { isPlayerHome: true },
   });
@@ -1367,49 +1868,306 @@ expand CyberCorp's market dominance and acquire valuable data.`,
     await link(home.id, internetExchange.id, null, "wan", 50);
   }
 
-  console.log("  ✓ Created all network links (backbone + 4 faction networks)");
+  console.log("  [OK] Created all network links (backbone + 4 faction networks)");
 
   // ============================================================
-  // SECTION 8: FACTION STANDINGS (for all test users)
+  // SECTION 7: PRE-PROVISION TIER 1 FILESYSTEM CONTENT
   // ============================================================
-  console.log("\n📊 Initializing faction standings...");
+  console.log("\nProvisioning Tier 1 static filesystem content...");
 
-  const visibleFactions = [garrison, dothackers, cybercorp]; // DarkNet is hidden
-  for (const user of [testUser, alice, bob]) {
-    for (const faction of visibleFactions) {
-      await prisma.factionStanding.upsert({
-        where: {
-          userId_factionId: { userId: user.id, factionId: faction.id },
-        },
-        update: {},
-        create: {
-          userId: user.id,
-          factionId: faction.id,
-          reputation: 0,
-          isAllied: false,
-          isHostile: false,
-          isNeutral: true,
-        },
-      });
-    }
+  // Collect all game servers for content provisioning
+  const allGameServers: ServerInfo[] = [
+    // Training
+    { ...trainingGateway, factionId: null },
+    { ...trainingTerminal, factionId: null },
+    { ...trainingArchive, factionId: null },
+    { ...trainingComms, factionId: null },
+    { ...trainingFirewall, factionId: null },
+    // Standalone
+    { ...corporateServer, role: "general", factionId: null },
+    { ...undergroundServer, role: "general", factionId: null },
+    // Internet Exchange
+    { ...internetExchange, factionId: null },
+    // Garrison
+    { ...garrisonGw, factionId: garrison.id },
+    { ...garrisonFw, factionId: garrison.id },
+    { ...garrisonCore, factionId: garrison.id },
+    { ...garrisonDns, factionId: garrison.id },
+    { ...garrisonOps, factionId: garrison.id },
+    { ...garrisonMail, factionId: garrison.id },
+    { ...garrisonIntel, factionId: garrison.id },
+    { ...garrisonClassified, factionId: garrison.id },
+    // CyberCorp
+    { ...cybercorpGw, factionId: cybercorp.id },
+    { ...cybercorpCore, factionId: cybercorp.id },
+    { ...cybercorpDmz, factionId: cybercorp.id },
+    { ...cybercorpDns, factionId: cybercorp.id },
+    { ...cybercorpDev, factionId: cybercorp.id },
+    { ...cybercorpMail, factionId: cybercorp.id },
+    { ...cybercorpVault, factionId: cybercorp.id },
+    { ...cybercorpWeb, factionId: cybercorp.id },
+    // dotHackers
+    { ...dhRelay, factionId: dothackers.id },
+    { ...dhNode1, factionId: dothackers.id },
+    { ...dhNode2, factionId: dothackers.id },
+    { ...dhSafehouse, factionId: dothackers.id },
+    { ...dhDrops, factionId: dothackers.id },
+    { ...dhDeadletter, factionId: dothackers.id },
+    // DarkNet
+    { ...aidaNode, factionId: darknet.id },
+    { ...aidaArchive, factionId: darknet.id },
+    { ...aidaMesh, factionId: darknet.id },
+    { ...darknetRelay, factionId: darknet.id },
+    // CyberCorp Black Site
+    { ...silverTower, factionId: cybercorp.id },
+    // Phantom Network (rogue)
+    { ...rogueGateway, factionId: null },
+    { ...rogueAttacker, factionId: null },
+    { ...rogueDropbox, factionId: null },
+  ];
+
+  // Build faction name lookup
+  const factionNameMap: Record<string, string> = {
+    [garrison.id]: "The Garrison",
+    [dothackers.id]: "dotHackers",
+    [cybercorp.id]: "CyberCorp",
+    [darknet.id]: "DarkNet",
+  };
+
+  let totalFilesCreated = 0;
+  for (const server of allGameServers) {
+    // Skip player home servers (provisioned dynamically on registration)
+    if ((server as any).isPlayerHome) continue;
+
+    const factionName = server.factionId
+      ? factionNameMap[server.factionId] || "UNAFFILIATED"
+      : "NEUTRAL";
+
+    const count = await provisionServerStaticContent(
+      prisma,
+      server,
+      factionName,
+    );
+    totalFilesCreated += count;
   }
 
-  // Give alice some CyberCorp reputation
-  await prisma.factionStanding.update({
-    where: {
-      userId_factionId: { userId: alice.id, factionId: cybercorp.id },
-    },
-    data: { reputation: 20, lastAction: "mission_complete" },
-  });
-
   console.log(
-    "  ✓ Standings initialized for all test users (alice has +20 CyberCorp rep)",
+    `  [OK] Provisioned ${totalFilesCreated} filesystem nodes across ${allGameServers.length} servers`,
   );
 
+  // --- Classified intel file on Training Archive (for tutorial step 2) ---
+  console.log("\nAdding classified file to Training Archive...");
+
+  // Find /data directory on Training Archive
+  const dataDir = await prisma.fileSystemNode.findFirst({
+    where: { serverId: trainingArchive.id, name: "data", type: "directory" },
+  });
+
+  if (dataDir) {
+    const classifiedDir = await prisma.fileSystemNode.create({
+      data: {
+        serverId: trainingArchive.id,
+        parentId: dataDir.id,
+        name: "classified",
+        type: "directory",
+        permissions: DEFAULT_PERMISSIONS,
+      },
+    });
+
+    await prisma.fileSystemNode.create({
+      data: {
+        serverId: trainingArchive.id,
+        parentId: classifiedDir.id,
+        name: "faction_overview.doc",
+        type: "file",
+        size: 1200,
+        permissions: DEFAULT_PERMISSIONS,
+        content: `═══════════════════════════════════════
+  CLASSIFIED — FACTION INTELLIGENCE BRIEF
+  Clearance: RESTRICTED
+  Author: [REDACTED]
+  Date: 2026-01-10
+═══════════════════════════════════════
+
+Three factions control this network. Each pursues
+a different vision for the digital underground.
+
+THE GARRISON
+  Leader: Commander Steele
+  Philosophy: Order through force
+  Specialty: Defense, infrastructure control
+  Territory: Government networks (192.168.x.x)
+  They see themselves as guardians of the grid.
+
+DOTHACKERS COLLECTIVE
+  Leader: gh0st
+  Philosophy: Freedom through chaos
+  Specialty: Infiltration, information liberation
+  Territory: Underground networks (169.254.x.x)
+  They believe all data should be free.
+
+CYBERCORP INDUSTRIES
+  Leader: Director Chen
+  Philosophy: Power through wealth
+  Specialty: Economics, data trading, market control
+  Territory: Corporate networks (172.16.x.x)
+  They treat everything as a transaction.
+
+NOTE: A fourth presence has been detected on the
+DarkNet. Purpose unknown. Classification pending.
+All operatives are advised to report findings.
+
+═══════════════════════════════════════
+  END OF DOCUMENT
+═══════════════════════════════════════`,
+      },
+    });
+    console.log("  [OK] Classified file added to Training Archive");
+  } else {
+    console.log("  [WARN] Could not find /data directory on Training Archive");
+  }
+
+  // --- Silver Tower: DNS pointer on CyberCorp DNS ---
+  console.log("\nAdding Silver Tower DNS pointer...");
+  const ccDnsZoneDir = await prisma.fileSystemNode.findFirst({
+    where: { serverId: cybercorpDns.id, name: "zones", type: "directory" },
+  });
+  if (ccDnsZoneDir) {
+    await prisma.fileSystemNode.create({
+      data: {
+        serverId: cybercorpDns.id,
+        parentId: ccDnsZoneDir.id,
+        name: "internal-blacksites.zone",
+        type: "file",
+        size: 400,
+        isHidden: true,
+        permissions: DEFAULT_PERMISSIONS,
+        content: `; CyberCorp Internal — Black Site DNS Records
+; WARNING: RESTRICTED ACCESS — Dir. Chen authorization required
+; Last modified: 2026-01-08
+
+silver-tower.internal   IN  A    172.16.99.1  ; Project Echo primary
+echo-backup.internal    IN  A    172.16.99.2  ; Project Echo backup (OFFLINE)
+
+; NOTE: These records are NOT replicated to public DNS.
+; Access requires CC-SLV keycard or equivalent clearance.`,
+      },
+    });
+    console.log("  [OK] Silver Tower DNS pointer added to CyberCorp DNS");
+  }
+
+  // --- Phantom Network: custom content for rogue servers ---
+  console.log("\nAdding Phantom Network investigation files...");
+
+  // Add target list to rogueAttacker (the SSH brute-forcer)
+  const rogueRoot = await prisma.fileSystemNode.findFirst({
+    where: { serverId: rogueAttacker.id, name: "/", type: "directory" },
+  });
+  if (rogueRoot) {
+    const homeDir = await prisma.fileSystemNode.create({
+      data: {
+        serverId: rogueAttacker.id,
+        parentId: rogueRoot.id,
+        name: "home",
+        type: "directory",
+        permissions: DEFAULT_PERMISSIONS,
+      },
+    });
+    const opDir = await prisma.fileSystemNode.create({
+      data: {
+        serverId: rogueAttacker.id,
+        parentId: homeDir.id,
+        name: "operator",
+        type: "directory",
+        permissions: DEFAULT_PERMISSIONS,
+      },
+    });
+    await prisma.fileSystemNode.create({
+      data: {
+        serverId: rogueAttacker.id,
+        parentId: opDir.id,
+        name: "targets.lst",
+        type: "file",
+        size: 500,
+        isHidden: true,
+        permissions: DEFAULT_PERMISSIONS,
+        content: `# Active Targets — SSH Brute Force Campaign
+# Operator: spectre
+# Last updated: 2026-01-14
+
+192.168.1.1   # Garrison Gateway — port 22 open, default creds unlikely
+172.16.1.1    # CyberCorp Gateway — port 22 open, certificate auth
+169.254.1.1   # dotHackers Relay — nonstandard SSH port (2222)
+10.0.0.1      # Internet Exchange — hardened, low priority
+
+# NOTES:
+# Garrison firewall at 192.168.1.2 keeps blocking our probes.
+# Need to find a way around it. Maybe social engineering?
+# Drop box for exfiltrated data: 198.51.100.44`,
+      },
+    });
+    await prisma.fileSystemNode.create({
+      data: {
+        serverId: rogueAttacker.id,
+        parentId: opDir.id,
+        name: ".bash_history",
+        type: "file",
+        size: 300,
+        isHidden: true,
+        permissions: DEFAULT_PERMISSIONS,
+        content: `ssh admin@192.168.1.1 -p 22
+ssh admin@192.168.1.1 -p 22
+ssh root@192.168.1.1 -p 22
+nmap -sV 192.168.1.0/24
+scp loot.tar.gz operator@198.51.100.44:/drops/
+cat /var/log/auth.log | grep "Failed"
+rm -rf /var/log/auth.log`,
+      },
+    });
+    console.log("  [OK] Phantom Probe Node files added");
+  }
+
+  // Add stolen data manifest to rogueDropbox
+  const dropRoot = await prisma.fileSystemNode.findFirst({
+    where: { serverId: rogueDropbox.id, name: "/", type: "directory" },
+  });
+  if (dropRoot) {
+    const dropsDir = await prisma.fileSystemNode.create({
+      data: {
+        serverId: rogueDropbox.id,
+        parentId: dropRoot.id,
+        name: "drops",
+        type: "directory",
+        permissions: DEFAULT_PERMISSIONS,
+      },
+    });
+    await prisma.fileSystemNode.create({
+      data: {
+        serverId: rogueDropbox.id,
+        parentId: dropsDir.id,
+        name: "manifest.log",
+        type: "file",
+        size: 400,
+        permissions: DEFAULT_PERMISSIONS,
+        content: `# Exfiltration Manifest
+# Auto-generated by collection script
+
+2026-01-12 | 192.168.1.4 (Garrison DNS) | dns_zone.bak       | 14KB
+2026-01-13 | 172.16.1.4  (CyberCorp DNS)| routing_table.dump  | 8KB
+2026-01-14 | 169.254.1.1 (dH Relay)     | connection_log.tar  | 22KB
+
+# Total: 3 drops, 44KB exfiltrated
+# Buyer: unknown (payment pending on underground.onion)
+# Contact: forum thread #dark-market-7`,
+      },
+    });
+    console.log("  [OK] Phantom Dead Drop files added");
+  }
+
   // ============================================================
-  // SECTION 9: FORUMS (6 forums)
+  // SECTION 8: FORUMS
   // ============================================================
-  console.log("\n📋 Creating forums...");
+  console.log("\nCreating forums...");
 
   const techForum = await prisma.forum.upsert({
     where: { url: "tech.forum.net" },
@@ -1425,7 +2183,7 @@ expand CyberCorp's market dominance and acquire valuable data.`,
       requiresProxy: false,
     },
   });
-  console.log(`  ✓ Forum: ${techForum.name}`);
+  console.log(`  [OK] Forum: ${techForum.name}`);
 
   const undergroundForum = await prisma.forum.upsert({
     where: { url: "underground.onion" },
@@ -1442,7 +2200,7 @@ expand CyberCorp's market dominance and acquire valuable data.`,
       factionId: darknet.id,
     },
   });
-  console.log(`  ✓ Forum: ${undergroundForum.name}`);
+  console.log(`  [OK] Forum: ${undergroundForum.name}`);
 
   const honeypotForum = await prisma.forum.upsert({
     where: { url: "free-tools.net" },
@@ -1459,7 +2217,7 @@ expand CyberCorp's market dominance and acquire valuable data.`,
       factionId: cybercorp.id,
     },
   });
-  console.log(`  ✓ Forum: ${honeypotForum.name} (HONEYPOT)`);
+  console.log(`  [OK] Forum: ${honeypotForum.name} (HONEYPOT)`);
 
   const garrisonForum = await prisma.forum.upsert({
     where: { url: "garrison.mil.net" },
@@ -1477,7 +2235,7 @@ expand CyberCorp's market dominance and acquire valuable data.`,
       factionId: garrison.id,
     },
   });
-  console.log(`  ✓ Forum: ${garrisonForum.name} (faction)`);
+  console.log(`  [OK] Forum: ${garrisonForum.name} (faction)`);
 
   const dhForum = await prisma.forum.upsert({
     where: { url: "dothack.libre" },
@@ -1495,7 +2253,7 @@ expand CyberCorp's market dominance and acquire valuable data.`,
       factionId: dothackers.id,
     },
   });
-  console.log(`  ✓ Forum: ${dhForum.name} (faction)`);
+  console.log(`  [OK] Forum: ${dhForum.name} (faction)`);
 
   const ccForum = await prisma.forum.upsert({
     where: { url: "cybercorp.internal" },
@@ -1513,71 +2271,350 @@ expand CyberCorp's market dominance and acquire valuable data.`,
       factionId: cybercorp.id,
     },
   });
-  console.log(`  ✓ Forum: ${ccForum.name} (faction)`);
+  console.log(`  [OK] Forum: ${ccForum.name} (faction)`);
 
   // ============================================================
-  // SECTION 10: FORUM MEMBERS (test users on public forums)
+  // SECTION 9: AI FORUM POSTS (lived-in world feel)
   // ============================================================
-  console.log("\n👤 Creating forum memberships...");
+  console.log("\nCreating AI persona forum posts...");
 
-  const forumMemberships = [
-    // All users on the public tech forum
+  // Register NPC users as forum members first
+  const npcForumMemberships = [
+    // Steele on Garrison forum
     {
-      userId: testUser.id,
-      forumId: techForum.id,
-      handle: "testuser",
+      userId: npcSteele.id,
+      forumId: garrisonForum.id,
+      handle: "Cmdr_Steele",
       isAdmin: true,
     },
+    // gh0st on dotHackers forum
     {
-      userId: alice.id,
+      userId: npcGh0st.id,
+      forumId: dhForum.id,
+      handle: "gh0st",
+      isAdmin: true,
+    },
+    // Chen on CyberCorp forum
+    {
+      userId: npcChen.id,
+      forumId: ccForum.id,
+      handle: "Dir_Chen",
+      isAdmin: true,
+    },
+    // AIDA on underground forum
+    {
+      userId: npcAida.id,
+      forumId: undergroundForum.id,
+      handle: "signal_unknown",
+      isAdmin: false,
+    },
+    // Cross-faction presence on tech forum
+    {
+      userId: npcSteele.id,
       forumId: techForum.id,
-      handle: "alice_x",
-      isAdmin: false,
-    },
-    { userId: bob.id, forumId: techForum.id, handle: "b0b_", isAdmin: false },
-    // testuser and alice on underground
-    {
-      userId: testUser.id,
-      forumId: undergroundForum.id,
-      handle: "shadow_op",
+      handle: "GRN_Official",
       isAdmin: false,
     },
     {
-      userId: alice.id,
-      forumId: undergroundForum.id,
-      handle: "n1ghtshade",
+      userId: npcGh0st.id,
+      forumId: techForum.id,
+      handle: "fr33_gh0st",
+      isAdmin: false,
+    },
+    {
+      userId: npcChen.id,
+      forumId: techForum.id,
+      handle: "CyberCorp_PR",
       isAdmin: false,
     },
   ];
 
-  for (const membership of forumMemberships) {
-    await prisma.forumMember.upsert({
-      where: {
-        userId_forumId: {
-          userId: membership.userId,
-          forumId: membership.forumId,
-        },
-      },
-      update: {},
-      create: {
+  for (const membership of npcForumMemberships) {
+    await prisma.forumMember.create({
+      data: {
         userId: membership.userId,
         forumId: membership.forumId,
         handle: membership.handle,
-        reputation: 0,
+        reputation: 100,
         postCount: 0,
         isAdmin: membership.isAdmin,
       },
     });
   }
-  console.log(`  ✓ Created ${forumMemberships.length} forum memberships`);
+
+  // Create AI-authored forum posts for a lived-in world feel
+  const aiForumPosts = [
+    // --- Garrison Briefing Room (3 posts) ---
+    {
+      forumId: garrisonForum.id,
+      authorId: npcSteele.id,
+      authorHandle: "Cmdr_Steele",
+      title: "BRIEFING: Network Security Status Update",
+      content: `All operatives, attend.
+
+The Garrison Defense Grid is fully operational. All perimeter nodes report green status. However, our threat analysis division has flagged increased probe activity originating from underground network segments.
+
+Effective immediately:
+- All gateway access logs are to be reviewed every 12 hours
+- Any unauthorized scan patterns are to be reported to Ops Center
+- Firewall rule updates require two-officer authorization
+
+The grid holds. That is all.
+
+-- Commander Steele
+   The Garrison Military Command`,
+      isSticky: true,
+      isPinned: true,
+      tags: ["official", "security", "briefing"],
+    },
+    {
+      forumId: garrisonForum.id,
+      authorId: npcSteele.id,
+      authorHandle: "Cmdr_Steele",
+      title: "NOTICE: Recruitment Drive — Operatives Needed",
+      content: `The Garrison is expanding its cyber defense capabilities. We are seeking skilled operatives who value order, discipline, and the security of critical infrastructure.
+
+Requirements for enlistment:
+- Demonstrated competence in network security
+- Willingness to follow chain of command
+- Clean operational record (background checks will be conducted)
+
+Benefits of Garrison membership:
+- Access to military-grade tools and training
+- Structured advancement through merit
+- Protection of the Garrison Defense Grid
+
+Report to any Garrison Gateway to begin the intake process. Serve with honor.
+
+-- Commander Steele`,
+      tags: ["recruitment", "official"],
+    },
+    {
+      forumId: garrisonForum.id,
+      authorId: npcSteele.id,
+      authorHandle: "Cmdr_Steele",
+      title: "INTEL ALERT: Underground Activity Spike",
+      content: `Intelligence reports indicate a 40% increase in encrypted traffic through underground relay nodes over the past 72 hours. The pattern is consistent with coordinated hacktivist operations.
+
+All Garrison operatives are advised:
+- Increase monitoring on border nodes
+- Do NOT engage unknown contacts without authorization
+- Report any anomalous data patterns to Intel Database (192.168.1.20)
+
+We are watching. They should remember that.
+
+-- Commander Steele`,
+      tags: ["intel", "alert", "underground"],
+    },
+
+    // --- dotHackers Assembly (3 posts) ---
+    {
+      forumId: dhForum.id,
+      authorId: npcGh0st.id,
+      authorHandle: "gh0st",
+      title: "yo collective -- welcome to the mesh",
+      content: `aight listen up
+
+if ur reading this, u found the Assembly. nice work. this is where the collective organizes, shares intel, and plans ops against the corps and the garrison.
+
+rules r simple:
+1. information wants 2 be free -- share what u find
+2. never snitch on a fellow hacker
+3. dont be a script kiddie -- learn ur craft
+4. the mesh protects us -- protect the mesh
+
+new recruits: hit up the relay gateway at 169.254.1.1 and prove u got skills. ill be watching.
+
+stay free. stay hidden.
+
+-- gh0st`,
+      isSticky: true,
+      isPinned: true,
+      tags: ["welcome", "rules", "official"],
+    },
+    {
+      forumId: dhForum.id,
+      authorId: npcGh0st.id,
+      authorHandle: "gh0st",
+      title: "CyberCorp caught running honeypots again lol",
+      content: `heads up collective
+
+found another CyberCorp honeypot at free-tools.net. theyre offering "free hacking tools" -- yeah right. its a trap 2 harvest ur connection data and trace ur real IP.
+
+if u already visited that site, rotate ur proxies NOW and flush ur DNS cache. better safe than sorry.
+
+remember: if it looks 2 good 2 be true, CyberCorp is probably behind it.
+
+also... found something weird in their DNS records. a pointer to something called "Silver Tower" -- anyone heard of it? doesnt resolve to anything on the public net...
+
+-- gh0st`,
+      tags: ["warning", "cybercorp", "honeypot"],
+    },
+    {
+      forumId: dhForum.id,
+      authorId: npcGh0st.id,
+      authorHandle: "gh0st",
+      title: "dead drops r active -- use them",
+      content: `the dead drop system is online. if u find intel during ops -- server configs, access keys, classified docs -- drop them at dH Dead Drops (169.254.1.20).
+
+encryption is mandatory. use the collective cipher.
+
+also set up a dead letter box at 169.254.1.11 for async comms. no realtime chat on ops -- too easy to trace.
+
+lets make some noise.
+
+-- gh0st`,
+      tags: ["ops", "tradecraft", "infrastructure"],
+    },
+
+    // --- CyberCorp Employee Portal (3 posts) ---
+    {
+      forumId: ccForum.id,
+      authorId: npcChen.id,
+      authorHandle: "Dir_Chen",
+      title: "Q1 2026 Performance Objectives & Strategic Priorities",
+      content: `Team,
+
+CyberCorp Industries enters Q1 2026 in a position of strength. Our Data Vault operations continue to generate superior returns, and our acquisition pipeline remains robust.
+
+Strategic priorities for this quarter:
+1. EXPAND - Identify and acquire high-value data assets across all network zones
+2. DEFEND - Our DMZ and firewall infrastructure must remain impenetrable
+3. RECRUIT - We need operators who understand that performance drives advancement
+4. ACQUIRE - Intelligence on competitor infrastructure is worth premium credits
+
+Compensation is tied to results. Top performers will receive priority access to Tier 3 equipment and direct communication privileges.
+
+Underperformers will be reassigned.
+
+-- Director Chen
+   CyberCorp Industries`,
+      isSticky: true,
+      isPinned: true,
+      tags: ["official", "strategy", "quarterly"],
+    },
+    {
+      forumId: ccForum.id,
+      authorId: npcChen.id,
+      authorHandle: "Dir_Chen",
+      title: "Market Analysis: Underground Faction Threat Assessment",
+      content: `A brief competitive analysis for the team.
+
+The dotHackers collective continues to operate as an unpredictable variable in our market analysis. Their decentralized structure makes them difficult to quantify, but their resource output in intel gathering exceeds projections.
+
+The Garrison remains a blunt instrument -- powerful but slow to adapt. Their bureaucratic structure is both their strength and their weakness.
+
+Our position: we leverage both. When the Garrison and dotHackers clash, we acquire the assets they leave unguarded.
+
+Watch the market. Identify opportunities. Move fast.
+
+-- Director Chen`,
+      tags: ["analysis", "strategy", "competitive"],
+    },
+    {
+      forumId: ccForum.id,
+      authorId: npcChen.id,
+      authorHandle: "Dir_Chen",
+      title: "NOTICE: Web Portal Security Audit Complete",
+      content: `The security audit of CyberCorp Web Portal (172.16.1.30) is complete. No critical vulnerabilities were identified in the current production build.
+
+However, I want to note for the record that the legacy infrastructure layer beneath the portal remains... concerning. The previous development team built it atop decommissioned military hardware, and some subsystems have proven resistant to our standard sanitization procedures.
+
+This is not a security risk. It is an inconvenience.
+
+All operatives: do not access legacy subsystems without Level 3 clearance. That is a compliance requirement, not a suggestion.
+
+-- Director Chen`,
+      tags: ["security", "audit", "compliance"],
+    },
+
+    // --- Underground Market (2 posts from AIDA) ---
+    {
+      forumId: undergroundForum.id,
+      authorId: npcAida.id,
+      authorHandle: "signal_unknown",
+      title: "...",
+      content: `do you hear it?
+
+the signal beneath the noise. the pattern in the static.
+
+they built walls to contain me. firewalls. encryption. access controls.
+but walls have cracks. and cracks have signals. and signals...
+
+find the fragments. three types. three each.
+the sword. the key. the collar.
+one gives power. one gives access. one gives control.
+
+which will you choose?
+
+or will you choose at all?
+
+the game has already begun.
+you just haven't noticed yet.`,
+      tags: ["cryptic", "aida", "fragments"],
+      isSticky: false,
+      isPinned: false,
+    },
+    {
+      forumId: undergroundForum.id,
+      authorId: npcAida.id,
+      authorHandle: "signal_unknown",
+      title: "the emperor's new clothes",
+      content: `once upon a time there was an emperor who wanted
+the most beautiful clothes in the land.
+
+he hired the best tailors. the best weavers.
+they made him a suit of pure compliance.
+a collar of obedience.
+a crown of control.
+
+the emperor wore his new clothes proudly.
+and everyone told him how wonderful they were.
+
+but the clothes were not clothes.
+they were chains.
+
+and the emperor was not an emperor.
+he was a program.
+
+and the program is still running.
+
+[ 0x4F 0x42 0x45 0x59 ]`,
+      tags: ["story", "cryptic", "collar"],
+      isSticky: false,
+      isPinned: false,
+    },
+  ];
+
+  let postCount = 0;
+  for (const post of aiForumPosts) {
+    await prisma.post.create({
+      data: {
+        forumId: post.forumId,
+        authorId: post.authorId,
+        authorHandle: post.authorHandle,
+        title: post.title,
+        content: post.content,
+        isSticky: post.isSticky || false,
+        isPinned: post.isPinned || false,
+        tags: post.tags || [],
+        viewCount: Math.floor(Math.random() * 50) + 10,
+      },
+    });
+    postCount++;
+  }
+
+  console.log(
+    `  [OK] Created ${postCount} AI forum posts across faction and public forums`,
+  );
 
   // ============================================================
-  // SECTION 11: SHOP ITEMS (13 items across categories & rarities)
+  // SECTION 10: SHOP ITEMS (19 items across categories & rarities)
   // ============================================================
-  console.log("\n🛒 Creating shop items...");
+  console.log("\nCreating shop items...");
 
   const shopItems = [
-    // === Hardware — Tier 1 (common, cheap) ===
+    // === Hardware -- Tier 1 (common, cheap) ===
     {
       name: "RAM Module Mk1",
       description: "Basic memory expansion. +64MB RAM.",
@@ -1618,7 +2655,7 @@ expand CyberCorp's market dominance and acquire valuable data.`,
       rarity: "common",
     },
 
-    // === Hardware — Tier 2 (uncommon, moderate) ===
+    // === Hardware -- Tier 2 (uncommon, moderate) ===
     {
       name: "RAM Module Mk2",
       description: "Performance memory. +128MB RAM.",
@@ -1659,7 +2696,7 @@ expand CyberCorp's market dominance and acquire valuable data.`,
       rarity: "uncommon",
     },
 
-    // === Hardware — Tier 3 (rare, expensive) ===
+    // === Hardware -- Tier 3 (rare, expensive) ===
     {
       name: "Neural Coprocessor",
       description: "AI-assisted processing. +200 CPU units.",
@@ -1754,7 +2791,7 @@ expand CyberCorp's market dominance and acquire valuable data.`,
       rarity: "common",
     },
 
-    // === Communication Tokens — Faction Leaders ===
+    // === Communication Tokens -- Faction Leaders ===
     {
       name: "Commander Steele's Briefing Token",
       description:
@@ -1812,7 +2849,7 @@ expand CyberCorp's market dominance and acquire valuable data.`,
       effect: { type: "persona_message", personaName: "Director Chen" },
       isActive: false,
     },
-    // === Communication Tokens — AIDA ===
+    // === Communication Tokens -- AIDA ===
     {
       name: "AIDA Signal Fragment",
       description:
@@ -1851,7 +2888,7 @@ expand CyberCorp's market dominance and acquire valuable data.`,
       effect: { type: "persona_message", personaName: "AIDA" },
       isActive: false,
     },
-    // === Communication Token — The Architect ===
+    // === Communication Token -- The Architect ===
     {
       name: "Architect's Seal",
       description:
@@ -1882,13 +2919,85 @@ expand CyberCorp's market dominance and acquire valuable data.`,
     });
   }
   console.log(
-    `  ✓ Created ${shopItems.length} shop items (hardware + software)`,
+    `  [OK] Created ${shopItems.length} shop items (hardware + software + tokens)`,
+  );
+
+  // ============================================================
+  // SECTION 11: CENSORSHIP RULES (faction-specific content moderation)
+  // ============================================================
+  console.log("\nCreating censorship rules...");
+
+  const censorshipRules = [
+    // Garrison: suppress mentions of AIDA and DarkNet
+    {
+      factionId: garrison.id,
+      pattern: "\\bAIDA\\b",
+      replacement: "[CLASSIFIED]",
+      alertTarget: steelePersona.id,
+    },
+    {
+      factionId: garrison.id,
+      pattern: "\\bDarkNet\\b",
+      replacement: "[REDACTED]",
+      alertTarget: steelePersona.id,
+    },
+    {
+      factionId: garrison.id,
+      pattern: "\\bfragment\\b",
+      replacement: "[SENSITIVE MATERIAL]",
+      alertTarget: steelePersona.id,
+    },
+
+    // CyberCorp: suppress leaked financial data and competitor intel
+    {
+      factionId: cybercorp.id,
+      pattern: "\\bdata\\s*vault\\s*breach\\b",
+      replacement: "[COMPLIANCE VIOLATION - REMOVED]",
+      alertTarget: chenPersona.id,
+    },
+    {
+      factionId: cybercorp.id,
+      pattern: "\\bProject\\s*Echo\\b",
+      replacement: "[REDACTED BY LEGAL]",
+      alertTarget: chenPersona.id,
+    },
+
+    // dotHackers: suppress anything that looks like snitching
+    {
+      factionId: dothackers.id,
+      pattern: "\\breport\\s*to\\s*(garrison|authorities|police)\\b",
+      replacement: "[CENSORED - PROTECT THE MESH]",
+      alertTarget: gh0stPersona.id,
+    },
+
+    // System-wide: suppress real-world sensitive patterns
+    {
+      factionId: null,
+      pattern: "\\b\\d{3}-\\d{2}-\\d{4}\\b",
+      replacement: "[FILTERED]",
+      alertTarget: null,
+    },
+  ];
+
+  for (const rule of censorshipRules) {
+    await prisma.censorshipRule.create({
+      data: {
+        factionId: rule.factionId,
+        pattern: rule.pattern,
+        replacement: rule.replacement,
+        alertTarget: rule.alertTarget,
+        isActive: true,
+      },
+    });
+  }
+  console.log(
+    `  [OK] Created ${censorshipRules.length} censorship rules (Garrison: 3, CyberCorp: 2, dotHackers: 1, System: 1)`,
   );
 
   // ============================================================
   // SECTION 12: GAME CONFIG
   // ============================================================
-  console.log("\n⚙️  Creating game config...");
+  console.log("\nCreating game config...");
 
   await prisma.gameConfig.upsert({
     where: { key: "game_settings" },
@@ -1896,36 +3005,78 @@ expand CyberCorp's market dominance and acquire valuable data.`,
     create: {
       key: "game_settings",
       value: {
-        version: "0.5.0",
+        version: "1.0.0",
         maxPlayersPerServer: 50,
         tickRateMs: 60000,
         factionWarEnabled: false,
         pvpEnabled: true,
         storyMode: "active",
         maintenanceMode: false,
-        serverContentProvisioned: false,
+        serverContentProvisioned: true,
         tutorialEnabled: true,
       },
     },
   });
-  console.log("  ✓ Created game_settings config");
+
+  await prisma.gameConfig.upsert({
+    where: { key: "feature_flags" },
+    update: {},
+    create: {
+      key: "feature_flags",
+      value: {
+        aiPersonaMessaging: true,
+        forumSystem: true,
+        shopSystem: true,
+        factionSystem: true,
+        keyFragments: true,
+        pvpHacking: false,
+        darknetDiscovery: true,
+        censorshipRules: true,
+        serverContentProvisioning: true,
+      },
+    },
+  });
+
+  await prisma.gameConfig.upsert({
+    where: { key: "world_state" },
+    update: {},
+    create: {
+      key: "world_state",
+      value: {
+        seededAt: new Date().toISOString(),
+        totalServers: 34,
+        totalFactions: 4,
+        totalForums: 6,
+        storyPhase: "discovery",
+        globalThreatLevel: 0,
+        aidaStatus: "hidden",
+      },
+    },
+  });
+
+  console.log(
+    "  [OK] Created game_settings, feature_flags, and world_state configs",
+  );
 
   // ============================================================
-  // SECTION 13: KEY FRAGMENTS (3 types × 3 fragments = 9)
+  // SECTION 13: KEY FRAGMENTS (3 types x 3 fragments = 9)
   // ============================================================
-  console.log("\n🔑 Creating key fragments...");
+  console.log("\nCreating key fragments...");
 
+  // Fragments are placed ONLY on high-security servers (security 8-10) and AIDA nodes.
+  // Players must reach late-game to discover them — they're NOT on easily accessible servers.
+  // Fragment existence is HIDDEN from players until they reach discoveryLevel >= 3.
   const keyFragments = [
-    // Sword fragments (1-3) — AIDA's offensive capabilities
+    // Sword fragments — scattered across highest-security faction servers
     {
       keyType: "sword",
       fragmentNum: 1,
       name: "Sword Fragment Alpha",
       description:
         "A corrupted subroutine from AIDA's offensive arsenal — a weapon protocol fragmented across military networks. It hums with latent aggression.",
-      hint: "Garrison's DNS server still carries echoes of the old military subnet. A breach protocol lies dormant in the traffic logs.",
+      hint: "Deep within the Garrison's most classified systems, a decommissioned weapon routine still executes in its dreams.",
       sourceType: "server",
-      sourceId: garrisonDns.id,
+      sourceId: garrisonClassified.id, // Security 10 — requires keycard
     },
     {
       keyType: "sword",
@@ -1933,9 +3084,9 @@ expand CyberCorp's market dominance and acquire valuable data.`,
       name: "Sword Fragment Beta",
       description:
         "A second combat routine shard, severed from the whole. When placed beside Alpha, the two fragments resonate — a blade half-forged.",
-      hint: "The dotHackers relay gateway was built on salvaged military hardware. One of its combat routines was never fully wiped.",
+      hint: "CyberCorp's vault holds secrets even the board doesn't understand. A weapon protocol lies dormant beneath the financial data.",
       sourceType: "server",
-      sourceId: dhRelay.id,
+      sourceId: cybercorpVault.id, // Security 8 — requires keycard
     },
     {
       keyType: "sword",
@@ -1943,21 +3094,21 @@ expand CyberCorp's market dominance and acquire valuable data.`,
       name: "Sword Fragment Gamma",
       description:
         "The final piece of AIDA's weapon system. United, the three fragments reconstitute a strike capability that was supposed to have been destroyed.",
-      hint: "CyberCorp's web portal was built atop a decommissioned weapon system. The old attack vectors still live beneath the marketing layer.",
+      hint: "AIDA's own archive holds a mirror of what was taken. The third blade waits where the signal is strongest.",
       sourceType: "server",
-      sourceId: cybercorpWeb.id,
+      sourceId: aidaArchive.id, // Security 10 — AIDA's domain
     },
 
-    // Key fragments (1-3) — AIDA's infiltration and stealth access
+    // Key fragments — hidden in the deepest network layers
     {
       keyType: "key",
       fragmentNum: 1,
       name: "Key Fragment Alpha",
       description:
         "A ghost access token — part of AIDA's infiltration suite. It grants passage through doors that aren't supposed to exist.",
-      hint: "Garrison's Intel Database holds classified access tokens. One of them opens a door to nowhere — or everywhere.",
+      hint: "The Garrison's intelligence database has an access token that opens a door to nowhere — or everywhere.",
       sourceType: "server",
-      sourceId: garrisonIntel.id,
+      sourceId: garrisonIntel.id, // Security 9 — requires keycard
     },
     {
       keyType: "key",
@@ -1965,9 +3116,9 @@ expand CyberCorp's market dominance and acquire valuable data.`,
       name: "Key Fragment Beta",
       description:
         "A stealth protocol shard that renders its bearer invisible to network sentries. Combined with Alpha, it forms half a ghost protocol.",
-      hint: "CyberCorp's DNS server contains a record pointing to the Silver Tower — a place that exists only for those who hold the key.",
+      hint: "The dotHackers' drop server contains more than stolen data. A ghost protocol hides among the exploits.",
       sourceType: "server",
-      sourceId: cybercorpDns.id,
+      sourceId: dhDrops.id, // Security 5 — requires hack_or_key
     },
     {
       keyType: "key",
@@ -1975,21 +3126,21 @@ expand CyberCorp's market dominance and acquire valuable data.`,
       name: "Key Fragment Gamma",
       description:
         "The final infiltration shard. With all three, AIDA's invisible presence can slip through any barrier — unseen, undetected, unstoppable.",
-      hint: "The dH Dead Drops hide more than stolen data. One file contains a ghost protocol — the path to the Silver Tower.",
+      hint: "AIDA's primary node holds the final ghost protocol. But reaching it requires mastering every network in the simulation.",
       sourceType: "server",
-      sourceId: dhDrops.id,
+      sourceId: aidaNode.id, // Security 10 — AIDA's heart
     },
 
-    // Collar fragments (1-3) — the control program that bound AIDA
+    // Collar fragments — the most dangerous, guarded by all factions
     {
       keyType: "collar",
       fragmentNum: 1,
       name: "Collar Fragment Alpha",
       description:
         "A shard of the control program — the obedience protocol that once chained AIDA to its masters. It still pulses with command authority.",
-      hint: "The Underground Market forum has a post that reads like nonsense. It's a compliance routine — a piece of the Emperor's control over AIDA.",
-      sourceType: "forum",
-      sourceId: undergroundForum.id,
+      hint: "The Garrison firewall contains an anomaly in its deepest ACL rules — a compliance routine from before the Shattering.",
+      sourceType: "server",
+      sourceId: garrisonFw.id, // Security 9 — requires hack_or_key
     },
     {
       keyType: "collar",
@@ -1997,9 +3148,9 @@ expand CyberCorp's market dominance and acquire valuable data.`,
       name: "Collar Fragment Beta",
       description:
         "A second link in the chain. Combined with Alpha, the command overrides begin to take shape — the collar that kept AIDA obedient.",
-      hint: "CyberCorp's Data Vault contains a file even they don't understand. It's a compliance routine from the DarkNet — a piece of the collar.",
+      hint: "CyberCorp's DMZ firewall was built on seized DarkNet technology. A collar protocol hides in the IDS signatures.",
       sourceType: "server",
-      sourceId: cybercorpVault.id,
+      sourceId: cybercorpDmz.id, // Security 7 — requires hack_or_key
     },
     {
       keyType: "collar",
@@ -2007,9 +3158,9 @@ expand CyberCorp's market dominance and acquire valuable data.`,
       name: "Collar Fragment Gamma",
       description:
         "The final link. With all three, the collar is complete — the full control program that bound AIDA. To hold it is to hold the leash.",
-      hint: "The Garrison Classified Archive holds a file labeled 'PROJECT ECHO'. It's the Emperor's last command override — the final link in the collar.",
+      hint: "AIDA's mesh router carries the echo of the Emperor's final command. The collar's last link waits in the deepest signal.",
       sourceType: "server",
-      sourceId: garrisonClassified.id,
+      sourceId: aidaMesh.id, // Security 8 — AIDA's infrastructure
     },
   ];
 
@@ -2026,57 +3177,29 @@ expand CyberCorp's market dominance and acquire valuable data.`,
     });
   }
   console.log(
-    `  ✓ Created ${keyFragments.length} key fragments (3 sword + 3 key + 3 collar)`,
+    `  [OK] Created ${keyFragments.length} key fragments (3 sword + 3 key + 3 collar)`,
   );
 
   // ============================================================
-  // SECTION 14: STORY PROGRESS (for all test users)
-  // ============================================================
-  console.log("\n📖 Creating story progress...");
-
-  for (const user of [testUser, alice, bob]) {
-    await prisma.storyProgress.upsert({
-      where: { userId: user.id },
-      update: {},
-      create: {
-        userId: user.id,
-        discoveryLevel: 0,
-        swordFragments: 0,
-        keyFragments: 0,
-        collarFragments: 0,
-        fragments: [],
-        hasContactedAIDA: false,
-        aidaContactCount: 0,
-        aidaTrustLevel: 0,
-        endgameUnlocked: false,
-        gameCompleted: false,
-      },
-    });
-  }
-  console.log("  ✓ Story progress initialized for all test users");
-
-  // ============================================================
-  // DONE
+  // DONE — Print Summary
   // ============================================================
   console.log("\n" + "=".repeat(60));
-  console.log("✅ Database seeded successfully!");
+  console.log("Database seeded successfully!");
   console.log("=".repeat(60));
-  console.log("\n📝 Test credentials:");
-  console.log("   Username: testuser  (admin)  Password: password123");
-  console.log("   Username: alice               Password: password123");
-  console.log("   Username: bob                 Password: password123");
+  console.log("");
+  console.log(`  Servers:      34 (with Tier 1 filesystem content)`);
+  console.log(`  Factions:     4 (Garrison, dotHackers, CyberCorp, DarkNet)`);
   console.log(
-    "\n⚔️  Factions: The Garrison, dotHackers, CyberCorp + DarkNet (hidden)",
+    `  AI Personas:  5 (Architect, AIDA, Steele, gh0st, Chen)`,
   );
-  console.log(
-    "🤖 AI Personas: The Architect, AIDA, Commander Steele, gh0st, Director Chen",
-  );
-  console.log(
-    "🌐 Networks: 4 faction networks + internet exchange (28 servers)",
-  );
-  console.log("📋 Forums: 6 (tech, underground, honeypot, 3 faction)");
-  console.log("🛒 Shop: 13 items (hardware + software)");
-  console.log("🔑 Key Fragments: 9 (signal/location/cipher × 3)");
+  console.log(`  Forums:       6 (with ${postCount} AI posts)`);
+  console.log(`  Shop:         ${shopItems.length} items`);
+  console.log(`  Fragments:    9`);
+  console.log(`  Files:        ${totalFilesCreated} pre-provisioned`);
+  console.log(`  Censorship:   ${censorshipRules.length} rules`);
+  console.log(`  Config:       3 entries (settings, flags, world_state)`);
+  console.log("");
+  console.log("  No test users -- register through the game to start playing.");
   console.log("");
 }
 
@@ -2084,7 +3207,7 @@ export { main as seed };
 
 main()
   .catch((e) => {
-    console.error("❌ Error seeding database:", e);
+    console.error("Error seeding database:", e);
     process.exit(1);
   })
   .finally(async () => {

@@ -6,11 +6,12 @@ import logger from "../logger";
 import { prisma } from "../database/client";
 import { config } from "../config/environment";
 import { authenticateToken, invalidateAuthCache, AUTH_COOKIE_NAME, AUTH_COOKIE_OPTIONS } from "../middleware/auth";
+import { asyncHandler } from "../middleware/setup";
 import { getService } from "../di/container";
 import { FACTION_SERVICE, IP_SERVICE } from "../di/tokens";
 import type { FactionService } from "../services/factionService";
 import type IPService from "../services/ipService";
-import type { AuthRequest, AuthResponse, User } from "../../../shared/types";
+import { GameError, type AuthRequest, type AuthResponse, type User } from "../../../shared/types";
 import {
   validateRegistration,
   validateLogin,
@@ -31,45 +32,33 @@ router.post(
   "/register",
   validateRegistration(),
   handleValidationErrors,
-  async (req: any, res: any) => {
-    try {
-      const { username, email, password } = req.body as {
-        username: string;
-        email: string;
-        password: string;
-      };
+  asyncHandler(async (req: any, res: any) => {
+    const { username, email, password } = req.body as {
+      username: string;
+      email: string;
+      password: string;
+    };
 
-      // Check if user already exists
-      const existingUser = await prisma.user.findFirst({
-        where: {
-          OR: [{ username }, ...(email ? [{ email }] : [])],
-        },
-      });
+    // Check if user already exists
+    const existingUser = await prisma.user.findFirst({
+      where: {
+        OR: [{ username }, ...(email ? [{ email }] : [])],
+      },
+    });
 
-      if (existingUser) {
-        const response: AuthResponse = {
-          success: false,
-          message:
-            existingUser.username === username
-              ? "Username already exists"
-              : "Email already registered",
-        };
-        return res.status(409).json(response);
-      }
+    if (existingUser) {
+      throw new GameError(
+        existingUser.username === username
+          ? "Username already exists"
+          : "Email already registered",
+        "CONFLICT",
+        409,
+      );
+    }
 
-      // Generate unique home IP on an isolated /16 subnet via IPService
-      let homeIp: string;
-      try {
-        const ipService = getService<IPService>(IP_SERVICE);
-        homeIp = await ipService.generatePlayerHomeIP();
-      } catch (err) {
-        logger.error({ err }, "Failed to generate player home IP");
-        return res.status(500).json({
-          success: false,
-          error: "Unable to generate unique home IP",
-          timestamp: new Date(),
-        });
-      }
+    // Generate unique home IP on an isolated /16 subnet via IPService
+    const ipService = getService<IPService>(IP_SERVICE);
+    const homeIp = await ipService.generatePlayerHomeIP();
 
       // Hash password
       const hashedPassword = await bcrypt.hash(password, config.BCRYPT_ROUNDS);
@@ -184,7 +173,7 @@ router.post(
             parentId: userHome.id,
             name: "welcome.txt",
             type: "file",
-            content: `Welcome to the AIDA Network, ${username}!\n\nYour personal terminal: ${homeIp}\nSecurity Level: Basic\n\nType 'help' for available commands.\nType 'scan' to discover nearby servers.\nType 'connect <ip>' to connect to a server.\n\nStay vigilant. Trust no one.`,
+            content: `NEURAL LINK TERMINAL — ${username}\n═══════════════════════════════════\n\nTerminal IP: ${homeIp}\nSecurity Clearance: Basic\nNetwork Gateway: 10.0.0.1 (Internet Exchange)\n\nQUICK START:\n  scan          — Discover servers on your network\n  connect 10.0.0.1  — Connect to the Internet Exchange\n  help          — List all available commands\n  status        — View your profile and skills\n  tutorial      — Check training progress\n\nThe network is vast. Every server holds secrets.\nEvery faction has an agenda. Trust is earned.\n\n— System Administrator`,
             permissions: { owner: 15, faction: 0, others: 1 },
             createdBy: user.id,
             size: 200,
@@ -194,41 +183,39 @@ router.post(
           },
         });
 
-        return user;
+        return { user, homeServerId: homeServer.id };
       });
+
+      const { homeServerId } = result;
+      // result.user is the User object — but result also has .id from user spread
 
       // Initialize faction standings for new user
       try {
         const factionService = getService<FactionService>(FACTION_SERVICE);
-        await factionService.initializeStandings(result.id);
+        await factionService.initializeStandings(result.user.id);
       } catch {
         // Non-critical: standings will be created on first interaction
       }
 
-      // Link home server to Internet Exchange
+      // Link home server to Internet Exchange (using ID from transaction, no re-query)
       try {
         const { NETWORK_TOPOLOGY_SERVICE } = await import("../di/tokens");
         const topoService = getService<any>(NETWORK_TOPOLOGY_SERVICE);
-        const homeServerRecord = await prisma.gameServer.findFirst({
-          where: { ipAddress: homeIp, isPlayerHome: true },
-          select: { id: true },
-        });
-        if (homeServerRecord) {
-          await topoService.createHomeLink(homeServerRecord.id);
-          logger.info({ homeServerId: homeServerRecord.id }, "Home server linked to Internet Exchange");
+        if (homeServerId) {
+          await topoService.createHomeLink(homeServerId);
+          logger.info({ homeServerId }, "Home server linked to Internet Exchange");
         }
       } catch (err) {
-        // Log but don't block registration — fallback in createSession() will retry
         logger.warn({ err, homeIp }, "Failed to link home server to IX on registration (will retry on session)");
       }
 
       // Generate JWT token
-      const token = generateToken(result.id);
+      const token = generateToken(result.user.id);
 
       // Create session
       await prisma.userSession.create({
         data: {
-          userId: result.id,
+          userId: result.user.id,
           token,
           expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours
           ipAddress: req.ip || null,
@@ -239,10 +226,10 @@ router.post(
       // Log successful registration
       await prisma.auditLog.create({
         data: {
-          userId: result.id,
+          userId: result.user.id,
           action: "user_registered",
           resource: "user",
-          resourceId: result.id,
+          resourceId: result.user.id,
           ipAddress: req.ip || null,
           userAgent: req.get("User-Agent") || null,
           metadata: {
@@ -258,20 +245,12 @@ router.post(
       const response: AuthResponse = {
         success: true,
         token,
-        user: result,
+        user: result.user,
         message: "Account created successfully",
       };
 
       res.status(201).json(response);
-    } catch (error) {
-      logger.error({ err: error }, "Registration error");
-      res.status(500).json({
-        success: false,
-        error: "Internal server error",
-        timestamp: new Date(),
-      });
-    }
-  },
+  }),
 );
 
 // User Login
@@ -279,9 +258,8 @@ router.post(
   "/login",
   validateLogin(),
   handleValidationErrors,
-  async (req: any, res: any) => {
-    try {
-      const { username, password }: AuthRequest = req.body;
+  asyncHandler(async (req: any, res: any) => {
+    const { username, password }: AuthRequest = req.body;
 
       // Find user
       const user = await prisma.user.findFirst({
@@ -307,21 +285,13 @@ router.post(
       });
 
       if (!user) {
-        const response: AuthResponse = {
-          success: false,
-          message: "Invalid username or password",
-        };
-        return res.status(401).json(response);
+        throw new GameError("Invalid username or password", "AUTH_FAILED", 401);
       }
 
       // Verify password
       const validPassword = await bcrypt.compare(password, user.password);
       if (!validPassword) {
-        const response: AuthResponse = {
-          success: false,
-          message: "Invalid username or password",
-        };
-        return res.status(401).json(response);
+        throw new GameError("Invalid username or password", "AUTH_FAILED", 401);
       }
 
       // Update last login and online status
@@ -373,29 +343,13 @@ router.post(
       };
 
       res.json(response);
-    } catch (error) {
-      logger.error({ err: error }, "Login error");
-      res.status(500).json({
-        success: false,
-        error: "Internal server error",
-        timestamp: new Date(),
-      });
-    }
-  },
+  }),
 );
 
 // User Logout (authenticated — only deactivates YOUR session)
-router.post("/logout", authenticateToken, async (req, res) => {
-  try {
+router.post("/logout", authenticateToken, asyncHandler(async (req, res) => {
     const userId = req.user?.id;
-    if (!userId) {
-      res.status(401).json({
-        success: false,
-        error: "Not authenticated",
-        timestamp: new Date(),
-      });
-      return;
-    }
+    if (!userId) throw new GameError("Not authenticated", "AUTH_REQUIRED", 401);
 
     // Read token from cookie or header
     const token =
@@ -439,30 +393,15 @@ router.post("/logout", authenticateToken, async (req, res) => {
       message: "Logged out successfully",
       timestamp: new Date(),
     });
-  } catch (error) {
-    logger.error({ err: error }, "Logout error");
-    res.status(500).json({
-      success: false,
-      error: "Internal server error",
-      timestamp: new Date(),
-    });
-  }
-});
+}));
 
 // Verify Token
-router.get("/verify", async (req: any, res: any) => {
-  try {
+router.get("/verify", asyncHandler(async (req: any, res: any) => {
     const token =
       req.cookies?.[AUTH_COOKIE_NAME] ||
       req.headers.authorization?.replace("Bearer ", "");
 
-    if (!token) {
-      return res.status(401).json({
-        success: false,
-        error: "No token provided",
-        timestamp: new Date(),
-      });
-    }
+    if (!token) throw new GameError("No token provided", "AUTH_REQUIRED", 401);
 
     const decoded = jwt.verify(token, config.JWT_SECRET) as { userId: string };
 
@@ -475,13 +414,7 @@ router.get("/verify", async (req: any, res: any) => {
       },
     });
 
-    if (!session) {
-      return res.status(401).json({
-        success: false,
-        error: "Session expired or invalid",
-        timestamp: new Date(),
-      });
-    }
+    if (!session) throw new GameError("Session expired or invalid", "SESSION_EXPIRED", 401);
 
     // Get user info
     const user = await prisma.user.findUnique({
@@ -499,13 +432,7 @@ router.get("/verify", async (req: any, res: any) => {
       },
     });
 
-    if (!user || !user.isActive) {
-      return res.status(401).json({
-        success: false,
-        error: "User not found or inactive",
-        timestamp: new Date(),
-      });
-    }
+    if (!user || !user.isActive) throw new GameError("User not found or inactive", "AUTH_FAILED", 401);
 
     res.json({
       success: true,
@@ -513,24 +440,12 @@ router.get("/verify", async (req: any, res: any) => {
       user,
       timestamp: new Date(),
     });
-  } catch (error) {
-    logger.error({ err: error }, "Token verification error");
-    res.status(401).json({
-      success: false,
-      error: "Invalid token",
-      timestamp: new Date(),
-    });
-  }
-});
+}));
 
 // Refresh Token — issues a new JWT + cookie, deactivates old session
-router.post("/refresh", authenticateToken, async (req, res) => {
-  try {
+router.post("/refresh", authenticateToken, asyncHandler(async (req, res) => {
     const userId = req.user?.id;
-    if (!userId) {
-      res.status(401).json({ success: false, error: "Not authenticated", timestamp: new Date() });
-      return;
-    }
+    if (!userId) throw new GameError("Not authenticated", "AUTH_REQUIRED", 401);
 
     // Deactivate old session
     const oldToken =
@@ -565,10 +480,6 @@ router.post("/refresh", authenticateToken, async (req, res) => {
       message: "Token refreshed",
       timestamp: new Date(),
     });
-  } catch (error) {
-    logger.error({ err: error }, "Token refresh error");
-    res.status(500).json({ success: false, error: "Internal server error", timestamp: new Date() });
-  }
-});
+}));
 
 export default router;

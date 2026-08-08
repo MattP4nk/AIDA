@@ -13,7 +13,8 @@ import {
   fallbackDepartureMessage,
   fallbackPromotionMessage,
 } from "../utils/aiFallbacks";
-import { validateOrRetry, validateMessageOutput } from "../utils/aiOutputValidator";
+import { validateMessageOutput } from "../utils/aiOutputValidator";
+import { safeExecute, safeAI } from "../utils/safeExecute";
 
 /** Inline validator for ad-hoc { title, content } forum post shapes */
 function validateTitleContent(parsed: any): { title: string; content: string } | null {
@@ -114,49 +115,32 @@ export class PersonaService {
 Send them a brief, in-character welcome message (2-3 sentences). Stay in character.
 Respond ONLY with JSON: { "subject": "...", "content": "..." }`;
 
-      const result = await this.aiService.generateResponse(prompt, leader.systemPrompt, undefined, '{ "subject": "string", "content": "string (min 5 chars)" }');
+      const { enrichWithTopology } = await import("./worldTopologyContext");
+      const enrichedSystemPrompt = await enrichWithTopology(leader.systemPrompt, this.prisma, this.logger);
 
-      let subject = "Welcome";
-      let content: string;
+      const leaderId = leader.id;
+      const msgSvc = this.messageService;
 
-      if (result.success) {
-        const leaderId = leader.id;
-        const msgSvc = this.messageService;
-        const msg = validateOrRetry(result.response, validateMessageOutput, this.aiService, {
-          prompt,
-          systemPrompt: leader.systemPrompt,
-          expectedFormat: '{ "subject": "string", "content": "string (min 5 chars)" }',
-          onSuccess: (response) => {
-            const retryMsg = validateOrRetry(response, validateMessageOutput);
-            if (retryMsg) {
-              msgSvc.sendAIMessage(leaderId, userId, retryMsg.subject, retryMsg.content).catch(() => {});
-            }
-          },
-        });
-        if (msg) {
-          subject = msg.subject;
-          content = msg.content;
-        } else {
-          content = fallbackWelcomeMessage(factionShort, userId);
-        }
-      } else {
-        content = fallbackWelcomeMessage(factionShort, userId);
+      const msg = await safeAI({
+        aiService: this.aiService,
+        prompt,
+        systemPrompt: enrichedSystemPrompt,
+        expectedFormat: '{ "subject": "string", "content": "string (min 5 chars)" }',
+        validate: validateMessageOutput,
+        fallback: () => ({ subject: "Welcome", content: fallbackWelcomeMessage(factionShort, userId) }),
+        context: "Welcome message for new faction member",
+        logger: this.logger,
+        retry: true,
+        onRetrySuccess: async (result) => {
+          await msgSvc.sendAIMessage(leaderId, userId, result.subject, result.content).catch(() => {});
+        },
+      });
 
-        // Queue for retry — when AI comes back, send a better follow-up message
-        const leaderId = leader.id;
-        const msgSvc = this.messageService;
-        this.aiService.queueForRetry(prompt, leader.systemPrompt, (response) => {
-          const msg = validateOrRetry(response, validateMessageOutput);
-          if (msg) {
-            msgSvc.sendAIMessage(leaderId, userId, msg.subject, msg.content).catch(() => {});
-          }
-        });
-      }
-
-      await this.messageService.sendAIMessage(leader.id, userId, subject, content);
-      this.logger.info({ factionId, userId, personaId: leader.id, aiFallback: !result.success }, "Faction leader welcomed new member");
+      await this.messageService.sendAIMessage(leader.id, userId, msg.subject, msg.content);
+      this.logger.info({ factionId, userId, personaId: leader.id }, "Faction leader welcomed new member");
     } catch (error) {
-      this.logger.error(error, "Error in onMemberJoined");
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.logger.debug?.({ err, context: "onMemberJoined" }, `[onMemberJoined] ${err.message}`);
     }
   }
 
@@ -177,49 +161,32 @@ Respond ONLY with JSON: { "subject": "...", "content": "..." }`;
 React briefly in character (1-2 sentences). This could be disappointment, anger, or indifference.
 Respond ONLY with JSON: { "subject": "...", "content": "..." }`;
 
-      const result = await this.aiService.generateResponse(prompt, leader.systemPrompt, undefined, '{ "subject": "string", "content": "string (min 5 chars)" }');
+      const { enrichWithTopology } = await import("./worldTopologyContext");
+      const enrichedSystemPrompt = await enrichWithTopology(leader.systemPrompt, this.prisma, this.logger);
 
-      let subject = "Departure";
-      let content: string;
+      const leaderId = leader.id;
+      const msgSvc = this.messageService;
 
-      if (result.success) {
-        const leaderId = leader.id;
-        const msgSvc = this.messageService;
-        const msg = validateOrRetry(result.response, validateMessageOutput, this.aiService, {
-          prompt,
-          systemPrompt: leader.systemPrompt,
-          expectedFormat: '{ "subject": "string", "content": "string (min 5 chars)" }',
-          onSuccess: (response) => {
-            const retryMsg = validateOrRetry(response, validateMessageOutput);
-            if (retryMsg) {
-              msgSvc.sendAIMessage(leaderId, userId, retryMsg.subject, retryMsg.content).catch(() => {});
-            }
-          },
-        });
-        if (msg) {
-          subject = msg.subject;
-          content = msg.content;
-        } else {
-          content = fallbackDepartureMessage(factionShort, userId);
-        }
-      } else {
-        content = fallbackDepartureMessage(factionShort, userId);
+      const msg = await safeAI({
+        aiService: this.aiService,
+        prompt,
+        systemPrompt: enrichedSystemPrompt,
+        expectedFormat: '{ "subject": "string", "content": "string (min 5 chars)" }',
+        validate: validateMessageOutput,
+        fallback: () => ({ subject: "Departure", content: fallbackDepartureMessage(factionShort, userId) }),
+        context: "Departure message for leaving faction member",
+        logger: this.logger,
+        retry: true,
+        onRetrySuccess: async (result) => {
+          await msgSvc.sendAIMessage(leaderId, userId, result.subject, result.content).catch(() => {});
+        },
+      });
 
-        // Queue for retry — when AI comes back, send a follow-up departure message
-        const leaderId = leader.id;
-        const msgSvc = this.messageService;
-        this.aiService.queueForRetry(prompt, leader.systemPrompt, (response) => {
-          const msg = validateOrRetry(response, validateMessageOutput);
-          if (msg) {
-            msgSvc.sendAIMessage(leaderId, userId, msg.subject, msg.content).catch(() => {});
-          }
-        });
-      }
-
-      await this.messageService.sendAIMessage(leader.id, userId, subject, content);
-      this.logger.info({ factionId, userId, personaId: leader.id, aiFallback: !result.success }, "Faction leader reacted to member leaving");
+      await this.messageService.sendAIMessage(leader.id, userId, msg.subject, msg.content);
+      this.logger.info({ factionId, userId, personaId: leader.id }, "Faction leader reacted to member leaving");
     } catch (error) {
-      this.logger.error(error, "Error in onMemberLeft");
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.logger.debug?.({ err, context: "onMemberLeft" }, `[onMemberLeft] ${err.message}`);
     }
   }
 
@@ -240,52 +207,35 @@ Respond ONLY with JSON: { "subject": "...", "content": "..." }`;
 Acknowledge their achievement in character (2-3 sentences). Be appropriately formal or enthusiastic.
 Respond ONLY with JSON: { "subject": "...", "content": "..." }`;
 
-      const result = await this.aiService.generateResponse(prompt, leader.systemPrompt, undefined, '{ "subject": "string", "content": "string (min 5 chars)" }');
+      const { enrichWithTopology } = await import("./worldTopologyContext");
+      const enrichedSystemPrompt = await enrichWithTopology(leader.systemPrompt, this.prisma, this.logger);
 
       const faction = await this.prisma.faction.findUnique({ where: { id: factionId }, select: { shortName: true } });
       const factionShort = faction?.shortName || "garrison";
 
-      let subject = "Promotion";
-      let content: string;
+      const leaderId = leader.id;
+      const msgSvc = this.messageService;
 
-      if (result.success) {
-        const leaderId = leader.id;
-        const msgSvc = this.messageService;
-        const msg = validateOrRetry(result.response, validateMessageOutput, this.aiService, {
-          prompt,
-          systemPrompt: leader.systemPrompt,
-          expectedFormat: '{ "subject": "string", "content": "string (min 5 chars)" }',
-          onSuccess: (response) => {
-            const retryMsg = validateOrRetry(response, validateMessageOutput);
-            if (retryMsg) {
-              msgSvc.sendAIMessage(leaderId, userId, retryMsg.subject, retryMsg.content).catch(() => {});
-            }
-          },
-        });
-        if (msg) {
-          subject = msg.subject;
-          content = msg.content;
-        } else {
-          content = fallbackPromotionMessage(factionShort, newRank);
-        }
-      } else {
-        content = fallbackPromotionMessage(factionShort, newRank);
+      const msg = await safeAI({
+        aiService: this.aiService,
+        prompt,
+        systemPrompt: enrichedSystemPrompt,
+        expectedFormat: '{ "subject": "string", "content": "string (min 5 chars)" }',
+        validate: validateMessageOutput,
+        fallback: () => ({ subject: "Promotion", content: fallbackPromotionMessage(factionShort, newRank) }),
+        context: "Promotion acknowledgment message",
+        logger: this.logger,
+        retry: true,
+        onRetrySuccess: async (result) => {
+          await msgSvc.sendAIMessage(leaderId, userId, result.subject, result.content).catch(() => {});
+        },
+      });
 
-        // Queue for retry — when AI comes back, send a follow-up promotion message
-        const leaderId = leader.id;
-        const msgSvc = this.messageService;
-        this.aiService.queueForRetry(prompt, leader.systemPrompt, (response) => {
-          const msg = validateOrRetry(response, validateMessageOutput);
-          if (msg) {
-            msgSvc.sendAIMessage(leaderId, userId, msg.subject, msg.content).catch(() => {});
-          }
-        });
-      }
-
-      await this.messageService.sendAIMessage(leader.id, userId, subject, content);
-      this.logger.info({ factionId, userId, newRank, personaId: leader.id, aiFallback: !result.success }, "Faction leader acknowledged promotion");
+      await this.messageService.sendAIMessage(leader.id, userId, msg.subject, msg.content);
+      this.logger.info({ factionId, userId, newRank, personaId: leader.id }, "Faction leader acknowledged promotion");
     } catch (error) {
-      this.logger.error(error, "Error in onHighRankAchieved");
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.logger.debug?.({ err, context: "onHighRankAchieved" }, `[onHighRankAchieved] ${err.message}`);
     }
   }
 
@@ -308,20 +258,26 @@ Respond ONLY with JSON: { "subject": "...", "content": "..." }`;
 React in character on the faction forum (2-3 sentences). ${won ? "Celebrate or rally." : "Regroup or vow revenge."}
 Respond ONLY with JSON: { "title": "...", "content": "..." }`;
 
-      const result = await this.aiService.generateResponse(prompt, leader.systemPrompt, undefined, '{ "title": "string", "content": "string" }');
-      if (!result.success) return;
+      const { enrichWithTopology } = await import("./worldTopologyContext");
+      const enrichedSystemPrompt = await enrichWithTopology(leader.systemPrompt, this.prisma, this.logger);
 
-      const validated = validateOrRetry(result.response, validateTitleContent, this.aiService, {
+      const leaderId = leader.id;
+      const forumSvc = this.forumService;
+      const prismaRef = this.prisma;
+
+      const validated = await safeAI<{ title: string; content: string } | null>({
+        aiService: this.aiService,
         prompt,
-        systemPrompt: leader.systemPrompt,
+        systemPrompt: enrichedSystemPrompt,
         expectedFormat: '{ "title": "string (non-empty)", "content": "string (non-empty)" }',
-        onSuccess: async (response) => {
-          try {
-            const retryParsed = validateOrRetry(response, validateTitleContent);
-            if (!retryParsed) return;
-            const forum = await this.prisma.forum.findFirst({ where: { factionId } });
-            if (forum) await this.forumService.createAIPost(leader.id, forum.id, retryParsed.title, retryParsed.content);
-          } catch { /* ignore retry errors */ }
+        validate: validateTitleContent,
+        fallback: null,
+        context: "Server contest reaction forum post",
+        logger: this.logger,
+        retry: true,
+        onRetrySuccess: async (result) => {
+          const forum = await prismaRef.forum.findFirst({ where: { factionId } });
+          if (forum && result) await forumSvc.createAIPost(leaderId, forum.id, result.title, result.content);
         },
       });
       if (!validated) return;
@@ -332,7 +288,8 @@ Respond ONLY with JSON: { "title": "...", "content": "..." }`;
       }
       this.logger.info({ factionId, serverId, won, personaId: leader.id }, "Faction leader reacted to contest result");
     } catch (error) {
-      this.logger.error(error, "Error in onServerContestResolved");
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.logger.debug?.({ err, context: "onServerContestResolved" }, `[onServerContestResolved] ${err.message}`);
     }
   }
 
@@ -405,7 +362,8 @@ Respond ONLY with JSON: { "title": "...", "content": "..." }`;
         );
       }
     } catch (error) {
-      this.logger.error(error, "Error processing mission completion event");
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.logger.debug?.({ err, context: "onMissionCompleted" }, `[onMissionCompleted] ${err.message}`);
     }
   }
 
@@ -447,7 +405,8 @@ Respond ONLY with JSON: { "title": "...", "content": "..." }`;
         }
       }
     } catch (error) {
-      this.logger.error(error, "Error processing server hack event");
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.logger.debug?.({ err, context: "onServerHacked" }, `[onServerHacked] ${err.message}`);
     }
   }
 
@@ -455,21 +414,24 @@ Respond ONLY with JSON: { "title": "...", "content": "..." }`;
    * Add knowledge to a persona's database
    */
   public async addKnowledge(personaId: string, input: KnowledgeInput): Promise<void> {
-    try {
-      await this.prisma.aIKnowledge.create({
-        data: {
-          personaId,
-          source: input.source,
-          type: input.type,
-          content: input.content,
-          confidence: input.confidence || 1.0,
-          expiresAt: input.expiresAt || null,
-        },
-      });
-      this.logger.info({ personaId, type: input.type }, "AI Knowledge added");
-    } catch (error) {
-      this.logger.error(error, "Error adding AI knowledge");
-    }
+    await safeExecute({
+      fn: async () => {
+        await this.prisma.aIKnowledge.create({
+          data: {
+            personaId,
+            source: input.source,
+            type: input.type,
+            content: input.content,
+            confidence: input.confidence || 1.0,
+            expiresAt: input.expiresAt || null,
+          },
+        });
+        this.logger.info({ personaId, type: input.type }, "AI Knowledge added");
+      },
+      context: "Add AI knowledge",
+      logger: this.logger,
+      silent: true,
+    })();
   }
 
   /**
@@ -537,45 +499,32 @@ Respond ONLY with JSON: { "title": "...", "content": "..." }`;
 Rally your faction members with a war declaration post (2-3 sentences). Be aggressive and in-character.
 Respond ONLY with JSON: { "title": "...", "content": "..." }`;
         try {
-          const result = await this.aiService.generateResponse(prompt, attackerLeader.systemPrompt, undefined, '{ "title": "string", "content": "string" }');
-          if (result.success) {
-            const aLeaderId = attackerLeader.id;
-            const aFactionId = attackerFactionId;
-            const forumSvc = this.forumService;
-            const prismaRef = this.prisma;
-            const validated = validateOrRetry(result.response, validateTitleContent, this.aiService, {
-              prompt,
-              systemPrompt: attackerLeader.systemPrompt,
-              expectedFormat: '{ "title": "string (non-empty)", "content": "string (non-empty)" }',
-              onSuccess: async (response) => {
-                try {
-                  const retryParsed = validateOrRetry(response, validateTitleContent);
-                  if (retryParsed) {
-                    const forum = await prismaRef.forum.findFirst({ where: { factionId: aFactionId } });
-                    if (forum) await forumSvc.createAIPost(aLeaderId, forum.id, retryParsed.title, retryParsed.content);
-                  }
-                } catch { /* ignore retry errors */ }
-              },
-            });
-            if (validated) {
-              const forum = await this.prisma.forum.findFirst({ where: { factionId: attackerFactionId } });
-              if (forum) await this.forumService.createAIPost(attackerLeader.id, forum.id, validated.title, validated.content);
-            }
-          } else {
-            // Queue for retry — when AI comes back, post the war declaration
-            const aLeaderId = attackerLeader.id;
-            const aFactionId = attackerFactionId;
-            const forumSvc = this.forumService;
-            const prismaRef = this.prisma;
-            this.aiService.queueForRetry(prompt, attackerLeader.systemPrompt, async (response) => {
-              try {
-                const retryParsed = validateOrRetry(response, validateTitleContent);
-                if (retryParsed) {
-                  const forum = await prismaRef.forum.findFirst({ where: { factionId: aFactionId } });
-                  if (forum) await forumSvc.createAIPost(aLeaderId, forum.id, retryParsed.title, retryParsed.content);
-                }
-              } catch { /* ignore retry errors */ }
-            });
+          const { enrichWithTopology } = await import("./worldTopologyContext");
+          const warSystemPrompt = await enrichWithTopology(attackerLeader.systemPrompt, this.prisma, this.logger);
+          const aLeaderId = attackerLeader.id;
+          const aFactionId = attackerFactionId;
+          const forumSvc = this.forumService;
+          const prismaRef = this.prisma;
+
+          const validated = await safeAI<{ title: string; content: string } | null>({
+            aiService: this.aiService,
+            prompt,
+            systemPrompt: warSystemPrompt,
+            expectedFormat: '{ "title": "string (non-empty)", "content": "string (non-empty)" }',
+            validate: validateTitleContent,
+            fallback: null,
+            context: "War declaration forum post (attacker)",
+            logger: this.logger,
+            retry: true,
+            onRetrySuccess: async (result) => {
+              if (!result) return;
+              const forum = await prismaRef.forum.findFirst({ where: { factionId: aFactionId } });
+              if (forum) await forumSvc.createAIPost(aLeaderId, forum.id, result.title, result.content);
+            },
+          });
+          if (validated) {
+            const forum = await this.prisma.forum.findFirst({ where: { factionId: attackerFactionId } });
+            if (forum) await this.forumService.createAIPost(attackerLeader.id, forum.id, validated.title, validated.content);
           }
         } catch { /* AI post is best-effort */ }
       }
@@ -595,52 +544,40 @@ Respond ONLY with JSON: { "title": "...", "content": "..." }`;
 Warn your members and rally them to defend (2-3 sentences). Be urgent and in-character.
 Respond ONLY with JSON: { "title": "...", "content": "..." }`;
         try {
-          const result = await this.aiService.generateResponse(prompt, defenderLeader.systemPrompt, undefined, '{ "title": "string", "content": "string" }');
-          if (result.success) {
-            const dLeaderId = defenderLeader.id;
-            const dFactionId = defenderFactionId;
-            const forumSvc = this.forumService;
-            const prismaRef = this.prisma;
-            const validated = validateOrRetry(result.response, validateTitleContent, this.aiService, {
-              prompt,
-              systemPrompt: defenderLeader.systemPrompt,
-              expectedFormat: '{ "title": "string (non-empty)", "content": "string (non-empty)" }',
-              onSuccess: async (response) => {
-                try {
-                  const retryParsed = validateOrRetry(response, validateTitleContent);
-                  if (retryParsed) {
-                    const forum = await prismaRef.forum.findFirst({ where: { factionId: dFactionId } });
-                    if (forum) await forumSvc.createAIPost(dLeaderId, forum.id, retryParsed.title, retryParsed.content);
-                  }
-                } catch { /* ignore retry errors */ }
-              },
-            });
-            if (validated) {
-              const forum = await this.prisma.forum.findFirst({ where: { factionId: defenderFactionId } });
-              if (forum) await this.forumService.createAIPost(defenderLeader.id, forum.id, validated.title, validated.content);
-            }
-          } else {
-            // Queue for retry — when AI comes back, post the defense rally
-            const dLeaderId = defenderLeader.id;
-            const dFactionId = defenderFactionId;
-            const forumSvc = this.forumService;
-            const prismaRef = this.prisma;
-            this.aiService.queueForRetry(prompt, defenderLeader.systemPrompt, async (response) => {
-              try {
-                const retryParsed = validateOrRetry(response, validateTitleContent);
-                if (retryParsed) {
-                  const forum = await prismaRef.forum.findFirst({ where: { factionId: dFactionId } });
-                  if (forum) await forumSvc.createAIPost(dLeaderId, forum.id, retryParsed.title, retryParsed.content);
-                }
-              } catch { /* ignore retry errors */ }
-            });
+          const { enrichWithTopology } = await import("./worldTopologyContext");
+          const defSystemPrompt = await enrichWithTopology(defenderLeader.systemPrompt, this.prisma, this.logger);
+          const dLeaderId = defenderLeader.id;
+          const dFactionId = defenderFactionId;
+          const forumSvc = this.forumService;
+          const prismaRef = this.prisma;
+
+          const validated = await safeAI<{ title: string; content: string } | null>({
+            aiService: this.aiService,
+            prompt,
+            systemPrompt: defSystemPrompt,
+            expectedFormat: '{ "title": "string (non-empty)", "content": "string (non-empty)" }',
+            validate: validateTitleContent,
+            fallback: null,
+            context: "War declaration forum post (defender)",
+            logger: this.logger,
+            retry: true,
+            onRetrySuccess: async (result) => {
+              if (!result) return;
+              const forum = await prismaRef.forum.findFirst({ where: { factionId: dFactionId } });
+              if (forum) await forumSvc.createAIPost(dLeaderId, forum.id, result.title, result.content);
+            },
+          });
+          if (validated) {
+            const forum = await this.prisma.forum.findFirst({ where: { factionId: defenderFactionId } });
+            if (forum) await this.forumService.createAIPost(defenderLeader.id, forum.id, validated.title, validated.content);
           }
         } catch { /* best-effort */ }
       }
 
       this.logger.info({ warId, attackerFactionId, defenderFactionId }, "AI personas notified of war declaration");
     } catch (error) {
-      this.logger.error(error, "Error in onWarDeclared");
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.logger.debug?.({ err, context: "onWarDeclared" }, `[onWarDeclared] ${err.message}`);
     }
   }
 
@@ -687,45 +624,32 @@ Respond ONLY with JSON: { "title": "...", "content": "..." }`;
 Post a victory announcement to your faction (2-3 sentences). In-character.
 Respond ONLY with JSON: { "title": "...", "content": "..." }`;
         try {
-          const result = await this.aiService.generateResponse(prompt, winnerLeader.systemPrompt, undefined, '{ "title": "string", "content": "string" }');
-          if (result.success) {
-            const wLeaderId = winnerLeader.id;
-            const wFactionId = winnerId;
-            const forumSvc = this.forumService;
-            const prismaRef = this.prisma;
-            const validated = validateOrRetry(result.response, validateTitleContent, this.aiService, {
-              prompt,
-              systemPrompt: winnerLeader.systemPrompt,
-              expectedFormat: '{ "title": "string (non-empty)", "content": "string (non-empty)" }',
-              onSuccess: async (response) => {
-                try {
-                  const retryParsed = validateOrRetry(response, validateTitleContent);
-                  if (retryParsed) {
-                    const forum = await prismaRef.forum.findFirst({ where: { factionId: wFactionId } });
-                    if (forum) await forumSvc.createAIPost(wLeaderId, forum.id, retryParsed.title, retryParsed.content);
-                  }
-                } catch { /* ignore retry errors */ }
-              },
-            });
-            if (validated) {
-              const forum = await this.prisma.forum.findFirst({ where: { factionId: winnerId } });
-              if (forum) await this.forumService.createAIPost(winnerLeader.id, forum.id, validated.title, validated.content);
-            }
-          } else {
-            // Queue for retry — when AI comes back, post the victory announcement
-            const wLeaderId = winnerLeader.id;
-            const wFactionId = winnerId;
-            const forumSvc = this.forumService;
-            const prismaRef = this.prisma;
-            this.aiService.queueForRetry(prompt, winnerLeader.systemPrompt, async (response) => {
-              try {
-                const retryParsed = validateOrRetry(response, validateTitleContent);
-                if (retryParsed) {
-                  const forum = await prismaRef.forum.findFirst({ where: { factionId: wFactionId } });
-                  if (forum) await forumSvc.createAIPost(wLeaderId, forum.id, retryParsed.title, retryParsed.content);
-                }
-              } catch { /* ignore retry errors */ }
-            });
+          const { enrichWithTopology } = await import("./worldTopologyContext");
+          const winSystemPrompt = await enrichWithTopology(winnerLeader.systemPrompt, this.prisma, this.logger);
+          const wLeaderId = winnerLeader.id;
+          const wFactionId = winnerId;
+          const forumSvc = this.forumService;
+          const prismaRef = this.prisma;
+
+          const validated = await safeAI<{ title: string; content: string } | null>({
+            aiService: this.aiService,
+            prompt,
+            systemPrompt: winSystemPrompt,
+            expectedFormat: '{ "title": "string (non-empty)", "content": "string (non-empty)" }',
+            validate: validateTitleContent,
+            fallback: null,
+            context: "War victory forum post",
+            logger: this.logger,
+            retry: true,
+            onRetrySuccess: async (result) => {
+              if (!result) return;
+              const forum = await prismaRef.forum.findFirst({ where: { factionId: wFactionId } });
+              if (forum) await forumSvc.createAIPost(wLeaderId, forum.id, result.title, result.content);
+            },
+          });
+          if (validated) {
+            const forum = await this.prisma.forum.findFirst({ where: { factionId: winnerId } });
+            if (forum) await this.forumService.createAIPost(winnerLeader.id, forum.id, validated.title, validated.content);
           }
         } catch { /* best-effort */ }
       }
@@ -744,52 +668,40 @@ Respond ONLY with JSON: { "title": "...", "content": "..." }`;
 Post a message to regroup your faction (2-3 sentences). In-character, show resilience.
 Respond ONLY with JSON: { "title": "...", "content": "..." }`;
         try {
-          const result = await this.aiService.generateResponse(prompt, loserLeader.systemPrompt, undefined, '{ "title": "string", "content": "string" }');
-          if (result.success) {
-            const lLeaderId = loserLeader.id;
-            const lFactionId = loserFactionId;
-            const forumSvc = this.forumService;
-            const prismaRef = this.prisma;
-            const validated = validateOrRetry(result.response, validateTitleContent, this.aiService, {
-              prompt,
-              systemPrompt: loserLeader.systemPrompt,
-              expectedFormat: '{ "title": "string (non-empty)", "content": "string (non-empty)" }',
-              onSuccess: async (response) => {
-                try {
-                  const retryParsed = validateOrRetry(response, validateTitleContent);
-                  if (retryParsed) {
-                    const forum = await prismaRef.forum.findFirst({ where: { factionId: lFactionId } });
-                    if (forum) await forumSvc.createAIPost(lLeaderId, forum.id, retryParsed.title, retryParsed.content);
-                  }
-                } catch { /* ignore retry errors */ }
-              },
-            });
-            if (validated) {
-              const forum = await this.prisma.forum.findFirst({ where: { factionId: loserFactionId } });
-              if (forum) await this.forumService.createAIPost(loserLeader.id, forum.id, validated.title, validated.content);
-            }
-          } else {
-            // Queue for retry — when AI comes back, post the regrouping message
-            const lLeaderId = loserLeader.id;
-            const lFactionId = loserFactionId;
-            const forumSvc = this.forumService;
-            const prismaRef = this.prisma;
-            this.aiService.queueForRetry(prompt, loserLeader.systemPrompt, async (response) => {
-              try {
-                const retryParsed = validateOrRetry(response, validateTitleContent);
-                if (retryParsed) {
-                  const forum = await prismaRef.forum.findFirst({ where: { factionId: lFactionId } });
-                  if (forum) await forumSvc.createAIPost(lLeaderId, forum.id, retryParsed.title, retryParsed.content);
-                }
-              } catch { /* ignore retry errors */ }
-            });
+          const { enrichWithTopology } = await import("./worldTopologyContext");
+          const loseSystemPrompt = await enrichWithTopology(loserLeader.systemPrompt, this.prisma, this.logger);
+          const lLeaderId = loserLeader.id;
+          const lFactionId = loserFactionId;
+          const forumSvc = this.forumService;
+          const prismaRef = this.prisma;
+
+          const validated = await safeAI<{ title: string; content: string } | null>({
+            aiService: this.aiService,
+            prompt,
+            systemPrompt: loseSystemPrompt,
+            expectedFormat: '{ "title": "string (non-empty)", "content": "string (non-empty)" }',
+            validate: validateTitleContent,
+            fallback: null,
+            context: "War defeat regrouping forum post",
+            logger: this.logger,
+            retry: true,
+            onRetrySuccess: async (result) => {
+              if (!result) return;
+              const forum = await prismaRef.forum.findFirst({ where: { factionId: lFactionId } });
+              if (forum) await forumSvc.createAIPost(lLeaderId, forum.id, result.title, result.content);
+            },
+          });
+          if (validated) {
+            const forum = await this.prisma.forum.findFirst({ where: { factionId: loserFactionId } });
+            if (forum) await this.forumService.createAIPost(loserLeader.id, forum.id, validated.title, validated.content);
           }
         } catch { /* best-effort */ }
       }
 
       this.logger.info({ warId, winnerId, reason }, "AI personas notified of war end");
     } catch (error) {
-      this.logger.error(error, "Error in onWarEnded");
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.logger.debug?.({ err, context: "onWarEnded" }, `[onWarEnded] ${err.message}`);
     }
   }
 
@@ -813,7 +725,8 @@ Respond ONLY with JSON: { "title": "...", "content": "..." }`;
         }
       }
     } catch (error) {
-      this.logger.error(error, "Error in onWarResourceBleed");
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.logger.debug?.({ err, context: "onWarResourceBleed" }, `[onWarResourceBleed] ${err.message}`);
     }
   }
 
@@ -847,7 +760,8 @@ Respond ONLY with JSON: { "title": "...", "content": "..." }`;
         });
       }
     } catch (error) {
-      this.logger.error(error, "Error in onForumPostCreated");
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.logger.debug?.({ err, context: "onForumPostCreated" }, `[onForumPostCreated] ${err.message}`);
     }
   }
 
@@ -926,7 +840,8 @@ Respond ONLY with JSON: { "title": "...", "content": "..." }`;
 
       this.logger.info({ serverId, serverFactionId, attackerUserId, detected }, "Faction server hack processed for AI");
     } catch (error) {
-      this.logger.error(error, "Error in onFactionServerHacked");
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.logger.debug?.({ err, context: "onFactionServerHacked" }, `[onFactionServerHacked] ${err.message}`);
     }
   }
 
@@ -988,63 +903,40 @@ Respond ONLY with JSON: { "content": "..." }`
     let content = "Encrypted fragment detected...";
     if (prompt && aida) {
       try {
-        const result = await this.aiService.generateResponse(prompt, aida.systemPrompt, undefined, '{ "content": "string (cryptic AIDA clue, 100-500 chars)" }');
-        if (result.success) {
-          const validated = validateOrRetry(result.response, validateClueContent, this.aiService, {
-            prompt,
-            systemPrompt: aida.systemPrompt,
-            expectedFormat: '{ "content": "string (cryptic AIDA clue, 100-500 chars)" }',
-            onSuccess: async (response) => {
-              try {
-                const retryParsed = validateOrRetry(response, validateClueContent);
-                if (retryParsed) {
-                  const clueFile = await this.prisma.fileSystemNode.findFirst({
-                    where: {
-                      serverId,
-                      name: { startsWith: `.clue_${type}_` },
-                      isHidden: true,
-                    },
-                    orderBy: { createdAt: "desc" },
-                  });
-                  if (clueFile) {
-                    await this.prisma.fileSystemNode.update({
-                      where: { id: clueFile.id },
-                      data: { content: retryParsed.content },
-                    });
-                  }
-                }
-              } catch { /* ignore retry errors */ }
-            },
-          });
-          if (validated) content = validated.content;
-        } else {
-          // Queue for retry — when AI comes back, update the clue file content
-          const prismaRef = this.prisma;
-          const clueServerId = serverId;
-          const clueType = type;
-          this.aiService.queueForRetry(prompt, aida.systemPrompt, async (response) => {
-            try {
-              const retryParsed = validateOrRetry(response, validateClueContent);
-              if (retryParsed) {
-                // Find and update the clue file that was created with fallback content
-                const clueFile = await prismaRef.fileSystemNode.findFirst({
-                  where: {
-                    serverId: clueServerId,
-                    name: { startsWith: `.clue_${clueType}_` },
-                    isHidden: true,
-                  },
-                  orderBy: { createdAt: "desc" },
-                });
-                if (clueFile) {
-                  await prismaRef.fileSystemNode.update({
-                    where: { id: clueFile.id },
-                    data: { content: retryParsed.content },
-                  });
-                }
-              }
-            } catch { /* ignore retry errors */ }
-          });
-        }
+        const { enrichWithTopology } = await import("./worldTopologyContext");
+        const clueSystemPrompt = await enrichWithTopology(aida.systemPrompt, this.prisma, this.logger);
+        const prismaRef = this.prisma;
+        const clueServerId = serverId;
+        const clueType = type;
+
+        const validated = await safeAI({
+          aiService: this.aiService,
+          prompt,
+          systemPrompt: clueSystemPrompt,
+          expectedFormat: '{ "content": "string (cryptic AIDA clue, 100-500 chars)" }',
+          validate: validateClueContent,
+          fallback: { content: "Encrypted fragment detected..." },
+          context: "Generate AIDA clue",
+          logger: this.logger,
+          retry: true,
+          onRetrySuccess: async (result) => {
+            const clueFile = await prismaRef.fileSystemNode.findFirst({
+              where: {
+                serverId: clueServerId,
+                name: { startsWith: `.clue_${clueType}_` },
+                isHidden: true,
+              },
+              orderBy: { createdAt: "desc" },
+            });
+            if (clueFile) {
+              await prismaRef.fileSystemNode.update({
+                where: { id: clueFile.id },
+                data: { content: result.content },
+              });
+            }
+          },
+        });
+        content = validated.content;
       } catch { /* fallback to default */ }
     }
 

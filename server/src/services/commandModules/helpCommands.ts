@@ -12,6 +12,7 @@ import {
   resolveSkillKey,
   meetsSkillRequirement,
 } from "./skillRequirements";
+import { successResult, errorResult } from "./helpers";
 
 export class HelpCommandsModule implements CommandModule {
   public category = "help";
@@ -32,19 +33,10 @@ export class HelpCommandsModule implements CommandModule {
         case "stats":
           return await this.handleStats(command, context);
         default:
-          return {
-            success: false,
-            output: `Help command not implemented: ${command.command}`,
-            timestamp: new Date(),
-          };
+          return errorResult(`Help command not implemented: ${command.command}`);
       }
     } catch (error) {
-      return {
-        success: false,
-        output: "Help command failed",
-        error: error instanceof Error ? error.message : "Unknown error",
-        timestamp: new Date(),
-      };
+      return errorResult("Help command failed", error instanceof Error ? error.message : "Unknown error");
     }
   }
 
@@ -126,10 +118,15 @@ export class HelpCommandsModule implements CommandModule {
       { name: "file", desc: "Advanced file operations" },
       { name: "process", desc: "Process and resource management" },
       { name: "math", desc: "Mathematics and calculations" },
-      { name: "network", desc: "Network operations and scanning" },
-      { name: "social", desc: "Communication and social features" },
-      { name: "game", desc: "Game commands and player info" },
+      { name: "network", desc: "Network and connection tools" },
+      { name: "social", desc: "Communication and messaging" },
+      { name: "player", desc: "Status, skills, and intel reporting" },
+      { name: "faction", desc: "Faction membership and management" },
+      { name: "mission", desc: "Missions, stories, and objectives" },
+      { name: "shop", desc: "Shop, inventory, and equipment" },
       { name: "hack", desc: "Hacking and exploitation tools" },
+      { name: "alias", desc: "Identity alias management" },
+      { name: "defense", desc: "Home server defenses" },
       { name: "help", desc: "Help and documentation" },
     ];
 
@@ -159,16 +156,12 @@ export class HelpCommandsModule implements CommandModule {
       }
     });
 
-    const lines = helpPanel("COMMAND CATEGORIES", entries, 50);
+    const lines = helpPanel("COMMAND CATEGORIES", entries);
     lines.push("");
     lines.push(" Type 'help <category>' to see commands.");
     lines.push(" Raise skills to unlock hidden commands.");
 
-    return {
-      success: true,
-      output: render(lines),
-      timestamp: new Date(),
-    };
+    return successResult(render(lines));
   }
 
   /**
@@ -197,18 +190,20 @@ export class HelpCommandsModule implements CommandModule {
         "math",
         "network",
         "social",
-        "game",
+        "player",
+        "faction",
+        "mission",
+        "shop",
         "hack",
+        "alias",
+        "defense",
         "help",
       ];
-      return {
-        success: false,
-        output:
-          `Unknown category: ${category}\n\n` +
-          `Available categories: ${validCategories.join(", ")}\n\n` +
-          "Type 'help' to see all categories.",
-        timestamp: new Date(),
-      };
+      return errorResult(
+        `Unknown category: ${category}\n\n` +
+        `Available categories: ${validCategories.join(", ")}\n\n` +
+        "Type 'help' to see all categories.",
+      );
     }
 
     const unlocked = categoryCommands.filter((cmd) => !cmd.locked);
@@ -219,7 +214,7 @@ export class HelpCommandsModule implements CommandModule {
       description: cmd.description,
     }));
 
-    const lines = helpPanel(`${category.toUpperCase()} COMMANDS`, entries, 50);
+    const lines = helpPanel(`${category.toUpperCase()} COMMANDS`, entries);
     if (lockedCount > 0) {
       lines.push("");
       lines.push(
@@ -230,12 +225,7 @@ export class HelpCommandsModule implements CommandModule {
     lines.push(" Type 'help' to see all categories.");
     lines.push(" Type 'man <command>' for detailed info.");
 
-    return {
-      success: true,
-      output: render(lines),
-      data: { commands: unlocked },
-      timestamp: new Date(),
-    };
+    return successResult(render(lines), { commands: unlocked });
   }
 
   private async handleMan(
@@ -244,11 +234,7 @@ export class HelpCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const commandName = command.args?.[0];
     if (!commandName) {
-      return {
-        success: false,
-        output: "Usage: man <command>\nExample: man scan",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: man <command>\nExample: man scan");
     }
 
     // Fetch player progress for skill-based filtering
@@ -273,17 +259,9 @@ export class HelpCommandsModule implements CommandModule {
         const key = resolveSkillKey(commandName);
         const req = SKILL_REQUIREMENTS[key];
         const skillInfo = req ? ` Requires ${req.label} ${req.level}.` : "";
-        return {
-          success: false,
-          output: `Command '${commandName}' is locked.${skillInfo}\nRaise your skills to unlock it.`,
-          timestamp: new Date(),
-        };
+        return errorResult(`Command '${commandName}' is locked.${skillInfo}\nRaise your skills to unlock it.`);
       }
-      return {
-        success: false,
-        output: `No manual entry for '${commandName}'\nType 'help' to see available commands`,
-        timestamp: new Date(),
-      };
+      return errorResult(`No manual entry for '${commandName}'\nType 'help' to see available commands`);
     }
     const sections: Array<{
       heading?: string;
@@ -320,12 +298,7 @@ export class HelpCommandsModule implements CommandModule {
       sections,
       50,
     );
-    return {
-      success: true,
-      output: render(lines),
-      data: { command: cmdInfo },
-      timestamp: new Date(),
-    };
+    return successResult(render(lines), { command: cmdInfo });
   }
 
   private async handleHistory(
@@ -346,11 +319,7 @@ export class HelpCommandsModule implements CommandModule {
       .slice(0, Math.min(limit, 200));
 
     if (history.length === 0) {
-      return {
-        success: true,
-        output: "No command history",
-        timestamp: new Date(),
-      };
+      return successResult("No command history");
     }
 
     const entries = history.map((cmd: Command, index: number) => {
@@ -363,12 +332,7 @@ export class HelpCommandsModule implements CommandModule {
     const footer = `${history.length} command${history.length !== 1 ? "s" : ""} | Use 'history <n>' to limit (max 200)`;
     const lines = numberedLog("COMMAND HISTORY", entries, 50, footer);
 
-    return {
-      success: true,
-      output: render(lines),
-      data: { history },
-      timestamp: new Date(),
-    };
+    return successResult(render(lines), { history });
   }
 
   private async handleStats(
@@ -482,18 +446,13 @@ export class HelpCommandsModule implements CommandModule {
 
     const lines = multiPanel("COMMAND STATISTICS", sections, 50);
 
-    return {
-      success: true,
-      output: render(lines),
-      data: {
-        totalCommands,
-        commandsByCategory,
-        mostUsedCommands,
-        recentActivity,
-        successRate: 100,
-      },
-      timestamp: new Date(),
-    };
+    return successResult(render(lines), {
+      totalCommands,
+      commandsByCategory,
+      mostUsedCommands,
+      recentActivity,
+      successRate: 100,
+    });
   }
 
   /**
@@ -527,10 +486,27 @@ export class HelpCommandsModule implements CommandModule {
       locked?: boolean;
     }> = [];
 
+    // Check discovery level — hide fragment/endgame commands until player discovers them
+    let discoveryLevel = 0;
+    try {
+      const storyProg = await context.db.client.storyProgress.findUnique({
+        where: { userId: context.userId },
+        select: { discoveryLevel: true },
+      });
+      discoveryLevel = storyProg?.discoveryLevel ?? 0;
+    } catch { /* non-critical */ }
+
+    const HIDDEN_UNTIL_DISCOVERY = new Set(["fragment", "fragments", "endgame"]);
+
     for (const mod of context.modules) {
       if (mod.getCommandInfo) {
         const infos = mod.getCommandInfo();
         for (const info of infos) {
+          // Hide fragment/endgame from help until discoveryLevel >= 3
+          if (discoveryLevel < 3 && HIDDEN_UNTIL_DISCOVERY.has(info.command)) {
+            continue;
+          }
+
           let locked = false;
           if (playerSkills) {
             locked = !meetsSkillRequirement(

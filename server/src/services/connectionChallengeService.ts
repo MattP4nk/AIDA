@@ -56,6 +56,7 @@ Your task:
 --- GENERAL ---
   - Higher networking skill reduces difficulty
   - Revisiting low-security servers (1-2) skips the challenge
+  - Install a backdoor ('backdoor install') to bypass challenges on revisits
   - Use 'connect.abort' to cancel an active challenge
   - Hints are shown below the puzzle
 
@@ -79,15 +80,21 @@ export class ConnectionChallengeService {
     userId: string,
     server: { isPlayerHome: boolean; ownerId: string | null; securityLevel: number },
     isFirstVisit: boolean,
+    hasBackdoor: boolean = false,
   ): { needed: boolean; difficulty: number } {
     // Home server: never challenge
     if (server.isPlayerHome && server.ownerId === userId) {
       return { needed: false, difficulty: 0 };
     }
 
-    // First visit: always challenge
+    // First visit: always challenge (even with backdoor — you haven't been there yet)
     if (isFirstVisit) {
       return { needed: true, difficulty: server.securityLevel };
+    }
+
+    // Revisit with active backdoor: skip challenge
+    if (hasBackdoor) {
+      return { needed: false, difficulty: 0 };
     }
 
     // Revisit: skip for low-security servers

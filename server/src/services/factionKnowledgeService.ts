@@ -3,6 +3,7 @@ import { PrismaClient } from "@prisma/client";
 import { Logger } from "pino";
 import { PRISMA_CLIENT, LOGGER, CACHE_SERVICE } from "../di/tokens";
 import { CacheService } from "./cacheService";
+import { safeExecute } from "../utils/safeExecute";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -59,48 +60,47 @@ export class FactionKnowledgeService {
    * Uses upsert on (factionId, assetType, assetId) — rediscovery updates confidence & meta.
    */
   async addEntry(factionId: string, entry: KnowledgeEntry): Promise<void> {
-    try {
-      await this.prisma.factionKnowledge.upsert({
-        where: {
-          factionId_assetType_assetId: {
+    await safeExecute({
+      fn: async () => {
+        await this.prisma.factionKnowledge.upsert({
+          where: {
+            factionId_assetType_assetId: {
+              factionId,
+              assetType: entry.assetType,
+              assetId: entry.assetId,
+            },
+          },
+          create: {
             factionId,
             assetType: entry.assetType,
             assetId: entry.assetId,
+            assetMeta: (entry.assetMeta ?? {}) as any,
+            source: entry.source,
+            confidence: entry.confidence ?? 0.8,
+            discoveredBy: entry.discoveredBy ?? null,
+            expiresAt: entry.expiresAt ?? null,
           },
-        },
-        create: {
-          factionId,
-          assetType: entry.assetType,
-          assetId: entry.assetId,
-          assetMeta: (entry.assetMeta ?? {}) as any,
-          source: entry.source,
-          confidence: entry.confidence ?? 0.8,
-          discoveredBy: entry.discoveredBy ?? null,
-          expiresAt: entry.expiresAt ?? null,
-        },
-        update: {
-          assetMeta: (entry.assetMeta ?? {}) as any,
-          source: entry.source,
-          // Confidence only increases on rediscovery, never decreases
-          confidence: Math.max(entry.confidence ?? 0.8, 0),
-          ...(entry.discoveredBy != null ? { discoveredBy: entry.discoveredBy } : {}),
-          ...(entry.expiresAt !== undefined ? { expiresAt: entry.expiresAt } : {}),
-        },
-      });
+          update: {
+            assetMeta: (entry.assetMeta ?? {}) as any,
+            source: entry.source,
+            // Confidence only increases on rediscovery, never decreases
+            confidence: Math.max(entry.confidence ?? 0.8, 0),
+            ...(entry.discoveredBy != null ? { discoveredBy: entry.discoveredBy } : {}),
+            ...(entry.expiresAt !== undefined ? { expiresAt: entry.expiresAt } : {}),
+          },
+        });
 
-      // Invalidate snapshot cache
-      this.cacheService.del(`fk:snapshot:${factionId}`);
+        // Invalidate snapshot cache
+        this.cacheService.del(`fk:snapshot:${factionId}`);
 
-      this.logger.debug(
-        { factionId, assetType: entry.assetType, assetId: entry.assetId },
-        "Faction knowledge entry added/updated",
-      );
-    } catch (error) {
-      this.logger.error(
-        { error, factionId, assetType: entry.assetType, assetId: entry.assetId },
-        "Error adding faction knowledge entry",
-      );
-    }
+        this.logger.debug(
+          { factionId, assetType: entry.assetType, assetId: entry.assetId },
+          "Faction knowledge entry added/updated",
+        );
+      },
+      context: "Add faction knowledge entry",
+      logger: this.logger,
+    })();
   }
 
   /**
@@ -198,20 +198,22 @@ export class FactionKnowledgeService {
    * Called periodically (e.g. from scheduler).
    */
   async expireEntries(): Promise<number> {
-    try {
-      const result = await this.prisma.factionKnowledge.deleteMany({
-        where: {
-          expiresAt: { lt: new Date() },
-        },
-      });
-      if (result.count > 0) {
-        this.logger.info({ expired: result.count }, "Expired faction knowledge entries cleaned up");
-      }
-      return result.count;
-    } catch (error) {
-      this.logger.error(error, "Error expiring faction knowledge entries");
-      return 0;
-    }
+    return await safeExecute({
+      fn: async () => {
+        const result = await this.prisma.factionKnowledge.deleteMany({
+          where: {
+            expiresAt: { lt: new Date() },
+          },
+        });
+        if (result.count > 0) {
+          this.logger.info({ expired: result.count }, "Expired faction knowledge entries cleaned up");
+        }
+        return result.count;
+      },
+      context: "Expire faction knowledge entries",
+      logger: this.logger,
+      fallback: 0,
+    })() as number;
   }
 
   /**
@@ -232,47 +234,49 @@ export class FactionKnowledgeService {
     };
     const DEFAULT_DECAY = 0.05;
 
-    try {
-      // Fetch all entries and decay per-source
-      const entries = await this.prisma.factionKnowledge.findMany({
-        where: { confidence: { gt: minConfidence } },
-        select: { id: true, source: true, confidence: true },
-      });
+    return await safeExecute({
+      fn: async () => {
+        // Fetch all entries and decay per-source
+        const entries = await this.prisma.factionKnowledge.findMany({
+          where: { confidence: { gt: minConfidence } },
+          select: { id: true, source: true, confidence: true },
+        });
 
-      let decayed = 0;
-      for (const entry of entries) {
-        const rate = SOURCE_DECAY[entry.source] || DEFAULT_DECAY;
-        const newConfidence = entry.confidence * (1 - rate);
+        let decayed = 0;
+        for (const entry of entries) {
+          const rate = SOURCE_DECAY[entry.source] || DEFAULT_DECAY;
+          const newConfidence = entry.confidence * (1 - rate);
 
-        if (newConfidence < minConfidence) {
-          // Will be purged below
-          continue;
+          if (newConfidence < minConfidence) {
+            // Will be purged below
+            continue;
+          }
+
+          await this.prisma.factionKnowledge.update({
+            where: { id: entry.id },
+            data: { confidence: newConfidence },
+          });
+          decayed++;
         }
 
-        await this.prisma.factionKnowledge.update({
-          where: { id: entry.id },
-          data: { confidence: newConfidence },
+        // Purge entries that fell below minimum confidence
+        const purged = await this.prisma.factionKnowledge.deleteMany({
+          where: { confidence: { lt: minConfidence } },
         });
-        decayed++;
-      }
 
-      // Purge entries that fell below minimum confidence
-      const purged = await this.prisma.factionKnowledge.deleteMany({
-        where: { confidence: { lt: minConfidence } },
-      });
+        if (purged.count > 0 || decayed > 0) {
+          this.logger.info({ decayed, purged: purged.count }, "Knowledge confidence decay complete");
+        }
 
-      if (purged.count > 0 || decayed > 0) {
-        this.logger.info({ decayed, purged: purged.count }, "Knowledge confidence decay complete");
-      }
+        // Invalidate all snapshot caches
+        this.cacheService.flush();
 
-      // Invalidate all snapshot caches
-      this.cacheService.flush();
-
-      return { decayed, purged: purged.count };
-    } catch (error) {
-      this.logger.error(error, "Error decaying knowledge confidence");
-      return { decayed: 0, purged: 0 };
-    }
+        return { decayed, purged: purged.count };
+      },
+      context: "Decay knowledge confidence",
+      logger: this.logger,
+      fallback: { decayed: 0, purged: 0 },
+    })() as { decayed: number; purged: number };
   }
 
   /**
@@ -280,25 +284,27 @@ export class FactionKnowledgeService {
    * Called daily from AISchedulerService.
    */
   async purgeOldEntries(maxAgeDays: number = 14, maxConfidence: number = 0.3): Promise<number> {
-    try {
-      const cutoff = new Date(Date.now() - maxAgeDays * 24 * 60 * 60 * 1000);
-      const result = await this.prisma.factionKnowledge.deleteMany({
-        where: {
-          discoveredAt: { lt: cutoff },
-          confidence: { lt: maxConfidence },
-        },
-      });
+    return await safeExecute({
+      fn: async () => {
+        const cutoff = new Date(Date.now() - maxAgeDays * 24 * 60 * 60 * 1000);
+        const result = await this.prisma.factionKnowledge.deleteMany({
+          where: {
+            discoveredAt: { lt: cutoff },
+            confidence: { lt: maxConfidence },
+          },
+        });
 
-      if (result.count > 0) {
-        this.logger.info({ purged: result.count, maxAgeDays }, "Purged old low-confidence knowledge entries");
-        this.cacheService.flush();
-      }
+        if (result.count > 0) {
+          this.logger.info({ purged: result.count, maxAgeDays }, "Purged old low-confidence knowledge entries");
+          this.cacheService.flush();
+        }
 
-      return result.count;
-    } catch (error) {
-      this.logger.error(error, "Error purging old knowledge entries");
-      return 0;
-    }
+        return result.count;
+      },
+      context: "Purge old knowledge entries",
+      logger: this.logger,
+      fallback: 0,
+    })() as number;
   }
 
   /**
@@ -307,52 +313,54 @@ export class FactionKnowledgeService {
    * Called periodically from AISchedulerService.
    */
   async verifyKnowledge(factionId: string): Promise<number> {
-    try {
-      const entries = await this.prisma.factionKnowledge.findMany({
-        where: { factionId },
-        select: { id: true, assetType: true, assetId: true },
-      });
+    return await safeExecute({
+      fn: async () => {
+        const entries = await this.prisma.factionKnowledge.findMany({
+          where: { factionId },
+          select: { id: true, assetType: true, assetId: true },
+        });
 
-      let removed = 0;
-      for (const entry of entries) {
-        let exists = true;
+        let removed = 0;
+        for (const entry of entries) {
+          let exists = true;
 
-        if (entry.assetType === "server") {
-          const server = await this.prisma.gameServer.findUnique({
-            where: { id: entry.assetId },
-            select: { id: true },
-          });
-          exists = !!server;
-        } else if (entry.assetType === "file") {
-          const file = await this.prisma.fileSystemNode.findUnique({
-            where: { id: entry.assetId },
-            select: { id: true },
-          });
-          exists = !!file;
-        } else if (entry.assetType === "player") {
-          const user = await this.prisma.user.findUnique({
-            where: { id: entry.assetId },
-            select: { id: true },
-          });
-          exists = !!user;
+          if (entry.assetType === "server") {
+            const server = await this.prisma.gameServer.findUnique({
+              where: { id: entry.assetId },
+              select: { id: true },
+            });
+            exists = !!server;
+          } else if (entry.assetType === "file") {
+            const file = await this.prisma.fileSystemNode.findUnique({
+              where: { id: entry.assetId },
+              select: { id: true },
+            });
+            exists = !!file;
+          } else if (entry.assetType === "player") {
+            const user = await this.prisma.user.findUnique({
+              where: { id: entry.assetId },
+              select: { id: true },
+            });
+            exists = !!user;
+          }
+
+          if (!exists) {
+            await this.prisma.factionKnowledge.delete({ where: { id: entry.id } });
+            removed++;
+          }
         }
 
-        if (!exists) {
-          await this.prisma.factionKnowledge.delete({ where: { id: entry.id } });
-          removed++;
+        if (removed > 0) {
+          this.logger.info({ factionId, removed }, "Verified and removed stale knowledge");
+          this.cacheService.del(`fk:snapshot:${factionId}`);
         }
-      }
 
-      if (removed > 0) {
-        this.logger.info({ factionId, removed }, "Verified and removed stale knowledge");
-        this.cacheService.del(`fk:snapshot:${factionId}`);
-      }
-
-      return removed;
-    } catch (error) {
-      this.logger.error(error, "Error verifying knowledge");
-      return 0;
-    }
+        return removed;
+      },
+      context: "Verify knowledge",
+      logger: this.logger,
+      fallback: 0,
+    })() as number;
   }
 
   /**

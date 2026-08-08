@@ -1,5 +1,6 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
+import { successResult, errorResult } from "./helpers";
 import {
   boxTop,
   boxBottom,
@@ -32,6 +33,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
     "bounty",
     "leaderboard",
     "achievements",
+    "report",
   ]);
 
   public async execute(
@@ -60,20 +62,13 @@ export class PlayerInfoCommandsModule implements CommandModule {
           return await this.handleLeaderboard(command, context);
         case "achievements":
           return await this.handleAchievements(command, context);
+        case "report":
+          return await this.handleReport(command, context);
         default:
-          return {
-            success: false,
-            output: `Player info command not implemented: ${command.command}`,
-            timestamp: new Date(),
-          };
+          return errorResult(`Player info command not implemented: ${command.command}`);
       }
     } catch (error) {
-      return {
-        success: false,
-        output: "Player info command failed",
-        error: error instanceof Error ? error.message : "Unknown error",
-        timestamp: new Date(),
-      };
+      return errorResult("Player info command failed", error instanceof Error ? error.message : "Unknown error");
     }
   }
 
@@ -159,6 +154,20 @@ export class PlayerInfoCommandsModule implements CommandModule {
         usage: "achievements",
         examples: ["achievements"],
       },
+      {
+        command: "report",
+        category: "player",
+        description: "Submit intel to a faction (server, file, or mission findings)",
+        usage: "report [server|file <name>|mission] [to <faction>]",
+        examples: [
+          "report",
+          "report server",
+          "report server to The Garrison",
+          "report file secrets.txt",
+          "report file config.dat to dotHackers",
+          "report mission",
+        ],
+      },
     ];
   }
 
@@ -172,11 +181,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
     });
 
     if (!user || !user.progress) {
-      return {
-        success: false,
-        output: "User data not found",
-        timestamp: new Date(),
-      };
+      return errorResult("User data not found");
     }
 
     // Build dynamic faction standings
@@ -198,42 +203,61 @@ export class PlayerInfoCommandsModule implements CommandModule {
           }))
         : [{ label: "", value: "No faction standings yet." }];
 
-    // Query fragment progress via keyFragmentService for the STORY PROGRESS section
-    const fragSvc = context.services.keyFragmentService;
-    const fragmentProgress = fragSvc
-      ? await fragSvc.getPlayerFragments(context.userId)
-      : null;
+    // Query story/fragment progress — HIDDEN until player reaches discoveryLevel >= 3
+    // Players must discover the existence of fragments through gameplay, not the status screen
+    const storyProgress = await context.db.client.storyProgress.findUnique({
+      where: { userId: context.userId },
+      select: { discoveryLevel: true },
+    });
+    const discoveryLevel = storyProgress?.discoveryLevel ?? 0;
 
     let storyRows: { label: string; value: string }[];
-    if (fragmentProgress) {
-      const swordHeld = fragmentProgress.sword.fragments.filter(
-        (f: any) => f.isHeldByPlayer,
-      ).length;
-      const keyHeld = fragmentProgress.key.fragments.filter(
-        (f: any) => f.isHeldByPlayer,
-      ).length;
-      const collarHeld = fragmentProgress.collar.fragments.filter(
-        (f: any) => f.isHeldByPlayer,
-      ).length;
+    if (discoveryLevel >= 3) {
+      // Player has discovered AIDA fragments — show full progress
+      const fragSvc = context.services.keyFragmentService;
+      const fragmentProgress = fragSvc
+        ? await fragSvc.getPlayerFragments(context.userId)
+        : null;
+
+      if (fragmentProgress) {
+        const swordHeld = fragmentProgress.sword.fragments.filter(
+          (f: any) => f.isHeldByPlayer,
+        ).length;
+        const keyHeld = fragmentProgress.key.fragments.filter(
+          (f: any) => f.isHeldByPlayer,
+        ).length;
+        const collarHeld = fragmentProgress.collar.fragments.filter(
+          (f: any) => f.isHeldByPlayer,
+        ).length;
+        storyRows = [
+          { label: pad("Discovery:", 20), value: `Level ${discoveryLevel}` },
+          { label: pad("Fragments Held:", 20), value: `${fragmentProgress.totalHeld}/9` },
+          { label: pad("  Sword:", 20), value: `${swordHeld}/3` },
+          { label: pad("  Key:", 20), value: `${keyHeld}/3` },
+          { label: pad("  Collar:", 20), value: `${collarHeld}/3` },
+          {
+            label: pad("Endgame:", 20),
+            value: fragmentProgress.gameCompleted
+              ? `COMPLETED (${fragmentProgress.endgameChoice})`
+              : fragmentProgress.endgameUnlocked
+                ? "UNLOCKED"
+                : "LOCKED",
+          },
+        ];
+      } else {
+        storyRows = [{ label: pad("Discovery:", 20), value: `Level ${discoveryLevel}` }];
+      }
+    } else if (discoveryLevel >= 1) {
+      // Player has some awareness — show vague hints only
       storyRows = [
-        {
-          label: pad("Fragments Held:", 20),
-          value: `${fragmentProgress.totalHeld}/9`,
-        },
-        { label: pad("  Sword:", 20), value: `${swordHeld}/3` },
-        { label: pad("  Key:", 20), value: `${keyHeld}/3` },
-        { label: pad("  Collar:", 20), value: `${collarHeld}/3` },
-        {
-          label: pad("Endgame:", 20),
-          value: fragmentProgress.gameCompleted
-            ? `COMPLETED (${fragmentProgress.endgameChoice})`
-            : fragmentProgress.endgameUnlocked
-              ? "UNLOCKED"
-              : "LOCKED",
-        },
+        { label: pad("Discovery:", 20), value: `Level ${discoveryLevel}` },
+        { label: "", value: "Whispers of something ancient echo in the net..." },
       ];
     } else {
-      storyRows = [{ label: "", value: "No story progress yet." }];
+      // No discovery yet — generic message
+      storyRows = [
+        { label: "", value: "Explore the network. The truth is out there." },
+      ];
     }
 
     const output = render(
@@ -291,11 +315,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
     });
 
     if (!progress) {
-      return {
-        success: false,
-        output: "Player progress not found",
-        timestamp: new Date(),
-      };
+      return errorResult("Player progress not found");
     }
 
     const output = render(
@@ -345,11 +365,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const presenceService = context.services.playerPresenceService;
     if (!presenceService) {
-      return {
-        success: false,
-        output: "Presence service unavailable.",
-        timestamp: new Date(),
-      };
+      return errorResult("Presence service unavailable.");
     }
 
     const players = presenceService.getOnlinePlayers();
@@ -377,7 +393,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
     });
 
     const output = render(
-      panel(`PLAYERS ONLINE (${players.length})`, rows, 48),
+      panel(`PLAYERS ONLINE (${players.length})`, rows, context.terminalWidth),
     );
 
     return {
@@ -407,20 +423,12 @@ export class PlayerInfoCommandsModule implements CommandModule {
     });
 
     if (!connection) {
-      return {
-        success: false,
-        output: "You are not connected to any server.",
-        timestamp: new Date(),
-      };
+      return errorResult("You are not connected to any server.");
     }
 
     const presenceService = context.services.playerPresenceService;
     if (!presenceService) {
-      return {
-        success: false,
-        output: "Presence service unavailable.",
-        timestamp: new Date(),
-      };
+      return errorResult("Presence service unavailable.");
     }
     const output = presenceService.formatServerOccupancy(connection.serverId);
 
@@ -442,31 +450,19 @@ export class PlayerInfoCommandsModule implements CommandModule {
     const targetUsername = command.args?.[0];
 
     if (!targetUsername) {
-      return {
-        success: false,
-        output: "Usage: whois <username>",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: whois <username>");
     }
 
     const presenceService = context.services.playerPresenceService;
     if (!presenceService) {
-      return {
-        success: false,
-        output: "Presence service unavailable.",
-        timestamp: new Date(),
-      };
+      return errorResult("Presence service unavailable.");
     }
 
     // Find player by username
     const player = presenceService.findPlayerByUsername(targetUsername);
 
     if (!player) {
-      return {
-        success: false,
-        output: `Player '${targetUsername}' not found or is offline.`,
-        timestamp: new Date(),
-      };
+      return errorResult(`Player '${targetUsername}' not found or is offline.`);
     }
 
     // Get detailed info
@@ -475,11 +471,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
     const playerGlyph = getInlineGlyph("player");
 
     if (!details) {
-      return {
-        success: false,
-        output: "Failed to retrieve player information.",
-        timestamp: new Date(),
-      };
+      return errorResult("Failed to retrieve player information.");
     }
 
     // Format output
@@ -577,18 +569,14 @@ export class PlayerInfoCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const fkService = context.services.factionKnowledgeService;
     if (!fkService) {
-      return {
-        success: false,
-        output: "Intel sharing system unavailable.",
-        timestamp: new Date(),
-      };
+      return errorResult("Intel sharing system unavailable.");
     }
 
     const assetType = command.args?.[0] as "server" | "file" | "player";
     const assetId = command.args?.[1];
 
     if (!assetType || !assetId) {
-      const W = 52;
+      const W = context.terminalWidth;
       const lines: string[] = [];
       lines.push(boxTop(W));
       lines.push(boxCenter("SHARE INTEL", W));
@@ -602,25 +590,17 @@ export class PlayerInfoCommandsModule implements CommandModule {
       lines.push(boxRow("", W));
       lines.push(boxRow("Example: share_intel server srv_abc123", W));
       lines.push(boxBottom(W));
-      return { success: true, output: render(lines), timestamp: new Date() };
+      return successResult(render(lines));
     }
 
     if (!["server", "file", "player"].includes(assetType)) {
-      return {
-        success: false,
-        output: `Invalid intel type: ${assetType}. Use: server, file, or player`,
-        timestamp: new Date(),
-      };
+      return errorResult(`Invalid intel type: ${assetType}. Use: server, file, or player`);
     }
 
     // Check faction membership
     const factionId = await fkService.getPlayerFactionId(context.userId);
     if (!factionId) {
-      return {
-        success: false,
-        output: "You must be in a faction to share intel.",
-        timestamp: new Date(),
-      };
+      return errorResult("You must be in a faction to share intel.");
     }
 
     // Check faction rank — must be at least operative
@@ -630,11 +610,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
     const allowedRanks = ["operative", "elite", "council_member"];
     if (!member || !allowedRanks.includes(member.rank)) {
       const currentRank = member?.rank?.toUpperCase() ?? "UNKNOWN";
-      return {
-        success: false,
-        output: `Insufficient faction rank. You must be at least OPERATIVE rank to share intel. Current rank: ${currentRank}`,
-        timestamp: new Date(),
-      };
+      return errorResult(`Insufficient faction rank. You must be at least OPERATIVE rank to share intel. Current rank: ${currentRank}`);
     }
 
     // Verify the asset exists
@@ -652,11 +628,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
         },
       });
       if (!server) {
-        return {
-          success: false,
-          output: `Server not found: ${assetId}`,
-          timestamp: new Date(),
-        };
+        return errorResult(`Server not found: ${assetId}`);
       }
       assetMeta = {
         name: server.name,
@@ -678,11 +650,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
         },
       });
       if (!file) {
-        return {
-          success: false,
-          output: `File not found: ${assetId}`,
-          timestamp: new Date(),
-        };
+        return errorResult(`File not found: ${assetId}`);
       }
       assetMeta = {
         name: file.name,
@@ -696,11 +664,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
         select: { id: true, username: true },
       });
       if (!player) {
-        return {
-          success: false,
-          output: `Player not found: ${assetId}`,
-          timestamp: new Date(),
-        };
+        return errorResult(`Player not found: ${assetId}`);
       }
       assetMeta = { username: player.username };
     }
@@ -714,7 +678,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
       discoveredBy: context.userId,
     });
 
-    const W = 52;
+    const W = context.terminalWidth;
     const lines: string[] = [];
     lines.push(sBoxTop(W));
     lines.push(sBoxRow(" [+] Intel shared with your faction", W));
@@ -723,7 +687,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
     lines.push(sBoxRow("     Confidence: HIGH (player report)", W));
     lines.push(sBoxBottom(W));
 
-    return { success: true, output: render(lines), timestamp: new Date() };
+    return successResult(render(lines));
   }
 
   // ==================== BOUNTIES ====================
@@ -743,11 +707,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
     });
 
     if (bounties.length === 0) {
-      return {
-        success: true,
-        output: "No active bounties. The network is quiet... for now.",
-        timestamp: new Date(),
-      };
+      return successResult("No active bounties. The network is quiet... for now.");
     }
 
     // Get player's faction for highlighting
@@ -796,7 +756,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
     lines.push(boxRow("  Hack the target's home server to complete", W));
     lines.push(boxBottom(W));
 
-    return { success: true, output: render(lines), timestamp: new Date() };
+    return successResult(render(lines));
   }
 
   private async handleBounty(
@@ -807,12 +767,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
     const bountyId = command.args?.[1];
 
     if (!action || !bountyId) {
-      return {
-        success: false,
-        output:
-          "Usage: bounty <claim|complete> <bounty_id>\n'bounties' to see active bounties.",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: bounty <claim|complete> <bounty_id>\n'bounties' to see active bounties.");
     }
 
     const bounty = await context.db.client.bounty.findUnique({
@@ -820,35 +775,19 @@ export class PlayerInfoCommandsModule implements CommandModule {
     });
 
     if (!bounty) {
-      return {
-        success: false,
-        output: `Bounty not found: ${bountyId}`,
-        timestamp: new Date(),
-      };
+      return errorResult(`Bounty not found: ${bountyId}`);
     }
 
     if (action === "claim") {
       // Claim a bounty — assign it to this player
       if (bounty.status !== "active") {
-        return {
-          success: false,
-          output: `Bounty is ${bounty.status}, cannot claim.`,
-          timestamp: new Date(),
-        };
+        return errorResult(`Bounty is ${bounty.status}, cannot claim.`);
       }
       if (bounty.claimedByUserId) {
-        return {
-          success: false,
-          output: "Bounty already claimed by another player.",
-          timestamp: new Date(),
-        };
+        return errorResult("Bounty already claimed by another player.");
       }
       if (bounty.targetUserId === context.userId) {
-        return {
-          success: false,
-          output: "You can't claim a bounty on yourself.",
-          timestamp: new Date(),
-        };
+        return errorResult("You can't claim a bounty on yourself.");
       }
 
       await context.db.client.bounty.update({
@@ -862,7 +801,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
         select: { homeIp: true, username: true },
       });
 
-      const W = 52;
+      const W = context.terminalWidth;
       const lines: string[] = [];
       lines.push(boxTop(W));
       lines.push(boxCenter("BOUNTY CLAIMED", W));
@@ -886,24 +825,16 @@ export class PlayerInfoCommandsModule implements CommandModule {
       );
       lines.push(boxBottom(W));
 
-      return { success: true, output: render(lines), timestamp: new Date() };
+      return successResult(render(lines));
     }
 
     if (action === "complete") {
       // Complete a bounty — verify the player has hacked the target's home
       if (bounty.status !== "claimed") {
-        return {
-          success: false,
-          output: "Bounty must be claimed first. Use 'bounty claim <id>'.",
-          timestamp: new Date(),
-        };
+        return errorResult("Bounty must be claimed first. Use 'bounty claim <id>'.");
       }
       if (bounty.claimedByUserId !== context.userId) {
-        return {
-          success: false,
-          output: "This bounty was claimed by someone else.",
-          timestamp: new Date(),
-        };
+        return errorResult("This bounty was claimed by someone else.");
       }
 
       // Verify: player must have a ServerConnection with accessLevel > 0 on target's home server
@@ -913,11 +844,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
       });
 
       if (!targetUser?.homeServerId) {
-        return {
-          success: false,
-          output: "Target has no home server.",
-          timestamp: new Date(),
-        };
+        return errorResult("Target has no home server.");
       }
 
       const hasAccess = await context.db.client.serverConnection.findFirst({
@@ -929,11 +856,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
       });
 
       if (!hasAccess) {
-        return {
-          success: false,
-          output: `You haven't hacked ${bounty.targetUsername}'s home server yet. Hack ${targetUser.homeIp} first.`,
-          timestamp: new Date(),
-        };
+        return errorResult(`You haven't hacked ${bounty.targetUsername}'s home server yet. Hack ${targetUser.homeIp} first.`);
       }
 
       // ── Delete stolen files from target's home server ──
@@ -1020,7 +943,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
         });
       }
 
-      const W = 52;
+      const W = context.terminalWidth;
       const lines: string[] = [];
       lines.push(boxTop(W));
       lines.push(boxCenter("BOUNTY COMPLETED", W));
@@ -1055,14 +978,10 @@ export class PlayerInfoCommandsModule implements CommandModule {
           .catch(() => {});
       }
 
-      return { success: true, output: render(lines), timestamp: new Date() };
+      return successResult(render(lines));
     }
 
-    return {
-      success: false,
-      output: "Usage: bounty <claim|complete> <bounty_id>",
-      timestamp: new Date(),
-    };
+    return errorResult("Usage: bounty <claim|complete> <bounty_id>");
   }
 
   // ==================== LEADERBOARD ====================
@@ -1073,11 +992,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const service = context.services.leaderboardService;
     if (!service) {
-      return {
-        success: false,
-        output: "Leaderboard service unavailable.",
-        timestamp: new Date(),
-      };
+      return errorResult("Leaderboard service unavailable.");
     }
 
     const category = (command.args[0]?.toLowerCase() || "level") as any;
@@ -1093,11 +1008,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
       "missions",
     ];
     if (!validCategories.includes(category)) {
-      return {
-        success: true,
-        output: `Usage: leaderboard [${validCategories.join("|")}]\n\nCategories:\n  level        - Highest level players\n  credits      - Wealthiest players\n  hacking      - Top hackers\n  networking   - Network specialists\n  cryptography - Cipher masters\n  stealth      - Ghost operatives\n  reputation   - Faction heroes\n  achievements - Most achievements\n  missions     - Most missions completed`,
-        timestamp: new Date(),
-      };
+      return successResult(`Usage: leaderboard [${validCategories.join("|")}]\n\nCategories:\n  level        - Highest level players\n  credits      - Wealthiest players\n  hacking      - Top hackers\n  networking   - Network specialists\n  cryptography - Cipher masters\n  stealth      - Ghost operatives\n  reputation   - Faction heroes\n  achievements - Most achievements\n  missions     - Most missions completed`);
     }
 
     const W = 60;
@@ -1149,7 +1060,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
     }
 
     lines.push(boxBottom(W));
-    return { success: true, output: render(lines), timestamp: new Date() };
+    return successResult(render(lines));
   }
 
   // ==================== ACHIEVEMENTS ====================
@@ -1160,11 +1071,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const service = context.services.achievementService;
     if (!service) {
-      return {
-        success: false,
-        output: "Achievement service unavailable.",
-        timestamp: new Date(),
-      };
+      return errorResult("Achievement service unavailable.");
     }
 
     // Check for new achievements first
@@ -1219,6 +1126,296 @@ export class PlayerInfoCommandsModule implements CommandModule {
     }
 
     lines.push(boxBottom(W));
-    return { success: true, output: render(lines), timestamp: new Date() };
+    return successResult(render(lines));
+  }
+
+  // ==================== REPORT COMMAND ====================
+
+  /**
+   * Report intel to faction, complete recon objectives, or submit findings.
+   *
+   * Usage:
+   *   report                    — Show current server intel summary
+   *   report server             — Report current server to faction knowledge
+   *   report file <filename>    — Report a specific file as intel
+   *   report mission            — Report findings for active mission objectives
+   */
+  /**
+   * Parse `to <faction>` from args. Returns remaining args + target faction info.
+   */
+  private async resolveReportTarget(
+    args: string[],
+    userId: string,
+    db: any,
+  ): Promise<{ targetFactionId: string; targetFactionName: string; cleanArgs: string[] } | { error: string }> {
+    // Check for "to <faction>" at the end of args
+    const toIdx = args.findIndex((a) => a.toLowerCase() === "to");
+    let cleanArgs = [...args];
+    let targetFactionName: string | null = null;
+
+    if (toIdx >= 0 && toIdx < args.length - 1) {
+      targetFactionName = args.slice(toIdx + 1).join(" ");
+      cleanArgs = args.slice(0, toIdx);
+    }
+
+    if (targetFactionName) {
+      // Explicit target faction
+      const faction = await db.client.faction.findFirst({
+        where: { name: { equals: targetFactionName, mode: "insensitive" } },
+        select: { id: true, name: true },
+      });
+      if (!faction) {
+        return { error: `Faction not found: "${targetFactionName}". Use 'faction list' to see factions.` };
+      }
+      return { targetFactionId: faction.id, targetFactionName: faction.name, cleanArgs };
+    }
+
+    // Default to player's own faction
+    const membership = await db.client.factionMember.findFirst({
+      where: { userId },
+      include: { faction: { select: { id: true, name: true } } },
+    });
+
+    if (!membership) {
+      return { error: "No faction specified. Use: report ... to <faction>\nOr join a faction with 'faction join <name>'." };
+    }
+
+    return { targetFactionId: membership.factionId, targetFactionName: membership.faction.name, cleanArgs };
+  }
+
+  private async handleReport(
+    command: Command,
+    context: CommandContext,
+  ): Promise<CommandResult> {
+    const { userId, db } = context;
+    const subCommand = command.args?.[0]?.toLowerCase();
+    const session = context.gameStateManager?.getSession(userId);
+    const serverId = session?.currentServerId || session?.homeServerId;
+
+    if (!serverId) {
+      return errorResult("No active server connection.");
+    }
+
+    const W = context.terminalWidth;
+
+    // ── report (no args) — show current server intel summary ──
+    if (!subCommand) {
+      const server = await db.client.gameServer.findUnique({
+        where: { id: serverId },
+        select: { name: true, ipAddress: true, role: true, securityLevel: true, factionId: true, faction: { select: { name: true } } },
+      });
+
+      if (!server) {
+        return errorResult("Server not found.");
+      }
+
+      const fileCount = await db.client.fileSystemNode.count({
+        where: { serverId, type: "file" },
+      });
+      const dirCount = await db.client.fileSystemNode.count({
+        where: { serverId, type: "directory" },
+      });
+
+      const lines: string[] = [];
+      lines.push(boxTop(W));
+      lines.push(boxCenter("INTEL REPORT", W));
+      lines.push(boxDivider(W));
+      lines.push(boxRow(`  Server: ${server.name}`, W));
+      lines.push(boxRow(`  IP: ${server.ipAddress}`, W));
+      lines.push(boxRow(`  Role: ${server.role}`, W));
+      lines.push(boxRow(`  Security: Level ${server.securityLevel}`, W));
+      lines.push(boxRow(`  Files: ${fileCount} | Dirs: ${dirCount}`, W));
+      lines.push(boxRow(`  Faction: ${(server as any).faction?.name || "Unaffiliated"}`, W));
+      lines.push(boxDivider(W));
+      lines.push(boxRow("  Commands:", W));
+      lines.push(boxRow("    report server [to <faction>]", W));
+      lines.push(boxRow("    report file <name> [to <faction>]", W));
+      lines.push(boxRow("    report mission", W));
+      lines.push(boxBottom(W));
+
+      return successResult(render(lines));
+    }
+
+    // ── report server [to <faction>] — add current server to faction knowledge ──
+    if (subCommand === "server") {
+      const targetResult = await this.resolveReportTarget(command.args?.slice(1) || [], userId, db);
+      if ("error" in targetResult) {
+        return errorResult(targetResult.error);
+      }
+
+      const server = await db.client.gameServer.findUnique({
+        where: { id: serverId },
+        select: { id: true, name: true, ipAddress: true, role: true, type: true, securityLevel: true },
+      });
+
+      if (!server) {
+        return errorResult("Server not found.");
+      }
+
+      // Add to faction knowledge
+      const fkService = context.services.factionKnowledgeService;
+      if (fkService) {
+        await fkService.addEntry(targetResult.targetFactionId, {
+          assetType: "server",
+          assetId: server.id,
+          assetMeta: {
+            name: server.name,
+            ip: server.ipAddress,
+            serverType: server.type,
+            role: server.role,
+            securityLevel: server.securityLevel,
+          },
+          source: "player_report",
+          confidence: 1.0,
+          discoveredBy: userId,
+        });
+      }
+
+      // Trigger mission integration
+      const missionIntegration = context.services.missionIntegrationService;
+      if (missionIntegration) {
+        try {
+          await (missionIntegration as any).onServerConnect(userId, server.id);
+          await (missionIntegration as any).onReportSubmitted(userId, "server");
+        } catch { /* non-critical */ }
+      }
+
+      return {
+        success: true,
+        output: `Intel submitted to ${targetResult.targetFactionName}: Server "${server.name}" (${server.ipAddress}) reported.`,
+        soundEvent: "success" as const,
+        timestamp: new Date(),
+      };
+    }
+
+    // ── report file <filename> [to <faction>] — report a specific file as intel ──
+    if (subCommand === "file") {
+      const restArgs = command.args?.slice(1) || [];
+      const targetResult = await this.resolveReportTarget(restArgs, userId, db);
+      if ("error" in targetResult) {
+        return errorResult(targetResult.error);
+      }
+
+      const filename = targetResult.cleanArgs.join(" ");
+      if (!filename) {
+        return errorResult("Usage: report file <filename> [to <faction>]");
+      }
+
+      const currentDir = session?.currentDirectory || "/";
+      const { resolvePath } = await import("./helpers");
+      const filePath = resolvePath(filename, currentDir);
+      const pathParts = filePath.split("/").filter(Boolean);
+      const targetName = pathParts.pop() || filename;
+
+      // Walk the directory tree for accurate lookup (handles duplicate names)
+      let parentId: string | null = null;
+      if (pathParts.length > 0) {
+        let current = await db.client.fileSystemNode.findFirst({
+          where: { serverId, parentId: null, type: "directory" },
+          select: { id: true },
+        });
+        for (const part of pathParts) {
+          if (!current) break;
+          current = await db.client.fileSystemNode.findFirst({
+            where: { serverId, parentId: current.id, name: part },
+            select: { id: true },
+          });
+        }
+        parentId = current?.id || null;
+      }
+
+      const file = await db.client.fileSystemNode.findFirst({
+        where: { serverId, name: targetName, type: "file", ...(parentId ? { parentId } : {}) },
+        select: { id: true, name: true, content: true, isEncrypted: true },
+      });
+
+      if (!file) {
+        return errorResult(`File not found: ${filename}`);
+      }
+
+      // Add file to faction knowledge
+      const fkService = context.services.factionKnowledgeService;
+      if (fkService) {
+        await fkService.addEntry(targetResult.targetFactionId, {
+          assetType: "file",
+          assetId: file.id,
+          assetMeta: {
+            name: file.name,
+            fileName: file.name,
+            serverId,
+            isEncrypted: file.isEncrypted,
+            contentPreview: file.content?.substring(0, 100) || "",
+          },
+          source: "player_report",
+          confidence: 1.0,
+          discoveredBy: userId,
+        });
+      }
+
+      // Trigger mission integration
+      const missionIntegration = context.services.missionIntegrationService;
+      if (missionIntegration) {
+        try {
+          await (missionIntegration as any).onFileOperation(userId, "read", file.id, serverId);
+          await (missionIntegration as any).onReportSubmitted(userId, "file");
+        } catch { /* non-critical */ }
+      }
+
+      return {
+        success: true,
+        output: `Intel submitted to ${targetResult.targetFactionName}: File "${file.name}" reported${file.isEncrypted ? " (encrypted)" : ""}.`,
+        soundEvent: "success" as const,
+        timestamp: new Date(),
+      };
+    }
+
+    // ── report mission — check active missions and submit relevant intel ──
+    if (subCommand === "mission") {
+      const missionService = context.services.missionService;
+      if (!missionService) {
+        return errorResult("Mission system unavailable.");
+      }
+
+      const missions = await missionService.getPlayerMissions(userId);
+      const active = missions.filter((m: any) => m.status === "active");
+
+      if (active.length === 0) {
+        return errorResult("No active missions. Accept a mission first with 'missions' → 'accept <id>'.");
+      }
+
+      // Trigger mission checks for current server context
+      const missionIntegration = context.services.missionIntegrationService;
+      if (missionIntegration) {
+        try {
+          await (missionIntegration as any).onServerConnect(userId, serverId);
+          await (missionIntegration as any).onReportSubmitted(userId, "mission");
+        } catch { /* non-critical */ }
+      }
+
+      const lines: string[] = [];
+      lines.push(boxTop(W));
+      lines.push(boxCenter("MISSION REPORT SUBMITTED", W));
+      lines.push(boxDivider(W));
+      for (const m of active.slice(0, 5)) {
+        const objectives = ((m as any).objectives as any[] || []);
+        const completed = objectives.filter((o: any) => o.completed).length;
+        lines.push(boxRow(`  ${(m as any).title || "Mission"}`, W));
+        lines.push(boxRow(`    Objectives: ${completed}/${objectives.length}`, W));
+      }
+      lines.push(boxDivider(W));
+      lines.push(boxRow("  Findings from current server submitted.", W));
+      lines.push(boxRow("  Check 'progress' for objective status.", W));
+      lines.push(boxBottom(W));
+
+      return {
+        success: true,
+        output: render(lines),
+        soundEvent: "success" as const,
+        suggestedCommand: "progress",
+        timestamp: new Date(),
+      };
+    }
+
+    return errorResult("Usage: report [server|file <name>|mission] [to <faction>]");
   }
 }

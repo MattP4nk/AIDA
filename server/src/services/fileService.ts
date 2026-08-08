@@ -1538,6 +1538,16 @@ export class FileService {
    */
   async initializeFileSystem(serverId: string, ownerId: string): Promise<void> {
     try {
+      // Validate ownerId is a real user — use null if not (system/dungeon servers)
+      let validOwnerId: string | null = ownerId || null;
+      if (validOwnerId) {
+        const ownerExists = await prisma.user.findUnique({
+          where: { id: validOwnerId },
+          select: { id: true },
+        });
+        if (!ownerExists) validOwnerId = null;
+      }
+
       // Check if root already exists
       let root = await prisma.fileSystemNode.findFirst({
         where: {
@@ -1557,7 +1567,7 @@ export class FileService {
             type: "directory",
             content: null,
             size: 0,
-            createdBy: ownerId,
+            createdBy: validOwnerId,
             isEncrypted: false,
             encryptionKey: null,
             isHidden: false,
@@ -1604,7 +1614,7 @@ export class FileService {
             type: "directory",
             content: null,
             size: 0,
-            createdBy: ownerId,
+            createdBy: validOwnerId,
             isEncrypted: false,
             encryptionKey: null,
             isHidden: false,

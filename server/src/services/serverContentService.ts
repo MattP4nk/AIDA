@@ -1052,8 +1052,9 @@ CONTENT REQUIREMENTS:
 
 CRITICAL RULES:
 - Output ONLY valid JSON, no other text
-- Reference ONLY the IPs, server names, and employee names provided in the context
-- DO NOT invent new IPs, names, or servers
+- Prefer referencing REAL IPs and server names from the world topology
+- You MAY invent new IPs/servers if the content needs them — they will be auto-created as drafts
+- When inventing an IP, use the correct range for the zone (see topology context)
 - Directory names: lowercase, no spaces
 - File paths: absolute (start with /)
 - Cross-reference other servers in the network by their real IPs and names`;
@@ -1077,8 +1078,8 @@ CONTENT REQUIREMENTS:
 
 CRITICAL RULES:
 - Output ONLY valid JSON, no other text
-- Reference ONLY the IPs, server names, and employee names provided in the context
-- DO NOT invent new IPs, names, or servers
+- Prefer referencing REAL IPs and server names from the world topology
+- You MAY invent new IPs if the content needs them — they will be auto-created as drafts
 - Directory names: lowercase, no spaces
 - File paths: absolute (start with /)
 - Cross-reference other servers in the network by their real IPs and names
@@ -1740,7 +1741,7 @@ export class ServerContentService {
       const factionShortName = server.faction?.shortName || null;
 
       // Get linked servers via topology
-      let linkedServers: Array<{ name: string; ip: string; role: string }> = [];
+      const linkedServers: Array<{ name: string; ip: string; role: string }> = [];
       let allNetworkServers: Array<{ name: string; ip: string; role: string }> =
         [];
 
@@ -2152,28 +2153,56 @@ export class ServerContentService {
       }
       const aiService = this.aiService;
 
+      // Build system prompt with faction context
       const fullSystemPrompt = factionSystemPrompt
         ? `${factionSystemPrompt}\n\n${systemPrompt}`
         : systemPrompt;
 
-      const result = await aiService.generateResponse(
-        userPrompt,
-        fullSystemPrompt,
-        undefined,
-        '{ "directories": [{"path": "/..."}], "files": [{"path": "/...", "content": "string (100-3000 chars)", "isHidden": false}] }',
-      );
+      // Use agent loop so AI can query DB for real server data and create new entities
+      const { runAgentLoop } = await import("./aiAgentTools");
+      const agentPrompt = userPrompt + '\n\nYour final response MUST be JSON: { "directories": [{"path": "/..."}], "files": [{"path": "/...", "content": "string (100-3000 chars)", "isHidden": false}] }';
 
-      if (!result.success) {
-        this.logger.debug({ error: result.error }, "AI content plan generation returned error");
-        return null;
+      let responseText: string | null = null;
+      try {
+        responseText = await runAgentLoop(
+          aiService, this.prisma, fullSystemPrompt, agentPrompt, this.logger, 6,
+        );
+      } catch { /* fall through */ }
+
+      // Fallback: direct call without agent loop if agent fails
+      if (!responseText) {
+        const directResult = await aiService.generateResponse(
+          userPrompt,
+          fullSystemPrompt,
+          undefined,
+          '{ "directories": [{"path": "/..."}], "files": [{"path": "/...", "content": "string (100-3000 chars)", "isHidden": false}] }',
+        );
+        if (!directResult.success) {
+          this.logger.debug({ error: directResult.error }, "AI content plan generation returned error");
+          return null;
+        }
+        responseText = directResult.response;
       }
 
       // Extract and validate content plan from AI response
-      const validated = validateOrRetry(result.response, validateContentPlan);
+      const validated = validateOrRetry(responseText, validateContentPlan);
       if (!validated) {
         this.logger.debug("AI content plan validation failed");
         return null;
       }
+
+      // Auto-backfill: scan generated file content for IPs/URLs that don't exist
+      try {
+        const { getService } = await import("../di/container");
+        const { REFERENCE_VALIDATION_SERVICE } = await import("../di/tokens");
+        const refService = getService<any>(REFERENCE_VALIDATION_SERVICE);
+        if (refService) {
+          const allContent = validated.files.map((f: any) => f.content || "").join("\n");
+          if (allContent.length > 10) {
+            refService.validateAndBackfillReferences(allContent, "ai_content").catch(() => {});
+          }
+        }
+      } catch { /* non-critical */ }
 
       return validated;
     } catch (error) {

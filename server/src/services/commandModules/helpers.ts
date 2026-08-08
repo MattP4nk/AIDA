@@ -15,11 +15,21 @@ import { sanitizePath } from "../../utils/pathSanitizer";
 /**
  * Resolve a relative or absolute path against the player's current directory.
  * Applies path sanitization to prevent traversal attacks.
+ * Handles `~` as alias for `/` (root of current server).
  */
 export function resolvePath(input: string, currentDir: string): string {
+  // Normalize `~` to `/` (server root)
+  const dir = currentDir === "~" ? "/" : currentDir;
   let path = input;
+
+  if (path === "~") {
+    path = "/";
+  } else if (path.startsWith("~/")) {
+    path = "/" + path.slice(2);
+  }
+
   if (!path.startsWith("/")) {
-    path = currentDir === "/" ? `/${path}` : `${currentDir}/${path}`;
+    path = dir === "/" ? `/${path}` : `${dir}/${path}`;
   }
   return sanitizePath(path);
 }

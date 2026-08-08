@@ -15,11 +15,13 @@
 
 import { injectable, inject } from "tsyringe";
 import type { Logger } from "pino";
+import { safeExecute, safeAI } from "../utils/safeExecute";
 import { LOGGER, AI_SERVICE, SERVER_CONTENT_SERVICE } from "../di/tokens";
 import { db } from "../database/client";
 import type { AIService } from "./aiService";
 import type { ServerContentService } from "./serverContentService";
-import { validateOrRetry, validateStoryArcPlan, validateMissionOutput } from "../utils/aiOutputValidator";
+import { validateStoryArcPlan, validateMissionOutput } from "../utils/aiOutputValidator";
+import { fallbackStoryStep } from "../utils/aiFallbacks";
 
 // ═══════════════════════════════════════════════════════════════════
 // Types
@@ -80,85 +82,87 @@ export class StoryMissionService {
     title?: string;
     error?: string;
   }> {
-    try {
-      // Get context
-      const [user, faction, persona] = await Promise.all([
-        db.client.user.findUnique({
-          where: { id: userId },
-          include: { progress: true },
-        }),
-        db.client.faction.findUnique({ where: { id: factionId } }),
-        db.client.aIPersona.findUnique({ where: { id: personaId } }),
-      ]);
+    return await safeExecute({
+      fn: async () => {
+        // Get context
+        const [user, faction, persona] = await Promise.all([
+          db.client.user.findUnique({
+            where: { id: userId },
+            include: { progress: true },
+          }),
+          db.client.faction.findUnique({ where: { id: factionId } }),
+          db.client.aIPersona.findUnique({ where: { id: personaId } }),
+        ]);
 
-      if (!user || !faction || !persona) {
-        return { success: false, error: "Invalid user, faction, or persona." };
-      }
+        if (!user || !faction || !persona) {
+          return { success: false, error: "Invalid user, faction, or persona." };
+        }
 
-      // Check if player already has an active story arc for this faction
-      const existing = await db.client.storyArc.findFirst({
-        where: { assignedTo: userId, factionId, status: "active" },
-      });
-      if (existing) {
-        return {
-          success: false,
-          error: `You already have an active story arc: "${existing.title}". Complete or abandon it first.`,
-        };
-      }
+        // Check if player already has an active story arc for this faction
+        const existing = await db.client.storyArc.findFirst({
+          where: { assignedTo: userId, factionId, status: "active" },
+        });
+        if (existing) {
+          return {
+            success: false,
+            error: `You already have an active story arc: "${existing.title}". Complete or abandon it first.`,
+          };
+        }
 
-      const playerLevel = user.progress?.level ?? 1;
+        const playerLevel = user.progress?.level ?? 1;
 
-      // Ask AI to plan the story arc
-      const arcPlan = await this.generateArcPlan(
-        persona,
-        faction,
-        playerLevel,
-        difficulty,
-      );
-
-      if (!arcPlan) {
-        return {
-          success: false,
-          error: "AI failed to generate story arc. Try again.",
-        };
-      }
-
-      // Create the story arc
-      const arc = await db.client.storyArc.create({
-        data: {
-          title: arcPlan.title,
-          description: arcPlan.description,
-          factionId,
-          issuedBy: personaId,
-          assignedTo: userId,
-          status: "active",
-          currentStep: 0,
-          totalSteps: arcPlan.steps.length,
-          steps: arcPlan.steps as any,
-          narrativeContext: {
-            premise: arcPlan.description,
-            completedSteps: [],
-            playerLevel,
-            factionName: faction.name,
-            leaderName: persona.name,
-          } as any,
+        // Ask AI to plan the story arc
+        const arcPlan = await this.generateArcPlan(
+          persona,
+          faction,
+          playerLevel,
           difficulty,
-        },
-      });
+        );
 
-      // Generate the first step's mission
-      await this.generateStepMission(arc.id, 0);
+        if (!arcPlan) {
+          return {
+            success: false,
+            error: "AI failed to generate story arc. Try again.",
+          };
+        }
 
-      this.logger.info(
-        { arcId: arc.id, userId, factionId, steps: arcPlan.steps.length },
-        "Story arc created",
-      );
+        // Create the story arc
+        const arc = await db.client.storyArc.create({
+          data: {
+            title: arcPlan.title,
+            description: arcPlan.description,
+            factionId,
+            issuedBy: personaId,
+            assignedTo: userId,
+            status: "active",
+            currentStep: 0,
+            totalSteps: arcPlan.steps.length,
+            steps: arcPlan.steps as any,
+            narrativeContext: {
+              premise: arcPlan.description,
+              completedSteps: [],
+              playerLevel,
+              factionName: faction.name,
+              leaderName: persona.name,
+            } as any,
+            difficulty,
+          },
+        });
 
-      return { success: true, arcId: arc.id, title: arcPlan.title };
-    } catch (err) {
-      this.logger.error({ err, userId }, "Failed to create story arc");
-      return { success: false, error: "Failed to create story arc." };
-    }
+        // Generate the first step's mission
+        await this.generateStepMission(arc.id, 0);
+
+        this.logger.info(
+          { arcId: arc.id, userId, factionId, steps: arcPlan.steps.length },
+          "Story arc created",
+        );
+
+        return { success: true, arcId: arc.id, title: arcPlan.title };
+      },
+      context: "Create story arc",
+      logger: this.logger,
+      fallback: { success: false, error: "Failed to create story arc." } as { success: boolean; arcId?: string; title?: string; error?: string },
+    })() as unknown as Promise<{ success: boolean; arcId?: string; title?: string; error?: string }>;
   }
 
   // ── Advance story when a mission completes or fails ──
@@ -167,7 +171,8 @@ export class StoryMissionService {
     missionId: string,
     outcome: "completed" | "failed",
   ): Promise<void> {
-    try {
+    await safeExecute({
+      fn: async () => {
       // Find the mission's story arc
       const mission = await db.client.mission.findUnique({
         where: { id: missionId },
@@ -283,9 +288,10 @@ export class StoryMissionService {
 
       // Generate the next step's mission
       await this.generateStepMission(arc.id, nextStepNum);
-    } catch (err) {
-      this.logger.error({ err, missionId }, "Failed to advance story");
-    }
+      },
+      context: "Advance story",
+      logger: this.logger,
+    })();
   }
 
   // ── Generate a mission for a specific story step ──
@@ -373,45 +379,45 @@ export class StoryMissionService {
     // Provision mission infrastructure (target server, objective files, etc.)
     let targetServerId: string | undefined;
     if (this.serverContent) {
-      try {
-        const provision =
-          await this.serverContent.provisionMissionInfrastructure(
-            {
-              title,
-              description,
-              type: "story",
-              difficulty: arc.difficulty,
-              objectives,
-              ...(arc.factionId ? { factionId: arc.factionId } : {}),
-            },
-            arc.assignedTo,
-          );
+      await safeExecute({
+        fn: async () => {
+          const provision =
+            await this.serverContent!.provisionMissionInfrastructure(
+              {
+                title,
+                description,
+                type: "story",
+                difficulty: arc.difficulty,
+                objectives,
+                ...(arc.factionId ? { factionId: arc.factionId } : {}),
+              },
+              arc.assignedTo,
+            );
 
-        if (provision) {
-          targetServerId = provision.targetServerId;
-          for (const patch of provision.objectives) {
-            const obj = objectives[patch.index];
-            if (obj) {
-              obj.metadata = { ...(obj.metadata || {}), ...patch.metadata };
+          if (provision) {
+            targetServerId = provision.targetServerId;
+            for (const patch of provision.objectives) {
+              const obj = objectives[patch.index];
+              if (obj) {
+                obj.metadata = { ...(obj.metadata || {}), ...patch.metadata };
+              }
             }
+            this.logger.info(
+              {
+                arcId,
+                stepNumber,
+                targetServerId: provision.targetServerId,
+                patchedObjectives: provision.objectives.length,
+                plantedFiles: provision.plantedFiles.length,
+              },
+              "Story mission infrastructure provisioned",
+            );
           }
-          this.logger.info(
-            {
-              arcId,
-              stepNumber,
-              targetServerId: provision.targetServerId,
-              patchedObjectives: provision.objectives.length,
-              plantedFiles: provision.plantedFiles.length,
-            },
-            "Story mission infrastructure provisioned",
-          );
-        }
-      } catch (err) {
-        this.logger.warn(
-          { err, arcId, stepNumber },
-          "Failed to provision story mission infrastructure",
-        );
-      }
+        },
+        context: "Provision story mission infrastructure",
+        logger: this.logger,
+        silent: true,
+      })();
     }
 
     // Create the mission
@@ -489,97 +495,91 @@ Available templateIds: first_blood, silent_entry, data_heist, network_sweep, cle
 The last step's successBranch must be "complete".
 For failureBranch: use a step number to skip ahead, "adapt" to create an alternate path, or "fail" to end the arc.`;
 
-    try {
-      const aiResult = await this.aiService.generateResponse(
-        prompt,
-        persona.systemPrompt,
-        undefined,
-        '{ "premise": "string", "steps": [{"title": "string", "description": "string", "objectiveType": "string", "successBranch": "next|complete", "failureBranch": "next|fail|adapt"}] }',
-      );
-      if (!aiResult.success || !aiResult.response) {
-        // Queue for retry — when AI comes back, we can't create the arc retroactively
-        // but we queue for narrative update if an arc was created with fallback data
-        // Note: The caller returns error when null, so no arc to update — skip queue
-        return null;
+    const { enrichWithTopology } = await import("./worldTopologyContext");
+    const enrichedSystemPrompt = await enrichWithTopology(persona.systemPrompt, db.client, this.logger);
+
+    // Extended type that preserves raw fields the validator strips
+    type ArcPlanWithRaw = {
+      premise: string;
+      rawTitle?: string;
+      steps: Array<{
+        title: string;
+        description: string;
+        templateId?: string;
+        successBranch?: string;
+        failureBranch?: string;
+      }>;
+    };
+
+    // Wrapper validator that maps AI's "description" -> "premise" and preserves raw fields
+    const arcPlanValidator = (parsed: any): ArcPlanWithRaw | null => {
+      if (!parsed) return null;
+      if (!parsed.premise && parsed.description) {
+        parsed.premise = parsed.description;
       }
-
-      // Extended type that preserves raw fields the validator strips
-      type ArcPlanWithRaw = {
-        premise: string;
-        rawTitle?: string;
-        steps: Array<{
-          title: string;
-          description: string;
-          templateId?: string;
-          successBranch?: string;
-          failureBranch?: string;
-        }>;
-      };
-
-      // Wrapper validator that maps AI's "description" -> "premise" and preserves raw fields
-      const arcPlanValidator = (parsed: any): ArcPlanWithRaw | null => {
-        if (!parsed) return null;
-        if (!parsed.premise && parsed.description) {
-          parsed.premise = parsed.description;
-        }
-        const validated = validateStoryArcPlan(parsed);
-        if (!validated) return null;
-        // Merge templateId from raw steps + raw title back into the validated result
-        return {
-          ...validated,
-          rawTitle: typeof parsed.title === "string" ? parsed.title : undefined,
-          steps: validated.steps.map((s, i: number) => ({
-            ...s,
-            templateId: (parsed.steps?.[i] as any)?.templateId,
-          })),
-        };
-      };
-
-      const validated = validateOrRetry(aiResult.response, arcPlanValidator);
+      const validated = validateStoryArcPlan(parsed);
       if (!validated) return null;
+      return {
+        ...validated,
+        rawTitle: typeof parsed.title === "string" ? parsed.title : undefined,
+        steps: validated.steps.map((s, i: number) => ({
+          ...s,
+          templateId: (parsed.steps?.[i] as any)?.templateId,
+        })),
+      };
+    };
 
-      // Map validated steps to StoryStep format
-      const steps: StoryStep[] = validated.steps.map((s, i: number) => {
-        // Parse failureBranch: could be a number, "fail", or "adapt"
-        let failureBranch: number | "fail" | "adapt" = "adapt";
-        if (s.failureBranch === "fail" || s.failureBranch === "adapt") {
-          failureBranch = s.failureBranch;
-        } else if (s.failureBranch) {
-          const num = parseInt(s.failureBranch, 10);
-          if (!isNaN(num)) failureBranch = num;
-        }
+    const validated = await safeAI<ArcPlanWithRaw | null>({
+      aiService: this.aiService,
+      prompt,
+      systemPrompt: enrichedSystemPrompt,
+      expectedFormat: '{ "premise": "string", "steps": [{"title": "string", "description": "string", "objectiveType": "string", "successBranch": "next|complete", "failureBranch": "next|fail|adapt"}] }',
+      validate: arcPlanValidator,
+      fallback: null,
+      context: "AI arc plan generation",
+      logger: this.logger,
+    });
 
-        return {
-          stepNumber: i,
-          templateId: s.templateId || "data_heist",
-          title: s.title,
-          narrativeBrief: s.description.substring(0, 300),
-          status: "pending" as const,
-          successBranch:
-            i === validated.steps.length - 1
-              ? ("complete" as const)
-              : (s.successBranch ? parseInt(s.successBranch, 10) || (i + 1) : i + 1),
-          failureBranch,
-        };
-      });
+    if (!validated) return null;
 
-      // Auto-upgrade failure branches: only the FINAL step can have "fail".
-      // Earlier steps get "adapt" so the arc isn't unrecoverable on first mistake.
-      for (let i = 0; i < steps.length - 1; i++) {
-        if (steps[i]!.failureBranch === "fail") {
-          steps[i]!.failureBranch = "adapt";
-        }
+    // Map validated steps to StoryStep format
+    const steps: StoryStep[] = validated.steps.map((s, i: number) => {
+      // Parse failureBranch: could be a number, "fail", or "adapt"
+      let failureBranch: number | "fail" | "adapt" = "adapt";
+      if (s.failureBranch === "fail" || s.failureBranch === "adapt") {
+        failureBranch = s.failureBranch;
+      } else if (s.failureBranch) {
+        const num = parseInt(s.failureBranch, 10);
+        if (!isNaN(num)) failureBranch = num;
       }
 
       return {
-        title: (validated.rawTitle || validated.premise).substring(0, 80),
-        description: validated.premise,
-        steps,
+        stepNumber: i,
+        templateId: s.templateId || "data_heist",
+        title: s.title,
+        narrativeBrief: s.description.substring(0, 300),
+        status: "pending" as const,
+        successBranch:
+          i === validated.steps.length - 1
+            ? ("complete" as const)
+            : (s.successBranch ? parseInt(s.successBranch, 10) || (i + 1) : i + 1),
+        failureBranch,
       };
-    } catch (err) {
-      this.logger.error({ err }, "AI arc plan generation failed");
-      return null;
+    });
+
+    // Auto-upgrade failure branches: only the FINAL step can have "fail".
+    // Earlier steps get "adapt" so the arc isn't unrecoverable on first mistake.
+    for (let i = 0; i < steps.length - 1; i++) {
+      if (steps[i]!.failureBranch === "fail") {
+        steps[i]!.failureBranch = "adapt";
+      }
     }
+
+    return {
+      title: (validated.rawTitle || validated.premise).substring(0, 80),
+      description: validated.premise,
+      steps,
+    };
   }
 
   // ── AI: Generate narrative for a specific step ──
@@ -610,56 +610,36 @@ Write a mission briefing for this step. Respond with JSON:
   "description": "2-3 sentence briefing referencing previous events"
 }`;
 
-    try {
-      const aiResult = await this.aiService.generateResponse(
-        prompt,
-        persona.systemPrompt,
-        undefined,
-        '{ "title": "string (3-80 chars)", "description": "string (10-500 chars)" }',
-      );
-      if (!aiResult.success || !aiResult.response) {
-        // Queue for retry — when AI comes back, update the step mission description
-        const stepMissionId = step.missionId;
-        this.aiService.queueForRetry(prompt, persona.systemPrompt, async (response) => {
-          try {
-            const validated = validateOrRetry(response, validateMissionOutput);
-            // Update the mission if it was already created
-            if (stepMissionId && validated) {
-              await db.client.mission.update({
-                where: { id: stepMissionId },
-                data: { title: validated.title, description: validated.description },
-              });
-            }
-          } catch { /* ignore retry errors */ }
-        });
-        return null;
-      }
+    const { enrichWithTopology } = await import("./worldTopologyContext");
+    const enrichedSystemPrompt = await enrichWithTopology(persona.systemPrompt, db.client, this.logger);
 
-      const validated = validateOrRetry(aiResult.response, validateMissionOutput, this.aiService, {
-        prompt,
-        systemPrompt: persona.systemPrompt,
-        expectedFormat: '{ "title": "string (3-80 chars)", "description": "string (10-500 chars)" }',
-        onSuccess: async (response) => {
-          try {
-            const retryValidated = validateOrRetry(response, validateMissionOutput);
-            if (step.missionId && retryValidated) {
-              await db.client.mission.update({
-                where: { id: step.missionId },
-                data: { title: retryValidated.title, description: retryValidated.description },
-              });
-            }
-          } catch { /* ignore retry errors */ }
-        },
-      });
-      if (!validated) return null;
+    const validated = await safeAI<{ title: string; description: string } | null>({
+      aiService: this.aiService,
+      prompt,
+      systemPrompt: enrichedSystemPrompt,
+      expectedFormat: '{ "title": "string (3-80 chars)", "description": "string (10-500 chars)" }',
+      validate: validateMissionOutput,
+      fallback: () => fallbackStoryStep(step.title),
+      context: "Generate step narrative",
+      logger: this.logger,
+      retry: true,
+      onRetrySuccess: async (retryResult) => {
+        // Update the mission if it was already created
+        if (step.missionId && retryResult) {
+          await db.client.mission.update({
+            where: { id: step.missionId },
+            data: { title: retryResult.title, description: retryResult.description },
+          });
+        }
+      },
+    });
 
-      return {
-        title: validated.title || step.title,
-        description: validated.description || step.narrativeBrief,
-      };
-    } catch {
-      return null;
-    }
+    if (!validated) return null;
+
+    return {
+      title: validated.title || step.title,
+      description: validated.description || step.narrativeBrief,
+    };
   }
 
   // ── AI: Generate an adapted step after failure ──
@@ -686,44 +666,42 @@ Create an adapted follow-up step that accounts for the failure. Respond with JSO
   "narrativeBrief": "What changed because of the failure and what must be done now"
 }`;
 
-    try {
-      const aiResult = await this.aiService.generateResponse(
-        prompt,
-        persona.systemPrompt,
-      );
-      if (!aiResult.success || !aiResult.response) {
-        // Queue for retry — adapted step generation is narrative-only,
-        // but the arc will have failed by then so no action to take
-        // (the arc status is set to "failed" by the caller when this returns null)
-        return null;
-      }
+    const { enrichWithTopology } = await import("./worldTopologyContext");
+    const enrichedSystemPrompt = await enrichWithTopology(persona.systemPrompt, db.client, this.logger);
 
-      const validateAdaptedStep = (parsed: any): { templateId: string; title: string; narrativeBrief: string } | null => {
-        if (!parsed || typeof parsed !== "object") return null;
-        return {
-          templateId: typeof parsed.templateId === "string" ? parsed.templateId : "ghost_protocol",
-          title: (typeof parsed.title === "string" ? parsed.title.trim() : "Contingency Plan").substring(0, 80),
-          narrativeBrief: (typeof parsed.narrativeBrief === "string" ? parsed.narrativeBrief.trim() : "Plans have changed. Adapt.").substring(0, 300),
-        };
-      };
-
-      const validated = validateOrRetry(aiResult.response, validateAdaptedStep);
-      if (!validated) return null;
-
-      const nextNum = context.completedSteps.length + 1;
-
+    const validateAdaptedStep = (parsed: any): { templateId: string; title: string; narrativeBrief: string } | null => {
+      if (!parsed || typeof parsed !== "object") return null;
       return {
-        stepNumber: nextNum,
-        templateId: validated.templateId,
-        title: validated.title,
-        narrativeBrief: validated.narrativeBrief,
-        status: "pending",
-        successBranch: "complete", // Adapted steps lead to completion
-        failureBranch: "fail", // Second failure ends the arc
+        templateId: typeof parsed.templateId === "string" ? parsed.templateId : "ghost_protocol",
+        title: (typeof parsed.title === "string" ? parsed.title.trim() : "Contingency Plan").substring(0, 80),
+        narrativeBrief: (typeof parsed.narrativeBrief === "string" ? parsed.narrativeBrief.trim() : "Plans have changed. Adapt.").substring(0, 300),
       };
-    } catch {
-      return null;
-    }
+    };
+
+    const validated = await safeAI<{ templateId: string; title: string; narrativeBrief: string } | null>({
+      aiService: this.aiService,
+      prompt,
+      systemPrompt: enrichedSystemPrompt,
+      expectedFormat: '{ "templateId": "string", "title": "string", "narrativeBrief": "string" }',
+      validate: validateAdaptedStep,
+      fallback: null,
+      context: "Generate adapted step",
+      logger: this.logger,
+    });
+
+    if (!validated) return null;
+
+    const nextNum = context.completedSteps.length + 1;
+
+    return {
+      stepNumber: nextNum,
+      templateId: validated.templateId,
+      title: validated.title,
+      narrativeBrief: validated.narrativeBrief,
+      status: "pending" as const,
+      successBranch: "complete" as const, // Adapted steps lead to completion
+      failureBranch: "fail" as const, // Second failure ends the arc
+    };
   }
 
   // ── Query helpers ──

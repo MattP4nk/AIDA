@@ -4,6 +4,7 @@ import MissionService from "./missionService";
 import type { Logger } from "pino";
 import { Server as SocketIOServer } from "socket.io";
 import type { FactionKnowledgeService } from "./factionKnowledgeService";
+import { safeExecute } from "../utils/safeExecute";
 
 /**
  * MissionIntegration Service
@@ -151,78 +152,72 @@ export class MissionIntegrationService {
     accessLevel: number,
     method: string,
   ): Promise<void> {
-    try {
-      const hackObjectiveTypes = ["hack", "hack_target", "hack_stealth", "hack_method", "gain_access", "install_backdoor"];
-      const activeMissions = await this.getActiveMissionsWithObjectiveTypes(userId, hackObjectiveTypes);
+    await safeExecute({
+      fn: async () => {
+        const hackObjectiveTypes = ["hack", "hack_target", "hack_stealth", "hack_method", "gain_access", "install_backdoor"];
+        const activeMissions = await this.getActiveMissionsWithObjectiveTypes(userId, hackObjectiveTypes);
 
-      for (const mission of activeMissions) {
-        for (const objective of mission.objectives) {
-          let shouldUpdate = false;
-          let newProgress: number | string | boolean = objective.current;
+        for (const mission of activeMissions) {
+          for (const objective of mission.objectives) {
+            let shouldUpdate = false;
+            let newProgress: number | string | boolean = objective.current;
 
-          const objType = objective.type as string;
+            const objType = objective.type as string;
 
-          if (objType === "hack") {
-            // Generic hack objective - count all successful hacks
-            if (success) {
-              newProgress = (objective.current as number) + 1;
-              shouldUpdate = true;
+            if (objType === "hack") {
+              if (success) {
+                newProgress = (objective.current as number) + 1;
+                shouldUpdate = true;
+              }
+            } else if (objType === "hack_target") {
+              if (success && objective.target === targetId) {
+                newProgress = true;
+                shouldUpdate = true;
+              }
+            } else if (objType === "hack_stealth") {
+              if (success && !detected) {
+                newProgress = (objective.current as number) + 1;
+                shouldUpdate = true;
+              }
+            } else if (objType === "hack_method") {
+              if (success && (objective as any).metadata?.method === method) {
+                newProgress = (objective.current as number) + 1;
+                shouldUpdate = true;
+              }
+            } else if (objType === "gain_access") {
+              if (
+                success &&
+                accessLevel >= ((objective as any).metadata?.minLevel || 1)
+              ) {
+                newProgress = true;
+                shouldUpdate = true;
+              }
+            } else if (objType === "install_backdoor") {
+              if (
+                success &&
+                (method === "backdoor" || method === "rootkit") &&
+                (!objective.target || objective.target === targetId)
+              ) {
+                newProgress = true;
+                shouldUpdate = true;
+              }
             }
-          } else if (objType === "hack_target") {
-            // Specific target hack
-            if (success && objective.target === targetId) {
-              newProgress = true;
-              shouldUpdate = true;
-            }
-          } else if (objType === "hack_stealth") {
-            // Stealth hack (not detected)
-            if (success && !detected) {
-              newProgress = (objective.current as number) + 1;
-              shouldUpdate = true;
-            }
-          } else if (objType === "hack_method") {
-            // Specific hack method
-            if (success && (objective as any).metadata?.method === method) {
-              newProgress = (objective.current as number) + 1;
-              shouldUpdate = true;
-            }
-          } else if (objType === "gain_access") {
-            // Gain access level
-            if (
-              success &&
-              accessLevel >= ((objective as any).metadata?.minLevel || 1)
-            ) {
-              newProgress = true;
-              shouldUpdate = true;
-            }
-          } else if (objType === "install_backdoor") {
-            // Install backdoor on specific server (method must be backdoor or rootkit)
-            if (
-              success &&
-              (method === "backdoor" || method === "rootkit") &&
-              (!objective.target || objective.target === targetId)
-            ) {
-              newProgress = true;
-              shouldUpdate = true;
-            }
-          }
 
-          if (shouldUpdate) {
-            await this.missionService.updateObjective(
-              userId,
-              mission.missionId,
-              objective.id,
-              newProgress,
-            );
+            if (shouldUpdate) {
+              await this.missionService.updateObjective(
+                userId,
+                mission.missionId,
+                objective.id,
+                newProgress,
+              );
+            }
           }
         }
-      }
-    } catch (error) {
-      this.logger.error(
-        { err: error, userId, targetId, hook: "onHackComplete" },
-        "Mission integration error",
-      );
-    }
+      },
+      context: "onHackComplete",
+      logger: this.logger,
+      silent: true,
+    })();
   }
 
   /**
@@ -236,82 +231,76 @@ export class MissionIntegrationService {
     serverId: string,
     _metadata?: any,
   ): Promise<void> {
-    try {
-      const missions = await this.missionService.getPlayerMissions(userId);
-      const activeMissions = missions.filter((m: any) => m.status === "active");
+    await safeExecute({
+      fn: async () => {
+        const missions = await this.missionService.getPlayerMissions(userId);
+        const activeMissions = missions.filter((m: any) => m.status === "active");
 
-      for (const mission of activeMissions) {
-        if (!mission.objectives || !Array.isArray(mission.objectives)) continue;
+        for (const mission of activeMissions) {
+          if (!mission.objectives || !Array.isArray(mission.objectives)) continue;
 
-        for (const objective of mission.objectives) {
-          let shouldUpdate = false;
-          let newProgress: number | string | boolean = objective.current;
+          for (const objective of mission.objectives) {
+            let shouldUpdate = false;
+            let newProgress: number | string | boolean = objective.current;
 
-          const objType = objective.type as string;
+            const objType = objective.type as string;
 
-          if (objType === "steal") {
-            // Steal specific file
-            if (operation === "download" && objective.target === fileId) {
-              newProgress = true;
-              shouldUpdate = true;
-            }
-          } else if (objType === "steal_count") {
-            // Steal multiple files
-            if (operation === "download") {
-              newProgress = (objective.current as number) + 1;
-              shouldUpdate = true;
-            }
-          } else if (objType === "upload_file") {
-            // Upload file to specific server
-            if (
-              operation === "upload" &&
-              (objective as any).metadata?.serverId === serverId
-            ) {
-              newProgress = true;
-              shouldUpdate = true;
-            }
-          } else if (objType === "delete_file") {
-            // Delete specific file
-            if (operation === "delete" && objective.target === fileId) {
-              newProgress = true;
-              shouldUpdate = true;
-            }
-          } else if (objType === "download_file") {
-            // Download specific file to home server
-            if (operation === "download") {
-              const meta = (objective as any).metadata;
-              if (meta?.fileId === fileId || !meta?.fileId) {
+            if (objType === "steal") {
+              if (operation === "download" && objective.target === fileId) {
                 newProgress = true;
                 shouldUpdate = true;
               }
-            }
-          } else if (objType === "exfiltrate_data") {
-            // Download specific file from a specific server
-            if (operation === "download") {
-              const meta = (objective as any).metadata;
-              if (meta?.serverId === serverId && meta?.fileId === fileId) {
+            } else if (objType === "steal_count") {
+              if (operation === "download") {
+                newProgress = (objective.current as number) + 1;
+                shouldUpdate = true;
+              }
+            } else if (objType === "upload_file") {
+              if (
+                operation === "upload" &&
+                (objective as any).metadata?.serverId === serverId
+              ) {
                 newProgress = true;
                 shouldUpdate = true;
               }
+            } else if (objType === "delete_file") {
+              if (operation === "delete" && objective.target === fileId) {
+                newProgress = true;
+                shouldUpdate = true;
+              }
+            } else if (objType === "download_file") {
+              if (operation === "download") {
+                const meta = (objective as any).metadata;
+                if (meta?.fileId === fileId || !meta?.fileId) {
+                  newProgress = true;
+                  shouldUpdate = true;
+                }
+              }
+            } else if (objType === "exfiltrate_data") {
+              if (operation === "download") {
+                const meta = (objective as any).metadata;
+                if (meta?.serverId === serverId && meta?.fileId === fileId) {
+                  newProgress = true;
+                  shouldUpdate = true;
+                }
+              }
             }
-          }
 
-          if (shouldUpdate) {
-            await this.missionService.updateObjective(
-              userId,
-              mission.missionId,
-              objective.id,
-              newProgress,
-            );
+            if (shouldUpdate) {
+              await this.missionService.updateObjective(
+                userId,
+                mission.missionId,
+                objective.id,
+                newProgress,
+              );
+            }
           }
         }
-      }
-    } catch (error) {
-      this.logger.error(
-        { err: error, userId, operation, fileId, hook: "onFileOperation" },
-        "Mission integration error",
-      );
-    }
+      },
+      context: "onFileOperation",
+      logger: this.logger,
+      silent: true,
+    })();
   }
 
   /**
@@ -323,47 +312,45 @@ export class MissionIntegrationService {
     recipientId: string,
     _messageId: string,
   ): Promise<void> {
-    try {
-      const missions = await this.missionService.getPlayerMissions(userId);
-      const activeMissions = missions.filter((m: any) => m.status === "active");
+    await safeExecute({
+      fn: async () => {
+        const missions = await this.missionService.getPlayerMissions(userId);
+        const activeMissions = missions.filter((m: any) => m.status === "active");
 
-      for (const mission of activeMissions) {
-        if (!mission.objectives || !Array.isArray(mission.objectives)) continue;
+        for (const mission of activeMissions) {
+          if (!mission.objectives || !Array.isArray(mission.objectives)) continue;
 
-        for (const objective of mission.objectives) {
-          let shouldUpdate = false;
-          let newProgress: number | string | boolean = objective.current;
+          for (const objective of mission.objectives) {
+            let shouldUpdate = false;
+            let newProgress: number | string | boolean = objective.current;
 
-          const objType = objective.type as string;
+            const objType = objective.type as string;
 
-          if (objType === "message") {
-            // Send any message
-            newProgress = (objective.current as number) + 1;
-            shouldUpdate = true;
-          } else if (objType === "contact_player") {
-            // Contact specific player
-            if (objective.target === recipientId) {
-              newProgress = true;
+            if (objType === "message") {
+              newProgress = (objective.current as number) + 1;
               shouldUpdate = true;
+            } else if (objType === "contact_player") {
+              if (objective.target === recipientId) {
+                newProgress = true;
+                shouldUpdate = true;
+              }
+            }
+
+            if (shouldUpdate) {
+              await this.missionService.updateObjective(
+                userId,
+                mission.missionId,
+                objective.id,
+                newProgress,
+              );
             }
           }
-
-          if (shouldUpdate) {
-            await this.missionService.updateObjective(
-              userId,
-              mission.missionId,
-              objective.id,
-              newProgress,
-            );
-          }
         }
-      }
-    } catch (error) {
-      this.logger.error(
-        { err: error, userId, recipientId, hook: "onMessageSent" },
-        "Mission integration error",
-      );
-    }
+      },
+      context: "onMessageSent",
+      logger: this.logger,
+      silent: true,
+    })();
   }
 
   /**
@@ -376,74 +363,68 @@ export class MissionIntegrationService {
     serverType: string,
     serverMeta?: { networkId?: string; role?: string },
   ): Promise<void> {
-    try {
-      const missions = await this.missionService.getPlayerMissions(userId);
-      const activeMissions = missions.filter((m: any) => m.status === "active");
+    await safeExecute({
+      fn: async () => {
+        const missions = await this.missionService.getPlayerMissions(userId);
+        const activeMissions = missions.filter((m: any) => m.status === "active");
 
-      for (const mission of activeMissions) {
-        if (!mission.objectives || !Array.isArray(mission.objectives)) continue;
+        for (const mission of activeMissions) {
+          if (!mission.objectives || !Array.isArray(mission.objectives)) continue;
 
-        for (const objective of mission.objectives) {
-          let shouldUpdate = false;
-          let newProgress: number | string | boolean = objective.current;
+          for (const objective of mission.objectives) {
+            let shouldUpdate = false;
+            let newProgress: number | string | boolean = objective.current;
 
-          const objType = objective.type as string;
+            const objType = objective.type as string;
 
-          if (objType === "explore") {
-            // Connect to any server
-            newProgress = (objective.current as number) + 1;
-            shouldUpdate = true;
-          } else if (objType === "connect_server") {
-            // Connect to specific server
-            if (objective.target === serverId) {
-              newProgress = true;
-              shouldUpdate = true;
-            }
-          } else if (objType === "discover_server_type") {
-            // Discover specific server type
-            if ((objective as any).metadata?.serverType === serverType) {
+            if (objType === "explore") {
               newProgress = (objective.current as number) + 1;
               shouldUpdate = true;
-            }
-          } else if (objType === "infiltrate_network") {
-            // Reach a server deep inside a specific network
-            const meta = (objective as any).metadata;
-            if (
-              serverMeta?.networkId &&
-              meta?.networkId === serverMeta.networkId
-            ) {
-              // Check optional targetRole constraint
-              const roleMatch = !meta.targetRole || serverMeta.role === meta.targetRole;
-              if (roleMatch) {
+            } else if (objType === "connect_server") {
+              if (objective.target === serverId) {
+                newProgress = true;
+                shouldUpdate = true;
+              }
+            } else if (objType === "discover_server_type") {
+              if ((objective as any).metadata?.serverType === serverType) {
+                newProgress = (objective.current as number) + 1;
+                shouldUpdate = true;
+              }
+            } else if (objType === "infiltrate_network") {
+              const meta = (objective as any).metadata;
+              if (
+                serverMeta?.networkId &&
+                meta?.networkId === serverMeta.networkId
+              ) {
+                const roleMatch = !meta.targetRole || serverMeta.role === meta.targetRole;
+                if (roleMatch) {
+                  newProgress = true;
+                  shouldUpdate = true;
+                }
+              }
+            } else if (objType === "trace_connection") {
+              const meta = (objective as any).metadata;
+              if (meta?.serverId === serverId) {
                 newProgress = true;
                 shouldUpdate = true;
               }
             }
-          } else if (objType === "trace_connection") {
-            // Discover a specific server by following network clues
-            const meta = (objective as any).metadata;
-            if (meta?.serverId === serverId) {
-              newProgress = true;
-              shouldUpdate = true;
+
+            if (shouldUpdate) {
+              await this.missionService.updateObjective(
+                userId,
+                mission.missionId,
+                objective.id,
+                newProgress,
+              );
             }
           }
-
-          if (shouldUpdate) {
-            await this.missionService.updateObjective(
-              userId,
-              mission.missionId,
-              objective.id,
-              newProgress,
-            );
-          }
         }
-      }
-    } catch (error) {
-      this.logger.error(
-        { err: error, userId, serverId, hook: "onServerConnect" },
-        "Mission integration error",
-      );
-    }
+      },
+      context: "onServerConnect",
+      logger: this.logger,
+      silent: true,
+    })();
   }
 
   /**
@@ -456,53 +437,50 @@ export class MissionIntegrationService {
     _forumId: string,
     threadId?: string,
   ): Promise<void> {
-    try {
-      const missions = await this.missionService.getPlayerMissions(userId);
-      const activeMissions = missions.filter((m: any) => m.status === "active");
+    await safeExecute({
+      fn: async () => {
+        const missions = await this.missionService.getPlayerMissions(userId);
+        const activeMissions = missions.filter((m: any) => m.status === "active");
 
-      for (const mission of activeMissions) {
-        if (!mission.objectives || !Array.isArray(mission.objectives)) continue;
+        for (const mission of activeMissions) {
+          if (!mission.objectives || !Array.isArray(mission.objectives)) continue;
 
-        for (const objective of mission.objectives) {
-          let shouldUpdate = false;
-          let newProgress: number | string | boolean = objective.current;
+          for (const objective of mission.objectives) {
+            let shouldUpdate = false;
+            let newProgress: number | string | boolean = objective.current;
 
-          const objType = objective.type as string;
+            const objType = objective.type as string;
 
-          if (objType === "forum_post") {
-            // Make any forum post
-            if (activityType === "post") {
+            if (objType === "forum_post") {
+              if (activityType === "post") {
+                newProgress = (objective.current as number) + 1;
+                shouldUpdate = true;
+              }
+            } else if (objType === "forum_reply") {
+              if (activityType === "reply" && objective.target === threadId) {
+                newProgress = true;
+                shouldUpdate = true;
+              }
+            } else if (objType === "forum_interaction") {
               newProgress = (objective.current as number) + 1;
               shouldUpdate = true;
             }
-          } else if (objType === "forum_reply") {
-            // Reply to specific thread
-            if (activityType === "reply" && objective.target === threadId) {
-              newProgress = true;
-              shouldUpdate = true;
-            }
-          } else if (objType === "forum_interaction") {
-            // Any forum interaction
-            newProgress = (objective.current as number) + 1;
-            shouldUpdate = true;
-          }
 
-          if (shouldUpdate) {
-            await this.missionService.updateObjective(
-              userId,
-              mission.missionId,
-              objective.id,
-              newProgress,
-            );
+            if (shouldUpdate) {
+              await this.missionService.updateObjective(
+                userId,
+                mission.missionId,
+                objective.id,
+                newProgress,
+              );
+            }
           }
         }
-      }
-    } catch (error) {
-      this.logger.error(
-        { err: error, userId, activityType, hook: "onForumActivity" },
-        "Mission integration error",
-      );
-    }
+      },
+      context: "onForumActivity",
+      logger: this.logger,
+      silent: true,
+    })();
   }
 
   /**
@@ -515,50 +493,48 @@ export class MissionIntegrationService {
     newLevel: number,
     xpGained: number,
   ): Promise<void> {
-    try {
-      const missions = await this.missionService.getPlayerMissions(userId);
-      const activeMissions = missions.filter((m: any) => m.status === "active");
+    await safeExecute({
+      fn: async () => {
+        const missions = await this.missionService.getPlayerMissions(userId);
+        const activeMissions = missions.filter((m: any) => m.status === "active");
 
-      for (const mission of activeMissions) {
-        if (!mission.objectives || !Array.isArray(mission.objectives)) continue;
+        for (const mission of activeMissions) {
+          if (!mission.objectives || !Array.isArray(mission.objectives)) continue;
 
-        for (const objective of mission.objectives) {
-          let shouldUpdate = false;
-          let newProgress: number | string | boolean = objective.current;
+          for (const objective of mission.objectives) {
+            let shouldUpdate = false;
+            let newProgress: number | string | boolean = objective.current;
 
-          const objType = objective.type as string;
+            const objType = objective.type as string;
 
-          if (objType === "skill_level") {
-            // Reach specific skill level
-            if (
-              (objective as any).metadata?.skill === skillName &&
-              newLevel >= (objective.target as number)
-            ) {
-              newProgress = newLevel;
+            if (objType === "skill_level") {
+              if (
+                (objective as any).metadata?.skill === skillName &&
+                newLevel >= (objective.target as number)
+              ) {
+                newProgress = newLevel;
+                shouldUpdate = true;
+              }
+            } else if (objType === "gain_xp") {
+              newProgress = (objective.current as number) + xpGained;
               shouldUpdate = true;
             }
-          } else if (objType === "gain_xp") {
-            // Gain XP
-            newProgress = (objective.current as number) + xpGained;
-            shouldUpdate = true;
-          }
 
-          if (shouldUpdate) {
-            await this.missionService.updateObjective(
-              userId,
-              mission.missionId,
-              objective.id,
-              newProgress,
-            );
+            if (shouldUpdate) {
+              await this.missionService.updateObjective(
+                userId,
+                mission.missionId,
+                objective.id,
+                newProgress,
+              );
+            }
           }
         }
-      }
-    } catch (error) {
-      this.logger.error(
-        { err: error, userId, skillName, hook: "onSkillUpdate" },
-        "Mission integration error",
-      );
-    }
+      },
+      context: "onSkillUpdate",
+      logger: this.logger,
+      silent: true,
+    })();
   }
 
   /**
@@ -570,49 +546,47 @@ export class MissionIntegrationService {
     amount: number,
     type: "earned" | "spent",
   ): Promise<void> {
-    try {
-      const missions = await this.missionService.getPlayerMissions(userId);
-      const activeMissions = missions.filter((m: any) => m.status === "active");
+    await safeExecute({
+      fn: async () => {
+        const missions = await this.missionService.getPlayerMissions(userId);
+        const activeMissions = missions.filter((m: any) => m.status === "active");
 
-      for (const mission of activeMissions) {
-        if (!mission.objectives || !Array.isArray(mission.objectives)) continue;
+        for (const mission of activeMissions) {
+          if (!mission.objectives || !Array.isArray(mission.objectives)) continue;
 
-        for (const objective of mission.objectives) {
-          let shouldUpdate = false;
-          let newProgress: number | string | boolean = objective.current;
+          for (const objective of mission.objectives) {
+            let shouldUpdate = false;
+            let newProgress: number | string | boolean = objective.current;
 
-          const objType = objective.type as string;
+            const objType = objective.type as string;
 
-          if (objType === "earn_credits") {
-            // Earn credits
-            if (type === "earned") {
-              newProgress = (objective.current as number) + amount;
-              shouldUpdate = true;
+            if (objType === "earn_credits") {
+              if (type === "earned") {
+                newProgress = (objective.current as number) + amount;
+                shouldUpdate = true;
+              }
+            } else if (objType === "spend_credits") {
+              if (type === "spent") {
+                newProgress = (objective.current as number) + amount;
+                shouldUpdate = true;
+              }
             }
-          } else if (objType === "spend_credits") {
-            // Spend credits
-            if (type === "spent") {
-              newProgress = (objective.current as number) + amount;
-              shouldUpdate = true;
-            }
-          }
 
-          if (shouldUpdate) {
-            await this.missionService.updateObjective(
-              userId,
-              mission.missionId,
-              objective.id,
-              newProgress,
-            );
+            if (shouldUpdate) {
+              await this.missionService.updateObjective(
+                userId,
+                mission.missionId,
+                objective.id,
+                newProgress,
+              );
+            }
           }
         }
-      }
-    } catch (error) {
-      this.logger.error(
-        { err: error, userId, amount, type, hook: "onCreditsTransaction" },
-        "Mission integration error",
-      );
-    }
+      },
+      context: "onCreditsTransaction",
+      logger: this.logger,
+      silent: true,
+    })();
   }
 
   /**
@@ -621,66 +595,70 @@ export class MissionIntegrationService {
    */
   public async onFactionEvent(
     userId: string,
-    eventType: "join" | "leave" | "mission_complete" | "reputation_gain",
-    factionId: string,
+    eventType: "join" | "leave" | "neutral" | "mission_complete" | "reputation_gain",
+    factionId: string | null,
     metadata?: any,
   ): Promise<void> {
-    try {
-      const missions = await this.missionService.getPlayerMissions(userId);
-      const activeMissions = missions.filter((m: any) => m.status === "active");
+    await safeExecute({
+      fn: async () => {
+        const missions = await this.missionService.getPlayerMissions(userId);
+        const activeMissions = missions.filter((m: any) => m.status === "active");
 
-      for (const mission of activeMissions) {
-        if (!mission.objectives || !Array.isArray(mission.objectives)) continue;
+        for (const mission of activeMissions) {
+          if (!mission.objectives || !Array.isArray(mission.objectives)) continue;
 
-        for (const objective of mission.objectives) {
-          let shouldUpdate = false;
-          let newProgress: number | string | boolean = objective.current;
+          for (const objective of mission.objectives) {
+            let shouldUpdate = false;
+            let newProgress: number | string | boolean = objective.current;
 
-          const objType = objective.type as string;
+            const objType = objective.type as string;
 
-          if (objType === "join_faction") {
-            // Join specific faction
-            if (eventType === "join" && objective.target === factionId) {
-              newProgress = true;
-              shouldUpdate = true;
+            if (objType === "join_faction") {
+              if (eventType === "join") {
+                if (objective.target === true || objective.target === factionId) {
+                  newProgress = true;
+                  shouldUpdate = true;
+                }
+              }
+            } else if (objType === "faction_choice") {
+              if (eventType === "join" || eventType === "neutral") {
+                newProgress = true;
+                shouldUpdate = true;
+              }
+            } else if (objType === "faction_reputation") {
+              if (
+                eventType === "reputation_gain" &&
+                (objective as any).metadata?.factionId === factionId
+              ) {
+                newProgress =
+                  (objective.current as number) + (metadata?.amount || 0);
+                shouldUpdate = true;
+              }
+            } else if (objType === "faction_mission") {
+              if (
+                eventType === "mission_complete" &&
+                (objective as any).metadata?.factionId === factionId
+              ) {
+                newProgress = (objective.current as number) + 1;
+                shouldUpdate = true;
+              }
             }
-          } else if (objType === "faction_reputation") {
-            // Gain faction reputation
-            if (
-              eventType === "reputation_gain" &&
-              (objective as any).metadata?.factionId === factionId
-            ) {
-              newProgress =
-                (objective.current as number) + (metadata?.amount || 0);
-              shouldUpdate = true;
-            }
-          } else if (objType === "faction_mission") {
-            // Complete faction mission
-            if (
-              eventType === "mission_complete" &&
-              (objective as any).metadata?.factionId === factionId
-            ) {
-              newProgress = (objective.current as number) + 1;
-              shouldUpdate = true;
-            }
-          }
 
-          if (shouldUpdate) {
-            await this.missionService.updateObjective(
-              userId,
-              mission.missionId,
-              objective.id,
-              newProgress,
-            );
+            if (shouldUpdate) {
+              await this.missionService.updateObjective(
+                userId,
+                mission.missionId,
+                objective.id,
+                newProgress,
+              );
+            }
           }
         }
-      }
-    } catch (error) {
-      this.logger.error(
-        { err: error, userId, eventType, factionId, hook: "onFactionEvent" },
-        "Mission integration error",
-      );
-    }
+      },
+      context: "onFactionEvent",
+      logger: this.logger,
+      silent: true,
+    })();
   }
 
   // ==================== UTILITY METHODS ====================
@@ -693,33 +671,32 @@ export class MissionIntegrationService {
     userId: string,
     missionId: string,
   ): Promise<ObjectiveValidationResult[]> {
-    try {
-      const missions = await this.missionService.getPlayerMissions(userId);
-      const mission = missions.find((m: any) => m.missionId === missionId);
+    return (await safeExecute({
+      fn: async () => {
+        const missions = await this.missionService.getPlayerMissions(userId);
+        const mission = missions.find((m: any) => m.missionId === missionId);
 
-      if (!mission || !mission.objectives) {
-        return [];
-      }
+        if (!mission || !mission.objectives) {
+          return [];
+        }
 
-      const results: ObjectiveValidationResult[] = [];
+        const results: ObjectiveValidationResult[] = [];
 
-      for (const objective of mission.objectives) {
-        results.push({
-          missionId,
-          objectiveId: objective.id,
-          completed: objective.completed,
-          progress: objective.current,
-        });
-      }
+        for (const objective of mission.objectives) {
+          results.push({
+            missionId,
+            objectiveId: objective.id,
+            completed: objective.completed,
+            progress: objective.current,
+          });
+        }
 
-      return results;
-    } catch (error) {
-      this.logger.error(
-        { err: error, userId, missionId, hook: "validateMissionObjectives" },
-        "Mission integration error",
-      );
-      return [];
-    }
+        return results;
+      },
+      context: "validateMissionObjectives",
+      logger: this.logger,
+      fallback: [] as ObjectiveValidationResult[],
+    })()) ?? [];
   }
 
   /**
@@ -748,30 +725,30 @@ export class MissionIntegrationService {
    * Useful for periodic background checks
    */
   public async checkAllActiveMissions(userId: string): Promise<void> {
-    try {
-      const missions = await this.missionService.getPlayerMissions(userId);
-      const activeMissions = missions.filter((m: any) => m.status === "active");
+    await safeExecute({
+      fn: async () => {
+        const missions = await this.missionService.getPlayerMissions(userId);
+        const activeMissions = missions.filter((m: any) => m.status === "active");
 
-      for (const mission of activeMissions) {
-        // Check expiration
-        if (mission.expiresAt && new Date(mission.expiresAt) < new Date()) {
-          await this.missionService.expireMission(userId, mission.missionId);
-          await this.sendNotification(userId, "mission_expired", {
-            missionId: mission.missionId,
-            status: "expired",
-            message: `Mission "${(mission as any).title}" has expired`,
-          });
+        for (const mission of activeMissions) {
+          // Check expiration
+          if (mission.expiresAt && new Date(mission.expiresAt) < new Date()) {
+            await this.missionService.expireMission(userId, mission.missionId);
+            await this.sendNotification(userId, "mission_expired", {
+              missionId: mission.missionId,
+              status: "expired",
+              message: `Mission "${(mission as any).title}" has expired`,
+            });
+          }
+
+          // Validate objectives
+          await this.validateMissionObjectives(userId, mission.missionId);
         }
-
-        // Validate objectives
-        await this.validateMissionObjectives(userId, mission.missionId);
-      }
-    } catch (error) {
-      this.logger.error(
-        { err: error, userId, hook: "checkAllActiveMissions" },
-        "Mission integration error",
-      );
-    }
+      },
+      context: "checkAllActiveMissions",
+      logger: this.logger,
+      silent: true,
+    })();
   }
 
   // ==================== FACTION KNOWLEDGE TRACKING ====================
@@ -838,25 +815,27 @@ export class MissionIntegrationService {
     encoding: string,
     _decodedText: string,
   ): Promise<void> {
-    try {
-      const missions = await this.missionService.getPlayerMissions(userId);
-      const activeMissions = missions.filter((m: any) => m.status === "active");
+    await safeExecute({
+      fn: async () => {
+        const missions = await this.missionService.getPlayerMissions(userId);
+        const activeMissions = missions.filter((m: any) => m.status === "active");
 
-      for (const mission of activeMissions) {
-        if (!mission.objectives || !Array.isArray(mission.objectives)) continue;
+        for (const mission of activeMissions) {
+          if (!mission.objectives || !Array.isArray(mission.objectives)) continue;
 
-        for (const objective of mission.objectives) {
-          if ((objective.type as string) !== "decode_content") continue;
-          const meta = (objective as any).metadata;
-          // Match if encoding matches or no specific encoding required
-          if (!meta?.encoding || meta.encoding === encoding) {
-            await this.missionService.updateObjective(userId, mission.missionId, objective.id, true);
+          for (const objective of mission.objectives) {
+            if ((objective.type as string) !== "decode_content") continue;
+            const meta = (objective as any).metadata;
+            if (!meta?.encoding || meta.encoding === encoding) {
+              await this.missionService.updateObjective(userId, mission.missionId, objective.id, true);
+            }
           }
         }
-      }
-    } catch (error) {
-      this.logger.error({ err: error, userId, hook: "onDecodeSuccess" }, "Mission integration error");
-    }
+      },
+      context: "onDecodeSuccess",
+      logger: this.logger,
+      silent: true,
+    })();
   }
 
   /**
@@ -868,27 +847,29 @@ export class MissionIntegrationService {
     defenseType: string,
     level: number,
   ): Promise<void> {
-    try {
-      const missions = await this.missionService.getPlayerMissions(userId);
-      const activeMissions = missions.filter((m: any) => m.status === "active");
+    await safeExecute({
+      fn: async () => {
+        const missions = await this.missionService.getPlayerMissions(userId);
+        const activeMissions = missions.filter((m: any) => m.status === "active");
 
-      for (const mission of activeMissions) {
-        if (!mission.objectives || !Array.isArray(mission.objectives)) continue;
+        for (const mission of activeMissions) {
+          if (!mission.objectives || !Array.isArray(mission.objectives)) continue;
 
-        for (const objective of mission.objectives) {
-          if ((objective.type as string) !== "defend_home") continue;
-          const meta = (objective as any).metadata;
-          // Match if defense type matches (or any defense)
-          if (!meta?.defenseType || meta.defenseType === defenseType) {
-            if (!meta?.minLevel || level >= meta.minLevel) {
-              await this.missionService.updateObjective(userId, mission.missionId, objective.id, true);
+          for (const objective of mission.objectives) {
+            if ((objective.type as string) !== "defend_home") continue;
+            const meta = (objective as any).metadata;
+            if (!meta?.defenseType || meta.defenseType === defenseType) {
+              if (!meta?.minLevel || level >= meta.minLevel) {
+                await this.missionService.updateObjective(userId, mission.missionId, objective.id, true);
+              }
             }
           }
         }
-      }
-    } catch (error) {
-      this.logger.error({ err: error, userId, hook: "onDefenseEvent" }, "Mission integration error");
-    }
+      },
+      context: "onDefenseEvent",
+      logger: this.logger,
+      silent: true,
+    })();
   }
 
   /**
@@ -899,24 +880,27 @@ export class MissionIntegrationService {
     userId: string,
     targetFactionId?: string,
   ): Promise<void> {
-    try {
-      const missions = await this.missionService.getPlayerMissions(userId);
-      const activeMissions = missions.filter((m: any) => m.status === "active");
+    await safeExecute({
+      fn: async () => {
+        const missions = await this.missionService.getPlayerMissions(userId);
+        const activeMissions = missions.filter((m: any) => m.status === "active");
 
-      for (const mission of activeMissions) {
-        if (!mission.objectives || !Array.isArray(mission.objectives)) continue;
+        for (const mission of activeMissions) {
+          if (!mission.objectives || !Array.isArray(mission.objectives)) continue;
 
-        for (const objective of mission.objectives) {
-          if ((objective.type as string) !== "claim_bounty") continue;
-          const meta = (objective as any).metadata;
-          if (!meta?.targetFactionId || meta.targetFactionId === targetFactionId) {
-            await this.missionService.updateObjective(userId, mission.missionId, objective.id, true);
+          for (const objective of mission.objectives) {
+            if ((objective.type as string) !== "claim_bounty") continue;
+            const meta = (objective as any).metadata;
+            if (!meta?.targetFactionId || meta.targetFactionId === targetFactionId) {
+              await this.missionService.updateObjective(userId, mission.missionId, objective.id, true);
+            }
           }
         }
-      }
-    } catch (error) {
-      this.logger.error({ err: error, userId, hook: "onBountyCompleted" }, "Mission integration error");
-    }
+      },
+      context: "onBountyCompleted",
+      logger: this.logger,
+      silent: true,
+    })();
   }
 
   /**
@@ -924,22 +908,25 @@ export class MissionIntegrationService {
    * Updates objectives: survive_trace
    */
   public async onTraceEvaded(userId: string): Promise<void> {
-    try {
-      const missions = await this.missionService.getPlayerMissions(userId);
-      const activeMissions = missions.filter((m: any) => m.status === "active");
+    await safeExecute({
+      fn: async () => {
+        const missions = await this.missionService.getPlayerMissions(userId);
+        const activeMissions = missions.filter((m: any) => m.status === "active");
 
-      for (const mission of activeMissions) {
-        if (!mission.objectives || !Array.isArray(mission.objectives)) continue;
+        for (const mission of activeMissions) {
+          if (!mission.objectives || !Array.isArray(mission.objectives)) continue;
 
-        for (const objective of mission.objectives) {
-          if ((objective.type as string) !== "survive_trace") continue;
-          const newProgress = ((objective.current as number) || 0) + 1;
-          await this.missionService.updateObjective(userId, mission.missionId, objective.id, newProgress);
+          for (const objective of mission.objectives) {
+            if ((objective.type as string) !== "survive_trace") continue;
+            const newProgress = ((objective.current as number) || 0) + 1;
+            await this.missionService.updateObjective(userId, mission.missionId, objective.id, newProgress);
+          }
         }
-      }
-    } catch (error) {
-      this.logger.error({ err: error, userId, hook: "onTraceEvaded" }, "Mission integration error");
-    }
+      },
+      context: "onTraceEvaded",
+      logger: this.logger,
+      silent: true,
+    })();
   }
 
   /**
@@ -947,22 +934,57 @@ export class MissionIntegrationService {
    * Updates objectives: scan_subnet
    */
   public async onSubnetUsed(userId: string): Promise<void> {
-    try {
-      const missions = await this.missionService.getPlayerMissions(userId);
-      const activeMissions = missions.filter((m: any) => m.status === "active");
+    await safeExecute({
+      fn: async () => {
+        const missions = await this.missionService.getPlayerMissions(userId);
+        const activeMissions = missions.filter((m: any) => m.status === "active");
 
-      for (const mission of activeMissions) {
-        if (!mission.objectives || !Array.isArray(mission.objectives)) continue;
+        for (const mission of activeMissions) {
+          if (!mission.objectives || !Array.isArray(mission.objectives)) continue;
 
-        for (const objective of mission.objectives) {
-          if ((objective.type as string) !== "scan_subnet") continue;
-          const newProgress = ((objective.current as number) || 0) + 1;
-          await this.missionService.updateObjective(userId, mission.missionId, objective.id, newProgress);
+          for (const objective of mission.objectives) {
+            if ((objective.type as string) !== "scan_subnet") continue;
+            const newProgress = ((objective.current as number) || 0) + 1;
+            await this.missionService.updateObjective(userId, mission.missionId, objective.id, newProgress);
+          }
         }
-      }
-    } catch (error) {
-      this.logger.error({ err: error, userId, hook: "onSubnetUsed" }, "Mission integration error");
-    }
+      },
+      context: "onSubnetUsed",
+      logger: this.logger,
+      silent: true,
+    })();
+  }
+
+  /**
+   * Handle intel report submission
+   * Updates objectives: report_intel
+   */
+  public async onReportSubmitted(
+    userId: string,
+    reportType: "server" | "file" | "mission",
+  ): Promise<void> {
+    await safeExecute({
+      fn: async () => {
+        const missions = await this.missionService.getPlayerMissions(userId);
+        const activeMissions = missions.filter((m: any) => m.status === "active");
+
+        for (const mission of activeMissions) {
+          if (!mission.objectives || !Array.isArray(mission.objectives)) continue;
+
+          for (const objective of mission.objectives) {
+            if ((objective.type as string) !== "report_intel") continue;
+            const meta = (objective as any).metadata;
+            if (!meta?.reportType || meta.reportType === reportType) {
+              const newProgress = ((objective.current as number) || 0) + 1;
+              await this.missionService.updateObjective(userId, mission.missionId, objective.id, newProgress);
+            }
+          }
+        }
+      },
+      context: "onReportSubmitted",
+      logger: this.logger,
+      silent: true,
+    })();
   }
 }
 

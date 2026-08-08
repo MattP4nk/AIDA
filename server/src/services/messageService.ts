@@ -26,6 +26,7 @@ import {
   AI_SERVICE,
   MESSAGE_ENCRYPTION_SERVICE,
 } from "../di/tokens";
+import { safeExecute } from "../utils/safeExecute";
 import type { MessageEncryptionService } from "./messageEncryptionService";
 import type MissionIntegrationService from "./missionIntegration";
 import type { AIService } from "./aiService";
@@ -874,7 +875,8 @@ export class MessageService {
 
       return true;
     } catch (error) {
-      this.logger.error({ err: error }, "Real-time delivery error");
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.logger.debug?.({ err, context: "deliverMessageRealtime" }, `[deliverMessageRealtime] ${err.message}`);
       return false;
     }
   }
@@ -886,14 +888,17 @@ export class MessageService {
     senderId: string,
     messageId: string,
   ): Promise<void> {
-    try {
-      this.io.to(`user:${senderId}`).emit("message:read_receipt", {
-        messageId,
-        readAt: new Date(),
-      });
-    } catch (error) {
-      this.logger.error({ err: error }, "Read receipt error");
-    }
+    await safeExecute({
+      fn: async () => {
+        this.io.to(`user:${senderId}`).emit("message:read_receipt", {
+          messageId,
+          readAt: new Date(),
+        });
+      },
+      context: "Send read receipt",
+      logger: this.logger,
+      silent: true,
+    })();
   }
 
   /**
@@ -1014,26 +1019,34 @@ export class MessageService {
    * PHASE 5: Creates user accounts for AI personas to send messages
    */
   private async getAIUserId(personaId: string): Promise<string> {
-    const aiUsername = `AI_${personaId.substring(0, 8)}`;
+    const aiId = `ai_${personaId}`;
 
-    const aiUser = await prisma.user.findFirst({
-      where: { username: aiUsername },
-    });
+    // Check by ID first (fastest)
+    const byId = await prisma.user.findUnique({ where: { id: aiId }, select: { id: true } });
+    if (byId) return byId.id;
 
-    if (aiUser) {
-      return aiUser.id;
-    }
-
-    // Get persona info for better naming
+    // Check by persona name (seed may have created with different ID)
     const persona = await prisma.aIPersona.findUnique({
       where: { id: personaId },
+      select: { name: true },
     });
 
-    // Create AI user account
-    const newAIUser = await prisma.user.create({
-      data: {
-        id: `ai_${personaId}`,
-        username: persona?.name || aiUsername,
+    if (persona?.name) {
+      const byName = await prisma.user.findFirst({
+        where: { username: persona.name, email: { endsWith: "@ai.aida.internal" } },
+        select: { id: true },
+      });
+      if (byName) return byName.id;
+    }
+
+    // Create AI user account via upsert to prevent race conditions
+    const aiUsername = persona?.name || `AI_${personaId.substring(0, 8)}`;
+    const newAIUser = await prisma.user.upsert({
+      where: { id: aiId },
+      update: {},
+      create: {
+        id: aiId,
+        username: aiUsername,
         email: `${personaId}@ai.aida.internal`,
         password: crypto.randomBytes(32).toString("hex"),
         homeIp: "127.0.0.1",
@@ -1051,8 +1064,8 @@ export class MessageService {
     action: string,
     messageId: string,
   ): Promise<void> {
-    try {
-      await prisma.auditLog.create({
+    await safeExecute({
+      fn: () => prisma.auditLog.create({
         data: {
           userId,
           action: `message_${action}`,
@@ -1063,10 +1076,11 @@ export class MessageService {
             action,
           },
         },
-      });
-    } catch (error) {
-      this.logger.error({ err: error }, "Failed to log message activity");
-    }
+      }),
+      context: "Log message activity",
+      logger: this.logger,
+      silent: true,
+    })();
   }
 
   // ==================== STATS & NOTIFICATIONS ====================
@@ -1075,17 +1089,17 @@ export class MessageService {
    * Get unread message count for a user
    */
   async getUnreadCount(userId: string): Promise<number> {
-    try {
-      return await prisma.message.count({
+    return (await safeExecute({
+      fn: () => prisma.message.count({
         where: {
           recipientId: userId,
           isRead: false,
         },
-      });
-    } catch (error) {
-      this.logger.error({ err: error }, "Get unread count error");
-      return 0;
-    }
+      }),
+      context: "Get unread count",
+      logger: this.logger,
+      fallback: 0,
+    })()) ?? 0;
   }
 
   /**
@@ -1348,46 +1362,42 @@ export class MessageService {
       `Their latest message (subject: "${originalSubject}"):\n${originalContent}\n\n` +
       `Respond in character. Keep your reply concise (1-3 paragraphs).`;
 
-    // 4. Generate response via AI
-    const aiResult = await aiService.generateResponse(
-      prompt,
-      persona.systemPrompt,
-    );
+    // 4. Generate response via AI (with fallback + retry)
+    const { fallbackPersonaReply } = await import("../utils/aiFallbacks");
+    const { safeExecute } = await import("../utils/safeExecute");
 
-    if (!aiResult.success) {
-      this.logger.warn(
-        { personaId: persona.id, error: aiResult.error },
-        "AI persona reply generation failed — sending generic reply",
-      );
-    }
+    const personaRecord = await prisma.aIPersona.findUnique({
+      where: { id: persona.id },
+      include: { faction: { select: { shortName: true } } },
+    });
+    const factionShortName = (personaRecord as any)?.faction?.shortName || null;
+    const personaId = persona.id;
+    const replySubjectForRetry = originalSubject.startsWith("Re: ")
+      ? originalSubject
+      : `Re: ${originalSubject}`;
 
-    let replyContent: string;
-    if (aiResult.success) {
-      replyContent = aiResult.response;
-    } else {
-      // Smart fallback — determine faction from persona name and use in-character template
-      const { fallbackPersonaReply } = await import("../utils/aiFallbacks");
-      const personaRecord = await prisma.aIPersona.findUnique({
-        where: { id: persona.id },
-        include: { faction: { select: { shortName: true } } },
-      });
-      replyContent = fallbackPersonaReply(
-        persona.name,
-        (personaRecord as any)?.faction?.shortName || null,
-      );
+    // Plain text response (not JSON) — use safeExecute with generateOrThrow directly
+    const fallbackReply = fallbackPersonaReply(persona.name, factionShortName);
+    let usedFallback = false;
 
-      // Queue for retry — when AI comes back, send the real AI reply as a follow-up
-      const personaId = persona.id;
-      const replySubjectForRetry = originalSubject.startsWith("Re: ")
-        ? originalSubject
-        : `Re: ${originalSubject}`;
-      const msgSvc = this;
+    const replyContent = await safeExecute({
+      fn: async () => {
+        const result = await aiService.generateOrThrow(prompt, persona.systemPrompt);
+        return result.response;
+      },
+      context: "AI persona reply to player message",
+      logger: this.logger,
+      silent: true,
+      fallback: fallbackReply,
+      onError: () => { usedFallback = true; },
+    })();
+
+    // Queue retry if AI failed — when it recovers, send the real reply as a follow-up
+    if (usedFallback) {
       aiService.queueForRetry(prompt, persona.systemPrompt, async (response) => {
-        try {
-          if (response && response.trim().length > 0) {
-            await msgSvc.sendAIMessage(personaId, playerId, replySubjectForRetry, response);
-          }
-        } catch { /* ignore retry errors */ }
+        if (response && response.trim().length > 0) {
+          await this.sendAIMessage(personaId, playerId, replySubjectForRetry, response).catch(() => {});
+        }
       });
     }
 

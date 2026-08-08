@@ -7,6 +7,7 @@ import { getService } from "../di/container";
 import { LOGGER, RESOURCE_SERVICE, FACTION_KNOWLEDGE_SERVICE } from "../di/tokens";
 import ResourceService from "./resourceService";
 import type { FactionKnowledgeService } from "./factionKnowledgeService";
+import { safeExecute } from "../utils/safeExecute";
 
 /**
  * AISchedulerService - Automated AI Persona Actions
@@ -324,17 +325,20 @@ export class AISchedulerService {
 
     this.logger.info({ personaId, eventType }, "Triggering event-based AI action");
 
-    try {
-      // Event-triggered actions bypass daily limits
-      const action = await this.personaService.decideAction(personaId);
+    await safeExecute({
+      fn: async () => {
+        // Event-triggered actions bypass daily limits
+        const action = await this.personaService.decideAction(personaId);
 
-      if (action) {
-        this.logger.info({ personaId, actionId: action.id, eventType }, "Event action created");
-        await this.personaService.executeAction(action.id);
-      }
-    } catch (error) {
-      this.logger.error({ error, personaId, eventType }, "Error in event-triggered action");
-    }
+        if (action) {
+          this.logger.info({ personaId, actionId: action.id, eventType }, "Event action created");
+          await this.personaService.executeAction(action.id);
+        }
+      },
+      context: "Event-triggered AI action",
+      logger: this.logger,
+      silent: true,
+    })();
   }
 
   /**

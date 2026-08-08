@@ -3,6 +3,7 @@ import { Logger } from "pino";
 import type { CacheService } from "./cacheService";
 import { LOGGER } from "../di/tokens";
 import crypto from "crypto";
+import { safeExecute } from "../utils/safeExecute";
 
 interface OllamaChatMessage {
   role: "system" | "user" | "assistant";
@@ -67,6 +68,13 @@ export class AIService {
   private readonly RETRY_MAX_AGE_MS = 10 * 60 * 1000; // Drop requests older than 10 min
   private retryTimer: NodeJS.Timeout | null = null;
 
+  /** Concurrency throttle — prevents flooding the API with parallel requests. */
+  private activeRequests = 0;
+  private readonly MAX_CONCURRENT_REQUESTS = 2;
+  private readonly MAX_QUEUE_DEPTH = 20;
+  private readonly SLOT_TIMEOUT_MS = 30_000;
+  private requestQueue: Array<{ resolve: () => void }> = [];
+
   constructor(
     @inject(LOGGER) logger: Logger,
     @inject("CacheService") cacheService: CacheService,
@@ -122,6 +130,42 @@ export class AIService {
     return `ai:${crypto.createHash("md5").update(data).digest("hex")}`;
   }
 
+  /** Acquire a slot in the concurrency throttle. */
+  private async acquireSlot(): Promise<void> {
+    if (this.activeRequests < this.MAX_CONCURRENT_REQUESTS) {
+      this.activeRequests++;
+      return;
+    }
+    if (this.requestQueue.length >= this.MAX_QUEUE_DEPTH) {
+      throw new Error("AI service queue full — try again later");
+    }
+    // Wait for a slot to free up (with timeout)
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const idx = this.requestQueue.findIndex(q => q.resolve === wrappedResolve);
+        if (idx >= 0) this.requestQueue.splice(idx, 1);
+        reject(new Error("AI service request timed out waiting for slot"));
+      }, this.SLOT_TIMEOUT_MS);
+
+      const wrappedResolve = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+
+      this.requestQueue.push({ resolve: wrappedResolve });
+    });
+  }
+
+  /** Release a slot in the concurrency throttle. */
+  private releaseSlot(): void {
+    this.activeRequests--;
+    if (this.requestQueue.length > 0) {
+      const next = this.requestQueue.shift()!;
+      this.activeRequests++;
+      next.resolve();
+    }
+  }
+
   private async retryOperation<T>(
     operation: () => Promise<T>,
     maxRetries: number = 3,
@@ -130,9 +174,13 @@ export class AIService {
       try {
         return await operation();
       } catch (error) {
+        const isRateLimit = error instanceof Error && error.message.includes("Too Many Requests");
         if (i === maxRetries - 1) throw error;
-        const delay = 1000 * Math.pow(2, i);
-        this.logger.warn({ attempt: i + 1, delay }, "Retrying AI request");
+        // Use longer backoff for rate limits (5s, 15s, 30s)
+        const delay = isRateLimit
+          ? 5000 * Math.pow(3, i)
+          : 1000 * Math.pow(2, i);
+        this.logger.warn({ attempt: i + 1, delay, isRateLimit }, "Retrying AI request");
         await new Promise((resolve) => setTimeout(resolve, delay));
       }
     }
@@ -171,6 +219,8 @@ export class AIService {
       return cached;
     }
 
+    // Throttle concurrent requests to avoid rate limiting
+    await this.acquireSlot();
     try {
       const result = await this.retryOperation(async () => {
         const messages: OllamaChatMessage[] = [];
@@ -246,7 +296,26 @@ export class AIService {
         response: "",
         error: errMsg,
       };
+    } finally {
+      this.releaseSlot();
     }
+  }
+
+  /**
+   * Like generateResponse, but throws on failure instead of returning success=false.
+   * Designed for use with safeExecute/safeAI — lets the error handler catch and log.
+   */
+  public async generateOrThrow(
+    prompt: string,
+    systemPrompt?: string,
+    context?: number[],
+    expectedFormat?: string,
+  ): Promise<{ response: string; context?: number[] }> {
+    const result = await this.generateResponse(prompt, systemPrompt, context, expectedFormat);
+    if (!result.success) {
+      throw new Error(result.error || "AI generation failed");
+    }
+    return { response: result.response, ...(result.context ? { context: result.context } : {}) };
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -371,26 +440,29 @@ export class AIService {
     Flag if it contains: illegal content, hate speech, personal information, exploits, or spam.
     Respond ONLY with a JSON object: { "safe": boolean, "reason": string | null }`;
 
-    try {
-      const result = await this.generateResponse(content, systemPrompt, undefined, '{ "safe": true|false, "reason": "string|null" }');
-      if (!result.success) {
-        return { safe: true, reason: "Moderation service unavailable" };
-      }
+    return (await safeExecute({
+      fn: async () => {
+        const result = await this.generateResponse(content, systemPrompt, undefined, '{ "safe": true|false, "reason": "string|null" }');
+        if (!result.success) {
+          return { safe: true, reason: "Moderation service unavailable" };
+        }
 
-      const jsonMatch = result.response.match(/\{.*\}/s);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        return {
-          safe: parsed.safe,
-          reason: parsed.reason || undefined,
-        };
-      }
+        const jsonMatch = result.response.match(/\{.*\}/s);
+        if (jsonMatch) {
+          const parsed = JSON.parse(jsonMatch[0]);
+          const reason = (parsed.reason as string) || undefined;
+          if (reason) {
+            return { safe: parsed.safe as boolean, reason };
+          }
+          return { safe: parsed.safe as boolean };
+        }
 
-      return { safe: true };
-    } catch (error) {
-      this.logger.error(error, "Error moderating content");
-      return { safe: true, reason: "Moderation service unavailable" };
-    }
+        return { safe: true };
+      },
+      context: "Moderate content",
+      logger: this.logger,
+      fallback: { safe: true, reason: "Moderation service unavailable" } as { safe: boolean; reason?: string },
+    })()) ?? { safe: true, reason: "Moderation service unavailable" };
   }
 
   public async summarize(content: string): Promise<string> {
@@ -402,14 +474,18 @@ export class AIService {
   }
 
   public async checkHealth(): Promise<boolean> {
-    try {
-      const response = await fetch(`${this.apiUrl}/api/tags`, {
-        headers: this.getHeaders(),
-      });
-      return response.ok;
-    } catch (error) {
-      return false;
-    }
+    return (await safeExecute({
+      fn: async () => {
+        const response = await fetch(`${this.apiUrl}/api/tags`, {
+          headers: this.getHeaders(),
+        });
+        return response.ok;
+      },
+      context: "AI health check",
+      logger: this.logger,
+      silent: true,
+      fallback: false,
+    })()) ?? false;
   }
 
   public getMetrics() {

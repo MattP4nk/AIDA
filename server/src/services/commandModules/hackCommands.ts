@@ -15,6 +15,7 @@ import {
   progressBar,
   render,
 } from "./asciiBox";
+import { successResult, errorResult } from "./helpers";
 import logger from "../../logger";
 
 /**
@@ -90,19 +91,10 @@ export class HackCommandsModule implements CommandModule {
         case "trace.evade":
           return await this.handleTraceEvade(command, context);
         default:
-          return {
-            success: false,
-            output: `Hack command not implemented: ${command.command}`,
-            timestamp: new Date(),
-          };
+          return errorResult(`Hack command not implemented: ${command.command}`);
       }
     } catch (error) {
-      return {
-        success: false,
-        output: "Hack command failed",
-        error: error instanceof Error ? error.message : "Unknown error",
-        timestamp: new Date(),
-      };
+      return errorResult("Hack command failed", error instanceof Error ? error.message : "Unknown error");
     }
   }
 
@@ -245,31 +237,18 @@ export class HackCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const targetIp = command.args?.[0];
     if (!targetIp) {
-      return {
-        success: false,
-        output:
-          "Usage: hack <target_ip> [--method <method>] [--tools <tool1,tool2,...>]",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: hack <target_ip> [--method <method>] [--tools <tool1,tool2,...>]");
     }
 
     const session = context.gameStateManager.getSession(context.userId);
     if (!session) {
-      return {
-        success: false,
-        output: "No active session",
-        timestamp: new Date(),
-      };
+      return errorResult("No active session");
     }
 
     // Resolve target server and owner from IP address
     const targetResolution = await this.resolveHackTarget(targetIp, context);
     if (!targetResolution.success) {
-      return {
-        success: false,
-        output: targetResolution.error || "Failed to resolve target",
-        timestamp: new Date(),
-      };
+      return errorResult(targetResolution.error || "Failed to resolve target");
     }
 
     const { serverId, ownerId } = targetResolution;
@@ -293,7 +272,7 @@ export class HackCommandsModule implements CommandModule {
       const check = memoryService.canSpawnProcess(context.userId, "hack_prep");
       if (!check.allowed) {
         const spec = memoryService.getComputerSpec(context.userId);
-        const W = 52;
+        const W = context.terminalWidth;
         const lines: string[] = [];
         lines.push(sBoxTop(W));
         lines.push(sBoxRow(" [!] INSUFFICIENT RESOURCES", W));
@@ -306,7 +285,7 @@ export class HackCommandsModule implements CommandModule {
         lines.push(sBoxRow(" Use 'ps' to see running processes.", W));
         lines.push(sBoxRow(" Use 'kill <pid>' to free resources.", W));
         lines.push(sBoxBottom(W));
-        return { success: false, output: render(lines), timestamp: new Date() };
+        return errorResult(render(lines));
       }
 
       // Check if player set a priority via 'nice' command
@@ -405,13 +384,13 @@ export class HackCommandsModule implements CommandModule {
       );
 
       if (!proc) {
-        return { success: false, output: "Failed to start hack process. Insufficient resources.", timestamp: new Date() };
+        return errorResult("Failed to start hack process. Insufficient resources.");
       }
 
       // Return immediately — hack runs in background
       const etaSec = Math.ceil(proc.duration / 1000);
       const spec = memoryService.getComputerSpec(context.userId);
-      const W = 52;
+      const W = context.terminalWidth;
       const lines: string[] = [];
       lines.push(boxTop(W));
       lines.push(boxCenter("EXPLOIT PREPARATION", W));
@@ -427,7 +406,7 @@ export class HackCommandsModule implements CommandModule {
       lines.push(boxRow(" Use 'ps' to monitor, 'kill " + proc.pid + "' to abort.", W));
       lines.push(boxBottom(W));
 
-      return { success: true, output: render(lines), timestamp: new Date() };
+      return successResult(render(lines));
     }
 
     // ── Fallback: no resource system — direct hack (legacy) ──
@@ -440,11 +419,7 @@ export class HackCommandsModule implements CommandModule {
     );
 
     if (!result.success) {
-      return {
-        success: false,
-        output: result.error || "Failed to initiate hack session",
-        timestamp: new Date(),
-      };
+      return errorResult(result.error || "Failed to initiate hack session");
     }
 
     // Determine the submit command for this challenge type
@@ -479,22 +454,13 @@ export class HackCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const answer = command.args?.join(" ");
     if (!answer) {
-      return {
-        success: false,
-        output: "Usage: crack.submit <decrypted plaintext>",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: crack.submit <decrypted plaintext>");
     }
 
     const hackService = context.services.hackService;
     const session = hackService.getActiveSession(context.userId);
     if (!session || session.layers[session.currentLayer]?.type !== "cipher") {
-      return {
-        success: false,
-        output:
-          "No active cipher challenge. Use crack.submit during the encryption layer.",
-        timestamp: new Date(),
-      };
+      return errorResult("No active cipher challenge. Use crack.submit during the encryption layer.");
     }
 
     const result = await hackService.submitLayerAnswer(context.userId, answer);
@@ -514,11 +480,7 @@ export class HackCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const ports = command.args?.join(" ");
     if (!ports) {
-      return {
-        success: false,
-        output: "Usage: firewall.knock <port1> <port2> ...",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: firewall.knock <port1> <port2> ...");
     }
 
     const hackService = context.services.hackService;
@@ -527,12 +489,7 @@ export class HackCommandsModule implements CommandModule {
       !session ||
       session.layers[session.currentLayer]?.type !== "port_sequence"
     ) {
-      return {
-        success: false,
-        output:
-          "No active firewall challenge. Use firewall.knock during the port knock layer.",
-        timestamp: new Date(),
-      };
+      return errorResult("No active firewall challenge. Use firewall.knock during the port knock layer.");
     }
 
     const result = await hackService.submitLayerAnswer(context.userId, ports);
@@ -552,11 +509,7 @@ export class HackCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const answer = command.args?.join(" ");
     if (!answer) {
-      return {
-        success: false,
-        output: "Usage: memory.extract <address> <hex_token>",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: memory.extract <address> <hex_token>");
     }
 
     const hackService = context.services.hackService;
@@ -565,12 +518,7 @@ export class HackCommandsModule implements CommandModule {
       !session ||
       session.layers[session.currentLayer]?.type !== "memory_trace"
     ) {
-      return {
-        success: false,
-        output:
-          "No active memory trace challenge. Use memory.extract during the IDS layer.",
-        timestamp: new Date(),
-      };
+      return errorResult("No active memory trace challenge. Use memory.extract during the IDS layer.");
     }
 
     const result = await hackService.submitLayerAnswer(context.userId, answer);
@@ -748,11 +696,11 @@ export class HackCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const messageId = command.args?.[0];
     if (!messageId) {
-      return { success: false, output: "Usage: crack <message_id>", timestamp: new Date() };
+      return errorResult("Usage: crack <message_id>");
     }
 
     const session = context.gameStateManager.getSession(context.userId);
-    if (!session) return { success: false, output: "No active session", timestamp: new Date() };
+    if (!session) return errorResult("No active session");
 
     const memoryService = context.services.memoryService;
     if (memoryService) {
@@ -764,7 +712,7 @@ export class HackCommandsModule implements CommandModule {
 
       const check = memoryService.canSpawnProcess(context.userId, "decrypt");
       if (!check.allowed) {
-        return { success: false, output: `Insufficient resources: ${check.reason}\nUse 'ps' to see running processes, 'kill <pid>' to free resources.`, timestamp: new Date() };
+        return errorResult(`Insufficient resources: ${check.reason}\nUse 'ps' to see running processes, 'kill <pid>' to free resources.`);
       }
 
       const userId = context.userId;
@@ -782,15 +730,18 @@ export class HackCommandsModule implements CommandModule {
         },
       );
 
-      if (!proc) return { success: false, output: "Failed to start crack process.", timestamp: new Date() };
+      if (!proc) return errorResult("Failed to start crack process.");
 
       const etaSec = Math.ceil(proc.duration / 1000);
-      return { success: true, output: `Cracking encryption... ETA ${etaSec}s [PID ${proc.pid}]\nUse 'ps' to monitor progress.`, timestamp: new Date() };
+      return successResult(`Cracking encryption... ETA ${etaSec}s [PID ${proc.pid}]\nUse 'ps' to monitor progress.`);
     }
 
     // Fallback: no process system
     const result = await context.services.messageEncryptionService!.crackEncryption(messageId, context.userId);
-    return { success: result.success, output: result.success ? "Encryption cracked successfully" : "Failed to crack encryption", timestamp: new Date() };
+    if (result.success) {
+      return successResult("Encryption cracked successfully");
+    }
+    return errorResult("Failed to crack encryption");
   }
 
   private async handleExploit(
@@ -800,16 +751,16 @@ export class HackCommandsModule implements CommandModule {
     const targetIp = command.args?.[0];
     const exploitName = command.args?.[1];
     if (!targetIp || !exploitName) {
-      return { success: false, output: "Usage: exploit <target_ip> <exploit_name>", timestamp: new Date() };
+      return errorResult("Usage: exploit <target_ip> <exploit_name>");
     }
 
     const targetResolution = await this.resolveHackTarget(targetIp, context);
     if (!targetResolution.success) {
-      return { success: false, output: targetResolution.error || "Failed to resolve target", timestamp: new Date() };
+      return errorResult(targetResolution.error || "Failed to resolve target");
     }
 
     const session = context.gameStateManager.getSession(context.userId);
-    if (!session) return { success: false, output: "No active session", timestamp: new Date() };
+    if (!session) return errorResult("No active session");
 
     const { serverId, ownerId } = targetResolution;
     const memoryService = context.services.memoryService;
@@ -823,7 +774,7 @@ export class HackCommandsModule implements CommandModule {
 
       const check = memoryService.canSpawnProcess(context.userId, "hack_prep");
       if (!check.allowed) {
-        return { success: false, output: `Insufficient resources: ${check.reason}\nUse 'ps' to see running processes, 'kill <pid>' to free resources.`, timestamp: new Date() };
+        return errorResult(`Insufficient resources: ${check.reason}\nUse 'ps' to see running processes, 'kill <pid>' to free resources.`);
       }
 
       const userId = context.userId;
@@ -841,15 +792,18 @@ export class HackCommandsModule implements CommandModule {
         },
       );
 
-      if (!proc) return { success: false, output: "Failed to start exploit process.", timestamp: new Date() };
+      if (!proc) return errorResult("Failed to start exploit process.");
 
       const etaSec = Math.ceil(proc.duration / 1000);
-      return { success: true, output: `Deploying exploit '${exploitName}' against ${targetIp}... ETA ${etaSec}s [PID ${proc.pid}]\nUse 'ps' to monitor progress.`, timestamp: new Date() };
+      return successResult(`Deploying exploit '${exploitName}' against ${targetIp}... ETA ${etaSec}s [PID ${proc.pid}]\nUse 'ps' to monitor progress.`);
     }
 
     // Fallback
     const result = await context.services.hackService.processHackAttempt(context.userId, ownerId!, serverId!, HackMethod.EXPLOIT, [exploitName]);
-    return { success: result.success, output: result.success ? `Exploit ${exploitName} executed successfully` : `Exploit ${exploitName} failed`, timestamp: new Date() };
+    if (result.success) {
+      return successResult(`Exploit ${exploitName} executed successfully`);
+    }
+    return errorResult(`Exploit ${exploitName} failed`);
   }
 
   private async handleBackdoor(
@@ -858,16 +812,16 @@ export class HackCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const targetIp = command.args?.[0];
     if (!targetIp) {
-      return { success: false, output: "Usage: backdoor <target_ip>", timestamp: new Date() };
+      return errorResult("Usage: backdoor <target_ip>");
     }
 
     const targetResolution = await this.resolveHackTarget(targetIp, context);
     if (!targetResolution.success) {
-      return { success: false, output: targetResolution.error || "Failed to resolve target", timestamp: new Date() };
+      return errorResult(targetResolution.error || "Failed to resolve target");
     }
 
     const session = context.gameStateManager.getSession(context.userId);
-    if (!session) return { success: false, output: "No active session", timestamp: new Date() };
+    if (!session) return errorResult("No active session");
 
     const { serverId, ownerId } = targetResolution;
     const memoryService = context.services.memoryService;
@@ -881,7 +835,7 @@ export class HackCommandsModule implements CommandModule {
 
       const check = memoryService.canSpawnProcess(context.userId, "backdoor_install");
       if (!check.allowed) {
-        return { success: false, output: `Insufficient resources: ${check.reason}\nBackdoor installation is resource-intensive. Use 'kill <pid>' to free resources.`, timestamp: new Date() };
+        return errorResult(`Insufficient resources: ${check.reason}\nBackdoor installation is resource-intensive. Use 'kill <pid>' to free resources.`);
       }
 
       const userId = context.userId;
@@ -899,15 +853,18 @@ export class HackCommandsModule implements CommandModule {
         },
       );
 
-      if (!proc) return { success: false, output: "Failed to start backdoor install process.", timestamp: new Date() };
+      if (!proc) return errorResult("Failed to start backdoor install process.");
 
       const etaSec = Math.ceil(proc.duration / 1000);
-      return { success: true, output: `Installing backdoor on ${targetIp}... ETA ${etaSec}s [PID ${proc.pid}]\nUse 'ps' to monitor. This is a stealthy operation.`, timestamp: new Date() };
+      return successResult(`Installing backdoor on ${targetIp}... ETA ${etaSec}s [PID ${proc.pid}]\nUse 'ps' to monitor. This is a stealthy operation.`);
     }
 
     // Fallback
     const result = await context.services.hackService.processHackAttempt(context.userId, ownerId!, serverId!, HackMethod.BACKDOOR, ["backdoor_tool"]);
-    return { success: result.success, output: result.success ? "Backdoor installed successfully" : "Failed to install backdoor", timestamp: new Date() };
+    if (result.success) {
+      return successResult("Backdoor installed successfully");
+    }
+    return errorResult("Failed to install backdoor");
   }
 
   private async handleRootkit(
@@ -916,16 +873,16 @@ export class HackCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const targetIp = command.args?.[0];
     if (!targetIp) {
-      return { success: false, output: "Usage: rootkit <target_ip>", timestamp: new Date() };
+      return errorResult("Usage: rootkit <target_ip>");
     }
 
     const targetResolution = await this.resolveHackTarget(targetIp, context);
     if (!targetResolution.success) {
-      return { success: false, output: targetResolution.error || "Failed to resolve target", timestamp: new Date() };
+      return errorResult(targetResolution.error || "Failed to resolve target");
     }
 
     const session = context.gameStateManager.getSession(context.userId);
-    if (!session) return { success: false, output: "No active session", timestamp: new Date() };
+    if (!session) return errorResult("No active session");
 
     const { serverId, ownerId } = targetResolution;
     const memoryService = context.services.memoryService;
@@ -940,7 +897,7 @@ export class HackCommandsModule implements CommandModule {
       // Rootkit uses backdoor_install costs but takes longer (uses lower skill of stealth/hacking)
       const check = memoryService.canSpawnProcess(context.userId, "backdoor_install");
       if (!check.allowed) {
-        return { success: false, output: `Insufficient resources: ${check.reason}\nRootkit deployment requires significant resources. Use 'kill <pid>' to free resources.`, timestamp: new Date() };
+        return errorResult(`Insufficient resources: ${check.reason}\nRootkit deployment requires significant resources. Use 'kill <pid>' to free resources.`);
       }
 
       const userId = context.userId;
@@ -959,15 +916,18 @@ export class HackCommandsModule implements CommandModule {
         },
       );
 
-      if (!proc) return { success: false, output: "Failed to start rootkit deployment.", timestamp: new Date() };
+      if (!proc) return errorResult("Failed to start rootkit deployment.");
 
       const etaSec = Math.ceil(proc.duration / 1000);
-      return { success: true, output: `Deploying rootkit on ${targetIp}... ETA ${etaSec}s [PID ${proc.pid}]\nThis is a deep-access operation. Use 'ps' to monitor.`, timestamp: new Date() };
+      return successResult(`Deploying rootkit on ${targetIp}... ETA ${etaSec}s [PID ${proc.pid}]\nThis is a deep-access operation. Use 'ps' to monitor.`);
     }
 
     // Fallback
     const result = await context.services.hackService.processHackAttempt(context.userId, ownerId!, serverId!, HackMethod.ROOTKIT, ["rootkit_installer"]);
-    return { success: result.success, output: result.success ? "Rootkit installed successfully" : "Failed to install rootkit", timestamp: new Date() };
+    if (result.success) {
+      return successResult("Rootkit installed successfully");
+    }
+    return errorResult("Failed to install rootkit");
   }
 
   // ==================== BACKDOOR COMMANDS ====================
@@ -978,17 +938,13 @@ export class HackCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const backdoorService = context.services.backdoorService;
     if (!backdoorService) {
-      return {
-        success: false,
-        output: "Backdoor service unavailable",
-        timestamp: new Date(),
-      };
+      return errorResult("Backdoor service unavailable");
     }
 
     const backdoors = await backdoorService.getBackdoors(context.userId);
 
     if (!backdoors || backdoors.length === 0) {
-      const W = 52;
+      const W = context.terminalWidth;
       const lines = [
         boxTop(W),
         boxCenter("INSTALLED BACKDOORS", W),
@@ -997,7 +953,7 @@ export class HackCommandsModule implements CommandModule {
         boxRow("  Use  hack <ip> --method backdoor  to install one.", W),
         boxBottom(W),
       ];
-      return { success: true, output: lines, timestamp: new Date() };
+      return successResult(lines);
     }
 
     const W = 62;
@@ -1033,7 +989,7 @@ export class HackCommandsModule implements CommandModule {
     // Replace last divider with bottom
     lines[lines.length - 1] = boxBottom(W);
 
-    return { success: true, output: lines, timestamp: new Date() };
+    return successResult(lines);
   }
 
   private async handleBackdoorUse(
@@ -1042,20 +998,12 @@ export class HackCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const targetIp = command.args?.[0];
     if (!targetIp) {
-      return {
-        success: false,
-        output: "Usage: backdoor.use <target_ip>",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: backdoor.use <target_ip>");
     }
 
     const backdoorService = context.services.backdoorService;
     if (!backdoorService) {
-      return {
-        success: false,
-        output: "Backdoor service unavailable",
-        timestamp: new Date(),
-      };
+      return errorResult("Backdoor service unavailable");
     }
 
     // Resolve IP to server ID
@@ -1064,24 +1012,16 @@ export class HackCommandsModule implements CommandModule {
       select: { id: true, name: true },
     });
     if (!server) {
-      return {
-        success: false,
-        output: `No server found at ${targetIp}`,
-        timestamp: new Date(),
-      };
+      return errorResult(`No server found at ${targetIp}`);
     }
 
     const result = await backdoorService.useBackdoor(context.userId, server.id);
 
     if (!result.success) {
-      return {
-        success: false,
-        output: result.error || "Failed to use backdoor",
-        timestamp: new Date(),
-      };
+      return errorResult(result.error || "Failed to use backdoor");
     }
 
-    const W = 52;
+    const W = context.terminalWidth;
     const lines: string[] = [
       boxTop(W),
       boxCenter("BACKDOOR ACCESS", W),
@@ -1116,20 +1056,12 @@ export class HackCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const targetIp = command.args?.[0];
     if (!targetIp) {
-      return {
-        success: false,
-        output: "Usage: backdoor.remove <target_ip>",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: backdoor.remove <target_ip>");
     }
 
     const backdoorService = context.services.backdoorService;
     if (!backdoorService) {
-      return {
-        success: false,
-        output: "Backdoor service unavailable",
-        timestamp: new Date(),
-      };
+      return errorResult("Backdoor service unavailable");
     }
 
     const server = await context.db.client.gameServer.findUnique({
@@ -1137,11 +1069,7 @@ export class HackCommandsModule implements CommandModule {
       select: { id: true, name: true },
     });
     if (!server) {
-      return {
-        success: false,
-        output: `No server found at ${targetIp}`,
-        timestamp: new Date(),
-      };
+      return errorResult(`No server found at ${targetIp}`);
     }
 
     const result = await backdoorService.removeBackdoor(
@@ -1150,14 +1078,10 @@ export class HackCommandsModule implements CommandModule {
     );
 
     if (!result.success) {
-      return {
-        success: false,
-        output: result.error || "No backdoor found on that server",
-        timestamp: new Date(),
-      };
+      return errorResult(result.error || "No backdoor found on that server");
     }
 
-    const W = 52;
+    const W = context.terminalWidth;
     const lines = [
       boxTop(W),
       boxCenter("BACKDOOR REMOVED", W),
@@ -1166,7 +1090,7 @@ export class HackCommandsModule implements CommandModule {
       boxRow(`  Backdoor deactivated and traces cleaned.`, W),
       boxBottom(W),
     ];
-    return { success: true, output: lines, timestamp: new Date() };
+    return successResult(lines);
   }
 
   // ==================== SECURITY SCAN COMMAND ====================
@@ -1177,20 +1101,12 @@ export class HackCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const serverIp = command.args?.[0];
     if (!serverIp) {
-      return {
-        success: false,
-        output: "Usage: security.scan <your_server_ip>",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: security.scan <your_server_ip>");
     }
 
     const backdoorService = context.services.backdoorService;
     if (!backdoorService) {
-      return {
-        success: false,
-        output: "Backdoor service unavailable",
-        timestamp: new Date(),
-      };
+      return errorResult("Backdoor service unavailable");
     }
 
     // Verify the player owns the server
@@ -1199,18 +1115,10 @@ export class HackCommandsModule implements CommandModule {
       select: { id: true, name: true, ownerId: true },
     });
     if (!server) {
-      return {
-        success: false,
-        output: `No server found at ${serverIp}`,
-        timestamp: new Date(),
-      };
+      return errorResult(`No server found at ${serverIp}`);
     }
     if (server.ownerId !== context.userId) {
-      return {
-        success: false,
-        output: "You can only scan servers you own",
-        timestamp: new Date(),
-      };
+      return errorResult("You can only scan servers you own");
     }
 
     // Get player forensics skill
@@ -1274,7 +1182,7 @@ export class HackCommandsModule implements CommandModule {
     }
 
     lines.push(boxBottom(W));
-    return { success: true, output: lines, timestamp: new Date() };
+    return successResult(lines);
   }
 
   // ==================== TRACE COMMANDS ====================
@@ -1285,11 +1193,7 @@ export class HackCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const traceService = context.services.traceService;
     if (!traceService) {
-      return {
-        success: false,
-        output: "Trace service unavailable",
-        timestamp: new Date(),
-      };
+      return errorResult("Trace service unavailable");
     }
 
     const tracesAgainst = await traceService.getTracesAgainst(context.userId);
@@ -1356,7 +1260,7 @@ export class HackCommandsModule implements CommandModule {
     }
 
     lines.push(boxBottom(W));
-    return { success: true, output: lines, timestamp: new Date() };
+    return successResult(lines);
   }
 
   private async handleTraceEvade(
@@ -1365,16 +1269,16 @@ export class HackCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const traceId = command.args?.[0];
     if (!traceId) {
-      return { success: false, output: "Usage: trace.evade <trace_id>", timestamp: new Date() };
+      return errorResult("Usage: trace.evade <trace_id>");
     }
 
     const traceService = context.services.traceService;
     if (!traceService) {
-      return { success: false, output: "Trace service unavailable", timestamp: new Date() };
+      return errorResult("Trace service unavailable");
     }
 
     const session = context.gameStateManager.getSession(context.userId);
-    if (!session) return { success: false, output: "No active session", timestamp: new Date() };
+    if (!session) return errorResult("No active session");
 
     const memoryService = context.services.memoryService;
 
@@ -1387,7 +1291,7 @@ export class HackCommandsModule implements CommandModule {
 
       const check = memoryService.canSpawnProcess(context.userId, "trace_evade");
       if (!check.allowed) {
-        return { success: false, output: `Insufficient resources: ${check.reason}\nTrace evasion is CPU-intensive. Free resources with 'kill <pid>'.`, timestamp: new Date() };
+        return errorResult(`Insufficient resources: ${check.reason}\nTrace evasion is CPU-intensive. Free resources with 'kill <pid>'.`);
       }
 
       const userId = context.userId;
@@ -1400,7 +1304,7 @@ export class HackCommandsModule implements CommandModule {
             context.services.missionIntegrationService.onTraceEvaded(userId).catch(() => {});
           }
           if (context.io) {
-            const W = 52;
+            const W = context.terminalWidth;
             const lines: string[] = [boxTop(W), boxCenter("TRACE EVASION RESULT", W), boxDivider(W)];
             if (result.evaded) {
               lines.push(boxRow("  EVASION SUCCESSFUL", W), boxRow("", W), boxRow("  " + (result.message ?? "Trace evaded."), W));
@@ -1417,10 +1321,10 @@ export class HackCommandsModule implements CommandModule {
         },
       );
 
-      if (!proc) return { success: false, output: "Failed to start trace evasion.", timestamp: new Date() };
+      if (!proc) return errorResult("Failed to start trace evasion.");
 
       const etaSec = Math.ceil(proc.duration / 1000);
-      return { success: true, output: `Initiating trace evasion... ETA ${etaSec}s [PID ${proc.pid}]\nYour system is running counter-trace protocols. Use 'ps' to monitor.`, timestamp: new Date() };
+      return successResult(`Initiating trace evasion... ETA ${etaSec}s [PID ${proc.pid}]\nYour system is running counter-trace protocols. Use 'ps' to monitor.`);
     }
 
     // Fallback: direct execution
@@ -1428,7 +1332,7 @@ export class HackCommandsModule implements CommandModule {
     if (result.evaded && context.services.missionIntegrationService) {
       context.services.missionIntegrationService.onTraceEvaded(context.userId).catch(() => {});
     }
-    const W = 52;
+    const W = context.terminalWidth;
     const lines: string[] = [boxTop(W), boxCenter("TRACE EVASION ATTEMPT", W), boxDivider(W)];
     if (result.evaded) {
       lines.push(boxRow("  EVASION SUCCESSFUL", W), boxRow("", W), boxRow("  " + (result.message ?? "Trace evaded."), W));

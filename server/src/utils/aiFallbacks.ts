@@ -229,6 +229,59 @@ export function fallbackForumPost(
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// Mission Flavor Fallbacks
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Generate template mission title + description when AI can't flavor them.
+ */
+export function fallbackMissionFlavor(
+  templateTitle: string,
+  factionShortName: string | null,
+): { title: string; description: string } {
+  const flavorMap: Record<string, string> = {
+    garrison: "Garrison Command has issued new orders. Review your objectives and execute with precision.",
+    dothackers: "new job dropped in the mesh. check the details and move fast — the window is closing.",
+    cybercorp: "A new directive has been assigned to your portfolio. Deliverables are outlined below.",
+    darknet: "... a signal emerges from the deep. Follow it. The fragments will guide you.",
+  };
+  return {
+    title: templateTitle,
+    description: flavorMap[factionShortName || ""] || "A new mission is available. Review the objectives and proceed.",
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Story Step Fallbacks
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Generate a template narrative for a story step when AI can't write one.
+ */
+export function fallbackStoryStep(
+  stepTitle: string,
+): { title: string; description: string } {
+  return {
+    title: stepTitle || "Next Operation",
+    description: "Your handler has issued new instructions. Proceed with the objectives as briefed.",
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Recruitment DM Fallbacks
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Generate a template recruitment message when AI can't create one.
+ */
+export function fallbackRecruitmentDM(): { subject: string; content: string } {
+  return {
+    subject: "Something stirs in the deep net",
+    content: "You've been noticed. There are layers beneath the surface that most never see. If you're curious, keep digging. Not everything is as it seems.\n\n— ???",
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // Story Event Retry Marking
 // ═══════════════════════════════════════════════════════════════════
 

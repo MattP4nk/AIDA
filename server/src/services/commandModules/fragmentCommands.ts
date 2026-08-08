@@ -1,5 +1,6 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
+import { successResult, errorResult } from "./helpers";
 import {
   boxTop,
   boxBottom,
@@ -29,19 +30,10 @@ export class FragmentCommandsModule implements CommandModule {
         case "endgame":
           return await this.handleEndgame(command, context);
         default:
-          return {
-            success: false,
-            output: `Fragment command not implemented: ${command.command}`,
-            timestamp: new Date(),
-          };
+          return errorResult(`Fragment command not implemented: ${command.command}`);
       }
     } catch (error) {
-      return {
-        success: false,
-        output: "Fragment command failed",
-        error: error instanceof Error ? error.message : "Unknown error",
-        timestamp: new Date(),
-      };
+      return errorResult("Fragment command failed", error instanceof Error ? error.message : "Unknown error");
     }
   }
 
@@ -87,11 +79,7 @@ export class FragmentCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const keyFragmentService = context.services.keyFragmentService;
     if (!keyFragmentService) {
-      return {
-        success: false,
-        output: "Key fragment service unavailable.",
-        timestamp: new Date(),
-      };
+      return errorResult("Key fragment service unavailable.");
     }
 
     const subcommand = command.args?.[0]?.toLowerCase();
@@ -113,11 +101,7 @@ export class FragmentCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const keyFragmentService = context.services.keyFragmentService;
     if (!keyFragmentService) {
-      return {
-        success: false,
-        output: "Key fragment service unavailable.",
-        timestamp: new Date(),
-      };
+      return errorResult("Key fragment service unavailable.");
     }
 
     const progress = await keyFragmentService.getPlayerFragments(
@@ -212,7 +196,7 @@ export class FragmentCommandsModule implements CommandModule {
       boxRow("  'fragments steal <type> <#>' while on target's server", W),
     );
     lines.push(boxBottom(W));
-    return { success: true, output: render(lines), timestamp: new Date() };
+    return successResult(render(lines));
   }
 
   private async handleFragmentGive(
@@ -221,11 +205,7 @@ export class FragmentCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const keyFragmentService = context.services.keyFragmentService;
     if (!keyFragmentService) {
-      return {
-        success: false,
-        output: "Key fragment service unavailable.",
-        timestamp: new Date(),
-      };
+      return errorResult("Key fragment service unavailable.");
     }
 
     const type = command.args?.[1]?.toLowerCase();
@@ -233,30 +213,17 @@ export class FragmentCommandsModule implements CommandModule {
     const targetUsername = command.args?.[3];
 
     if (!type || !num || !targetUsername) {
-      return {
-        success: false,
-        output:
-          "Usage: fragments give <type> <#> <player>\n  type: sword, key, collar\n  #: 1, 2, or 3",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: fragments give <type> <#> <player>\n  type: sword, key, collar\n  #: 1, 2, or 3");
     }
 
     const validTypes = ["sword", "key", "collar"];
     if (!validTypes.includes(type)) {
-      return {
-        success: false,
-        output: `Invalid fragment type: '${type}'. Valid types: sword, key, collar.`,
-        timestamp: new Date(),
-      };
+      return errorResult(`Invalid fragment type: '${type}'. Valid types: sword, key, collar.`);
     }
 
     const fragmentNum = parseInt(num);
     if (![1, 2, 3].includes(fragmentNum)) {
-      return {
-        success: false,
-        output: `Invalid fragment number: '${num}'. Must be 1, 2, or 3.`,
-        timestamp: new Date(),
-      };
+      return errorResult(`Invalid fragment number: '${num}'. Must be 1, 2, or 3.`);
     }
 
     const fragment = await context.db.client.keyFragment.findUnique({
@@ -264,11 +231,7 @@ export class FragmentCommandsModule implements CommandModule {
     });
 
     if (!fragment) {
-      return {
-        success: false,
-        output: `Fragment ${type} #${fragmentNum} not found.`,
-        timestamp: new Date(),
-      };
+      return errorResult(`Fragment ${type} #${fragmentNum} not found.`);
     }
 
     const targetUser = await context.db.client.user.findFirst({
@@ -276,19 +239,11 @@ export class FragmentCommandsModule implements CommandModule {
     });
 
     if (!targetUser) {
-      return {
-        success: false,
-        output: `Player not found: '${targetUsername}'.`,
-        timestamp: new Date(),
-      };
+      return errorResult(`Player not found: '${targetUsername}'.`);
     }
 
     if (targetUser.id === context.userId) {
-      return {
-        success: false,
-        output: "Cannot give a fragment to yourself.",
-        timestamp: new Date(),
-      };
+      return errorResult("Cannot give a fragment to yourself.");
     }
 
     try {
@@ -299,33 +254,16 @@ export class FragmentCommandsModule implements CommandModule {
       );
 
       if (!result.transferred) {
-        return {
-          success: false,
-          output:
-            result.message ||
-            `Failed to transfer ${type} fragment #${fragmentNum}.`,
-          timestamp: new Date(),
-        };
+        return errorResult(result.message || `Failed to transfer ${type} fragment #${fragmentNum}.`);
       }
 
       const recipientProgress = await keyFragmentService.getPlayerFragments(
         targetUser.id,
       );
 
-      return {
-        success: true,
-        output: `You gave ${fragment.name} to ${targetUser.username}. They now hold ${recipientProgress.totalHeld}/${recipientProgress.totalRequired} fragments.`,
-        timestamp: new Date(),
-      };
+      return successResult(`You gave ${fragment.name} to ${targetUser.username}. They now hold ${recipientProgress.totalHeld}/${recipientProgress.totalRequired} fragments.`);
     } catch (error) {
-      return {
-        success: false,
-        output:
-          error instanceof Error
-            ? error.message
-            : `Failed to transfer fragment.`,
-        timestamp: new Date(),
-      };
+      return errorResult(error instanceof Error ? error.message : `Failed to transfer fragment.`);
     }
   }
 
@@ -335,11 +273,7 @@ export class FragmentCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const keyFragmentService = context.services.keyFragmentService;
     if (!keyFragmentService) {
-      return {
-        success: false,
-        output: "Key fragment service unavailable.",
-        timestamp: new Date(),
-      };
+      return errorResult("Key fragment service unavailable.");
     }
 
     // Check current server connection
@@ -348,43 +282,22 @@ export class FragmentCommandsModule implements CommandModule {
       include: { server: true },
     });
     if (!connection || !connection.server) {
-      return {
-        success: false,
-        output: "Not connected to any server.",
-        timestamp: new Date(),
-      };
+      return errorResult("Not connected to any server.");
     }
     if (!connection.server.isPlayerHome) {
-      return {
-        success: false,
-        output: "You can only steal fragments from a player's home server.",
-        timestamp: new Date(),
-      };
+      return errorResult("You can only steal fragments from a player's home server.");
     }
     if (connection.server.ownerId === context.userId) {
-      return {
-        success: false,
-        output: "This is your own server.",
-        timestamp: new Date(),
-      };
+      return errorResult("This is your own server.");
     }
     const ownerId = connection.server.ownerId;
     if (!ownerId) {
-      return {
-        success: false,
-        output: "This server has no owner.",
-        timestamp: new Date(),
-      };
+      return errorResult("This server has no owner.");
     }
 
     // Must have hacked access (accessLevel >= 5) — no stealing via keycard/open
     if (connection.accessLevel < 5) {
-      return {
-        success: false,
-        output:
-          "Insufficient access level. You must hack this server before you can steal fragments.",
-        timestamp: new Date(),
-      };
+      return errorResult("Insufficient access level. You must hack this server before you can steal fragments.");
     }
 
     const type = command.args?.[1]?.toLowerCase();
@@ -412,11 +325,7 @@ export class FragmentCommandsModule implements CommandModule {
       }
 
       if (ownerFragments.length === 0) {
-        return {
-          success: true,
-          output: "This player holds no fragments.",
-          timestamp: new Date(),
-        };
+        return successResult("This player holds no fragments.");
       }
 
       const ownerUser = await context.db.client.user.findUnique({
@@ -445,35 +354,22 @@ export class FragmentCommandsModule implements CommandModule {
       lines.push(boxDivider(W));
       lines.push(boxRow("  'fragments steal <type> <#>' to take one", W));
       lines.push(boxBottom(W));
-      return { success: true, output: render(lines), timestamp: new Date() };
+      return successResult(render(lines));
     }
 
     // Steal a specific fragment
     const validTypes = ["sword", "key", "collar"];
     if (!validTypes.includes(type)) {
-      return {
-        success: false,
-        output: `Invalid fragment type: '${type}'. Valid types: sword, key, collar.`,
-        timestamp: new Date(),
-      };
+      return errorResult(`Invalid fragment type: '${type}'. Valid types: sword, key, collar.`);
     }
 
     if (!num) {
-      return {
-        success: false,
-        output:
-          "Usage: fragments steal <type> <#>\n  e.g. fragments steal sword 1",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: fragments steal <type> <#>\n  e.g. fragments steal sword 1");
     }
 
     const fragmentNum = parseInt(num);
     if (![1, 2, 3].includes(fragmentNum)) {
-      return {
-        success: false,
-        output: `Invalid fragment number: '${num}'. Must be 1, 2, or 3.`,
-        timestamp: new Date(),
-      };
+      return errorResult(`Invalid fragment number: '${num}'. Must be 1, 2, or 3.`);
     }
 
     const fragment = await context.db.client.keyFragment.findUnique({
@@ -481,11 +377,7 @@ export class FragmentCommandsModule implements CommandModule {
     });
 
     if (!fragment) {
-      return {
-        success: false,
-        output: `Fragment ${type} #${fragmentNum} not found.`,
-        timestamp: new Date(),
-      };
+      return errorResult(`Fragment ${type} #${fragmentNum} not found.`);
     }
 
     try {
@@ -496,13 +388,7 @@ export class FragmentCommandsModule implements CommandModule {
       );
 
       if (!result.stolen) {
-        return {
-          success: false,
-          output:
-            result.message ||
-            `Failed to steal ${type} fragment #${fragmentNum}.`,
-          timestamp: new Date(),
-        };
+        return errorResult(result.message || `Failed to steal ${type} fragment #${fragmentNum}.`);
       }
 
       const W = 58;
@@ -516,14 +402,9 @@ export class FragmentCommandsModule implements CommandModule {
       lines.push(boxRow("  It's yours now.", W));
       lines.push(boxRow("", W));
       lines.push(boxBottom(W));
-      return { success: true, output: render(lines), timestamp: new Date() };
+      return successResult(render(lines));
     } catch (error) {
-      return {
-        success: false,
-        output:
-          error instanceof Error ? error.message : "Failed to steal fragment.",
-        timestamp: new Date(),
-      };
+      return errorResult(error instanceof Error ? error.message : "Failed to steal fragment.");
     }
   }
 
@@ -533,11 +414,7 @@ export class FragmentCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const keyFragmentService = context.services.keyFragmentService;
     if (!keyFragmentService) {
-      return {
-        success: false,
-        output: "Key fragment service unavailable.",
-        timestamp: new Date(),
-      };
+      return errorResult("Key fragment service unavailable.");
     }
 
     const progress = await keyFragmentService.getPlayerFragments(
@@ -562,7 +439,7 @@ export class FragmentCommandsModule implements CommandModule {
         lines.push(boxRow("  fragment.", W));
         lines.push(boxRow("", W));
         lines.push(boxBottom(W));
-        return { success: true, output: render(lines), timestamp: new Date() };
+        return successResult(render(lines));
       }
 
       if (progress.gameCompleted && progress.endgameChoice) {
@@ -577,7 +454,7 @@ export class FragmentCommandsModule implements CommandModule {
         );
         lines.push(boxRow("", W));
         lines.push(boxBottom(W));
-        return { success: true, output: render(lines), timestamp: new Date() };
+        return successResult(render(lines));
       }
 
       // Endgame unlocked but not yet chosen — show menu
@@ -610,34 +487,21 @@ export class FragmentCommandsModule implements CommandModule {
       lines.push(boxRow("", W));
       lines.push(boxRow("  This choice is PERMANENT. Choose wisely.", W));
       lines.push(boxBottom(W));
-      return { success: true, output: render(lines), timestamp: new Date() };
+      return successResult(render(lines));
     }
 
     // Argument provided — validate and make the choice
     const validChoices = ["help", "expose", "exploit"];
     if (!validChoices.includes(choice)) {
-      return {
-        success: false,
-        output: `Invalid endgame choice: '${choice}'. Valid choices: help, expose, exploit.`,
-        timestamp: new Date(),
-      };
+      return errorResult(`Invalid endgame choice: '${choice}'. Valid choices: help, expose, exploit.`);
     }
 
     if (!progress.endgameUnlocked) {
-      return {
-        success: false,
-        output:
-          "The endgame is not yet available. You must hold all 9 fragments to unlock the endgame. Use 'fragments' to see who holds each fragment.",
-        timestamp: new Date(),
-      };
+      return errorResult("The endgame is not yet available. You must hold all 9 fragments to unlock the endgame. Use 'fragments' to see who holds each fragment.");
     }
 
     if (progress.gameCompleted) {
-      return {
-        success: false,
-        output: `You have already made your endgame choice: ${progress.endgameChoice}. This decision is permanent.`,
-        timestamp: new Date(),
-      };
+      return errorResult(`You have already made your endgame choice: ${progress.endgameChoice}. This decision is permanent.`);
     }
 
     try {
@@ -647,11 +511,7 @@ export class FragmentCommandsModule implements CommandModule {
       );
 
       if (!result.success) {
-        return {
-          success: false,
-          output: result.message,
-          timestamp: new Date(),
-        };
+        return errorResult(result.message);
       }
 
       const lines: string[] = [];
@@ -689,14 +549,7 @@ export class FragmentCommandsModule implements CommandModule {
         timestamp: new Date(),
       };
     } catch (error) {
-      return {
-        success: false,
-        output:
-          error instanceof Error
-            ? error.message
-            : "Failed to make endgame choice.",
-        timestamp: new Date(),
-      };
+      return errorResult(error instanceof Error ? error.message : "Failed to make endgame choice.");
     }
   }
 }

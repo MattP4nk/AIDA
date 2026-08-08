@@ -57,6 +57,8 @@
             case "backdoor_install": return "🚪";
             case "traceroute": return "🔍";
             case "trace_evade": return "👻";
+            case "hack_challenge": return "🔐";
+            case "connection_challenge": return "🔗";
             default: return "⚙";
         }
     }

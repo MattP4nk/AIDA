@@ -937,6 +937,40 @@ export interface LayerResult {
   timeUsed: number;
 }
 
+// ==================== TYPED CONSTANTS ====================
+
+/** Content draft lifecycle status */
+export const DraftStatus = {
+  DRAFT: "draft",
+  APPROVED: "approved",
+  REJECTED: "rejected",
+  APPLIED: "applied",
+} as const;
+export type DraftStatus = (typeof DraftStatus)[keyof typeof DraftStatus];
+
+/** Narrative epoch status */
+export const EpochStatus = {
+  DRAFT: "draft",
+  ACTIVE: "active",
+  COMPLETED: "completed",
+} as const;
+export type EpochStatus = (typeof EpochStatus)[keyof typeof EpochStatus];
+
+/** Reserved PIDs for virtual UI processes (ProcessBar) */
+export const ReservedPID = {
+  HACK_CHALLENGE: -1,
+  CONNECTION_CHALLENGE: -2,
+} as const;
+export type ReservedPID = (typeof ReservedPID)[keyof typeof ReservedPID];
+
+/** Faction membership events */
+export const FactionEventType = {
+  JOIN: "join",
+  LEAVE: "leave",
+  NEUTRAL: "neutral",
+} as const;
+export type FactionEventType = (typeof FactionEventType)[keyof typeof FactionEventType];
+
 // ==================== CONNECTION CHALLENGE TYPES ====================
 
 export type ConnectionChallengeType = "handshake" | "signal_trace";
