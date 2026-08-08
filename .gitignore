@@ -30,6 +30,16 @@ pids/
 .agents/
 .claude/
 
+# Scripts (dev-only utilities, not production code)
+server/scripts/
+
+# Documentation / notes (not source code)
+*.md
+*.toon
+
+# SQL dumps
+*.sql
+
 # OS
 .DS_Store
 Thumbs.db
