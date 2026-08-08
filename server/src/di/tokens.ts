@@ -37,6 +37,7 @@ export const MISSION_GENERATOR_SERVICE = "MissionGeneratorService";
 
 // Server Content
 export const SERVER_CONTENT_SERVICE = "ServerContentService";
+export const CONTENT_QUEUE_SERVICE = "ContentQueueService";
 
 // Reputation
 export const REPUTATION_ENGINE = "ReputationEngine";

@@ -1517,9 +1517,9 @@ export class ServerContentService {
         return;
       }
 
-      // Check if Tier 1 already applied
+      // Check if Tier 1 already applied (count files only, not directories)
       const fileCount = await this.prisma.fileSystemNode.count({
-        where: { serverId },
+        where: { serverId, type: "file" },
       });
 
       if (!options.force && fileCount > 12) {

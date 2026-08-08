@@ -256,12 +256,12 @@ export class ContentDraftService {
       }
     }
 
-    // Trigger content provisioning (fire-and-forget)
+    // Queue content provisioning
     try {
       const { getService } = await import("../di/container");
-      const { SERVER_CONTENT_SERVICE } = await import("../di/tokens");
-      const contentService = getService<any>(SERVER_CONTENT_SERVICE);
-      contentService.provisionServerContent(server.id).catch(() => {});
+      const { CONTENT_QUEUE_SERVICE } = await import("../di/tokens");
+      const contentQueue = getService<any>(CONTENT_QUEUE_SERVICE);
+      await contentQueue.enqueue(server.id, 5 /* NORMAL */);
     } catch { /* non-critical */ }
 
     return server.id;

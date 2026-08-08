@@ -207,6 +207,7 @@ model GameServer {
   linksOut         ServerLink[]       @relation("LinkSource")
   linksIn          ServerLink[]       @relation("LinkTarget")
   accessKeys       ServerAccessKey[]
+  contentJobs      ContentJob[]
 
   @@index([ownerId])
   @@index([networkId])
@@ -1542,4 +1543,28 @@ model PersonaMessage {
   @@index([userId, personaId])
   @@index([personaId])
   @@map("persona_messages")
+}
+
+// ==================== CONTENT GENERATION QUEUE ====================
+
+model ContentJob {
+  id          String    @id @default(cuid())
+  serverId    String    @map("server_id")
+  priority    Int       @default(5) // 1=urgent, 5=normal, 10=low
+  status      String    @default("pending") // pending | processing | completed | failed
+  attempts    Int       @default(0)
+  maxAttempts Int       @default(3) @map("max_attempts")
+  error       String?   @db.Text
+  requestedBy String?   @map("requested_by")
+  options     Json      @default("{}") // { skipAI?: boolean, force?: boolean }
+  completedAt DateTime? @map("completed_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  server GameServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+
+  @@index([status, priority])
+  @@index([serverId])
+  @@index([createdAt])
+  @@map("content_jobs")
 }

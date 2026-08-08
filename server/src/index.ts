@@ -464,18 +464,17 @@ async function initialize(): Promise<void> {
   );
   logger.info("✅ DarkNet Dungeon expiration checker scheduled (every 1h)");
 
-  // Tier 3: Batch-provision all seeded servers that lack content
+  // Content generation queue — reliable pipeline for server content
   try {
-    const { SERVER_CONTENT_SERVICE } = await import("./di/tokens");
-    const contentService = getService<any>(SERVER_CONTENT_SERVICE);
-    if (contentService?.provisionAllUnpopulatedServers) {
-      contentService.provisionAllUnpopulatedServers().catch((err: unknown) => {
-        logger.warn({ err }, "Batch server content provisioning failed (non-critical)");
-      });
-      logger.info("✅ Server content batch provisioning started");
-    }
-  } catch {
-    logger.debug("ServerContentService not available for batch provisioning");
+    const { CONTENT_QUEUE_SERVICE, SERVER_CONTENT_SERVICE } = await import("./di/tokens");
+    const contentQueue = getService<import("./services/contentQueueService").ContentQueueService>(CONTENT_QUEUE_SERVICE);
+    const contentService = getService<import("./services/serverContentService").ServerContentService>(SERVER_CONTENT_SERVICE);
+    contentQueue.setServerContentService(contentService);
+    await contentQueue.start();
+    await contentQueue.enqueueAllUnpopulated();
+    logger.info("✅ Content generation queue started");
+  } catch (err) {
+    logger.warn({ err }, "Content queue initialization failed (non-critical)");
   }
 
   const resourceService =

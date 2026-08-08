@@ -41,6 +41,7 @@ import AISchedulerService from "../services/aiSchedulerService";
 import MissionIntegrationService from "../services/missionIntegration";
 import MissionGeneratorService from "../services/missionGenerator";
 import { ServerContentService } from "../services/serverContentService";
+import { ContentQueueService } from "../services/contentQueueService";
 import ResourceService from "../services/resourceService";
 import ContestService from "../services/contestService";
 import WarfareService from "../services/warfareService";
@@ -103,6 +104,7 @@ export function setupContainer(
     TOKENS.SERVER_CONTENT_SERVICE,
     ServerContentService,
   );
+  container.registerSingleton(TOKENS.CONTENT_QUEUE_SERVICE, ContentQueueService);
   container.registerSingleton(TOKENS.SERVER_SERVICE, ServerService);
   container.registerSingleton(TOKENS.HACK_SERVICE, HackService);
   container.registerSingleton(TOKENS.FILE_SERVICE, FileService);

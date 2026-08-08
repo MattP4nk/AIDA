@@ -191,15 +191,15 @@ export class NetworkCommandsModule implements CommandModule {
             );
             logger.debug({ count: results.length }, "discoverNeighbors returned results");
 
-            // Tier 3: Pre-warm discovered servers — provision content before player connects
+            // Pre-warm discovered servers via content queue
             try {
               const { getService } = await import("../../di/container");
-              const { SERVER_CONTENT_SERVICE } = await import("../../di/tokens");
-              const contentSvc = getService<any>(SERVER_CONTENT_SERVICE);
+              const { CONTENT_QUEUE_SERVICE } = await import("../../di/tokens");
+              const contentQueue = getService<any>(CONTENT_QUEUE_SERVICE);
               for (const r of results) {
                 const sid = (r as any).serverId || (r as any).server?.id || (r as any).id;
                 if (sid) {
-                  contentSvc.provisionServerContent(sid).catch(() => {});
+                  await contentQueue.enqueue(sid, 5 /* NORMAL */);
                 }
               }
             } catch { /* non-critical */ }
@@ -785,12 +785,13 @@ export class NetworkCommandsModule implements CommandModule {
         );
 
         // Fire content provisioning early so it runs during the challenge
+        // Queue content generation during challenge (urgent — player is connecting)
         if (isFirstVisit && !targetServer.isPlayerHome) {
           try {
             const { getService } = await import("../../di/container");
-            const { SERVER_CONTENT_SERVICE } = await import("../../di/tokens");
-            const contentService = getService<any>(SERVER_CONTENT_SERVICE);
-            contentService.provisionServerContent(targetServer.id).catch(() => {});
+            const { CONTENT_QUEUE_SERVICE } = await import("../../di/tokens");
+            const contentQueue = getService<any>(CONTENT_QUEUE_SERVICE);
+            await contentQueue.enqueue(targetServer.id, 1 /* URGENT */, {}, context.userId);
           } catch { /* non-critical */ }
         }
 
@@ -810,7 +811,16 @@ export class NetworkCommandsModule implements CommandModule {
       }
     }
 
-    // ── Proceed with connection (no challenge needed) ──
+    // ── Ensure content is ready before connecting ──
+    if (!targetServer.isPlayerHome && targetServer.type !== "player_home") {
+      try {
+        const { getService } = await import("../../di/container");
+        const { CONTENT_QUEUE_SERVICE } = await import("../../di/tokens");
+        const contentQueue = getService<any>(CONTENT_QUEUE_SERVICE);
+        await contentQueue.ensureReady(targetServer.id, context.userId);
+      } catch { /* non-critical — connect anyway */ }
+    }
+
     return await this.completeConnection(context, target, targetServer);
   }
 
@@ -1388,6 +1398,16 @@ export class NetworkCommandsModule implements CommandModule {
         });
         if (!targetServer) {
           return { success: false, output: "Target server no longer exists.", data: { connectionResolved: true }, timestamp: new Date() };
+        }
+
+        // Ensure content is ready after challenge (may have been queued during challenge)
+        if (!targetServer.isPlayerHome && targetServer.type !== "player_home") {
+          try {
+            const { getService } = await import("../../di/container");
+            const { CONTENT_QUEUE_SERVICE } = await import("../../di/tokens");
+            const contentQueue = getService<any>(CONTENT_QUEUE_SERVICE);
+            await contentQueue.ensureReady(targetServer.id, context.userId);
+          } catch { /* non-critical */ }
         }
 
         const connectResult = await this.completeConnection(context, targetServer.ipAddress, targetServer);

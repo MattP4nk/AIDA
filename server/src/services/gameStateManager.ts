@@ -533,35 +533,8 @@ class GameStateManager extends EventEmitter {
         })();
       }
 
-      // Provision thematic server content on first connect (non-blocking).
-      // AI content generation can take 60-120s, so fire-and-forget to avoid
-      // blocking the connect flow. Player connects immediately; content appears
-      // when provisioning completes in the background.
-      if (!server.isPlayerHome && server.type !== "player_home") {
-        await safeExecute({
-          fn: async () => {
-            const { getService } = await import("../di/container");
-            const { SERVER_CONTENT_SERVICE } = await import("../di/tokens");
-            const contentService = getService<any>(SERVER_CONTENT_SERVICE);
-            // Non-blocking: don't await — notify player when done
-            contentService.provisionServerContent(serverId).then(() => {
-              this.io.to(`user:${userId}`).emit("command:result", {
-                success: true,
-                output: `[${server.name}] Server filesystem loaded.`,
-                timestamp: new Date(),
-              });
-            }).catch((contentErr: unknown) => {
-              this.logger.warn(
-                { err: contentErr, serverId, serverName: server.name },
-                "Server content provisioning failed on connect (non-fatal)",
-              );
-            });
-          },
-          context: "Server content service on connect",
-          logger: this.logger,
-          silent: true,
-        })();
-      }
+      // Content provisioning handled by ContentQueueService.ensureReady()
+      // in the connect flow (networkCommands.ts) — no fire-and-forget needed here.
 
       // Update session
       session.currentServerId = serverId;

@@ -7,11 +7,9 @@ import {
   LOGGER,
   CACHE_SERVICE,
   MISSION_INTEGRATION_SERVICE,
-  SERVER_CONTENT_SERVICE,
   FACTION_KNOWLEDGE_SERVICE,
 } from "../di/tokens";
 import type { CacheService } from "./cacheService";
-import type { ServerContentService } from "./serverContentService";
 import type MissionIntegrationService from "./missionIntegration";
 import type { FactionKnowledgeService } from "./factionKnowledgeService";
 import { safeExecute } from "../utils/safeExecute";
@@ -106,7 +104,6 @@ class ServerService {
   private io: SocketIOServer | null = null;
   private missionIntegration: MissionIntegrationService | null = null;
 
-  private serverContent: ServerContentService | null = null;
   private factionKnowledge: FactionKnowledgeService | null = null;
 
   constructor(
@@ -114,13 +111,10 @@ class ServerService {
     @inject(CACHE_SERVICE) private cacheService: CacheService,
     @inject(MISSION_INTEGRATION_SERVICE)
     missionIntegrationService?: MissionIntegrationService,
-    @inject(SERVER_CONTENT_SERVICE)
-    serverContentService?: ServerContentService,
     @inject(FACTION_KNOWLEDGE_SERVICE)
     factionKnowledgeService?: FactionKnowledgeService,
   ) {
     this.missionIntegration = missionIntegrationService || null;
-    this.serverContent = serverContentService || null;
     this.factionKnowledge = factionKnowledgeService || null;
     this.logger.info("ServerService initialized");
   }
@@ -184,16 +178,14 @@ class ServerService {
 
         const result = { ...server, state: defaultState };
 
-        // Fire-and-forget: provision thematic filesystem content for the new server
-        if (this.serverContent && server.type !== "player_home") {
-          this.serverContent
-            .provisionServerContent(server.id)
-            .catch((err) =>
-              this.logger.error(
-                { err, serverId: server.id },
-                "Background server content provisioning failed",
-              ),
-            );
+        // Queue content generation for the new server
+        if (server.type !== "player_home") {
+          try {
+            const { getService } = await import("../di/container");
+            const { CONTENT_QUEUE_SERVICE } = await import("../di/tokens");
+            const contentQueue = getService<any>(CONTENT_QUEUE_SERVICE);
+            await contentQueue.enqueue(server.id, 5 /* NORMAL */);
+          } catch { /* non-critical */ }
         }
 
         return result;
