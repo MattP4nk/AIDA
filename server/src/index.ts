@@ -441,15 +441,11 @@ async function initialize(): Promise<void> {
   const dungeonService = getService<DarkNetDungeonService>(
     DARKNET_DUNGEON_SERVICE,
   );
-  try {
-    await dungeonService.ensureActiveDungeon();
-    logger.info("✅ DarkNet Dungeon system initialized");
-  } catch (err) {
-    logger.warn(
-      { err },
-      "DarkNet Dungeon initialization failed (non-critical)",
-    );
-  }
+  // Fire-and-forget: dungeon generation involves multiple AI calls and
+  // must not block server startup (which prevents server.listen())
+  dungeonService.ensureActiveDungeon()
+    .then(() => logger.info("✅ DarkNet Dungeon system initialized"))
+    .catch((err) => logger.warn({ err }, "DarkNet Dungeon initialization failed (non-critical)"));
 
   // Periodic dungeon expiration check — every 1 hour
   setInterval(

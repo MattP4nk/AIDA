@@ -113,6 +113,7 @@ router.post(
             name: `${username}'s Terminal`,
             ipAddress: homeIp,
             type: "player_home",
+            isPlayerHome: true,
             ownerId: user.id,
             encryptionLevel: 1,
             accessRules: [{ type: "allow", target: "user", value: user.id }],
@@ -120,6 +121,12 @@ router.post(
             maxConnections: 5,
             currentConnections: 0,
           },
+        });
+
+        // Link user to home server
+        await tx.user.update({
+          where: { id: user.id },
+          data: { homeServerId: homeServer.id },
         });
 
         // Create root filesystem

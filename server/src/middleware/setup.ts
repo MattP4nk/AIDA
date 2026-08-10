@@ -42,6 +42,7 @@ export function setupMiddleware(app: Application): void {
           styleSrc: ["'self'", "'unsafe-inline'"],
           scriptSrc: ["'self'"],
           imgSrc: ["'self'", "data:", "https:"],
+          mediaSrc: ["'self'", "data:", "blob:"],
         },
       },
     }),

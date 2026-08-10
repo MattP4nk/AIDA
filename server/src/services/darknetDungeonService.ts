@@ -1202,7 +1202,8 @@ Respond ONLY with JSON:
     dungeonName: string,
     difficulty: number,
   ): Promise<void> {
-    const contentPromises = servers.map(async (server, index) => {
+    // Process servers sequentially to avoid flooding AI slot queue
+    for (const [index, server] of servers.entries()) {
       try {
         // Determine depth tier for this server
         const depthTier = this.getDepthTier(index, servers.length);
@@ -1375,10 +1376,7 @@ Respond ONLY with JSON:
           "Failed to populate server with lore content — skipping",
         );
       }
-    });
-
-    // Run all content generation in parallel
-    await Promise.allSettled(contentPromises);
+    }
   }
 
   /**

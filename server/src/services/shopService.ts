@@ -233,6 +233,22 @@ const SHOP_CATALOG: ShopItem[] = [
     maxStack: 1,
   },
 
+  // ==================== CONSUMABLES ====================
+  {
+    id: "quantum_charge",
+    name: "Quantum Decryptor Charge",
+    description:
+      "Single-use quantum decryption charge. Bypasses PROTECTED file encryption instantly. No minigame required.",
+    category: ItemCategory.EXPLOIT,
+    price: 7500,
+    requiredLevel: 8,
+    requiredSkills: { cryptography: 50 },
+    effects: {},
+    rarity: ItemRarity.EPIC,
+    isConsumable: true,
+    maxStack: 3,
+  },
+
   // ==================== DEFENSE TOOLS ====================
   {
     id: "ids_blocker",

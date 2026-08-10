@@ -899,7 +899,11 @@ export interface HomeCustomization {
 
 // ==================== HACKING MINIGAME TYPES ====================
 
-export type MinigameType = "cipher" | "port_sequence" | "memory_trace";
+export type MinigameType =
+  | "cipher" | "port_sequence" | "memory_trace"       // hack layers
+  | "anomaly_scan" | "disk_sector"                     // sweep (hidden files)
+  | "brute_force"                                      // crack (encrypted files)
+  | "cipher_storm" | "entropy_overload";               // crack.storm (protected files)
 
 export interface MinigameChallenge {
   type: MinigameType;
@@ -909,6 +913,7 @@ export interface MinigameChallenge {
   hints: string[];
   timeLimit: number; // seconds
   maxAttempts: number;
+  metadata?: Record<string, any>; // extra context (fileId, bestStrategy, hiddenFileIds, etc.)
 }
 
 export interface HackSessionInfo {

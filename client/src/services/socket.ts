@@ -3,7 +3,8 @@ import { writable, get, type Writable } from "svelte/store";
 import { apiClient } from "./api";
 import { terminalTabsStore } from "./terminalTabs";
 import { sound } from "./sound";
-import { ReservedPID } from "../../../shared/types";
+// Reserved PIDs for virtual UI processes (mirrored from shared/types.ts)
+const ReservedPID = { HACK_CHALLENGE: -1, CONNECTION_CHALLENGE: -2, FILE_CHALLENGE: -3 } as const;
 
 // Socket connection configuration — override via VITE_SOCKET_URL env var
 const SOCKET_URL =
@@ -54,6 +55,16 @@ export const activeHackSession = writable<{
 export const activeConnectionSession = writable<{
   active: boolean;
   targetIp?: string;
+  challenge?: any;
+  sessionId?: string;
+} | null>(null);
+
+// Active file access challenge store (sweep/crack/storm panels)
+export const activeFileChallenge = writable<{
+  active: boolean;
+  type: "sweep" | "crack" | "storm";
+  targetFile?: string;
+  targetDir?: string;
   challenge?: any;
   sessionId?: string;
 } | null>(null);
@@ -691,6 +702,30 @@ class SocketService {
           ...procs.filter((p: any) => p.pid !== ReservedPID.CONNECTION_CHALLENGE),
           { pid: ReservedPID.CONNECTION_CHALLENGE, type: "connection_challenge", description: `Connection challenge — ${data.data.targetIp}`, progress: 0, eta: connTimeLimit },
         ]);
+      }
+
+      // Check if this is a file access challenge (sweep/crack/storm)
+      if (data.data?.fileAccessSessionId && data.data?.fileAccessType) {
+        activeFileChallenge.set({
+          active: true,
+          type: data.data.fileAccessType,
+          targetFile: data.data.targetFile,
+          targetDir: data.data.targetDir,
+          challenge: data.data.challenge,
+          sessionId: data.data.fileAccessSessionId,
+        });
+
+        const timeLimit = data.data.challenge?.timeLimit || 60;
+        activeProcesses.update(procs => [
+          ...procs.filter((p: any) => p.pid !== ReservedPID.FILE_CHALLENGE),
+          { pid: ReservedPID.FILE_CHALLENGE, type: "file_challenge", description: `${data.data.fileAccessType} challenge`, progress: 0, eta: timeLimit },
+        ]);
+      }
+
+      // Clear file access challenge on resolution
+      if (data.data?.fileAccessResolved) {
+        activeFileChallenge.set(null);
+        activeProcesses.update(procs => procs.filter((p: any) => p.pid !== ReservedPID.FILE_CHALLENGE));
       }
 
       // Clear challenge panels + remove from ProcessBar on resolution

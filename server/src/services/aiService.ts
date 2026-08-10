@@ -71,8 +71,8 @@ export class AIService {
   /** Concurrency throttle — prevents flooding the API with parallel requests. */
   private activeRequests = 0;
   private readonly MAX_CONCURRENT_REQUESTS = 2;
-  private readonly MAX_QUEUE_DEPTH = 20;
-  private readonly SLOT_TIMEOUT_MS = 30_000;
+  private readonly MAX_QUEUE_DEPTH = 30;
+  private readonly SLOT_TIMEOUT_MS = 120_000; // 120s — cloud 120B model can be slow on complex prompts
   private requestQueue: Array<{ resolve: () => void }> = [];
 
   constructor(
@@ -95,8 +95,8 @@ export class AIService {
     // Cloud mode is active when an API key is present
     this.isCloudMode = !!this.apiKey;
 
-    // Dynamic timeout: cloud GPUs are fast (60s), local CPU inference is slow (120s)
-    this.requestTimeout = this.isCloudMode ? 60000 : 120000;
+    // 120s for both: cloud 120B model needs time for complex prompts, local CPU is slow
+    this.requestTimeout = 120000;
 
     this.logger.info(
       {

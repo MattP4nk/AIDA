@@ -193,7 +193,7 @@ function generateFactionSecrets(
   const randomServer = () =>
     networkServers.length > 0
       ? networkServers[Math.floor(Math.random() * networkServers.length)]!
-      : { name: "unknown", ip: "0.0.0.0", role: "general" };
+      : { name: "localhost", ip: "127.0.0.1", role: "general" };
 
   switch (factionShortName) {
     case "garrison": {
@@ -290,7 +290,7 @@ function generateFactionSecrets(
         {
           type: "technical",
           fileName: ".zero_days.stash",
-          content: `// ZERO-DAY EXPLOIT STASH — DO NOT SHARE\n// maintained by ${randomName()}\n\nCVE-2026-XXXX: Garrison firewall RCE (unpatched)\n  target: ${ContentEncoder.encode("192.168.1.2", hackEnc.encoding, hackEnc.key)}\n  payload: buffer overflow in auth handler\n  reliability: 85%\n  # ${hackEnc.encoding} encoded — use: decode ${hackEnc.encoding} <target>\n\nCVE-2026-YYYY: CyberCorp DMZ bypass\n  target: ${ContentEncoder.encode(targetSrv.ip, hackEnc.encoding, hackEnc.key)}\n  payload: SQL injection in API gateway\n  reliability: 70%`,
+          content: `// ZERO-DAY EXPLOIT STASH — DO NOT SHARE\n// maintained by ${randomName()}\n\nCVE-2026-XXXX: Garrison firewall RCE (unpatched)\n  target: ${ContentEncoder.encode(randomServer().ip, hackEnc.encoding, hackEnc.key)}\n  payload: buffer overflow in auth handler\n  reliability: 85%\n  # ${hackEnc.encoding} encoded — use: decode ${hackEnc.encoding} <target>\n\nCVE-2026-YYYY: CyberCorp DMZ bypass\n  target: ${ContentEncoder.encode(targetSrv.ip, hackEnc.encoding, hackEnc.key)}\n  payload: SQL injection in API gateway\n  reliability: 70%`,
           isHidden: true,
           isEncrypted: true,
           targetRole: "database",
@@ -419,7 +419,7 @@ const STATIC_CONTENT: Record<string, ServerContentPlan> = {
       {
         path: "/data/backups/.env.bak",
         content:
-          "DB_HOST=172.16.0.50\nDB_USER=sa\nDB_PASS=Tr0ub4dor&3\nAPI_KEY=sk-corp-889af23c\n",
+          "DB_HOST=db.corp.internal\nDB_USER=sa\nDB_PASS=Tr0ub4dor&3\nAPI_KEY=sk-corp-889af23c\n",
         isHidden: true,
       },
       {
@@ -465,7 +465,7 @@ const STATIC_CONTENT: Record<string, ServerContentPlan> = {
       {
         path: "/logs/audit/connections.log",
         content:
-          "[2024-12-01 00:00:01] SYSTEM BOOT — secure kernel loaded\n[2024-12-01 00:01:15] SSH admin@gov.mil.net — key auth OK\n[2024-12-01 02:33:44] ALERT — anomalous traffic from 169.254.42.1\n[2024-12-01 02:34:01] FIREWALL — blocked 169.254.42.1 (rule: gov_perimeter)\n",
+          "[2024-12-01 00:00:01] SYSTEM BOOT — secure kernel loaded\n[2024-12-01 00:01:15] SSH admin@gov.mil.net — key auth OK\n[2024-12-01 02:33:44] ALERT — anomalous traffic from unknown-host.underground\n[2024-12-01 02:34:01] FIREWALL — blocked unknown-host.underground (rule: gov_perimeter)\n",
       },
       {
         path: "/personnel/active/roster.dat",
@@ -602,11 +602,15 @@ function generateRoleContent(ctx: NetworkContext): ServerContentPlan {
   const { server, linkedServers, allNetworkServers, employeeRoster, network } =
     ctx;
   const e = (i: number) => employeeRoster[i % employeeRoster.length]!;
+  // Use linked servers, fall back to network peers (excluding self)
+  const peers = linkedServers.length > 0
+    ? linkedServers
+    : allNetworkServers.filter(s => s.ip !== server.ip);
   const ls = (i: number) =>
-    linkedServers[i % Math.max(1, linkedServers.length)] || {
-      name: "unknown",
-      ip: "0.0.0.0",
-      role: "general",
+    peers[i % Math.max(1, peers.length)] || {
+      name: server.name,
+      ip: server.ip,
+      role: server.role,
     };
   const ns = (i: number) =>
     allNetworkServers[i % Math.max(1, allNetworkServers.length)] || ls(i);
@@ -632,7 +636,7 @@ function generateRoleContent(ctx: NetworkContext): ServerContentPlan {
           },
           {
             path: "/etc/firewall/rules.conf",
-            content: `# Firewall Rules — ${server.name} (${server.ip})\n# Last updated: ${date}\n# Managed by: ${e(0)}\n\n${linkedServers.map((s) => `ALLOW TCP ${s.ip}:443  # ${s.name} (${s.role})`).join("\n")}\nDENY ALL 0.0.0.0/0  # Default deny\nLOG ALL FROM 10.0.0.0/8  # Monitor player zone\n`,
+            content: `# Firewall Rules — ${server.name} (${server.ip})\n# Last updated: ${date}\n# Managed by: ${e(0)}\n\n${peers.map((s) => `ALLOW TCP ${s.ip}:443  # ${s.name} (${s.role})`).join("\n")}\nDENY ALL 0.0.0.0/0  # Default deny\nLOG ALL FROM 10.0.0.0/8  # Monitor player zone\n`,
           },
           {
             path: "/etc/acl/authorized_hosts.csv",
@@ -640,7 +644,7 @@ function generateRoleContent(ctx: NetworkContext): ServerContentPlan {
           },
           {
             path: "/logs/access/connections.log",
-            content: `[${date} 03:14:22] ACCEPT ${ls(0).ip} → ${server.ip}:443 (${ls(0).name} TLS OK)\n[${date} 03:15:01] ACCEPT ${ls(1).ip} → ${server.ip}:22 (${ls(1).name} SSH key auth)\n[${date} 04:22:17] DENY 169.254.42.7 → ${server.ip}:22 (rule: perimeter_block)\n[${date} 04:22:19] ALERT: 3 failed attempts from external IP\n`,
+            content: `[${date} 03:14:22] ACCEPT ${ls(0).ip} → ${server.ip}:443 (${ls(0).name} TLS OK)\n[${date} 03:15:01] ACCEPT ${ls(1).ip} → ${server.ip}:22 (${ls(1).name} SSH key auth)\n[${date} 04:22:17] DENY ${ns(2).ip} → ${server.ip}:22 (rule: perimeter_block)\n[${date} 04:22:19] ALERT: 3 failed attempts from ${ns(2).ip}\n`,
           },
           {
             path: "/logs/security/alerts.log",
@@ -669,15 +673,15 @@ function generateRoleContent(ctx: NetworkContext): ServerContentPlan {
           },
           {
             path: "/etc/routes/routing_table.conf",
-            content: `# Routing Table — ${server.name}\n# Last update: ${date}\n\n${linkedServers.map((s) => `route add ${s.ip}/32 via ${server.ip} dev eth0  # → ${s.name}`).join("\n")}\nroute add default via ${server.ip} dev eth0\n`,
+            content: `# Routing Table — ${server.name}\n# Last update: ${date}\n\n${peers.map((s, i) => `route add ${s.ip}/32 dev eth${i}  # → ${s.name} (${s.role})`).join("\n")}\nroute add default via ${peers[0]?.ip || server.ip} dev eth0  # upstream\n`,
           },
           {
             path: "/data/interfaces/status.txt",
-            content: `Interface Status — ${date}\n\n${linkedServers.map((s, i) => `eth${i}: UP  ${s.ip}  → ${s.name} (${s.role})  latency: ${Math.floor(Math.random() * 10 + 2)}ms`).join("\n")}\n`,
+            content: `Interface Status — ${date}\n\n${peers.map((s, i) => `eth${i}: UP  ${s.ip}  → ${s.name} (${s.role})  latency: ${Math.floor(Math.random() * 10 + 2)}ms`).join("\n")}\n`,
           },
           {
             path: "/logs/traffic/summary.log",
-            content: `Traffic Summary — ${date}\n\n${linkedServers.map((s) => `${s.ip} (${s.name}): ${Math.floor(Math.random() * 500 + 100)} MB transferred`).join("\n")}\nTotal: ${Math.floor(Math.random() * 2000 + 500)} MB\n`,
+            content: `Traffic Summary — ${date}\n\n${peers.map((s) => `${s.ip} (${s.name}): ${Math.floor(Math.random() * 500 + 100)} MB transferred`).join("\n")}\nTotal: ${Math.floor(Math.random() * 2000 + 500)} MB\n`,
           },
         ],
       };
@@ -753,7 +757,7 @@ function generateRoleContent(ctx: NetworkContext): ServerContentPlan {
           },
           {
             path: "/mail/inbox/server_maintenance.eml",
-            content: `From: ${e(2)}\nTo: all-staff\nDate: ${date}\nSubject: Scheduled Maintenance\n\nMaintenance window: ${date} 02:00-04:00 UTC\nAffected systems: ${linkedServers.map((s) => s.name).join(", ")}\nBackup contact: ${e(3)}\n`,
+            content: `From: ${e(2)}\nTo: all-staff\nDate: ${date}\nSubject: Scheduled Maintenance\n\nMaintenance window: ${date} 02:00-04:00 UTC\nAffected systems: ${peers.map((s) => s.name).join(", ") || server.name}\nBackup contact: ${e(3)}\n`,
           },
           {
             path: "/mail/sent/re_access_request.eml",
@@ -798,7 +802,7 @@ function generateRoleContent(ctx: NetworkContext): ServerContentPlan {
           },
           {
             path: "/home/user/.ssh/config",
-            content: `# SSH Config — ${e(0)}\n${linkedServers
+            content: `# SSH Config — ${e(0)}\n${peers
               .map(
                 (s) =>
                   `Host ${s.name.toLowerCase().replace(/[^a-z0-9]/g, "-")}\n  HostName ${s.ip}\n  User ${e(
@@ -848,7 +852,7 @@ function generateRoleContent(ctx: NetworkContext): ServerContentPlan {
           },
           {
             path: "/etc/rules/acl.conf",
-            content: `# Access Control List — ${server.name}\n# Protected servers:\n${linkedServers.map((s) => `PROTECT ${s.ip}  # ${s.name} (${s.role})`).join("\n")}\n\n# Blocked zones:\nBLOCK 169.254.0.0/16  # Underground zone\nBLOCK 203.0.113.0/24  # DarkNet\nALERT 10.0.0.0/8       # Player zone — log all\n`,
+            content: `# Access Control List — ${server.name}\n# Protected servers:\n${peers.map((s) => `PROTECT ${s.ip}  # ${s.name} (${s.role})`).join("\n")}\n\n# Blocked zones:\nBLOCK 169.254.0.0/16  # Underground zone\nBLOCK 203.0.113.0/24  # DarkNet\nALERT 10.0.0.0/8       # Player zone — log all\n`,
           },
           {
             path: "/etc/ids/signatures.dat",
@@ -856,7 +860,7 @@ function generateRoleContent(ctx: NetworkContext): ServerContentPlan {
           },
           {
             path: "/logs/blocked/recent.log",
-            content: `[${date} 01:23:45] BLOCKED 10.42.7.12 → ${ls(0).ip}:22 (SIG-003: SSH brute force)\n[${date} 02:15:33] BLOCKED 169.254.99.1 → ${server.ip}:443 (zone: underground)\n[${date} 03:44:01] ALERT 10.0.0.1 → ${ls(0).ip}:3306 (SIG-002: SQL injection)\n`,
+            content: `[${date} 01:23:45] BLOCKED ${ns(2).ip} → ${ls(0).ip}:22 (SIG-003: SSH brute force)\n[${date} 02:15:33] BLOCKED ${ns(3).ip} → ${server.ip}:443 (zone: underground)\n[${date} 03:44:01] ALERT ${ns(4).ip} → ${ls(0).ip}:3306 (SIG-002: SQL injection)\n`,
           },
           {
             path: "/logs/alerts/critical.log",
@@ -921,7 +925,7 @@ function generateRoleContent(ctx: NetworkContext): ServerContentPlan {
           },
           {
             path: "/logs/system.log",
-            content: `[BOOT] System initialized — ${date}\n[INFO] Network interface up: ${server.ip}\n[INFO] Connected to: ${linkedServers.map((s) => s.ip).join(", ") || "none"}\n`,
+            content: `[BOOT] System initialized — ${date}\n[INFO] Network interface up: ${server.ip}\n[INFO] Connected to: ${peers.map((s) => s.ip).join(", ") || "standalone"}\n`,
           },
         ],
       };
@@ -1712,7 +1716,7 @@ export class ServerContentService {
     let provisioned = 0;
     for (const server of servers) {
       const fileCount = await this.prisma.fileSystemNode.count({
-        where: { serverId: server.id },
+        where: { serverId: server.id, type: "file" },
       });
       if (fileCount <= 8) {
         try {
@@ -1851,7 +1855,7 @@ export class ServerContentService {
     for (const server of servers) {
       try {
         const fileCount = await this.prisma.fileSystemNode.count({
-          where: { serverId: server.id },
+          where: { serverId: server.id, type: "file" },
         });
 
         if (fileCount > 8 && !options.force) {
@@ -2112,7 +2116,7 @@ export class ServerContentService {
         name: "/",
         type: "directory",
         content: null,
-        permissions: { owner: 15, group: 5, other: 5 },
+        permissions: { owner: 15, faction: 5, others: 5 },
         size: 0,
         createdBy,
       },
@@ -2127,7 +2131,7 @@ export class ServerContentService {
           name: dir,
           type: "directory",
           content: null,
-          permissions: { owner: 15, group: 5, other: 5 },
+          permissions: { owner: 15, faction: 5, others: 5 },
           size: 0,
           createdBy,
         },
@@ -2227,28 +2231,13 @@ export class ServerContentService {
     ownerId: string,
     plan: ServerContentPlan,
   ): Promise<void> {
-    // Try FileService first (works in full server context)
-    let fileService: any = null;
-    try {
-      const { getService } = await import("../di/container");
-      const { FILE_SERVICE } = await import("../di/tokens");
-      fileService = getService<any>(FILE_SERVICE);
-    } catch {
-      // FileService not available — use Prisma-direct fallback below
-    }
-
-    if (fileService) {
-      await this.applyContentPlanViaFileService(
-        serverId,
-        ownerId,
-        plan,
-        fileService,
-      );
-    } else {
-      await this.applyContentPlanViaPrisma(serverId, ownerId, plan);
-    }
+    // Always use Prisma-direct path for system provisioning.
+    // FileService enforces user-level permissions (access level, write checks)
+    // which fail for system/AI-generated content (no hack log, no ownership).
+    await this.applyContentPlanViaPrisma(serverId, ownerId, plan);
   }
 
+  // @ts-ignore kept for potential future use when FileService permission model supports system callers
   private async applyContentPlanViaFileService(
     serverId: string,
     ownerId: string,
@@ -2367,7 +2356,7 @@ export class ServerContentService {
               name: part,
               type: "directory",
               content: null,
-              permissions: { owner: 15, group: 5, other: 5 },
+              permissions: { owner: 15, faction: 5, others: 5 },
               size: 0,
               createdBy,
             },
@@ -2417,7 +2406,7 @@ export class ServerContentService {
             name: fileName,
             type: "file",
             content: file.content,
-            permissions: { owner: 15, group: 5, other: 1 },
+            permissions: { owner: 15, faction: 5, others: 1 },
             size: file.content.length,
             createdBy,
             isHidden: file.isHidden || false,

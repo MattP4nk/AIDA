@@ -1,4 +1,11 @@
-import { Command, CommandResult, HackMethod } from "../../../../shared/types";
+import { Command, CommandResult, HackMethod, MinigameChallenge } from "../../../../shared/types";
+import {
+  generateBruteForceChallenge,
+  generateCipherStormChallenge,
+  generateEntropyOverloadChallenge,
+  validateCrackStrategy,
+  validateStormAnswer,
+} from "../fileAccessMinigameGenerator";
 import { CommandModule, CommandContext } from "./interface";
 import {
   boxTop,
@@ -28,6 +35,31 @@ import logger from "../../logger";
  *   - rootkit: install a rootkit for persistent access
  *   - scan: (delegated to NetworkCommandsModule) placeholder here
  */
+// ── File crack session management ──────────────────────────────────
+interface FileCrackSession {
+  sessionId: string;
+  challenge: MinigameChallenge;
+  serverId: string;
+  fileId: string;
+  filePath: string;
+  expiresAt: number;
+  attemptsLeft: number;
+}
+
+const activeFileCrackSessions = new Map<string, FileCrackSession>();
+const activeStormSessions = new Map<string, FileCrackSession>();
+
+// Cleanup expired sessions
+setInterval(() => {
+  const now = Date.now();
+  for (const [uid, s] of activeFileCrackSessions) {
+    if (now > s.expiresAt) activeFileCrackSessions.delete(uid);
+  }
+  for (const [uid, s] of activeStormSessions) {
+    if (now > s.expiresAt) activeStormSessions.delete(uid);
+  }
+}, 30_000);
+
 export class HackCommandsModule implements CommandModule {
   public category = "hack";
   public commands: Set<string> = new Set([
@@ -48,6 +80,13 @@ export class HackCommandsModule implements CommandModule {
     "security.scan",
     "trace.status",
     "trace.evade",
+    // File encryption cracking
+    "crack.dict",
+    "crack.mask",
+    "crack.pattern",
+    "crack.protected",
+    "crack.storm",
+    "crack.storm.submit",
   ]);
 
   public async execute(
@@ -90,6 +129,16 @@ export class HackCommandsModule implements CommandModule {
           return await this.handleTraceStatus(command, context);
         case "trace.evade":
           return await this.handleTraceEvade(command, context);
+        case "crack.dict":
+        case "crack.mask":
+        case "crack.pattern":
+          return await this.handleCrackStrategy(command, context);
+        case "crack.protected":
+          return await this.handleCrackProtected(command, context);
+        case "crack.storm":
+          return await this.handleCrackStorm(command, context);
+        case "crack.storm.submit":
+          return await this.handleCrackStormSubmit(command, context);
         default:
           return errorResult(`Hack command not implemented: ${command.command}`);
       }
@@ -110,9 +159,9 @@ export class HackCommandsModule implements CommandModule {
       {
         command: "crack",
         category: "hack",
-        description: "[Hacking 30] Crack encryption on a message",
-        usage: "crack <message_id>",
-        examples: ["crack msg_12345"],
+        description: "[Hacking 30] Crack encryption on a file or message",
+        usage: "crack <filename|message_id>",
+        examples: ["crack secrets.db", "crack msg_12345"],
       },
       {
         command: "exploit",
@@ -221,6 +270,47 @@ export class HackCommandsModule implements CommandModule {
           "[Stealth 25] Attempt to evade an active trace (costs stealth XP)",
         usage: "trace.evade <trace_id>",
         examples: ["trace.evade clxyz12345"],
+      },
+      // ── File encryption cracking ──
+      {
+        command: "crack.dict",
+        category: "hack",
+        description: "[Crypto 20] Dictionary attack on encrypted file (use after 'crack <file>')",
+        usage: "crack.dict",
+      },
+      {
+        command: "crack.mask",
+        category: "hack",
+        description: "[Crypto 25] Brute force with charset constraint (use after 'crack <file>')",
+        usage: "crack.mask <charset>",
+        examples: ["crack.mask a-z", "crack.mask a-z0-9"],
+      },
+      {
+        command: "crack.pattern",
+        category: "hack",
+        description: "[Crypto 20] Pattern-based attack on encrypted file (use after 'crack <file>')",
+        usage: "crack.pattern",
+      },
+      {
+        command: "crack.protected",
+        category: "hack",
+        description: "[Crypto 40] Bypass file protection using a Quantum Charge item",
+        usage: "crack.protected <filename>",
+        examples: ["crack.protected vault.db"],
+      },
+      {
+        command: "crack.storm",
+        category: "hack",
+        description: "[Crypto 50] Near-impossible minigame to crack protected files without items",
+        usage: "crack.storm <filename>",
+        examples: ["crack.storm classified.enc"],
+      },
+      {
+        command: "crack.storm.submit",
+        category: "hack",
+        description: "Submit answer for an active storm challenge",
+        usage: "crack.storm.submit <answer>",
+        examples: ["crack.storm.submit ALPHA BRAVO DELTA", "crack.storm.submit 5 3"],
       },
     ];
   }
@@ -694,14 +784,109 @@ export class HackCommandsModule implements CommandModule {
     command: Command,
     context: CommandContext,
   ): Promise<CommandResult> {
-    const messageId = command.args?.[0];
-    if (!messageId) {
-      return errorResult("Usage: crack <message_id>");
+    const target = command.args?.[0];
+    if (!target) {
+      return errorResult("Usage: crack <filename> or crack <message_id>");
     }
 
     const session = context.gameStateManager.getSession(context.userId);
     if (!session) return errorResult("No active session");
 
+    // Try resolving as a file first (file crack flow)
+    if (session.currentServerId) {
+      const currentDir = session.terminals?.[0]?.currentDirectory || "/";
+      const filePath = target.startsWith("/") ? target : `${currentDir === "/" ? "" : currentDir}/${target}`;
+      const fileResult = await context.fileService.readFile(session.currentServerId, context.userId, filePath);
+
+      if (fileResult.success || fileResult.error === "ENCRYPTED") {
+        return this.handleCrackFile(command, context, session.currentServerId, filePath, target);
+      }
+    }
+
+    // Fall back to message crack flow
+    return this.handleCrackMessage(target, context, session);
+  }
+
+  /** Crack an encrypted file — shows brute force analysis panel. */
+  private async handleCrackFile(
+    _command: Command,
+    context: CommandContext,
+    serverId: string,
+    filePath: string,
+    fileName: string,
+  ): Promise<CommandResult> {
+    // Find the file node
+    const resolution = await context.fileService.resolvePath(serverId, filePath);
+    if (!resolution.exists || !resolution.node) {
+      return errorResult(`File not found: ${fileName}`);
+    }
+
+    const fileNode = resolution.node as any;
+    if (!fileNode.isEncrypted) {
+      return successResult(`${fileName} is not encrypted.`);
+    }
+    if (fileNode.isProtected) {
+      return errorResult(`${fileName} is PROTECTED. Use 'crack.storm ${fileName}', 'crack.protected ${fileName}' (requires Quantum Charge), or 'fragment.crack ${fileName}'.`);
+    }
+
+    // Check if already in a crack session
+    if (activeFileCrackSessions.has(context.userId)) {
+      return errorResult("File crack session already active. Choose a strategy (crack.dict, crack.mask, crack.pattern) or wait for it to expire.");
+    }
+
+    const progress = await context.db.client.playerProgress.findUnique({
+      where: { userId: context.userId },
+      select: { cryptography: true },
+    });
+    const cryptography = progress?.cryptography ?? 0;
+
+    // Determine encryption metadata
+    const metadata = (fileNode.metadata as any) || {};
+    const encryptionKey = fileNode.encryptionKey || metadata.encryptionKey || null;
+
+    const challenge = generateBruteForceChallenge(
+      fileNode.encryptionLevel || Math.min(10, Math.max(1, Math.floor((fileNode.size || 500) / 500))),
+      { id: fileNode.id, name: fileName, encryptionKey, metadata },
+      { cryptography },
+    );
+
+    const sessionId = `crack_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    activeFileCrackSessions.set(context.userId, {
+      sessionId,
+      challenge,
+      serverId,
+      fileId: fileNode.id,
+      filePath,
+      expiresAt: Date.now() + challenge.timeLimit * 1000 + 5000,
+      attemptsLeft: challenge.maxAttempts,
+    });
+
+    const output = challenge.displayText.join("\n") +
+      (challenge.hints.length > 0 ? "\n\n" + challenge.hints.map(h => `hint: ${h}`).join("\n") : "");
+
+    if (context.io) {
+      context.io.to(`player:${context.userId}`).emit("command:result", {
+        success: true,
+        output,
+        data: {
+          fileAccessSessionId: sessionId,
+          fileAccessType: "crack",
+          challenge,
+          targetFile: fileName,
+        },
+        timestamp: new Date(),
+      });
+    }
+
+    return successResult("Encryption analysis loaded. Choose your attack strategy from the panel above.");
+  }
+
+  /** Original message crack flow. */
+  private async handleCrackMessage(
+    messageId: string,
+    context: CommandContext,
+    session: any,
+  ): Promise<CommandResult> {
     const memoryService = context.services.memoryService;
     if (memoryService) {
       const progress = await context.db.client.playerProgress.findUnique({
@@ -731,17 +916,266 @@ export class HackCommandsModule implements CommandModule {
       );
 
       if (!proc) return errorResult("Failed to start crack process.");
-
       const etaSec = Math.ceil(proc.duration / 1000);
       return successResult(`Cracking encryption... ETA ${etaSec}s [PID ${proc.pid}]\nUse 'ps' to monitor progress.`);
     }
 
-    // Fallback: no process system
     const result = await context.services.messageEncryptionService!.crackEncryption(messageId, context.userId);
-    if (result.success) {
-      return successResult("Encryption cracked successfully");
+    return result.success ? successResult("Encryption cracked successfully") : errorResult("Failed to crack encryption");
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // CRACK STRATEGY — dict/mask/pattern
+  // ═══════════════════════════════════════════════════════════════
+
+  private async handleCrackStrategy(
+    command: Command,
+    context: CommandContext,
+  ): Promise<CommandResult> {
+    const crackSession = activeFileCrackSessions.get(context.userId);
+    if (!crackSession) {
+      return errorResult("No active file crack session. Run 'crack <filename>' first.");
     }
-    return errorResult("Failed to crack encryption");
+    if (Date.now() > crackSession.expiresAt) {
+      activeFileCrackSessions.delete(context.userId);
+      return errorResult("Crack session expired. Run 'crack <filename>' again.");
+    }
+
+    const strategyMap: Record<string, "dict" | "mask" | "pattern"> = {
+      "crack.dict": "dict",
+      "crack.mask": "mask",
+      "crack.pattern": "pattern",
+    };
+    const strategy = strategyMap[command.command];
+    if (!strategy) return errorResult("Unknown strategy.");
+
+    const { isCorrect, successMultiplier } = validateCrackStrategy(crackSession.challenge, strategy);
+
+    // Get crypto skill for success calculation
+    const progress = await context.db.client.playerProgress.findUnique({
+      where: { userId: context.userId },
+      select: { cryptography: true },
+    });
+    const cryptography = progress?.cryptography ?? 0;
+
+    // Success chance: base 50% + skill modifier, scaled by strategy correctness
+    const baseChance = 0.5 + (cryptography / 200); // 50-100% at skill 0-100
+    const finalChance = Math.min(0.95, Math.max(0.1, baseChance * successMultiplier));
+    const success = Math.random() < finalChance;
+
+    if (success) {
+      // Decrypt the file
+      await context.db.client.fileSystemNode.update({
+        where: { id: crackSession.fileId },
+        data: { isEncrypted: false, encryptionKey: null },
+      });
+
+      // Award XP
+      const xpGain = 5 + (crackSession.challenge.difficulty * 2) + (isCorrect ? 5 : 0);
+      try {
+        await context.db.client.playerProgress.update({
+          where: { userId: context.userId },
+          data: { cryptography: { increment: xpGain } },
+        });
+      } catch { /* non-critical */ }
+
+      activeFileCrackSessions.delete(context.userId);
+
+      const strategyLabel = isCorrect ? "Optimal strategy!" : "Suboptimal strategy, but it worked.";
+      return successResult(
+        `Encryption cracked! ${strategyLabel}\n` +
+        `File '${crackSession.challenge.metadata?.fileName}' is now readable.\n` +
+        `+${xpGain} cryptography XP`,
+      );
+    }
+
+    // Failure
+    crackSession.attemptsLeft--;
+    if (crackSession.attemptsLeft <= 0) {
+      activeFileCrackSessions.delete(context.userId);
+      return errorResult(
+        `Decryption failed. ${isCorrect ? "Bad luck." : "Wrong approach."}\n` +
+        "All attempts exhausted. Run 'crack <filename>' to try again.",
+      );
+    }
+
+    activeFileCrackSessions.delete(context.userId); // allow re-analysis
+    return errorResult(
+      `Decryption attempt failed. ${isCorrect ? "Almost had it." : "Try a different strategy."}\n` +
+      "Run 'crack <filename>' to analyze again.",
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // CRACK.PROTECTED — Quantum Charge item
+  // ═══════════════════════════════════════════════════════════════
+
+  private async handleCrackProtected(
+    command: Command,
+    context: CommandContext,
+  ): Promise<CommandResult> {
+    const fileName = command.args?.[0];
+    if (!fileName) return errorResult("Usage: crack.protected <filename>");
+
+    const session = context.gameStateManager.getSession(context.userId);
+    if (!session?.currentServerId) return errorResult("Not connected to any server.");
+
+    const currentDir = session.terminals?.[0]?.currentDirectory || "/";
+    const filePath = fileName.startsWith("/") ? fileName : `${currentDir === "/" ? "" : currentDir}/${fileName}`;
+
+    const resolution = await context.fileService.resolvePath(session.currentServerId, filePath);
+    if (!resolution.exists || !resolution.node) return errorResult(`File not found: ${fileName}`);
+
+    const fileNode = resolution.node as any;
+    if (!fileNode.isProtected) return errorResult(`${fileName} is not protected.`);
+
+    // Check for quantum_charge in inventory
+    const inventory = await context.db.client.inventoryItem.findMany({
+      where: { userId: context.userId },
+      include: { shopItem: true },
+    });
+    const charge = inventory.find((i: any) => i.shopItem.name?.toLowerCase().includes("quantum charge") && i.quantity > 0);
+    if (!charge) {
+      return errorResult(
+        "Requires a Quantum Decryptor Charge.\n" +
+        "Buy one from the shop, or try 'crack.storm' (near-impossible minigame) or 'fragment.crack' (risky).",
+      );
+    }
+
+    // Consume the charge
+    if (charge.quantity <= 1) {
+      await context.db.client.inventoryItem.delete({ where: { id: charge.id } });
+    } else {
+      await context.db.client.inventoryItem.update({
+        where: { id: charge.id },
+        data: { quantity: { decrement: 1 } },
+      });
+    }
+
+    // Remove protection
+    await context.db.client.fileSystemNode.update({
+      where: { id: fileNode.id },
+      data: { isProtected: false },
+    });
+
+    return successResult(
+      `Quantum Decryptor activated. Protection layer dissolved.\n` +
+      `File '${fileName}' is now accessible.`,
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // CRACK.STORM — Near-impossible minigame for protected files
+  // ═══════════════════════════════════════════════════════════════
+
+  private async handleCrackStorm(
+    command: Command,
+    context: CommandContext,
+  ): Promise<CommandResult> {
+    const fileName = command.args?.[0];
+    if (!fileName) return errorResult("Usage: crack.storm <filename>");
+
+    const session = context.gameStateManager.getSession(context.userId);
+    if (!session?.currentServerId) return errorResult("Not connected to any server.");
+
+    if (activeStormSessions.has(context.userId)) {
+      return errorResult("Storm session already active. Submit your answer with 'crack.storm.submit'.");
+    }
+
+    const currentDir = session.terminals?.[0]?.currentDirectory || "/";
+    const filePath = fileName.startsWith("/") ? fileName : `${currentDir === "/" ? "" : currentDir}/${fileName}`;
+
+    const resolution = await context.fileService.resolvePath(session.currentServerId, filePath);
+    if (!resolution.exists || !resolution.node) return errorResult(`File not found: ${fileName}`);
+
+    const fileNode = resolution.node as any;
+    if (!fileNode.isProtected) return errorResult(`${fileName} is not protected. Use 'crack' instead.`);
+
+    const progress = await context.db.client.playerProgress.findUnique({
+      where: { userId: context.userId },
+      select: { cryptography: true, hacking: true },
+    });
+    const skills = { cryptography: progress?.cryptography ?? 0, hacking: progress?.hacking ?? 0 };
+
+    // Randomly pick cipher storm or entropy overload
+    const challenge = Math.random() < 0.5
+      ? generateCipherStormChallenge(10, fileNode.id, skills)
+      : generateEntropyOverloadChallenge(10, fileNode.id, skills);
+
+    const sessionId = `storm_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    activeStormSessions.set(context.userId, {
+      sessionId,
+      challenge,
+      serverId: session.currentServerId,
+      fileId: fileNode.id,
+      filePath,
+      expiresAt: Date.now() + challenge.timeLimit * 1000 + 5000,
+      attemptsLeft: 1,
+    });
+
+    const output = challenge.displayText.join("\n") +
+      (challenge.hints.length > 0 ? "\n\n" + challenge.hints.map(h => `hint: ${h}`).join("\n") : "");
+
+    if (context.io) {
+      context.io.to(`player:${context.userId}`).emit("command:result", {
+        success: true,
+        output,
+        data: {
+          fileAccessSessionId: sessionId,
+          fileAccessType: "storm",
+          challenge,
+          targetFile: fileName,
+        },
+        timestamp: new Date(),
+      });
+    }
+
+    return successResult("STORM challenge loaded. Solve it in the panel above. Clock is ticking.");
+  }
+
+  private async handleCrackStormSubmit(
+    command: Command,
+    context: CommandContext,
+  ): Promise<CommandResult> {
+    const stormSession = activeStormSessions.get(context.userId);
+    if (!stormSession) return errorResult("No active storm session. Run 'crack.storm <filename>' first.");
+
+    if (Date.now() > stormSession.expiresAt) {
+      activeStormSessions.delete(context.userId);
+      return errorResult("Storm session expired. Time's up.");
+    }
+
+    const answer = command.args.join(" ").trim();
+    if (!answer) {
+      return errorResult("Usage: crack.storm.submit <answer>");
+    }
+
+    const correct = validateStormAnswer(stormSession.challenge, answer);
+    activeStormSessions.delete(context.userId);
+
+    if (correct) {
+      // Remove protection
+      await context.db.client.fileSystemNode.update({
+        where: { id: stormSession.fileId },
+        data: { isProtected: false },
+      });
+
+      // Award big XP
+      try {
+        await context.db.client.playerProgress.update({
+          where: { userId: context.userId },
+          data: { cryptography: { increment: 25 }, hacking: { increment: 15 } },
+        });
+      } catch { /* non-critical */ }
+
+      return successResult(
+        "PROTECTION BREACHED.\n" +
+        `File '${stormSession.filePath.split("/").pop()}' is now accessible.\n` +
+        "+25 cryptography XP, +15 hacking XP",
+      );
+    }
+
+    return errorResult("Incorrect. The protection holds. Session ended.");
   }
 
   private async handleExploit(

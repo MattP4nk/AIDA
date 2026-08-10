@@ -121,6 +121,7 @@ export class FileService {
     userId: string,
     path: string = "/",
     showHidden: boolean = false,
+    revealedFileIds: string[] = [],
   ): Promise<FileOperationResult> {
     try {
       // Validate path for security
@@ -152,12 +153,17 @@ export class FileService {
       // Get user's access level on this server
       const accessLevel = await this.getUserAccessLevel(userId, serverId);
 
-      // Fetch children
+      // Fetch children (include user-revealed hidden files from sweep)
+      const hiddenFilter = showHidden
+        ? {}
+        : revealedFileIds.length > 0
+          ? { OR: [{ isHidden: false }, { id: { in: revealedFileIds } }] }
+          : { isHidden: false };
       const children = await prisma.fileSystemNode.findMany({
         where: {
           serverId,
           parentId: resolution.nodeId,
-          ...(showHidden ? {} : { isHidden: false }),
+          ...hiddenFilter,
         },
         orderBy: [
           { type: "desc" }, // directories first
@@ -1233,7 +1239,7 @@ export class FileService {
   /**
    * Resolve a path to a node ID
    */
-  private async resolvePath(
+  async resolvePath(
     serverId: string,
     path: string,
   ): Promise<PathResolution> {

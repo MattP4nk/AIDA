@@ -2,7 +2,9 @@
     import { onMount, onDestroy, tick } from "svelte";
     import { get } from "svelte/store";
     import { terminalService } from "../services/terminal";
-    import { ReservedPID, type CommandResult } from "../../../shared/types";
+    import type { CommandResult } from "../../../shared/types";
+    // Reserved PIDs for virtual UI processes (mirrored from shared/types.ts)
+    const ReservedPID = { HACK_CHALLENGE: -1, CONNECTION_CHALLENGE: -2 } as const;
     import { apiClient } from "../services/api";
     // New ASCII Dialog system
     import MailDialog from "./MailDialog.svelte";
@@ -22,6 +24,7 @@
         playerResources,
         activeHackSession,
         activeConnectionSession,
+        activeFileChallenge,
     } from "../services/socketStores";
     // Notification service
     import {
@@ -347,6 +350,9 @@
     }
     $: if ($activeConnectionSession?.active && $activeConnectionSession.challenge?.timeLimit) {
         startChallengeTimer($activeConnectionSession.challenge.timeLimit);
+    }
+    $: if ($activeFileChallenge?.active && $activeFileChallenge.challenge?.timeLimit) {
+        startChallengeTimer($activeFileChallenge.challenge.timeLimit);
     }
     // Stop when challenge resolves
     $: if (!$activeHackSession?.active && !$activeConnectionSession?.active) {
@@ -1654,6 +1660,33 @@
         </div>
     {/if}
 
+    <!-- Sticky File Access Challenge Panel (sweep/crack/storm) -->
+    {#if $activeFileChallenge?.active && $activeFileChallenge.challenge}
+        <div class="file-challenge-panel">
+            <div class="challenge-header file-access">
+                <span>{$activeFileChallenge.type === "sweep" ? "SWEEP" : $activeFileChallenge.type === "storm" ? "STORM" : "CRACK"} —
+                {$activeFileChallenge.targetDir || $activeFileChallenge.targetFile || "unknown"}</span>
+                {#if challengeCountdown > 0}
+                    <span class="challenge-timer" class:warning={challengeCountdown <= ($activeFileChallenge.challenge.timeLimit || 60) * 0.25} class:urgent={challengeCountdown <= 5}>
+                        {challengeCountdown}s
+                    </span>
+                {/if}
+            </div>
+            {#if $activeFileChallenge.challenge.displayText}
+                {#each $activeFileChallenge.challenge.displayText as line}
+                    <div class="challenge-line">{line}</div>
+                {/each}
+            {/if}
+            {#if $activeFileChallenge.challenge.hints?.length}
+                <div class="challenge-hints">
+                    {#each $activeFileChallenge.challenge.hints as hint}
+                        <div class="hint-line">hint: {hint}</div>
+                    {/each}
+                </div>
+            {/if}
+        </div>
+    {/if}
+
     <!-- Live Process Bar -->
     <ProcessBar />
 
@@ -2277,6 +2310,29 @@
         color: #0099cc;
     }
 
+    /* ==================== FILE ACCESS CHALLENGE PANEL ==================== */
+
+    .file-challenge-panel {
+        border-top: 1px solid #3a2a0a;
+        border-bottom: 1px solid #3a2a0a;
+        background: #14100a;
+        padding: 8px 40px;
+        font-family: inherit;
+        font-size: 0.85em;
+        color: #ffaa00;
+        max-height: 280px;
+        overflow-y: auto;
+    }
+
+    .challenge-header.file-access {
+        color: #ffaa00;
+        text-shadow: 0 0 5px rgba(255, 170, 0, 0.3);
+    }
+
+    .file-challenge-panel .challenge-line {
+        color: #cc8800;
+    }
+
     /* ==================== CLICKABLE COMMANDS ==================== */
 
     :global(.clickable-cmd) {
@@ -2543,7 +2599,8 @@
 
         /* Challenge panels scroll horizontally */
         .hack-challenge-panel,
-        .connection-challenge-panel {
+        .connection-challenge-panel,
+        .file-challenge-panel {
             overflow-x: auto;
         }
 

@@ -113,9 +113,10 @@ export const isProduction = config.NODE_ENV === "production";
 export const isTest = config.NODE_ENV === "test";
 
 /** Single source of truth for allowed CORS origins */
-export const CORS_ORIGINS: string | string[] =
-  process.env.CORS_ORIGIN ||
-  ["http://localhost:8080", "http://localhost:8081", "http://localhost:5173"];
+export const CORS_ORIGINS: string[] =
+  process.env.CORS_ORIGIN
+    ? process.env.CORS_ORIGIN.split(",").map(s => s.trim())
+    : ["http://localhost:8080", "http://localhost:8081", "http://localhost:5173"];
 
 // Validation
 export const validateConfig = (): void => {

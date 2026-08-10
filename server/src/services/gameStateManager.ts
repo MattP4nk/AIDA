@@ -141,9 +141,24 @@ class GameStateManager extends EventEmitter {
         throw new Error(`User ${userId} not found`);
       }
 
-      // Use player's home server ID from database (already set during registration or migration)
-      const homeServerId =
-        user.homeServerId || `home_${user.homeIp.replace(/\./g, "_")}`;
+      // Use player's home server ID from database (set during registration)
+      let homeServerId = user.homeServerId;
+      if (!homeServerId) {
+        // Backfill: find the home server by owner
+        const homeServer = await db.client.gameServer.findFirst({
+          where: { ownerId: userId, isPlayerHome: true },
+          select: { id: true },
+        });
+        if (homeServer) {
+          homeServerId = homeServer.id;
+          await db.client.user.update({
+            where: { id: userId },
+            data: { homeServerId: homeServer.id },
+          });
+        } else {
+          throw new Error(`No home server found for user ${userId}`);
+        }
+      }
 
       // Try to load last session directory
       const lastSession = await db.client.userSession.findFirst({

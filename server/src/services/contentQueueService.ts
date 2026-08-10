@@ -62,12 +62,14 @@ export class ContentQueueService {
   private failedCount = 0;
 
   // Configuration
-  private readonly POLL_INTERVAL_MS = 5_000;
+  private readonly POLL_INTERVAL_MS = 10_000;       // 10s between polls (was 5s)
   private readonly MAX_ATTEMPTS = 3;
   private readonly URGENT_TIMEOUT_MS = 30_000;
-  private readonly BACKOFF_BASE_MS = 5_000;
+  private readonly BACKOFF_BASE_MS = 10_000;
   private readonly CONTENT_THRESHOLD = 12;
   private readonly CLEANUP_AGE_MS = 24 * 60 * 60 * 1000; // 24h
+  private readonly COOLDOWN_MS = 15_000;             // 15s cooldown between jobs to avoid flooding AI
+  private lastJobCompletedAt = 0;
 
   // Late-bound to avoid circular DI
   private serverContentService: ServerContentService | null = null;
@@ -312,16 +314,22 @@ export class ContentQueueService {
   private async tick(): Promise<void> {
     if (this.processing) return;
 
+    // Cooldown between jobs to avoid flooding AI (skip for URGENT)
+    const now = Date.now();
+    const timeSinceLastJob = now - this.lastJobCompletedAt;
+
     // Periodic cleanup of old completed/failed jobs
     await this.cleanup();
 
     // Pick highest-priority pending job (FIFO within same priority)
-    const now = Date.now();
     const nextJob = this.queue
       .filter(j => j.status === "pending" && j.createdAt.getTime() <= now)
       .sort((a, b) => a.priority - b.priority || a.createdAt.getTime() - b.createdAt.getTime())[0];
 
     if (!nextJob) return;
+
+    // Enforce cooldown for non-urgent jobs
+    if (nextJob.priority > 1 && timeSinceLastJob < this.COOLDOWN_MS) return;
 
     this.processing = nextJob;
     nextJob.status = "processing";
@@ -357,6 +365,7 @@ export class ContentQueueService {
       });
 
       this.logger.info({ jobId: nextJob.id, serverId: nextJob.serverId }, "Content queue: completed");
+      this.lastJobCompletedAt = Date.now();
       this.resolveWaiters(nextJob, true);
 
       // Notify requesting player
@@ -388,6 +397,7 @@ export class ContentQueueService {
           "Content queue: job failed permanently",
         );
 
+        this.lastJobCompletedAt = Date.now();
         this.resolveWaiters(nextJob, false);
         this.removeFromQueue(nextJob.id);
 

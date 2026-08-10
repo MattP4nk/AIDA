@@ -19,9 +19,9 @@
         isCheckingAuth = true;
 
         try {
-            // Check if we have a token
-            if (apiClient.isAuthenticated()) {
-                // Verify the token is still valid
+            // Always try to verify — the HTTP-only cookie may still be valid
+            // even if the in-memory token was lost on page refresh
+            {
                 const response = await apiClient.verifyToken();
                 if (response.success) {
                     // Fetch CSRF token before proceeding — required for all commands
@@ -40,8 +40,6 @@
                 } else {
                     isAuthenticated = false;
                 }
-            } else {
-                isAuthenticated = false;
             }
         } catch (error) {
             console.error("Auth check failed:", error);

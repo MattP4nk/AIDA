@@ -608,6 +608,9 @@ model KeyFragment {
   sourceType String @map("source_type") // 'forum', 'server', 'mission', 'hack'
   sourceId   String @map("source_id")
 
+  // Status: "active" or "bricked" (destroyed from failed fragment.crack attempt)
+  status String @default("active")
+
   @@unique([keyType, fragmentNum])
   @@index([heldByUserId])
   @@map("key_fragments")

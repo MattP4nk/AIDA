@@ -186,11 +186,14 @@ export class SystemCommandsModule implements CommandModule {
       const path = resolvePath(command.args[0] || currentDir, currentDir);
 
       const showHidden = command.args.includes("-a");
+      const gameSession = context.gameStateManager.getSession(context.userId);
+      const revealedFileIds = (gameSession as any)?.revealedFileIds as string[] || [];
       const result = await context.fileService.listDirectory(
         serverId,
         context.userId,
         path,
         showHidden,
+        revealedFileIds,
       );
 
       if (!result.success) {

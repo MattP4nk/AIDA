@@ -948,7 +948,7 @@ Respond ONLY with JSON: { "content": "..." }`
         type: "file",
         content,
         isHidden: true,
-        permissions: { owner: 7, group: 4, other: 0 },
+        permissions: { owner: 7, faction: 4, others: 0 },
       },
     });
 

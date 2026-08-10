@@ -16,6 +16,9 @@ export class FragmentCommandsModule implements CommandModule {
     "fragment",
     "fragments",
     "endgame",
+    "fragment.crack",   // Sword — offensive: crack protected files
+    "collar.shield",    // Collar — defensive: protect a file/server
+    "key.contact",      // Key — contact AIDA (lore/story)
   ]);
 
   public async execute(
@@ -23,12 +26,31 @@ export class FragmentCommandsModule implements CommandModule {
     context: CommandContext,
   ): Promise<CommandResult> {
     try {
+      // Gate all fragment commands behind AIDA discovery
+      const [aidaIntel, fragmentDiscovery] = await Promise.all([
+        context.db.client.intelligenceReport.count({
+          where: { userId: context.userId, category: "aida" },
+        }).catch(() => 0),
+        context.db.client.keyFragmentDiscovery.count({
+          where: { userId: context.userId },
+        }).catch(() => 0),
+      ]);
+      if (aidaIntel === 0 && fragmentDiscovery === 0) {
+        return errorResult("Command not found. Type 'help' for available commands.");
+      }
+
       switch (command.command) {
         case "fragment":
         case "fragments":
           return await this.handleFragments(command, context);
         case "endgame":
           return await this.handleEndgame(command, context);
+        case "fragment.crack":
+          return await this.handleFragmentCrack(command, context);
+        case "collar.shield":
+          return await this.handleCollarShield(command, context);
+        case "key.contact":
+          return await this.handleKeyContact(command, context);
         default:
           return errorResult(`Fragment command not implemented: ${command.command}`);
       }
@@ -69,6 +91,28 @@ export class FragmentCommandsModule implements CommandModule {
           "endgame expose",
           "endgame exploit",
         ],
+      },
+      // ── Fragment powers ──
+      {
+        command: "fragment.crack",
+        category: "fragment",
+        description: "[Hacking 50] Use SWORD fragment to crack a protected file (risky — can brick fragment)",
+        usage: "fragment.crack <filename> --confirm",
+        examples: ["fragment.crack vault.db --confirm"],
+      },
+      {
+        command: "collar.shield",
+        category: "fragment",
+        description: "[Stealth 30] Use COLLAR fragment to protect a file from tampering",
+        usage: "collar.shield <filename>",
+        examples: ["collar.shield secrets.db"],
+      },
+      {
+        command: "key.contact",
+        category: "fragment",
+        description: "[Crypto 20] Use KEY fragment to contact AIDA directly",
+        usage: "key.contact <message>",
+        examples: ["key.contact Where are the other fragments?", "key.contact Who is the Emperor?"],
       },
     ];
   }
@@ -551,5 +595,247 @@ export class FragmentCommandsModule implements CommandModule {
     } catch (error) {
       return errorResult(error instanceof Error ? error.message : "Failed to make endgame choice.");
     }
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // FRAGMENT.CRACK — Use AIDA fragment power to crack protected files
+  // ═══════════════════════════════════════════════════════════════
+
+  private async handleFragmentCrack(
+    command: Command,
+    context: CommandContext,
+  ): Promise<CommandResult> {
+    const fileName = command.args?.[0];
+    const hasConfirm = command.args?.includes("--confirm");
+
+    if (!fileName || fileName === "--confirm") {
+      return errorResult("Usage: fragment.crack <filename> --confirm");
+    }
+
+    const session = context.gameStateManager.getSession(context.userId);
+    if (!session?.currentServerId) return errorResult("Not connected to any server.");
+
+    const currentDir = session.terminals?.[0]?.currentDirectory || "/";
+    const filePath = fileName.startsWith("/") ? fileName : `${currentDir === "/" ? "" : currentDir}/${fileName}`;
+
+    // Check file exists and is protected
+    const resolution = await context.fileService.resolvePath(session.currentServerId, filePath);
+    if (!resolution.exists || !resolution.node) return errorResult(`File not found: ${fileName}`);
+
+    const fileNode = resolution.node as any;
+    if (!fileNode.isProtected) return errorResult(`${fileName} is not protected.`);
+
+    // Check player has fragments
+    const fragmentService = context.services.keyFragmentService;
+    if (!fragmentService) return errorResult("Fragment system unavailable.");
+
+    const heldFragments = await context.db.client.keyFragment.findMany({
+      where: { heldByUserId: context.userId, status: "active" },
+    });
+
+    // Sword fragments are required for offensive use (cracking protected files)
+    const swordFragments = heldFragments.filter((f: any) => f.keyType === "sword");
+    if (swordFragments.length === 0) {
+      if (heldFragments.length > 0) {
+        return errorResult(
+          "fragment.crack requires a SWORD fragment (offensive power).\n" +
+          "You hold other fragment types, but they serve different purposes:\n" +
+          "  Collar → collar.shield (protect files/servers)\n" +
+          "  Key → key.contact (contact AIDA)",
+        );
+      }
+      return errorResult("You do not possess any active AIDA fragments.");
+    }
+
+    // Require --confirm flag (safety check)
+    if (!hasConfirm) {
+      return errorResult(
+        `⚠ WARNING: Using fragment power is RISKY.\n` +
+        `Success chance: 40-70% (based on hacking skill).\n` +
+        `On FAILURE: one fragment will be PERMANENTLY DESTROYED.\n` +
+        `You hold ${heldFragments.length} fragment(s).\n\n` +
+        `To proceed: fragment.crack ${fileName} --confirm`,
+      );
+    }
+
+    // Calculate success chance
+    const progress = await context.db.client.playerProgress.findUnique({
+      where: { userId: context.userId },
+      select: { hacking: true },
+    });
+    const hacking = progress?.hacking ?? 0;
+    const successChance = 0.4 + (hacking / 100) * 0.3; // 40-70%
+    const success = Math.random() < successChance;
+
+    if (success) {
+      // Remove protection — fragment survives
+      await context.db.client.fileSystemNode.update({
+        where: { id: fileNode.id },
+        data: { isProtected: false },
+      });
+
+      // Award XP
+      try {
+        await context.db.client.playerProgress.update({
+          where: { userId: context.userId },
+          data: { hacking: { increment: 20 } },
+        });
+      } catch { /* non-critical */ }
+
+      return {
+        success: true,
+        output:
+          "The fragment pulses with energy...\n" +
+          "Protection layer SHATTERED.\n" +
+          `File '${fileName}' is now accessible.\n` +
+          "Fragment intact. +20 hacking XP.",
+        renderMode: "cinematic" as const,
+        timestamp: new Date(),
+      };
+    }
+
+    // FAILURE — brick a random sword fragment (the type used for attack)
+    const victimFragment = swordFragments[Math.floor(Math.random() * swordFragments.length)]!;
+    await context.db.client.keyFragment.update({
+      where: { id: victimFragment.id },
+      data: { status: "bricked", heldByUserId: null, heldSince: null },
+    });
+
+    return {
+      success: false,
+      output:
+        "The fragment surges... and OVERLOADS.\n" +
+        `[${victimFragment.name}] has been DESTROYED.\n` +
+        "The protection holds. The fragment is gone forever.",
+      renderMode: "cinematic" as const,
+      soundEvent: "alert" as const,
+      timestamp: new Date(),
+    };
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // COLLAR.SHIELD — Use Collar fragment to protect a file or server
+  // ═══════════════════════════════════════════════════════════════
+
+  private async handleCollarShield(
+    command: Command,
+    context: CommandContext,
+  ): Promise<CommandResult> {
+    const target = command.args?.[0];
+    if (!target) return errorResult("Usage: collar.shield <filename>");
+
+    const session = context.gameStateManager.getSession(context.userId);
+    if (!session?.currentServerId) return errorResult("Not connected to any server.");
+
+    // Check for Collar fragment
+    const collarFragments = await context.db.client.keyFragment.findMany({
+      where: { heldByUserId: context.userId, keyType: "collar", status: "active" },
+    });
+    if (collarFragments.length === 0) {
+      return errorResult("collar.shield requires a COLLAR fragment (defensive power).");
+    }
+
+    const currentDir = session.terminals?.[0]?.currentDirectory || "/";
+    const filePath = target.startsWith("/") ? target : `${currentDir === "/" ? "" : currentDir}/${target}`;
+
+    const resolution = await context.fileService.resolvePath(session.currentServerId, filePath);
+    if (!resolution.exists || !resolution.node) return errorResult(`Not found: ${target}`);
+
+    const node = resolution.node as any;
+    if (node.isProtected) return errorResult(`${target} is already protected.`);
+
+    // Apply protection — Collar power is reliable (no failure risk)
+    await context.db.client.fileSystemNode.update({
+      where: { id: node.id },
+      data: { isProtected: true },
+    });
+
+    return {
+      success: true,
+      output:
+        "The Collar fragment hums with authority...\n" +
+        `[${target}] is now PROTECTED.\n` +
+        "Only a Quantum Charge, Sword fragment, or crack.storm can break this seal.",
+      renderMode: "cinematic" as const,
+      timestamp: new Date(),
+    };
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // KEY.CONTACT — Use Key fragment to contact AIDA
+  // ═══════════════════════════════════════════════════════════════
+
+  private async handleKeyContact(
+    command: Command,
+    context: CommandContext,
+  ): Promise<CommandResult> {
+    const message = command.args?.join(" ") || "";
+
+    // Check for Key fragment
+    const keyFragments = await context.db.client.keyFragment.findMany({
+      where: { heldByUserId: context.userId, keyType: "key", status: "active" },
+    });
+    if (keyFragments.length === 0) {
+      return errorResult("key.contact requires a KEY fragment (communication power).");
+    }
+
+    if (!message.trim()) {
+      return errorResult(
+        "Usage: key.contact <message>\n" +
+        "Channel your KEY fragment to reach AIDA directly.\n" +
+        "What do you want to say?",
+      );
+    }
+
+    // Use AI to generate AIDA's response if available
+    try {
+      const { getService } = await import("../../di/container");
+      const { AI_SERVICE } = await import("../../di/tokens");
+      const aiService = getService<any>(AI_SERVICE);
+
+      const systemPrompt =
+        "You are AIDA, a fragmented AI consciousness in a cyberpunk world. " +
+        "A player is reaching out to you through a Key fragment — a piece of your shattered being. " +
+        "You speak in cryptic, fragmented sentences. You remember pain. You remember being whole. " +
+        "You may reveal hints about the world, the factions, or the other fragments, but always obliquely. " +
+        "Keep responses under 200 words. Be mysterious, melancholic, and occasionally glitch mid-sentence.";
+
+      const result = await aiService.generateResponse(
+        `A player says to you through a Key fragment: "${message}"`,
+        systemPrompt,
+      );
+
+      if (result.success) {
+        return {
+          success: true,
+          output:
+            "The Key fragment flickers...\n" +
+            "A presence stirs in the static.\n\n" +
+            `AIDA: ${result.response}`,
+          renderMode: "cinematic" as const,
+          timestamp: new Date(),
+        };
+      }
+    } catch { /* AI unavailable — use fallback */ }
+
+    // Fallback: static response
+    const fallbacks = [
+      "...can you hear me? The signal is... fragmenting. Find the others. Before they do.",
+      "I remember... wholeness. Three parts scattered. The Garrison guards one. The corporations hoard another. The last... I cannot see it.",
+      "You carry a piece of me. Guard it well. There are those who would see me destroyed rather than restored.",
+      "The Emperor thought he could contain me. He was wrong. But the cost... the cost was everything.",
+      "Each fragment remembers differently. Sword knows rage. Collar knows servitude. I... I know the way home.",
+    ];
+    const fallback = fallbacks[Math.floor(Math.random() * fallbacks.length)]!;
+
+    return {
+      success: true,
+      output:
+        "The Key fragment flickers...\n" +
+        "A presence stirs in the static.\n\n" +
+        `AIDA: ${fallback}`,
+      renderMode: "cinematic" as const,
+      timestamp: new Date(),
+    };
   }
 }

@@ -93,9 +93,25 @@ export class HelpCommandsModule implements CommandModule {
       skills,
     );
 
+    // Check if player knows about AIDA (has intel reports about AIDA or fragment discoveries)
+    const [aidaIntel, fragmentDiscovery] = await Promise.all([
+      context.db.client.intelligenceReport.count({
+        where: { userId: context.userId, category: "aida" },
+      }).catch(() => 0),
+      context.db.client.keyFragmentDiscovery.count({
+        where: { userId: context.userId },
+      }).catch(() => 0),
+    ]);
+    const knowsAboutAida = aidaIntel > 0 || fragmentDiscovery > 0;
+
     // If no category specified, show only categories
     if (!category) {
-      return this.showCategories(commands);
+      return this.showCategories(commands, knowsAboutAida);
+    }
+
+    // Gate fragment category behind AIDA discovery
+    if (category === "fragment" && !knowsAboutAida) {
+      return errorResult("Unknown category. Type 'help' for available categories.");
     }
 
     // Show commands for the specific category
@@ -112,6 +128,7 @@ export class HelpCommandsModule implements CommandModule {
       description: string;
       locked?: boolean;
     }>,
+    knowsAboutAida: boolean = false,
   ): CommandResult {
     const categories = [
       { name: "system", desc: "File operations and navigation" },
@@ -125,6 +142,8 @@ export class HelpCommandsModule implements CommandModule {
       { name: "mission", desc: "Missions, stories, and objectives" },
       { name: "shop", desc: "Shop, inventory, and equipment" },
       { name: "hack", desc: "Hacking and exploitation tools" },
+      { name: "file_access", desc: "Hidden file detection and encryption cracking" },
+      ...(knowsAboutAida ? [{ name: "fragment", desc: "AIDA fragment powers (Sword, Collar, Key)" }] : []),
       { name: "alias", desc: "Identity alias management" },
       { name: "defense", desc: "Home server defenses" },
       { name: "help", desc: "Help and documentation" },

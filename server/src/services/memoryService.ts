@@ -27,7 +27,9 @@ export type GameProcessType =
   | "download"
   | "backdoor_install"
   | "traceroute"
-  | "trace_evade";
+  | "trace_evade"
+  | "sweep"
+  | "crack_file";
 
 export interface GameProcess {
   pid: number;
@@ -98,6 +100,8 @@ export const PROCESS_COSTS: Record<GameProcessType, ProcessCostConfig> = {
   backdoor_install: { cpuCost: 60,  ramCost: 96,  bwCost: 40, baseDuration: 90000,  minDuration: 18000, skillName: "stealth",       skillScaleFactor: 1500 },
   traceroute:       { cpuCost: 20,  ramCost: 16,  bwCost: 40, baseDuration: 8000,   minDuration: 2000,  skillName: "networking",    skillScaleFactor: 200  },
   trace_evade:      { cpuCost: 70,  ramCost: 64,  bwCost: 30, baseDuration: 30000,  minDuration: 6000,  skillName: "stealth",       skillScaleFactor: 800  },
+  sweep:            { cpuCost: 60,  ramCost: 64,  bwCost: 20, baseDuration: 20000,  minDuration: 5000,  skillName: "forensics",     skillScaleFactor: 800  },
+  crack_file:       { cpuCost: 90,  ramCost: 96,  bwCost: 10, baseDuration: 40000,  minDuration: 8000,  skillName: "cryptography",  skillScaleFactor: 1200 },
 };
 
 /** Passive consumer costs */

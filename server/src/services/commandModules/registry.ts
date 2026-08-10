@@ -23,6 +23,7 @@ import { FactionCommandsModule } from "./factionCommands";
 import { AliasCommandsModule } from "./aliasCommands";
 import { AdminCommandsModule } from "./adminCommands";
 import { DefenseCommandsModule } from "./defenseCommands";
+import { FileAccessCommandsModule } from "./fileAccessCommands";
 
 /** All registered module constructors in load order. */
 const MODULE_CONSTRUCTORS: Array<new () => CommandModule> = [
@@ -42,6 +43,7 @@ const MODULE_CONSTRUCTORS: Array<new () => CommandModule> = [
   AliasCommandsModule,
   AdminCommandsModule,
   DefenseCommandsModule,
+  FileAccessCommandsModule,
 ];
 
 /** Create all command module instances. */
