@@ -19,9 +19,9 @@
         isCheckingAuth = true;
 
         try {
-            // Check if we have a token
-            if (apiClient.isAuthenticated()) {
-                // Verify the token is still valid
+            // Always try to verify — the HTTP-only cookie may still be valid
+            // even if the in-memory token was lost on page refresh
+            {
                 const response = await apiClient.verifyToken();
                 if (response.success) {
                     // Fetch CSRF token before proceeding — required for all commands
@@ -40,8 +40,6 @@
                 } else {
                     isAuthenticated = false;
                 }
-            } else {
-                isAuthenticated = false;
             }
         } catch (error) {
             console.error("Auth check failed:", error);
@@ -57,7 +55,7 @@
             socketService.reconnect();
 
             // Wait for authentication to complete on the server using acknowledgment pattern
-            const socket = (socketService as any).socket;
+            const socket = socketService.getSocket();
             if (socket) {
                 await new Promise<void>((resolve, reject) => {
                     const timeout = setTimeout(() => {
@@ -66,9 +64,21 @@
 
                     // Use acknowledgment pattern to avoid race condition
                     // This ensures we don't miss the authentication event
+                    // Handle connection errors with a targeted handler (don't strip SocketService's reconnect listener)
+                    const tempErrorHandler = (error: any) => {
+                        clearTimeout(timeout);
+                        reject(error);
+                    };
+                    socket.once("connect_error", tempErrorHandler);
+
                     socket.emit("authenticate:request", (response: any) => {
                         clearTimeout(timeout);
+                        socket.off("connect_error", tempErrorHandler);
                         if (response && response.success) {
+                            // Set userId for hack alert targeting
+                            if (response.userId) {
+                                socketService.setUserId(response.userId);
+                            }
                             resolve();
                         } else {
                             reject(
@@ -77,13 +87,6 @@
                                 ),
                             );
                         }
-                    });
-
-                    // Also handle connection errors (remove old listener first)
-                    socket.off("connect_error");
-                    socket.once("connect_error", (error: any) => {
-                        clearTimeout(timeout);
-                        reject(error);
                     });
                 });
             }
@@ -99,11 +102,13 @@
         }
     }
 
-    function handleAuthenticated(event: CustomEvent) {
+    async function handleAuthenticated(event: CustomEvent) {
         user = event.detail;
         isAuthenticated = true;
+        // Ensure CSRF token is available before initializing
+        await apiClient.ensureCsrfToken();
         // Initialize socket connection and terminals after successful authentication
-        initializeSocketAndTerminals();
+        await initializeSocketAndTerminals();
     }
 </script>
 

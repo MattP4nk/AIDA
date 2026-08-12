@@ -67,6 +67,7 @@ export interface FileSystemEntry {
   isEncrypted: boolean;
   isHidden: boolean;
   isProtected: boolean;
+  childCount?: number | undefined; // Number of items inside (directories only)
 }
 
 export interface FileOperationResult {
@@ -92,6 +93,9 @@ export class FileService {
   private missionIntegration: MissionIntegrationService | null = null;
   private factionKnowledge: FactionKnowledgeService | null = null;
   private networkTopology: NetworkTopologyService | null = null;
+  private accessKeyCache: { data: Array<{ id: string; name: string; accessKey: string }>; expiresAt: number } | null =
+    null;
+  private static readonly ACCESS_KEY_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
   constructor(
     @inject(LOGGER) private logger: Logger,
@@ -120,6 +124,7 @@ export class FileService {
     userId: string,
     path: string = "/",
     showHidden: boolean = false,
+    revealedFileIds: string[] = [],
   ): Promise<FileOperationResult> {
     try {
       // Validate path for security
@@ -151,12 +156,17 @@ export class FileService {
       // Get user's access level on this server
       const accessLevel = await this.getUserAccessLevel(userId, serverId);
 
-      // Fetch children
+      // Fetch children (include user-revealed hidden files from sweep)
+      const hiddenFilter = showHidden
+        ? {}
+        : revealedFileIds.length > 0
+          ? { OR: [{ isHidden: false }, { id: { in: revealedFileIds } }] }
+          : { isHidden: false };
       const children = await prisma.fileSystemNode.findMany({
         where: {
           serverId,
           parentId: resolution.nodeId,
-          ...(showHidden ? {} : { isHidden: false }),
+          ...hiddenFilter,
         },
         orderBy: [
           { type: "desc" }, // directories first
@@ -164,8 +174,20 @@ export class FileService {
         ],
       });
 
-      // Filter by permissions
+      // Filter by permissions and count children for directories
       const visibleEntries: FileSystemEntry[] = [];
+      const dirIds = children.filter(c => c.type === "directory").map(c => c.id);
+
+      // Batch-count children for all directories in one query
+      const childCounts = dirIds.length > 0
+        ? await prisma.fileSystemNode.groupBy({
+            by: ["parentId"],
+            where: { parentId: { in: dirIds }, ...(showHidden ? {} : { isHidden: false }) },
+            _count: { _all: true },
+          })
+        : [];
+      const countMap = new Map(childCounts.map(c => [c.parentId, c._count._all]));
+
       for (const child of children) {
         const permissions = child.permissions as unknown as FilePermissions;
         if (await this.canRead(userId, child.id, accessLevel)) {
@@ -178,6 +200,7 @@ export class FileService {
             isEncrypted: child.isEncrypted,
             isHidden: child.isHidden,
             isProtected: child.isProtected,
+            childCount: child.type === "directory" ? (countMap.get(child.id) ?? 0) : undefined,
           });
         }
       }
@@ -283,6 +306,12 @@ export class FileService {
 
       // Log file access
       await this.logFileAccess(userId, serverId, file.id, "read");
+
+      // Increment filesAccessed stat (fire-and-forget)
+      prisma.playerProgress.update({
+        where: { userId },
+        data: { filesAccessed: { increment: 1 } },
+      }).catch(() => {});
 
       // Track for mission objectives
       if (this.missionIntegration) {
@@ -1097,20 +1126,35 @@ export class FileService {
 
     const permissions = node.permissions as unknown as FilePermissions;
 
+    // Owner always gets owner-level permissions
+    if (node.createdBy === userId) {
+      return (permissions.owner & PermissionLevel.READ) !== 0;
+    }
+
     // Game mechanic: file requires a minimum hack access level
     if (
       permissions.requiredAccessLevel &&
       accessLevel < permissions.requiredAccessLevel
     ) {
-      return false;
+      // Connected players (accessLevel >= 0) can always read non-restricted directories
+      // Only block if requiredAccessLevel > 1 (i.e., needs actual hacking)
+      if (permissions.requiredAccessLevel > 1) {
+        return false;
+      }
     }
 
-    // Owner identity lives on the node, not inside permissions
-    if (node.createdBy === userId) {
-      return (permissions.owner & PermissionLevel.READ) !== 0;
+    // If others permission allows read, allow it
+    if ((permissions.others & PermissionLevel.READ) !== 0) {
+      return true;
     }
 
-    return (permissions.others & PermissionLevel.READ) !== 0;
+    // Connected player with any access can read basic filesystem structure
+    // (directories with requiredAccessLevel <= 1 are navigable)
+    if (node.type === "directory" && (!permissions.requiredAccessLevel || permissions.requiredAccessLevel <= 1)) {
+      return true;
+    }
+
+    return false;
   }
 
   /**
@@ -1204,7 +1248,7 @@ export class FileService {
   /**
    * Resolve a path to a node ID
    */
-  private async resolvePath(
+  async resolvePath(
     serverId: string,
     path: string,
   ): Promise<PathResolution> {
@@ -1338,8 +1382,9 @@ export class FileService {
    * Encrypt content using AES-256-CBC
    */
   private async encryptContent(content: string, key: string): Promise<string> {
+    const salt = crypto.randomBytes(16);
     const iv = crypto.randomBytes(16);
-    const keyBuffer = crypto.scryptSync(key, "salt", 32);
+    const keyBuffer = crypto.scryptSync(key, salt, 32);
     const cipher = crypto.createCipheriv(
       this.encryptionAlgorithm,
       keyBuffer,
@@ -1349,7 +1394,8 @@ export class FileService {
     let encrypted = cipher.update(content, "utf8", "hex");
     encrypted += cipher.final("hex");
 
-    return iv.toString("hex") + ":" + encrypted;
+    // Format: salt:iv:encrypted (3 parts)
+    return salt.toString("hex") + ":" + iv.toString("hex") + ":" + encrypted;
   }
 
   /**
@@ -1360,13 +1406,15 @@ export class FileService {
     key: string,
   ): Promise<string> {
     const parts = encryptedContent.split(":");
-    if (parts.length !== 2) {
+    if (parts.length !== 3) {
       throw new Error("Invalid encrypted content format");
     }
 
-    const iv = Buffer.from(parts[0]!, "hex");
-    const encrypted = parts[1]!;
-    const keyBuffer = crypto.scryptSync(key, "salt", 32);
+    const salt = Buffer.from(parts[0]!, "hex");
+    const iv = Buffer.from(parts[1]!, "hex");
+    const encrypted = parts[2]!;
+
+    const keyBuffer = crypto.scryptSync(key, salt, 32);
     const decipher = crypto.createDecipheriv(
       this.encryptionAlgorithm,
       keyBuffer,
@@ -1395,8 +1443,8 @@ export class FileService {
     return {
       owner: PermissionLevel.FULL, // owner can read/write/execute/delete
       faction: PermissionLevel.READ, // faction members can read
-      others: PermissionLevel.NONE, // others have no access
-      requiredAccessLevel: 1,
+      others: PermissionLevel.READ, // connected players can read
+      requiredAccessLevel: 0, // no hack required for basic access
     };
   }
 
@@ -1509,6 +1557,16 @@ export class FileService {
    */
   async initializeFileSystem(serverId: string, ownerId: string): Promise<void> {
     try {
+      // Validate ownerId is a real user — use null if not (system/dungeon servers)
+      let validOwnerId: string | null = ownerId || null;
+      if (validOwnerId) {
+        const ownerExists = await prisma.user.findUnique({
+          where: { id: validOwnerId },
+          select: { id: true },
+        });
+        if (!ownerExists) validOwnerId = null;
+      }
+
       // Check if root already exists
       let root = await prisma.fileSystemNode.findFirst({
         where: {
@@ -1528,7 +1586,7 @@ export class FileService {
             type: "directory",
             content: null,
             size: 0,
-            createdBy: ownerId,
+            createdBy: validOwnerId,
             isEncrypted: false,
             encryptionKey: null,
             isHidden: false,
@@ -1536,7 +1594,7 @@ export class FileService {
             permissions: {
               owner: PermissionLevel.FULL,
               faction: PermissionLevel.READ | PermissionLevel.EXECUTE,
-              others: PermissionLevel.NONE,
+              others: PermissionLevel.READ | PermissionLevel.EXECUTE,
               requiredAccessLevel: 0,
             } as unknown as Prisma.JsonObject,
           },
@@ -1575,7 +1633,7 @@ export class FileService {
             type: "directory",
             content: null,
             size: 0,
-            createdBy: ownerId,
+            createdBy: validOwnerId,
             isEncrypted: false,
             encryptionKey: null,
             isHidden: false,
@@ -1596,6 +1654,28 @@ export class FileService {
   // ==================== ACCESS KEY DETECTION ====================
 
   /**
+   * Returns servers with access keys, cached for 5 minutes to avoid
+   * unbounded queries on every file download.
+   */
+  private async getAccessKeyServers(excludeServerId: string) {
+    if (this.accessKeyCache && this.accessKeyCache.expiresAt > Date.now()) {
+      return this.accessKeyCache.data.filter((s) => s.id !== excludeServerId);
+    }
+
+    const servers = await prisma.gameServer.findMany({
+      where: { accessKey: { not: null } },
+      select: { id: true, name: true, accessKey: true },
+    });
+
+    this.accessKeyCache = {
+      data: servers as Array<{ id: string; name: string; accessKey: string }>,
+      expiresAt: Date.now() + FileService.ACCESS_KEY_CACHE_TTL,
+    };
+
+    return servers.filter((s) => s.id !== excludeServerId);
+  }
+
+  /**
    * Scan file content for access keys that match other servers' accessKey fields.
    * When found, automatically grants the player access to those servers.
    *
@@ -1613,14 +1693,8 @@ export class FileService {
   ): Promise<void> {
     if (!this.networkTopology) return;
 
-    // Find all servers that have an accessKey set
-    const serversWithKeys = await prisma.gameServer.findMany({
-      where: {
-        accessKey: { not: null },
-        id: { not: serverId }, // Don't match the server we're currently on
-      },
-      select: { id: true, name: true, accessKey: true },
-    });
+    // Find all servers that have an accessKey set (cached, 5-min TTL)
+    const serversWithKeys = await this.getAccessKeyServers(serverId);
 
     for (const server of serversWithKeys) {
       if (!server.accessKey) continue;

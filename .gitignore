@@ -3,15 +3,18 @@ node_modules/
 dist/
 build/
 out/
-.env
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+
+# Environment / Secrets — NEVER commit these
+.env
+.env.*
+!.env.example
+server/.env
+server/.env.*
+!server/.env.example
 
 # Logs
 logs/
@@ -22,6 +25,20 @@ pids/
 *.pid
 *.seed
 *.pid.lock
+
+# AI / Agent tooling
+.agents/
+.claude/
+
+# Scripts (dev-only utilities, not production code)
+server/scripts/
+
+# Documentation / notes (not source code)
+*.md
+*.toon
+
+# SQL dumps
+*.sql
 
 # OS
 .DS_Store

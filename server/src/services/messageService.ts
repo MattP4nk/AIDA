@@ -4,10 +4,12 @@
  * Handles all messaging operations including:
  * - Private messages between players
  * - Real-time delivery via Socket.IO
- * - Message encryption based on cryptography skill
  * - Read receipts and message status
  * - Message history and inbox management
- * - Encrypted message interception (for gameplay)
+ * - Token-gated AI persona messaging
+ *
+ * Encryption operations are delegated to MessageEncryptionService.
+ * Chat history/contacts are handled by ChatService.
  *
  * Phase 2, Day 8
  */
@@ -22,7 +24,10 @@ import {
   SOCKET_IO,
   MISSION_INTEGRATION_SERVICE,
   AI_SERVICE,
+  MESSAGE_ENCRYPTION_SERVICE,
 } from "../di/tokens";
+import { safeExecute } from "../utils/safeExecute";
+import type { MessageEncryptionService } from "./messageEncryptionService";
 import type MissionIntegrationService from "./missionIntegration";
 import type { AIService } from "./aiService";
 import {
@@ -101,7 +106,6 @@ export interface ChatContact {
 
 @injectable()
 export class MessageService {
-  private encryptionAlgorithm = "aes-256-cbc";
   private deliveryQueue: Map<string, QueuedMessage[]> = new Map();
   private deliveryProcessorInterval: NodeJS.Timeout | null = null;
   private missionIntegration: MissionIntegrationService | null = null;
@@ -121,6 +125,8 @@ export class MessageService {
     @inject(SOCKET_IO) private io: SocketIOServer,
     @inject(MISSION_INTEGRATION_SERVICE)
     missionIntegrationService?: MissionIntegrationService,
+    @inject(MESSAGE_ENCRYPTION_SERVICE)
+    private encryptionService?: MessageEncryptionService,
   ) {
     this.missionIntegration = missionIntegrationService || null;
     this.startDeliveryProcessor();
@@ -236,8 +242,8 @@ export class MessageService {
           ? Math.min(options.encryptionLevel, maxEncryptionLevel)
           : maxEncryptionLevel;
 
-        if (encryptionLevel > 0) {
-          const encryptionResult = await this.encryptMessage(
+        if (encryptionLevel > 0 && this.encryptionService) {
+          const encryptionResult = await this.encryptionService.encryptMessage(
             options.content,
             encryptionLevel,
           );
@@ -296,6 +302,12 @@ export class MessageService {
         });
       }
 
+      // Increment messagesSent stat (fire-and-forget)
+      prisma.playerProgress.update({
+        where: { userId: senderId },
+        data: { messagesSent: { increment: 1 } },
+      }).catch(() => {});
+
       // Track for mission objectives
       if (this.missionIntegration) {
         await this.missionIntegration.onMessageSent(
@@ -313,6 +325,24 @@ export class MessageService {
           // Hook errors should not break message sending
         }
       }
+
+      // Async content moderation (non-blocking — message created first, hidden if flagged)
+      void (async () => {
+        try {
+          const { getService } = await import("../di/container");
+          const { AI_SERVICE } = await import("../di/tokens");
+          const aiService = getService<any>(AI_SERVICE);
+          const modResult = await aiService.moderate(filteredContent);
+          if (!modResult.safe) {
+            await prisma.message.update({ where: { id: message.id }, data: { isHidden: true } });
+            this.io?.to(`user:${senderId}`).emit("moderation:flagged", {
+              type: "message",
+              id: message.id,
+              reason: modResult.reason || "Content policy violation",
+            });
+          }
+        } catch { /* moderation unavailable — content stays visible */ }
+      })();
 
       return {
         success: true,
@@ -506,6 +536,7 @@ export class MessageService {
       const where: any = {
         recipientId: userId,
         subject: { not: { equals: "" } },
+        isHidden: false,
       };
 
       if (filter.type) {
@@ -539,6 +570,7 @@ export class MessageService {
         where: {
           recipientId: userId,
           isRead: false,
+          isHidden: false,
         },
       });
 
@@ -572,6 +604,7 @@ export class MessageService {
       const where: any = {
         senderId: userId,
         subject: { not: { equals: "" } },
+        isHidden: false,
       };
 
       if (filter.type) {
@@ -817,317 +850,6 @@ export class MessageService {
     }
   }
 
-  // ==================== ENCRYPTION & DECRYPTION ====================
-
-  /**
-   * Encrypt message content based on skill level
-   */
-  private async encryptMessage(
-    content: string,
-    encryptionLevel: number,
-  ): Promise<EncryptionResult> {
-    try {
-      // Generate encryption key based on level
-      const keyLength = 16 + encryptionLevel * 2; // 16-36 bytes
-      const key = crypto.randomBytes(keyLength).toString("hex");
-
-      const iv = crypto.randomBytes(16);
-      const keyBuffer = crypto.scryptSync(key, "salt", 32);
-      const cipher = crypto.createCipheriv(
-        this.encryptionAlgorithm,
-        keyBuffer,
-        iv,
-      );
-
-      let encrypted = cipher.update(content, "utf8", "hex");
-      encrypted += cipher.final("hex");
-
-      const encryptedContent = iv.toString("hex") + ":" + encrypted;
-
-      return {
-        encryptedContent,
-        encryptionLevel,
-        key,
-      };
-    } catch (error) {
-      this.logger.error({ err: error }, "Encryption error");
-      throw error;
-    }
-  }
-
-  /**
-   * Decrypt message content.
-   *
-   * If `key` is omitted/empty and `messageId` is provided, the stored
-   * server-side encryption key will be looked up from the database.
-   */
-  async decryptMessage(
-    encryptedContent: string,
-    key: string | undefined,
-    userId: string,
-    messageId?: string,
-  ): Promise<MessageOperationResult> {
-    try {
-      // If no key was supplied, try to look it up from the database
-      let resolvedKey = key;
-      if (!resolvedKey && messageId) {
-        const dbMessage = await prisma.message.findUnique({
-          where: { id: messageId },
-          select: { encryptionKey: true, senderId: true, recipientId: true },
-        });
-
-        if (!dbMessage) {
-          return {
-            success: false,
-            message: "Message not found",
-            error: "NOT_FOUND",
-          };
-        }
-        // Only sender or recipient may use the stored key
-        if (dbMessage.senderId !== userId && dbMessage.recipientId !== userId) {
-          return {
-            success: false,
-            message: "Permission denied",
-            error: "PERMISSION_DENIED",
-          };
-        }
-        if (!dbMessage.encryptionKey) {
-          return {
-            success: false,
-            message: "No stored encryption key for this message",
-            error: "NO_KEY",
-          };
-        }
-        resolvedKey = dbMessage.encryptionKey;
-      }
-
-      if (!resolvedKey) {
-        return {
-          success: false,
-          message: "No encryption key provided and no messageId to look it up",
-          error: "NO_KEY",
-        };
-      }
-
-      // Get user's cryptography skill
-      const progress = await prisma.playerProgress.findUnique({
-        where: { userId },
-      });
-
-      if (!progress) {
-        return {
-          success: false,
-          message: "Player progress not found",
-          error: "NO_PROGRESS",
-        };
-      }
-
-      const parts = encryptedContent.split(":");
-      if (parts.length !== 2) {
-        return {
-          success: false,
-          message: "Invalid encrypted content format",
-          error: "INVALID_FORMAT",
-        };
-      }
-
-      const iv = Buffer.from(parts[0]!, "hex");
-      const encrypted = parts[1]!;
-      const keyBuffer = crypto.scryptSync(resolvedKey, "salt", 32);
-      const decipher = crypto.createDecipheriv(
-        this.encryptionAlgorithm,
-        keyBuffer,
-        iv,
-      );
-
-      let decrypted = decipher.update(encrypted, "hex", "utf8");
-      decrypted += decipher.final("utf8");
-
-      return {
-        success: true,
-        message: "Message decrypted successfully",
-        data: { content: decrypted },
-      };
-    } catch (error: any) {
-      this.logger.error({ err: error }, "Decryption error");
-      return {
-        success: false,
-        message: "Failed to decrypt message. Invalid key or corrupted data.",
-        error: "DECRYPTION_FAILED",
-      };
-    }
-  }
-
-  /**
-   * Decrypt a message by its ID using the server-side stored encryption key.
-   *
-   * Validates that the requesting user is the sender or recipient before
-   * allowing decryption.
-   */
-  async decryptMessageById(
-    messageId: string,
-    userId: string,
-  ): Promise<MessageOperationResult> {
-    try {
-      const message = await prisma.message.findUnique({
-        where: { id: messageId },
-      });
-
-      if (!message) {
-        return {
-          success: false,
-          message: "Message not found",
-          error: "NOT_FOUND",
-        };
-      }
-
-      // Only sender or recipient may decrypt
-      if (message.senderId !== userId && message.recipientId !== userId) {
-        return {
-          success: false,
-          message: "Permission denied",
-          error: "PERMISSION_DENIED",
-        };
-      }
-
-      if (!message.isEncrypted) {
-        return {
-          success: true,
-          message: "Message is not encrypted",
-          data: { content: message.content },
-        };
-      }
-
-      if (!message.encryptionKey) {
-        return {
-          success: false,
-          message: "No stored encryption key for this message",
-          error: "NO_KEY",
-        };
-      }
-
-      return await this.decryptMessage(
-        message.content,
-        message.encryptionKey,
-        userId,
-        messageId,
-      );
-    } catch (error: any) {
-      this.logger.error({ err: error }, "Decrypt message by ID error");
-      return {
-        success: false,
-        message: "Failed to decrypt message",
-        error: error.message,
-      };
-    }
-  }
-
-  /**
-   * Attempt to crack encrypted message (gameplay mechanic)
-   */
-  async crackEncryption(
-    messageId: string,
-    userId: string,
-  ): Promise<MessageOperationResult> {
-    try {
-      const message = await prisma.message.findUnique({
-        where: { id: messageId },
-      });
-
-      if (!message) {
-        return {
-          success: false,
-          message: "Message not found",
-          error: "NOT_FOUND",
-        };
-      }
-
-      if (!message.isEncrypted) {
-        return {
-          success: false,
-          message: "Message is not encrypted",
-          error: "NOT_ENCRYPTED",
-        };
-      }
-
-      const progress = await prisma.playerProgress.findUnique({
-        where: { userId },
-      });
-
-      if (!progress) {
-        return {
-          success: false,
-          message: "Player progress not found",
-          error: "NO_PROGRESS",
-        };
-      }
-
-      const cryptoSkill = progress.cryptography;
-      const requiredSkill = (message.encryptionLevel || 5) * 10;
-
-      // Success chance based on skill difference
-      const skillDiff = cryptoSkill - requiredSkill;
-      const baseChance = 50; // 50% at equal skill
-      const successChance = Math.max(10, Math.min(90, baseChance + skillDiff));
-
-      const roll = Math.random() * 100;
-      const success = roll < successChance;
-
-      if (success) {
-        // Award XP for successful crack
-        const xpGain = message.encryptionLevel! * 10;
-        await prisma.playerProgress.update({
-          where: { userId },
-          data: {
-            experience: { increment: xpGain },
-            cryptography: { increment: Math.min(2, message.encryptionLevel!) },
-          },
-        });
-
-        // Actually decrypt the content using the stored encryption key
-        const decryptResult = await this.decryptMessage(
-          message.content,
-          message.encryptionKey!,
-          userId,
-          messageId,
-        );
-
-        const decryptedContent =
-          decryptResult.success && decryptResult.data
-            ? decryptResult.data.content
-            : message.content; // Fallback to ciphertext if decryption fails unexpectedly
-
-        return {
-          success: true,
-          message: "Encryption cracked successfully!",
-          data: {
-            content: decryptedContent,
-            xpGained: xpGain,
-            skillGained: Math.min(2, message.encryptionLevel!),
-          },
-        };
-      } else {
-        return {
-          success: false,
-          message: `Failed to crack encryption (${successChance.toFixed(0)}% chance)`,
-          error: "CRACK_FAILED",
-          data: {
-            successChance,
-            requiredSkill,
-            yourSkill: cryptoSkill,
-          },
-        };
-      }
-    } catch (error: any) {
-      this.logger.error({ err: error }, "Crack encryption error");
-      return {
-        success: false,
-        message: "Failed to crack encryption",
-        error: error.message,
-      };
-    }
-  }
-
   // ==================== REAL-TIME DELIVERY ====================
 
   /**
@@ -1180,7 +902,8 @@ export class MessageService {
 
       return true;
     } catch (error) {
-      this.logger.error({ err: error }, "Real-time delivery error");
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.logger.debug?.({ err, context: "deliverMessageRealtime" }, `[deliverMessageRealtime] ${err.message}`);
       return false;
     }
   }
@@ -1192,14 +915,17 @@ export class MessageService {
     senderId: string,
     messageId: string,
   ): Promise<void> {
-    try {
-      this.io.to(`user:${senderId}`).emit("message:read_receipt", {
-        messageId,
-        readAt: new Date(),
-      });
-    } catch (error) {
-      this.logger.error({ err: error }, "Read receipt error");
-    }
+    await safeExecute({
+      fn: async () => {
+        this.io.to(`user:${senderId}`).emit("message:read_receipt", {
+          messageId,
+          readAt: new Date(),
+        });
+      },
+      context: "Send read receipt",
+      logger: this.logger,
+      silent: true,
+    })();
   }
 
   /**
@@ -1320,26 +1046,34 @@ export class MessageService {
    * PHASE 5: Creates user accounts for AI personas to send messages
    */
   private async getAIUserId(personaId: string): Promise<string> {
-    const aiUsername = `AI_${personaId.substring(0, 8)}`;
+    const aiId = `ai_${personaId}`;
 
-    const aiUser = await prisma.user.findFirst({
-      where: { username: aiUsername },
-    });
+    // Check by ID first (fastest)
+    const byId = await prisma.user.findUnique({ where: { id: aiId }, select: { id: true } });
+    if (byId) return byId.id;
 
-    if (aiUser) {
-      return aiUser.id;
-    }
-
-    // Get persona info for better naming
+    // Check by persona name (seed may have created with different ID)
     const persona = await prisma.aIPersona.findUnique({
       where: { id: personaId },
+      select: { name: true },
     });
 
-    // Create AI user account
-    const newAIUser = await prisma.user.create({
-      data: {
-        id: `ai_${personaId}`,
-        username: persona?.name || aiUsername,
+    if (persona?.name) {
+      const byName = await prisma.user.findFirst({
+        where: { username: persona.name, email: { endsWith: "@ai.aida.internal" } },
+        select: { id: true },
+      });
+      if (byName) return byName.id;
+    }
+
+    // Create AI user account via upsert to prevent race conditions
+    const aiUsername = persona?.name || `AI_${personaId.substring(0, 8)}`;
+    const newAIUser = await prisma.user.upsert({
+      where: { id: aiId },
+      update: {},
+      create: {
+        id: aiId,
+        username: aiUsername,
         email: `${personaId}@ai.aida.internal`,
         password: crypto.randomBytes(32).toString("hex"),
         homeIp: "127.0.0.1",
@@ -1357,8 +1091,8 @@ export class MessageService {
     action: string,
     messageId: string,
   ): Promise<void> {
-    try {
-      await prisma.auditLog.create({
+    await safeExecute({
+      fn: () => prisma.auditLog.create({
         data: {
           userId,
           action: `message_${action}`,
@@ -1369,10 +1103,11 @@ export class MessageService {
             action,
           },
         },
-      });
-    } catch (error) {
-      this.logger.error({ err: error }, "Failed to log message activity");
-    }
+      }),
+      context: "Log message activity",
+      logger: this.logger,
+      silent: true,
+    })();
   }
 
   // ==================== STATS & NOTIFICATIONS ====================
@@ -1381,17 +1116,17 @@ export class MessageService {
    * Get unread message count for a user
    */
   async getUnreadCount(userId: string): Promise<number> {
-    try {
-      return await prisma.message.count({
+    return (await safeExecute({
+      fn: () => prisma.message.count({
         where: {
           recipientId: userId,
           isRead: false,
         },
-      });
-    } catch (error) {
-      this.logger.error({ err: error }, "Get unread count error");
-      return 0;
-    }
+      }),
+      context: "Get unread count",
+      logger: this.logger,
+      fallback: 0,
+    })()) ?? 0;
   }
 
   /**
@@ -1425,296 +1160,21 @@ export class MessageService {
     }
   }
 
-  // ==================== CHAT METHODS ====================
-
   /**
-   * Get chat history between two users
-   */
-  async getChatHistory(
-    userId: string,
-    contactId: string,
-    limit: number = 100,
-  ): Promise<MessageOperationResult> {
-    try {
-      const messages = await prisma.message.findMany({
-        where: {
-          OR: [
-            { senderId: userId, recipientId: contactId },
-            { senderId: contactId, recipientId: userId },
-          ],
-          subject: "",
-        },
-        include: {
-          sender: { select: { id: true, username: true } },
-          recipient: { select: { id: true, username: true } },
-        },
-        orderBy: { timestamp: "desc" },
-        take: limit,
-      });
-
-      const formattedMessages = messages.map((msg) => ({
-        id: msg.id,
-        senderId: msg.senderId,
-        senderUsername: msg.sender?.username ?? "Unknown",
-        recipientId: msg.recipientId,
-        recipientUsername: msg.recipient?.username ?? "Unknown",
-        content: msg.isEncrypted ? "[ENCRYPTED]" : msg.content,
-        timestamp: msg.timestamp,
-        isRead: msg.isRead,
-        isEncrypted: msg.isEncrypted,
-        avatar: this.generateAvatarInfo(msg.sender?.username ?? "Unknown"),
-      }));
-
-      return {
-        success: true,
-        message: `Retrieved ${formattedMessages.length} messages`,
-        data: { messages: formattedMessages },
-      };
-    } catch (error: any) {
-      this.logger.error({ err: error }, "Get chat history error");
-      return {
-        success: false,
-        message: "Failed to load chat history",
-        error: error.message,
-      };
-    }
-  }
-
-  /**
-   * Get chat contacts for a user (from DB contacts + message history)
-   */
-  async getChatContacts(userId: string): Promise<MessageOperationResult> {
-    try {
-      // Get DB contacts
-      const dbContacts = await prisma.contact.findMany({
-        where: { userId },
-        include: {
-          contact: {
-            select: {
-              id: true,
-              username: true,
-              factionMembers: { select: { factionId: true }, take: 1 },
-            },
-          },
-        },
-      });
-
-      // Get all chat messages to find additional contacts from message history
-      const chatMessages = await prisma.message.findMany({
-        where: {
-          OR: [{ senderId: userId }, { recipientId: userId }],
-          subject: "",
-        },
-        include: {
-          sender: {
-            select: {
-              id: true,
-              username: true,
-              factionMembers: { select: { factionId: true }, take: 1 },
-            },
-          },
-          recipient: {
-            select: {
-              id: true,
-              username: true,
-              factionMembers: { select: { factionId: true }, take: 1 },
-            },
-          },
-        },
-        orderBy: { timestamp: "desc" },
-      });
-
-      const contactMap = new Map<string, ChatContact>();
-
-      // Add DB contacts
-      for (const dbContact of dbContacts) {
-        if (dbContact.contact && !contactMap.has(dbContact.contactUserId)) {
-          const factionId =
-            dbContact.contact.factionMembers?.[0]?.factionId ?? null;
-          contactMap.set(dbContact.contactUserId, {
-            userId: dbContact.contactUserId,
-            username: dbContact.contact.username,
-            isOnline: false,
-            unreadCount: 0,
-            lastMessage: "",
-            lastMessageTime: new Date(0),
-            isContact: true,
-            factionId,
-            avatar: this.generateAvatarInfo(
-              dbContact.contact.username,
-              "player",
-              factionId ?? undefined,
-            ),
-          });
-        }
-      }
-
-      // Add contacts from message history
-      for (const msg of chatMessages) {
-        const otherId =
-          msg.senderId === userId ? msg.recipientId : msg.senderId;
-        const other = msg.senderId === userId ? msg.recipient : msg.sender;
-        if (other && !contactMap.has(otherId)) {
-          const factionId = other.factionMembers?.[0]?.factionId ?? null;
-          contactMap.set(otherId, {
-            userId: otherId,
-            username: other.username,
-            isOnline: false,
-            unreadCount: 0,
-            lastMessage: "",
-            lastMessageTime: new Date(0),
-            isContact: false,
-            factionId,
-            avatar: this.generateAvatarInfo(
-              other.username,
-              "player",
-              factionId ?? undefined,
-            ),
-          });
-        }
-
-        // Update last message preview
-        const contact = contactMap.get(otherId);
-        if (contact && msg.timestamp > contact.lastMessageTime) {
-          contact.lastMessage = msg.isEncrypted
-            ? "[ENCRYPTED]"
-            : msg.content.substring(0, 50);
-          contact.lastMessageTime = msg.timestamp;
-        }
-      }
-
-      // Get unread counts in a single query
-      const unreadCounts = await prisma.message.groupBy({
-        by: ["senderId"],
-        where: {
-          recipientId: userId,
-          isRead: false,
-          subject: "",
-        },
-        _count: { id: true },
-      });
-
-      for (const uc of unreadCounts) {
-        const contact = contactMap.get(uc.senderId);
-        if (contact) {
-          contact.unreadCount = uc._count.id;
-        }
-      }
-
-      // Check online status via Socket.IO rooms
-      const contacts = Array.from(contactMap.values());
-      for (const contact of contacts) {
-        const sockets = await this.io
-          .in(`user:${contact.userId}`)
-          .fetchSockets();
-        contact.isOnline = sockets.length > 0;
-      }
-
-      // Sort by last message time (most recent first)
-      contacts.sort(
-        (a, b) => b.lastMessageTime.getTime() - a.lastMessageTime.getTime(),
-      );
-
-      return {
-        success: true,
-        message: `Found ${contacts.length} contacts`,
-        data: { contacts },
-      };
-    } catch (error: any) {
-      this.logger.error({ err: error }, "Get chat contacts error");
-      return {
-        success: false,
-        message: "Failed to load contacts",
-        error: error.message,
-      };
-    }
-  }
-
-  /**
-   * Mark all messages in a conversation as read
-   */
-  async markConversationRead(
-    userId: string,
-    senderId: string,
-  ): Promise<MessageOperationResult> {
-    try {
-      const result = await prisma.message.updateMany({
-        where: {
-          recipientId: userId,
-          senderId: senderId,
-          isRead: false,
-          subject: "",
-        },
-        data: { isRead: true },
-      });
-
-      // Send read receipts for each marked message
-      if (result.count > 0) {
-        this.io.to(`user:${senderId}`).emit("message:conversation_read", {
-          readBy: userId,
-          count: result.count,
-        });
-      }
-
-      return {
-        success: true,
-        message: `Marked ${result.count} messages as read`,
-        data: { count: result.count },
-      };
-    } catch (error: any) {
-      this.logger.error({ err: error }, "Mark conversation read error");
-      return {
-        success: false,
-        message: "Failed to mark messages as read",
-        error: error.message,
-      };
-    }
-  }
-
-  /**
-   * Get unread chat message counts grouped by sender
-   */
-  async getUnreadChatCounts(userId: string): Promise<MessageOperationResult> {
-    try {
-      const counts = await prisma.message.groupBy({
-        by: ["senderId"],
-        where: {
-          recipientId: userId,
-          isRead: false,
-          subject: "",
-        },
-        _count: { id: true },
-      });
-
-      const countMap: Record<string, number> = {};
-      for (const c of counts) {
-        countMap[c.senderId] = c._count.id;
-      }
-
-      return {
-        success: true,
-        message: "Unread counts retrieved",
-        data: { counts: countMap },
-      };
-    } catch (error: any) {
-      this.logger.error({ err: error }, "Get unread chat counts error");
-      return {
-        success: false,
-        message: "Failed to get unread counts",
-        error: error.message,
-      };
-    }
-  }
-
-  /**
-   * Request decryption of a message (wrapper around decryptMessageById)
+   * Request decryption of a message (delegates to MessageEncryptionService)
    */
   async requestDecryption(
     messageId: string,
     userId: string,
   ): Promise<MessageOperationResult> {
-    // This delegates to decryptMessageById which checks sender/recipient authorization
-    return this.decryptMessageById(messageId, userId);
+    if (!this.encryptionService) {
+      return {
+        success: false,
+        message: "Encryption service not available",
+        error: "SERVICE_UNAVAILABLE",
+      };
+    }
+    return this.encryptionService.decryptMessageById(messageId, userId);
   }
 
   // ==================== TOKEN-GATED AI PERSONA MESSAGING ====================
@@ -1920,20 +1380,66 @@ export class MessageService {
       })
       .join("\n");
 
-    // 3. Build prompt
+    // 3. Build prompt (sanitize user content to prevent prompt injection)
+    const { sanitizeForPrompt } = await import("../utils/aiPromptSanitizer");
     const prompt =
       `A player named ${playerUsername} has used a ${token.shopItemName} to contact you.\n` +
       (conversationLines
         ? `Recent conversation:\n${conversationLines}\n\n`
         : "") +
-      `Their latest message (subject: "${originalSubject}"):\n${originalContent}\n\n` +
+      `Their latest message subject: ${sanitizeForPrompt(originalSubject, 200)}\n` +
+      `Their latest message content:\n${sanitizeForPrompt(originalContent)}\n\n` +
       `Respond in character. Keep your reply concise (1-3 paragraphs).`;
 
-    // 4. Generate response via AI
-    const { response: replyContent } = await aiService.generateResponse(
-      prompt,
-      persona.systemPrompt,
-    );
+    // 4. Generate response via AI (with fallback + retry)
+    const { fallbackPersonaReply } = await import("../utils/aiFallbacks");
+    const { safeExecute } = await import("../utils/safeExecute");
+
+    const personaRecord = await prisma.aIPersona.findUnique({
+      where: { id: persona.id },
+      include: { faction: { select: { shortName: true } } },
+    });
+    const factionShortName = (personaRecord as any)?.faction?.shortName || null;
+    const personaId = persona.id;
+    const replySubjectForRetry = originalSubject.startsWith("Re: ")
+      ? originalSubject
+      : `Re: ${originalSubject}`;
+
+    // Plain text response (not JSON) — use safeExecute with generateOrThrow directly
+    const fallbackReply = fallbackPersonaReply(persona.name, factionShortName);
+    let usedFallback = false;
+
+    const replyContent = await safeExecute({
+      fn: async () => {
+        const result = await aiService.generateOrThrow(prompt, persona.systemPrompt);
+        return result.response;
+      },
+      context: "AI persona reply to player message",
+      logger: this.logger,
+      silent: true,
+      fallback: fallbackReply,
+      onError: () => { usedFallback = true; },
+    })();
+
+    // Queue retry if AI failed — when it recovers, send the real reply as a follow-up.
+    // Capture IDs (not live references) so the callback is safe even if state changes.
+    if (usedFallback) {
+      const capturedPersonaId = personaId;
+      const capturedPlayerId = playerId;
+      const capturedSubject = replySubjectForRetry;
+      const svc = this;
+      aiService.queueForRetry(prompt, persona.systemPrompt, async (response) => {
+        if (!response || response.trim().length === 0) return;
+        // Guard against stale state — verify both player and persona still exist
+        const [playerExists, personaExists] = await Promise.all([
+          prisma.user.findUnique({ where: { id: capturedPlayerId }, select: { id: true } }),
+          prisma.aIPersona.findUnique({ where: { id: capturedPersonaId }, select: { id: true } }),
+        ]);
+        if (playerExists && personaExists) {
+          await svc.sendAIMessage(capturedPersonaId, capturedPlayerId, capturedSubject, response).catch(() => {});
+        }
+      });
+    }
 
     // 5. Send the reply as an AI message (persona → player)
     const replySubject = originalSubject.startsWith("Re: ")
@@ -1961,6 +1467,80 @@ export class MessageService {
         },
       });
     }
+  }
+
+  // ==================== MESSAGE REPORTS ====================
+
+  /** Report a message for content violations. Only the recipient can report. */
+  async reportMessage(
+    reporterId: string,
+    messageId: string,
+    reason: string,
+  ): Promise<{ success: boolean; message: string; report?: any }> {
+    const msg = await prisma.message.findUnique({ where: { id: messageId } });
+    if (!msg) {
+      return { success: false, message: "Message not found" };
+    }
+    if (msg.recipientId !== reporterId) {
+      return { success: false, message: "You can only report messages you received" };
+    }
+    const report = await prisma.messageReport.create({
+      data: { reporterId, messageId, reason },
+    });
+    this.io?.to(`user:${reporterId}`).emit("message:reported", { reportId: report.id, messageId });
+    this.logger.info({ reporterId, messageId, reportId: report.id }, "Message reported");
+    return { success: true, message: "Report submitted", report };
+  }
+
+  /** Get message reports (admin/moderator). */
+  async getMessageReports(
+    status: string = "pending",
+    page: number = 1,
+    limit: number = 30,
+  ): Promise<{ reports: any[]; total: number; hasMore: boolean }> {
+    const skip = (page - 1) * limit;
+    const [reports, total] = await Promise.all([
+      prisma.messageReport.findMany({
+        where: { status },
+        include: {
+          reporter: { select: { id: true, username: true } },
+          message: { select: { id: true, senderId: true, recipientId: true, subject: true, content: true, timestamp: true } },
+        },
+        orderBy: { createdAt: "desc" },
+        skip,
+        take: limit,
+      }),
+      prisma.messageReport.count({ where: { status } }),
+    ]);
+    return { reports, total, hasMore: skip + reports.length < total };
+  }
+
+  /** Resolve a message report. action="action" hides the message. */
+  async resolveMessageReport(
+    adminId: string,
+    reportId: string,
+    action: "dismiss" | "action",
+  ): Promise<{ success: boolean; message: string; report?: any }> {
+    const report = await prisma.messageReport.findUnique({ where: { id: reportId } });
+    if (!report) {
+      return { success: false, message: "Report not found" };
+    }
+    if (action === "action" && report.messageId) {
+      await prisma.message.update({
+        where: { id: report.messageId },
+        data: { isHidden: true },
+      });
+    }
+    const updated = await prisma.messageReport.update({
+      where: { id: reportId },
+      data: {
+        status: action === "action" ? "actioned" : "dismissed",
+        resolvedAt: new Date(),
+        resolvedBy: adminId,
+      },
+    });
+    this.logger.info({ adminId, reportId, action }, "Message report resolved");
+    return { success: true, message: `Report ${action === "action" ? "actioned — message hidden" : "dismissed"}`, report: updated };
   }
 
   public stop(): void {

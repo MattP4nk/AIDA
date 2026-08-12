@@ -53,8 +53,10 @@ model User {
   intelligence     IntelligenceReport[]
   postReplies      PostReply[]
   postVotes        PostVote[]
-  reportsMade      PostReport[]         @relation("ReportCreator")
-  reportsResolved  PostReport[]         @relation("ReportResolver")
+  reportsMade            PostReport[]      @relation("ReportCreator")
+  reportsResolved        PostReport[]      @relation("ReportResolver")
+  messageReportsMade     MessageReport[]   @relation("MessageReportCreator")
+  messageReportsResolved MessageReport[]   @relation("MessageReportResolver")
 
   // Game mechanics
   inventoryItems   InventoryItem[]
@@ -134,7 +136,17 @@ model PlayerProgress {
 
   missionProgress Json     @default("{}") @map("mission_progress")
   achievements    String[] @default([])
-  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  // Stat counters
+  commandsExecuted  Int @default(0) @map("commands_executed")
+  successfulHacks   Int @default(0) @map("successful_hacks")
+  failedHacks       Int @default(0) @map("failed_hacks")
+  missionsCompleted Int @default(0) @map("missions_completed")
+  serversDiscovered Int @default(0) @map("servers_discovered")
+  filesAccessed     Int @default(0) @map("files_accessed")
+  messagesSent      Int @default(0) @map("messages_sent")
+
+  updatedAt DateTime @updatedAt @map("updated_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -207,6 +219,7 @@ model GameServer {
   linksOut         ServerLink[]       @relation("LinkSource")
   linksIn          ServerLink[]       @relation("LinkTarget")
   accessKeys       ServerAccessKey[]
+  contentJobs      ContentJob[]
 
   @@index([ownerId])
   @@index([networkId])
@@ -256,6 +269,9 @@ model FileSystemNode {
   parent   FileSystemNode?  @relation("FileHierarchy", fields: [parentId], references: [id], onDelete: Cascade)
   children FileSystemNode[] @relation("FileHierarchy")
 
+  @@index([serverId, parentId])
+  @@index([serverId, name])
+  @@index([createdBy])
   @@map("file_system_nodes")
 }
 
@@ -272,6 +288,8 @@ model ServerConnection {
 
   server GameServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
 
+  @@index([userId, serverId])
+  @@index([userId, isActive])
   @@map("server_connections")
 }
 
@@ -291,11 +309,33 @@ model Message {
   messageType     String   @default("private") @map("message_type")
   requiredSkill   Json?    @map("required_skill")
   triggerEvent    String?  @map("trigger_event")
+  isHidden        Boolean  @default(false) @map("is_hidden")
 
-  sender    User @relation("MessageSender", fields: [senderId], references: [id], onDelete: Cascade)
-  recipient User @relation("MessageRecipient", fields: [recipientId], references: [id], onDelete: Cascade)
+  sender    User            @relation("MessageSender", fields: [senderId], references: [id], onDelete: Cascade)
+  recipient User            @relation("MessageRecipient", fields: [recipientId], references: [id], onDelete: Cascade)
+  reports   MessageReport[]
 
+  @@index([recipientId, isRead])
+  @@index([senderId])
   @@map("messages")
+}
+
+model MessageReport {
+  id         String    @id @default(cuid())
+  reporterId String    @map("reporter_id")
+  messageId  String    @map("message_id")
+  reason     String
+  status     String    @default("pending") // "pending" | "reviewed" | "dismissed" | "actioned"
+  createdAt  DateTime  @default(now()) @map("created_at")
+  resolvedAt DateTime? @map("resolved_at")
+  resolvedBy String?   @map("resolved_by")
+
+  reporter User    @relation("MessageReportCreator", fields: [reporterId], references: [id])
+  resolver User?   @relation("MessageReportResolver", fields: [resolvedBy], references: [id])
+  message  Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@map("message_reports")
 }
 
 model Contact {
@@ -428,6 +468,10 @@ model ForumMember {
   isBanned   Boolean  @default(false) @map("is_banned")
   joinedAt   DateTime @default(now()) @map("joined_at")
 
+  // NPC forum identity + memory (null for real players)
+  personality Json? // { description, tone, topics, factionLean }
+  memory      Json? // [{ timestamp, userId, username, summary, topic }]
+
   user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
   forum Forum @relation(fields: [forumId], references: [id], onDelete: Cascade)
 
@@ -536,10 +580,10 @@ model StoryProgress {
   userId         String @unique @map("user_id")
   discoveryLevel Int    @default(0) @map("discovery_level") // 0-6
 
-  // Key fragments (3 keys × 3 fragments each = 9 total)
-  signalKey   Int @default(0) @map("signal_key") // 0-3
-  locationKey Int @default(0) @map("location_key") // 0-3
-  cipherKey   Int @default(0) @map("cipher_key") // 0-3
+  // AIDA fragments (sword/key/collar × 3 each = 9 total)
+  swordFragments  Int @default(0) @map("sword_fragments") // 0-3
+  keyFragments    Int @default(0) @map("key_fragments") // 0-3
+  collarFragments Int @default(0) @map("collar_fragments") // 0-3
 
   fragments Json @default("[]") // Array of found fragment IDs
 
@@ -588,18 +632,26 @@ model IntelligenceReport {
 
 model KeyFragment {
   id          String                 @id @default(cuid())
-  keyType     String                 @map("key_type") // 'signal' | 'location' | 'cipher'
+  keyType     String                 @map("key_type") // 'sword' | 'key' | 'collar'
   fragmentNum Int                    @map("fragment_num") // 1, 2, or 3
   name        String
   description String                 @db.Text
   hint        String                 @db.Text
   foundBy     KeyFragmentDiscovery[]
 
+  // Current holder (only one player can hold each fragment at a time)
+  heldByUserId String?   @map("held_by_user_id")
+  heldSince    DateTime? @map("held_since")
+
   // Location/trigger
   sourceType String @map("source_type") // 'forum', 'server', 'mission', 'hack'
   sourceId   String @map("source_id")
 
+  // Status: "active" or "bricked" (destroyed from failed fragment.crack attempt)
+  status String @default("active")
+
   @@unique([keyType, fragmentNum])
+  @@index([heldByUserId])
   @@map("key_fragments")
 }
 
@@ -731,6 +783,9 @@ model HackLog {
   target   User       @relation("HackTarget", fields: [targetId], references: [id])
   server   GameServer @relation(fields: [targetServerId], references: [id])
 
+  @@index([attackerId])
+  @@index([targetServerId])
+  @@index([timestamp])
   @@map("hack_logs")
 }
 
@@ -751,6 +806,9 @@ model AuditLog {
 
   user User? @relation(fields: [userId], references: [id])
 
+  @@index([userId])
+  @@index([action])
+  @@index([timestamp])
   @@map("audit_logs")
 }
 
@@ -1423,20 +1481,72 @@ model Bounty {
 }
 
 model NarrativeEpoch {
-  id         String    @id @default(cuid())
-  epochNum   Int       @unique @map("epoch_num")
-  title      String // "The Awakening", "Faction Wars", etc.
-  summary    String    @db.Text // AI-generated summary of what defines this epoch
-  worldState Json      @default("{}") @map("world_state") // Snapshot: faction standings, tensions, key events
-  triggers   Json      @default("[]") // What conditions/events triggered this epoch
-  decisions  Json      @default("[]") // Key Architect decisions during this epoch
-  startedAt  DateTime  @default(now()) @map("started_at")
-  endedAt    DateTime? @map("ended_at")
+  id          String    @id @default(cuid())
+  epochNum    Int       @unique @map("epoch_num")
+  title       String // "The Awakening", "Faction Wars", etc.
+  description String?   @db.Text // Admin-friendly longer description
+  summary     String    @db.Text // AI-generated summary of what defines this epoch
+  worldState  Json      @default("{}") @map("world_state") // Snapshot: faction standings, tensions, key events
+  triggers    Json      @default("[]") // What conditions/events triggered this epoch
+  decisions   Json      @default("[]") // Key Architect decisions during this epoch
+  status      String    @default("draft") // "draft" | "active" | "completed" | "archived"
+  order       Int       @default(0) // Explicit ordering for admin timeline
+  metadata    Json      @default("{}") // Arbitrary admin metadata
+  startedAt   DateTime  @default(now()) @map("started_at")
+  endedAt     DateTime? @map("ended_at")
+
+  events EpochEvent[]
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
+  @@index([status])
   @@map("narrative_epochs")
+}
+
+model EpochEvent {
+  id          String    @id @default(cuid())
+  epochId     String    @map("epoch_id")
+  name        String
+  description String    @db.Text
+  triggerType String    @default("manual") // "scheduled" | "manual" | "condition"
+  scheduledAt DateTime? @map("scheduled_at")
+  condition   Json? // For condition-based triggers
+  payload     Json      @default("{}") // { action: "create_draft"|"architect_intervention"|"world_event"|"advance_epoch"|"toggle_feature", ...data }
+  status      String    @default("pending") // "pending" | "fired" | "cancelled" | "failed"
+  firedAt     DateTime? @map("fired_at")
+  result      Json? // Outcome after firing
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  epoch NarrativeEpoch @relation(fields: [epochId], references: [id], onDelete: Cascade)
+
+  @@index([epochId])
+  @@index([status, scheduledAt])
+  @@map("epoch_events")
+}
+
+model ContentDraft {
+  id          String    @id @default(cuid())
+  type        String // "server" | "file" | "link" | "mission" | "forum_post" | "network" | "forum"
+  title       String
+  description String    @db.Text
+  payload     Json // Full creation data
+  source      String // "ai_content" | "architect" | "admin" | "epoch_event"
+  sourceId    String?   @map("source_id")
+  status      String    @default("draft") // "draft" | "approved" | "rejected" | "applied"
+  reviewNote  String?   @map("review_note") @db.Text
+  reviewedBy  String?   @map("reviewed_by")
+  reviewedAt  DateTime? @map("reviewed_at")
+  appliedAt   DateTime? @map("applied_at")
+  resultId    String?   @map("result_id") // ID of created entity after approval
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  @@index([status])
+  @@index([source])
+  @@index([type])
+  @@map("content_drafts")
 }
 
 model StoryLedger {
@@ -1481,4 +1591,28 @@ model PersonaMessage {
   @@index([userId, personaId])
   @@index([personaId])
   @@map("persona_messages")
+}
+
+// ==================== CONTENT GENERATION QUEUE ====================
+
+model ContentJob {
+  id          String    @id @default(cuid())
+  serverId    String    @map("server_id")
+  priority    Int       @default(5) // 1=urgent, 5=normal, 10=low
+  status      String    @default("pending") // pending | processing | completed | failed
+  attempts    Int       @default(0)
+  maxAttempts Int       @default(3) @map("max_attempts")
+  error       String?   @db.Text
+  requestedBy String?   @map("requested_by")
+  options     Json      @default("{}") // { skipAI?: boolean, force?: boolean }
+  completedAt DateTime? @map("completed_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  server GameServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+
+  @@index([status, priority])
+  @@index([serverId])
+  @@index([createdAt])
+  @@map("content_jobs")
 }

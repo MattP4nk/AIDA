@@ -10,6 +10,7 @@ import type {
 } from "../types/game";
 import { HackMethod } from "../types/game";
 import { injectable, inject } from "tsyringe";
+import { safeExecute } from "../utils/safeExecute";
 import { Logger } from "pino";
 import {
   LOGGER,
@@ -26,6 +27,7 @@ import {
   validateAnswer,
 } from "./hackMinigameGenerator";
 import type { LayerResult } from "../types/game";
+import { HACK_COOLDOWN_BASE_S } from "../config/gameBalance";
 
 /**
  * Enhanced HackService - Complete PvP hacking mechanics
@@ -44,7 +46,7 @@ class HackService extends EventEmitter {
   private cooldowns: Map<string, Date>;
   private activeHacks: Map<string, HackSessionInfo>;
   private sessionTimers: Map<string, NodeJS.Timeout>;
-  private readonly COOLDOWN_SECONDS = 30;
+  private readonly COOLDOWN_SECONDS = HACK_COOLDOWN_BASE_S; // From gameBalance — use getHackCooldown(skill) for skill-scaled value
   private readonly BASE_DETECTION_RATE = 0.3;
   private readonly BASE_SUCCESS_RATE = 0.5;
   private missionIntegration: MissionIntegrationService | null = null;
@@ -104,14 +106,45 @@ class HackService extends EventEmitter {
     );
   }
 
+  // ==================== CACHED SERVICE GETTERS ====================
+
+  private _serverService?: unknown;
+  private async getServerService() {
+    if (!this._serverService) {
+      const { getService } = await import("../di/container");
+      const { SERVER_SERVICE } = await import("../di/tokens");
+      this._serverService = getService(SERVER_SERVICE);
+    }
+    return this._serverService as { triggerSecurityAlert: (...args: unknown[]) => void };
+  }
+
+  private _reputationEngine?: unknown;
+  private async getReputationEngine() {
+    if (!this._reputationEngine) {
+      const { getService } = await import("../di/container");
+      const { REPUTATION_ENGINE } = await import("../di/tokens");
+      this._reputationEngine = getService(REPUTATION_ENGINE);
+    }
+    return this._reputationEngine as { onServerHacked: (...args: unknown[]) => Promise<void> };
+  }
+
+  /** Clear all session timers (called during shutdown) */
+  public cleanup(): void {
+    for (const [, timer] of this.sessionTimers) {
+      clearTimeout(timer);
+    }
+    this.sessionTimers.clear();
+    this.logger.info("Hack session timers cleared");
+  }
+
   // ==================== SESSION PERSISTENCE ====================
 
   /**
    * Persist a hack session to the database for crash recovery.
    */
   private async persistSession(session: HackSessionInfo): Promise<void> {
-    try {
-      await db.client.hackSession.upsert({
+    await safeExecute({
+      fn: () => db.client.hackSession.upsert({
         where: { id: session.id },
         create: {
           id: session.id,
@@ -138,27 +171,21 @@ class HackService extends EventEmitter {
           detectionAccumulator: session.detectionAccumulator,
           layerStartedAt: BigInt(session.layerStartedAt),
         },
-      });
-    } catch (err) {
-      this.logger.error(
-        { err, sessionId: session.id },
-        "Failed to persist hack session",
-      );
-    }
+      }),
+      context: "Persist hack session",
+      logger: this.logger,
+    })();
   }
 
   /**
    * Remove a persisted session from the database (after resolution).
    */
   private async removePersistedSession(sessionId: string): Promise<void> {
-    try {
-      await db.client.hackSession.deleteMany({ where: { id: sessionId } });
-    } catch (err) {
-      this.logger.error(
-        { err, sessionId },
-        "Failed to remove persisted hack session",
-      );
-    }
+    await safeExecute({
+      fn: () => db.client.hackSession.deleteMany({ where: { id: sessionId } }),
+      context: "Remove persisted hack session",
+      logger: this.logger,
+    })();
   }
 
   /**
@@ -239,7 +266,8 @@ class HackService extends EventEmitter {
   ): Promise<HackResult> {
     const startTime = Date.now();
 
-    try {
+    return await safeExecute({
+      fn: async (): Promise<HackResult> => {
       // 1. Validate the hack attempt
       const validation = await this.validateHackAttempt(
         attackerId,
@@ -349,19 +377,7 @@ class HackService extends EventEmitter {
         traceInitiated = evidenceLeft > 70;
       }
 
-      // 10. Create hack attempt record
-      const hackAttempt: HackAttempt = {
-        attackerId,
-        targetId,
-        targetServerId,
-        targetIp: server.ipAddress,
-        method,
-        tools,
-        stealthLevel: this.calculateStealthLevel(tools),
-        timestamp: new Date(),
-      };
-
-      // 11. Build result
+      // 10. Build result
       const result: HackResult = {
         success,
         detected,
@@ -378,42 +394,21 @@ class HackService extends EventEmitter {
         traceInitiated,
       };
 
-      // 12. Log to database (async)
-      this.logHackAttempt(hackAttempt, result).catch((err) =>
-        this.logger.error({ err }, "Failed to log hack"),
-      );
-
-      // 13. Update statistics
-      await this.updateHackStatistics(attackerId, targetId, success);
-
-      // 14. (Cooldown already applied at step 2b)
-
-      // 15. Emit events
-      this.emit("hack:attempt", {
+      // 11. Run post-hack pipeline (logging, stats, events, XP, cross-service)
+      await this.runPostHackPipeline({
         attackerId,
-        targetId,
         targetServerId,
-        serverName: server.name,
-        difficulty: server.securityLevel,
+        targetId,
         result,
+        method,
+        difficulty: server.securityLevel,
+        detected,
+        evidence: evidenceLeft,
+        targetIp: server.ipAddress,
+        serverName: server.name,
+        tools,
+        successRate: calculation.successRate,
       });
-      if (detected) {
-        this.emit("hack:detected", {
-          attackerId,
-          targetId,
-          evidenceLeft,
-          traceInitiated,
-        });
-      }
-
-      // 16. Trigger progress saves
-      this.progressService?.saveOnEvent(attackerId, "hack_attempt");
-      if (success) {
-        this.progressService?.saveOnEvent(attackerId, "hack_success");
-      }
-
-      // 17. Award experience and skill gains
-      await this.awardExperience(attackerId, success, calculation.successRate);
 
       const executionTime = Date.now() - startTime;
       this.logger.info(
@@ -421,54 +416,11 @@ class HackService extends EventEmitter {
         "Hack attempt completed",
       );
 
-      // ==================== CROSS-SERVICE INTEGRATION ====================
-
-      // 1. Trigger security alert on target server (HackService → ServerService)
-      if (detected) {
-        try {
-          const { getService } = await import("../di/container");
-          const { SERVER_SERVICE } = await import("../di/tokens");
-          const serverService = getService<any>(SERVER_SERVICE);
-          await serverService.triggerSecurityAlert(
-            targetServerId,
-            attackerId,
-            success ? "hack_successful" : "hack_detected",
-          );
-        } catch (error) {
-          this.logger.error({ err: error }, "Failed to trigger security alert");
-        }
-      }
-
-      // 2. Apply reputation changes via ReputationEngine
-      try {
-        const { getService } = await import("../di/container");
-        const { REPUTATION_ENGINE } = await import("../di/tokens");
-        const reputationEngine = getService<any>(REPUTATION_ENGINE);
-        await reputationEngine.onServerHacked(
-          attackerId,
-          targetServerId,
-          result.detected,
-        );
-      } catch (error) {
-        this.logger.error({ err: error }, "Failed to apply reputation change");
-      }
-
-      // 3. Track hack for mission objectives
-      if (this.missionIntegration && result.success) {
-        await this.missionIntegration.onHackComplete(
-          attackerId,
-          targetId,
-          result.success,
-          result.detected,
-          result.accessLevel,
-          method,
-        );
-      }
-
       return result;
-    } catch (error) {
-      this.logger.error({ err: error }, "Hack processing error");
-      return {
+      },
+      context: "Process hack attempt",
+      logger: this.logger,
+      fallback: {
         success: false,
         detected: true,
         accessLevel: 0,
@@ -477,8 +429,8 @@ class HackService extends EventEmitter {
         counterMeasures: ["system_error"],
         message: "Hack failed due to system error",
         traceInitiated: false,
-      };
-    }
+      } as HackResult,
+    })() as unknown as Promise<HackResult>;
   }
 
   // ==================== MINIGAME SESSION MANAGEMENT ====================
@@ -1187,124 +1139,26 @@ class HackService extends EventEmitter {
       traceInitiated,
     };
 
-    // Log to database
-    const hackAttempt: HackAttempt = {
+    // Run post-hack pipeline (logging, stats, events, XP, cross-service)
+    await this.runPostHackPipeline({
       attackerId: session.attackerId,
-      targetId: session.targetOwnerId,
       targetServerId: session.targetServerId,
-      targetIp: server.ipAddress,
-      method: session.method,
-      tools: session.tools,
-      stealthLevel: this.calculateStealthLevel(session.tools),
-      timestamp: new Date(),
-    };
-    this.logHackAttempt(hackAttempt, result).catch((err) =>
-      this.logger.error({ err }, "Failed to log hack"),
-    );
-
-    // Update statistics
-    await this.updateHackStatistics(
-      session.attackerId,
-      session.targetOwnerId,
-      overallSuccess,
-    );
-
-    // Emit events
-    this.emit("hack:attempt", {
-      attackerId: session.attackerId,
       targetId: session.targetOwnerId,
-      targetServerId: session.targetServerId,
-      serverName: server.name,
-      difficulty: server.securityLevel,
       result,
+      method: session.method,
+      difficulty: server.securityLevel,
+      detected,
+      evidence: evidenceLeft,
+      xpMultiplier,
+      notifyPersona: true,
+      targetIp: server.ipAddress,
+      serverName: server.name,
+      tools: session.tools,
+      successRate: calculation.successRate,
+      factionId: server.factionId,
       layersSolved,
       totalLayers,
     });
-    if (detected) {
-      this.emit("hack:detected", {
-        attackerId: session.attackerId,
-        targetId: session.targetOwnerId,
-        evidenceLeft,
-        traceInitiated,
-      });
-    }
-
-    // Progress saves
-    this.progressService?.saveOnEvent(session.attackerId, "hack_attempt");
-    if (overallSuccess) {
-      this.progressService?.saveOnEvent(session.attackerId, "hack_success");
-    }
-
-    // Award experience (scaled by xpMultiplier)
-    await this.awardMinigameExperience(
-      session.attackerId,
-      overallSuccess,
-      calculation.successRate,
-      xpMultiplier,
-    );
-
-    // Cross-service integration
-    if (detected) {
-      try {
-        const { getService } = await import("../di/container");
-        const { SERVER_SERVICE } = await import("../di/tokens");
-        const serverService = getService<any>(SERVER_SERVICE);
-        await serverService.triggerSecurityAlert(
-          session.targetServerId,
-          session.attackerId,
-          overallSuccess ? "hack_successful" : "hack_detected",
-        );
-      } catch (error) {
-        this.logger.error({ err: error }, "Failed to trigger security alert");
-      }
-    }
-
-    try {
-      const { getService } = await import("../di/container");
-      const { REPUTATION_ENGINE } = await import("../di/tokens");
-      const reputationEngine = getService<any>(REPUTATION_ENGINE);
-      await reputationEngine.onServerHacked(
-        session.attackerId,
-        session.targetServerId,
-        result.detected,
-      );
-    } catch (error) {
-      this.logger.error({ err: error }, "Failed to apply reputation change");
-    }
-
-    // Notify AI personas if this was a faction-owned server
-    if (result.success && server.factionId) {
-      try {
-        const { getService } = await import("../di/container");
-        const { PERSONA_SERVICE } = await import("../di/tokens");
-        const personaService =
-          getService<import("./personaService").PersonaService>(
-            PERSONA_SERVICE,
-          );
-        await personaService.onFactionServerHacked(
-          session.targetServerId,
-          server.factionId,
-          session.attackerId,
-          detected,
-        );
-      } catch (error) {
-        this.logger.error(
-          { err: error },
-          "Failed to notify AI of faction server hack",
-        );
-      }
-    }
-
-    if (this.missionIntegration && result.success) {
-      await this.missionIntegration.onHackComplete(
-        session.attackerId,
-        session.targetOwnerId,
-        result.success,
-        result.detected,
-        result.accessLevel,
-        session.method,
-      );
-    }
 
     // Clean up session (in-memory + DB)
     this.activeHacks.delete(userId);
@@ -1349,50 +1203,229 @@ class HackService extends EventEmitter {
       (session.method === HackMethod.BACKDOOR ||
         session.method === HackMethod.ROOTKIT)
     ) {
-      try {
-        const { getService } = await import("../di/container");
-        const { BACKDOOR_SERVICE } = await import("../di/tokens");
-        const backdoorService = getService<any>(BACKDOOR_SERVICE);
-        const bdResult = await backdoorService.installBackdoor(
-          session.attackerId,
-          session.targetServerId,
-          accessLevel,
-          session.method,
-          session.tools,
-        );
-        if (bdResult.success) {
-          const verb = bdResult.upgraded ? "Upgraded" : "Installed";
-          output.push(
-            `  🔓 ${verb} ${bdResult.backdoor?.type ?? "standard"} backdoor (access level ${accessLevel})`,
+      await safeExecute({
+        fn: async () => {
+          const { getService } = await import("../di/container");
+          const { BACKDOOR_SERVICE } = await import("../di/tokens");
+          const backdoorService = getService<any>(BACKDOOR_SERVICE);
+          const bdResult = await backdoorService.installBackdoor(
+            session.attackerId,
+            session.targetServerId,
+            accessLevel,
+            session.method,
+            session.tools,
           );
-        }
-      } catch (err) {
-        this.logger.error({ err }, "Failed to install backdoor after hack");
-      }
+          if (bdResult.success) {
+            const verb = bdResult.upgraded ? "Upgraded" : "Installed";
+            output.push(
+              `  🔓 ${verb} ${bdResult.backdoor?.type ?? "standard"} backdoor (access level ${accessLevel})`,
+            );
+          }
+        },
+        context: "Install backdoor after hack",
+        logger: this.logger,
+        silent: true,
+      })();
     }
 
     // ==================== TRACE INITIATION ====================
     // If trace was initiated, create a persistent trace in the database
     if (traceInitiated) {
-      try {
-        const { getService } = await import("../di/container");
-        const { TRACE_SERVICE } = await import("../di/tokens");
-        const traceService = getService<any>(TRACE_SERVICE);
-        const trResult = await traceService.initiateTrace(
-          session.attackerId,
-          session.targetOwnerId,
-          session.targetServerId,
-          evidenceLeft,
-        );
-        if (trResult.success) {
-          output.push(`  ⚠ ACTIVE TRACE LOCKED ON — evade with trace.evade`);
-        }
-      } catch (err) {
-        this.logger.error({ err }, "Failed to initiate trace after hack");
-      }
+      await safeExecute({
+        fn: async () => {
+          const { getService } = await import("../di/container");
+          const { TRACE_SERVICE } = await import("../di/tokens");
+          const traceService = getService<any>(TRACE_SERVICE);
+          const trResult = await traceService.initiateTrace(
+            session.attackerId,
+            session.targetOwnerId,
+            session.targetServerId,
+            evidenceLeft,
+          );
+          if (trResult.success) {
+            output.push(`  ⚠ ACTIVE TRACE LOCKED ON — evade with trace.evade`);
+          }
+        },
+        context: "Initiate trace after hack",
+        logger: this.logger,
+        silent: true,
+      })();
     }
 
     return { success: true, hackResult: result, output };
+  }
+
+  // ==================== POST-HACK PIPELINE ====================
+
+  /**
+   * Consolidated post-hack pipeline shared by processHackAttempt and resolveHackSession.
+   * Handles logging, stats, events, XP, security alerts, reputation, persona notification,
+   * and mission integration.
+   */
+  private async runPostHackPipeline(params: {
+    attackerId: string;
+    targetServerId: string;
+    targetId?: string;
+    result: HackResult;
+    method: string;
+    difficulty: number;
+    detected: boolean;
+    evidence: number;
+    xpMultiplier?: number;
+    notifyPersona?: boolean;
+    /** Extra fields needed by the pipeline internals */
+    targetIp: string;
+    serverName: string;
+    tools: string[];
+    successRate: number;
+    factionId?: string | null;
+    layersSolved?: number;
+    totalLayers?: number;
+  }): Promise<void> {
+    const {
+      attackerId,
+      targetServerId,
+      targetId,
+      result,
+      method,
+      difficulty,
+      detected,
+      evidence,
+      xpMultiplier,
+      notifyPersona,
+      targetIp,
+      serverName,
+      tools,
+      successRate,
+      factionId,
+      layersSolved,
+      totalLayers,
+    } = params;
+
+    // 1. Log to database
+    const hackAttempt: HackAttempt = {
+      attackerId,
+      targetId: targetId ?? attackerId,
+      targetServerId,
+      targetIp,
+      method: method as HackMethod,
+      tools,
+      stealthLevel: this.calculateStealthLevel(tools),
+      timestamp: new Date(),
+    };
+    this.logHackAttempt(hackAttempt, result).catch((err) =>
+      this.logger.error({ err }, "Failed to log hack"),
+    );
+
+    // 2. Update statistics
+    await this.updateHackStatistics(
+      attackerId,
+      targetId ?? attackerId,
+      result.success,
+    );
+
+    // 3. Emit hack:attempt event
+    this.emit("hack:attempt", {
+      attackerId,
+      targetId: targetId ?? attackerId,
+      targetServerId,
+      serverName,
+      difficulty,
+      result,
+      ...(layersSolved !== undefined ? { layersSolved } : {}),
+      ...(totalLayers !== undefined ? { totalLayers } : {}),
+    });
+
+    // 4. Emit hack:detected event (if detected)
+    if (detected) {
+      this.emit("hack:detected", {
+        attackerId,
+        targetId: targetId ?? attackerId,
+        evidenceLeft: evidence,
+        traceInitiated: result.traceInitiated,
+      });
+    }
+
+    // 5. Progress saves
+    this.progressService?.saveOnEvent(attackerId, "hack_attempt");
+    if (result.success) {
+      this.progressService?.saveOnEvent(attackerId, "hack_success");
+    }
+
+    // 6. Award experience
+    await this.awardExperience(
+      attackerId,
+      successRate,
+      result.success,
+      xpMultiplier ?? 1,
+    );
+
+    // 7. Security alert via ServerService (if detected)
+    if (detected) {
+      await safeExecute({
+        fn: async () => {
+          const serverService = await this.getServerService();
+          await serverService.triggerSecurityAlert(
+            targetServerId,
+            attackerId,
+            result.success ? "hack_successful" : "hack_detected",
+          );
+        },
+        context: "Trigger security alert on hack",
+        logger: this.logger,
+        silent: true,
+      })();
+    }
+
+    // 8. Reputation engine
+    await safeExecute({
+      fn: async () => {
+        const reputationEngine = await this.getReputationEngine();
+        await reputationEngine.onServerHacked(
+          attackerId,
+          targetServerId,
+          result.detected,
+        );
+      },
+      context: "Apply reputation change on hack",
+      logger: this.logger,
+      silent: true,
+    })();
+
+    // 9. Optional persona notification (resolveHackSession only)
+    if (notifyPersona && result.success && factionId) {
+      await safeExecute({
+        fn: async () => {
+          const { getService } = await import("../di/container");
+          const { PERSONA_SERVICE } = await import("../di/tokens");
+          const personaService =
+            getService<import("./personaService").PersonaService>(
+              PERSONA_SERVICE,
+            );
+          await personaService.onFactionServerHacked(
+            targetServerId,
+            factionId!,
+            attackerId,
+            detected,
+          );
+        },
+        context: "Notify AI of faction server hack",
+        logger: this.logger,
+        silent: true,
+      })();
+    }
+
+    // 10. Mission integration
+    if (this.missionIntegration && result.success) {
+      await this.missionIntegration.onHackComplete(
+        attackerId,
+        targetId ?? attackerId,
+        result.success,
+        result.detected,
+        result.accessLevel,
+        method as HackMethod,
+      );
+    }
   }
 
   private generateMinigameResultMessage(
@@ -1416,38 +1449,6 @@ class HackService extends EventEmitter {
         return `Minimal breach. ${layersSolved}/${totalLayers} layers cracked. Access level ${accessLevel}/10.${detectedSuffix}`;
       default:
         return `Hack failed. 0/${totalLayers} layers cracked.${detectedSuffix}`;
-    }
-  }
-
-  private async awardMinigameExperience(
-    attackerId: string,
-    success: boolean,
-    difficulty: number,
-    multiplier: number,
-  ): Promise<void> {
-    try {
-      const progress = await db.client.playerProgress.findUnique({
-        where: { userId: attackerId },
-      });
-      if (!progress) return;
-
-      const baseHackGain = success ? Math.ceil(difficulty * 2) : 1;
-      const baseStealthGain = Math.ceil(difficulty * 1.5);
-      const hackingGain = Math.ceil(baseHackGain * multiplier);
-      const stealthGain = Math.ceil(baseStealthGain * multiplier);
-
-      await db.client.playerProgress.update({
-        where: { userId: attackerId },
-        data: {
-          hacking: { increment: Math.min(hackingGain, 100 - progress.hacking) },
-          stealth: { increment: Math.min(stealthGain, 100 - progress.stealth) },
-          experience: {
-            increment: Math.ceil((success ? 50 : 10) * multiplier),
-          },
-        },
-      });
-    } catch (error) {
-      this.logger.error({ err: error }, "Minigame experience award error");
     }
   }
 
@@ -1476,63 +1477,62 @@ class HackService extends EventEmitter {
     targetId: string,
     targetServerId: string,
   ): Promise<{ valid: boolean; error?: string }> {
-    try {
-      // Cannot hack yourself
-      if (attackerId === targetId) {
-        return { valid: false, error: "Cannot hack your own servers" };
-      }
+    return await safeExecute({
+      fn: async () => {
+        // Cannot hack yourself
+        if (attackerId === targetId) {
+          return { valid: false, error: "Cannot hack your own servers" };
+        }
 
-      // Check if attacker exists and has skills
-      const attacker = await db.client.user.findUnique({
-        where: { id: attackerId },
-        include: { progress: true },
-      });
+        // Check if attacker exists and has skills
+        const attacker = await db.client.user.findUnique({
+          where: { id: attackerId },
+          include: { progress: true },
+        });
 
-      if (!attacker || !attacker.progress) {
-        return { valid: false, error: "Attacker not found" };
-      }
+        if (!attacker || !attacker.progress) {
+          return { valid: false, error: "Attacker not found" };
+        }
 
-      // Check minimum skill requirement
-      if (attacker.progress.hacking < 10) {
-        return {
-          valid: false,
-          error: "Insufficient hacking skill (minimum: 10)",
-        };
-      }
+        // Check minimum skill requirement
+        if (attacker.progress.hacking < 10) {
+          return {
+            valid: false,
+            error: "Insufficient hacking skill (minimum: 10)",
+          };
+        }
 
-      // Check if target exists
-      const target = await db.client.user.findUnique({
-        where: { id: targetId },
-      });
+        // Check if target exists
+        const target = await db.client.user.findUnique({
+          where: { id: targetId },
+        });
 
-      if (!target) {
-        return { valid: false, error: "Target not found" };
-      }
+        if (!target) {
+          return { valid: false, error: "Target not found" };
+        }
 
-      // Check if server exists and belongs to target
-      const server = await db.client.gameServer.findUnique({
-        where: { id: targetServerId },
-      });
+        // Check if server exists and belongs to target
+        const server = await db.client.gameServer.findUnique({
+          where: { id: targetServerId },
+        });
 
-      if (!server) {
-        return { valid: false, error: "Target server not found" };
-      }
+        if (!server) {
+          return { valid: false, error: "Target server not found" };
+        }
 
-      if (server.ownerId !== targetId) {
-        return {
-          valid: false,
-          error: "Server does not belong to target user",
-        };
-      }
+        if (server.ownerId !== targetId) {
+          return {
+            valid: false,
+            error: "Server does not belong to target user",
+          };
+        }
 
-      return { valid: true };
-    } catch (error) {
-      this.logger.error({ err: error }, "Validation error");
-      return {
-        valid: false,
-        error: error instanceof Error ? error.message : "Validation failed",
-      };
-    }
+        return { valid: true };
+      },
+      context: "Validate hack attempt",
+      logger: this.logger,
+      fallback: { valid: false, error: "Validation failed" },
+    })() as unknown as Promise<{ valid: boolean; error?: string }>;
   }
 
   // ==================== CALCULATIONS ====================
@@ -1713,31 +1713,33 @@ class HackService extends EventEmitter {
     serverId: string,
     accessLevel: number,
   ): Promise<string[]> {
-    try {
-      // Get files from server
-      const MAX_FILE_DISCOVERY = 30;
-      const files = await db.client.fileSystemNode.findMany({
-        where: {
-          serverId,
-          type: "file",
-        },
-        take: Math.min(accessLevel * 3, MAX_FILE_DISCOVERY),
-      });
+    return await safeExecute({
+      fn: async () => {
+        // Get files from server
+        const MAX_FILE_DISCOVERY = 30;
+        const files = await db.client.fileSystemNode.findMany({
+          where: {
+            serverId,
+            type: "file",
+          },
+          take: Math.min(accessLevel * 3, MAX_FILE_DISCOVERY),
+        });
 
-      // Filter by protection level vs access level
-      const discoveredFiles = files
-        .filter((file: any) => {
-          if (file.isProtected && accessLevel < 7) return false;
-          if (file.isHidden && accessLevel < 5) return false;
-          return true;
-        })
-        .map((file: any) => file.name);
+        // Filter by protection level vs access level
+        const discoveredFiles = files
+          .filter((file: any) => {
+            if (file.isProtected && accessLevel < 7) return false;
+            if (file.isHidden && accessLevel < 5) return false;
+            return true;
+          })
+          .map((file: any) => file.name);
 
-      return discoveredFiles.slice(0, Math.min(10, accessLevel * 2));
-    } catch (error) {
-      this.logger.error({ err: error }, "File discovery error");
-      return [];
-    }
+        return discoveredFiles.slice(0, Math.min(10, accessLevel * 2));
+      },
+      context: "Discover files on hack",
+      logger: this.logger,
+      fallback: [] as string[],
+    })() as unknown as Promise<string[]>;
   }
 
   // ==================== COUNTERMEASURES ====================
@@ -1911,26 +1913,29 @@ class HackService extends EventEmitter {
     evidenceLevel: number,
     severity: "warning" | "high" | "critical",
   ): Promise<void> {
-    try {
-      const { getService } = await import("../di/container");
-      const { SOCKET_IO } = await import("../di/tokens");
-      const io = getService<any>(SOCKET_IO);
+    await safeExecute({
+      fn: async () => {
+        const { getService } = await import("../di/container");
+        const { SOCKET_IO } = await import("../di/tokens");
+        const io = getService<any>(SOCKET_IO);
 
-      const messages: Record<string, string> = {
-        warning: `[SECURITY] Suspicious activity detected on ${serverName}. Evidence: ${evidenceLevel}%`,
-        high: `[ALERT] Intrusion detected on ${serverName}! Firewall strengthened. Evidence: ${evidenceLevel}%`,
-        critical: `[CRITICAL] ${serverName} under attack! Server locked down. Trace initiated. Evidence: ${evidenceLevel}%`,
-      };
+        const messages: Record<string, string> = {
+          warning: `[SECURITY] Suspicious activity detected on ${serverName}. Evidence: ${evidenceLevel}%`,
+          high: `[ALERT] Intrusion detected on ${serverName}! Firewall strengthened. Evidence: ${evidenceLevel}%`,
+          critical: `[CRITICAL] ${serverName} under attack! Server locked down. Trace initiated. Evidence: ${evidenceLevel}%`,
+        };
 
-      io.to(`player:${ownerId}`).emit("notification", {
-        type: "security_alert",
-        severity,
-        message: messages[severity],
-        timestamp: new Date(),
-      });
-    } catch (err) {
-      this.logger.warn({ err }, "Failed to notify server owner of security alert");
-    }
+        io.to(`player:${ownerId}`).emit("notification", {
+          type: "security_alert",
+          severity,
+          message: messages[severity],
+          timestamp: new Date(),
+        });
+      },
+      context: "Notify server owner of security alert",
+      logger: this.logger,
+      silent: true,
+    })();
   }
 
   /**
@@ -2131,19 +2136,21 @@ class HackService extends EventEmitter {
     factionId: string,
     evidenceLevel: number,
   ): Promise<void> {
-    try {
-      const { getService } = await import("../di/container");
-      const { FACTION_SERVICE } = await import("../di/tokens");
-      const factionService = getService<any>(FACTION_SERVICE);
+    await safeExecute({
+      fn: async () => {
+        const { getService } = await import("../di/container");
+        const { FACTION_SERVICE } = await import("../di/tokens");
+        const factionService = getService<any>(FACTION_SERVICE);
 
-      // Penalty scales with evidence: 61-80% → -5 rep, 81-100% → -15 rep
-      const penalty = evidenceLevel > 80 ? -15 : -5;
-      await factionService.addReputation(attackerId, factionId, penalty);
+        // Penalty scales with evidence: 61-80% → -5 rep, 81-100% → -15 rep
+        const penalty = evidenceLevel > 80 ? -15 : -5;
+        await factionService.addReputation(attackerId, factionId, penalty);
 
-      this.logger.info({ attackerId, factionId, penalty, evidenceLevel }, "Detection reputation penalty applied");
-    } catch (err) {
-      this.logger.error({ err }, "Failed to apply detection reputation penalty");
-    }
+        this.logger.info({ attackerId, factionId, penalty, evidenceLevel }, "Detection reputation penalty applied");
+      },
+      context: "Apply detection reputation penalty",
+      logger: this.logger,
+    })();
   }
 
   /**
@@ -2155,9 +2162,8 @@ class HackService extends EventEmitter {
     evidenceLevel: number,
     severity: string,
   ): Promise<void> {
-    try {
-      // Create game event
-      await db.client.gameEvent.create({
+    await safeExecute({
+      fn: () => db.client.gameEvent.create({
         data: {
           type: "hack_detected",
           title: "Security Breach Detected",
@@ -2168,12 +2174,10 @@ class HackService extends EventEmitter {
           isGlobal: false,
           severity,
         },
-      });
-
-      this.logger.info({ userId }, "Security alert sent to user");
-    } catch (error) {
-      this.logger.error({ err: error }, "Security alert error");
-    }
+      }),
+      context: "Send security alert",
+      logger: this.logger,
+    })();
   }
 
   // ==================== LOGGING & STATISTICS ====================
@@ -2185,35 +2189,37 @@ class HackService extends EventEmitter {
     attempt: HackAttempt,
     result: HackResult,
   ): Promise<void> {
-    try {
-      await db.client.hackLog.create({
-        data: {
-          attackerId: attempt.attackerId,
-          targetId: attempt.targetId,
-          targetServerId: attempt.targetServerId,
-          method: attempt.method,
-          tools: attempt.tools,
-          stealthLevel: attempt.stealthLevel,
-          success: result.success,
-          detected: result.detected,
-          accessLevel: result.accessLevel,
-          evidenceLeft: result.evidenceLeft,
-          counterMeasures: result.counterMeasures,
-          timestamp: new Date(),
-          metadata: {
-            discoveredFiles: result.discoveredFiles.length,
-            traceInitiated: result.traceInitiated,
+    await safeExecute({
+      fn: async () => {
+        await db.client.hackLog.create({
+          data: {
+            attackerId: attempt.attackerId,
+            targetId: attempt.targetId,
+            targetServerId: attempt.targetServerId,
+            method: attempt.method,
+            tools: attempt.tools,
+            stealthLevel: attempt.stealthLevel,
+            success: result.success,
+            detected: result.detected,
+            accessLevel: result.accessLevel,
+            evidenceLeft: result.evidenceLeft,
+            counterMeasures: result.counterMeasures,
+            timestamp: new Date(),
+            metadata: {
+              discoveredFiles: result.discoveredFiles.length,
+              traceInitiated: result.traceInitiated,
+            },
           },
-        },
-      });
+        });
 
-      this.logger.info(
-        { attackerId: attempt.attackerId, targetId: attempt.targetId },
-        "Logged hack attempt",
-      );
-    } catch (error) {
-      this.logger.error({ err: error }, "Hack logging error");
-    }
+        this.logger.info(
+          { attackerId: attempt.attackerId, targetId: attempt.targetId },
+          "Logged hack attempt",
+        );
+      },
+      context: "Log hack attempt",
+      logger: this.logger,
+    })();
   }
 
   /**
@@ -2224,76 +2230,85 @@ class HackService extends EventEmitter {
     targetId: string,
     success: boolean,
   ): Promise<void> {
-    try {
-      // Update attacker stats
-      const attackerProgress = await db.client.playerProgress.findUnique({
-        where: { userId: attackerId },
-      });
-
-      if (attackerProgress) {
-        await db.client.playerProgress.update({
+    await safeExecute({
+      fn: async () => {
+        // Update attacker stats
+        const attackerProgress = await db.client.playerProgress.findUnique({
           where: { userId: attackerId },
-          data: {
-            experience: {
-              increment: success ? 50 : 10,
-            },
-          },
         });
-      }
 
-      // Update target's security awareness (increase forensics slightly)
-      const targetProgress = await db.client.playerProgress.findUnique({
-        where: { userId: targetId },
-      });
+        if (attackerProgress) {
+          await db.client.playerProgress.update({
+            where: { userId: attackerId },
+            data: {
+              experience: {
+                increment: success ? 50 : 10,
+              },
+              successfulHacks: { increment: success ? 1 : 0 },
+              failedHacks: { increment: success ? 0 : 1 },
+            },
+          });
+        }
 
-      if (targetProgress && success) {
-        await db.client.playerProgress.update({
+        // Update target's security awareness (increase forensics slightly)
+        const targetProgress = await db.client.playerProgress.findUnique({
           where: { userId: targetId },
-          data: {
-            forensics: {
-              increment: Math.min(1, 100 - targetProgress.forensics),
-            },
-          },
         });
-      }
-    } catch (error) {
-      this.logger.error({ err: error }, "Statistics update error");
-    }
+
+        if (targetProgress && success) {
+          await db.client.playerProgress.update({
+            where: { userId: targetId },
+            data: {
+              forensics: {
+                increment: Math.min(1, 100 - targetProgress.forensics),
+              },
+            },
+          });
+        }
+      },
+      context: "Update hack statistics",
+      logger: this.logger,
+    })();
   }
 
   /**
-   * Award experience and skill gains
+   * Award experience and skill gains.
+   * Unified method — multiplier defaults to 1 for simple hack attempts,
+   * and is passed explicitly for minigame sessions (e.g. 0.25–1.5).
    */
   private async awardExperience(
     attackerId: string,
-    success: boolean,
     difficulty: number,
+    success: boolean,
+    multiplier = 1,
   ): Promise<void> {
-    try {
-      const progress = await db.client.playerProgress.findUnique({
-        where: { userId: attackerId },
-      });
+    await safeExecute({
+      fn: async () => {
+        const progress = await db.client.playerProgress.findUnique({
+          where: { userId: attackerId },
+        });
 
-      if (!progress) return;
+        if (!progress) return;
 
-      // Calculate skill gain (harder hacks = more skill gain)
-      const hackingGain = success ? Math.ceil(difficulty * 2) : 1;
-      const stealthGain = Math.ceil(difficulty * 1.5);
+        const baseHackGain = success ? Math.ceil(difficulty * 2) : 1;
+        const baseStealthGain = Math.ceil(difficulty * 1.5);
+        const hackingGain = Math.ceil(baseHackGain * multiplier);
+        const stealthGain = Math.ceil(baseStealthGain * multiplier);
 
-      await db.client.playerProgress.update({
-        where: { userId: attackerId },
-        data: {
-          hacking: {
-            increment: Math.min(hackingGain, 100 - progress.hacking),
+        await db.client.playerProgress.update({
+          where: { userId: attackerId },
+          data: {
+            hacking: { increment: Math.min(hackingGain, 100 - progress.hacking) },
+            stealth: { increment: Math.min(stealthGain, 100 - progress.stealth) },
+            experience: {
+              increment: Math.ceil((success ? 50 : 10) * multiplier),
+            },
           },
-          stealth: {
-            increment: Math.min(stealthGain, 100 - progress.stealth),
-          },
-        },
-      });
-    } catch (error) {
-      this.logger.error({ err: error }, "Experience award error");
-    }
+        });
+      },
+      context: "Award experience",
+      logger: this.logger,
+    })();
   }
 
   // ==================== COOLDOWN MANAGEMENT ====================
@@ -2376,73 +2391,71 @@ class HackService extends EventEmitter {
     page: number = 1,
     limit: number = 20,
   ): Promise<any> {
-    try {
-      const skip = (page - 1) * limit;
+    return await safeExecute({
+      fn: async () => {
+        const skip = (page - 1) * limit;
 
-      const hacks = await db.client.hackLog.findMany({
-        where: {
-          OR: [{ attackerId: userId }, { targetId: userId }],
-        },
-        include: {
-          attacker: { select: { username: true } },
-          target: { select: { username: true } },
-          server: { select: { name: true, ipAddress: true } },
-        },
-        orderBy: { timestamp: "desc" },
-        skip,
-        take: limit,
-      });
+        const hacks = await db.client.hackLog.findMany({
+          where: {
+            OR: [{ attackerId: userId }, { targetId: userId }],
+          },
+          include: {
+            attacker: { select: { username: true } },
+            target: { select: { username: true } },
+            server: { select: { name: true, ipAddress: true } },
+          },
+          orderBy: { timestamp: "desc" },
+          skip,
+          take: limit,
+        });
 
-      const total = await db.client.hackLog.count({
-        where: {
-          OR: [{ attackerId: userId }, { targetId: userId }],
-        },
-      });
+        const total = await db.client.hackLog.count({
+          where: {
+            OR: [{ attackerId: userId }, { targetId: userId }],
+          },
+        });
 
-      return {
-        success: true,
-        data: hacks,
-        pagination: {
-          page,
-          limit,
-          total,
-          pages: Math.ceil(total / limit),
-        },
-      };
-    } catch (error) {
-      this.logger.error({ err: error }, "Get hack history error");
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : "Unknown error",
-      };
-    }
+        return {
+          success: true,
+          data: hacks,
+          pagination: {
+            page,
+            limit,
+            total,
+            pages: Math.ceil(total / limit),
+          },
+        };
+      },
+      context: "Get hack history",
+      logger: this.logger,
+      fallback: { success: false as boolean, data: [] as any[], pagination: {} as any },
+    })();
   }
 
   /**
    * Get security alerts for user's servers
    */
   public async getSecurityAlerts(userId: string): Promise<any> {
-    try {
-      const alerts = await db.client.gameEvent.findMany({
-        where: {
-          affectedUsers: { has: userId },
-          type: "hack_detected",
-        },
-        orderBy: { timestamp: "desc" },
-        take: 50,
-      });
+    return await safeExecute({
+      fn: async () => {
+        const alerts = await db.client.gameEvent.findMany({
+          where: {
+            affectedUsers: { has: userId },
+            type: "hack_detected",
+          },
+          orderBy: { timestamp: "desc" },
+          take: 50,
+        });
 
-      return {
-        success: true,
-        data: alerts,
-      };
-    } catch (error) {
-      this.logger.error({ err: error }, "Get security alerts error");
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : "Unknown error",
-      };
-    }
+        return {
+          success: true,
+          data: alerts,
+        };
+      },
+      context: "Get security alerts",
+      logger: this.logger,
+      fallback: { success: false as boolean, data: [] as any[] },
+    })();
   }
 
   /**

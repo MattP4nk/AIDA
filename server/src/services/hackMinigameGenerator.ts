@@ -568,6 +568,7 @@ function getRelevantSkill(type: MinigameType, skills: Partial<PlayerSkills>): nu
     case "cipher": return skills.cryptography ?? 0;
     case "port_sequence": return skills.networking ?? 0;
     case "memory_trace": return (skills.hacking ?? 0) + (skills.forensics ?? 0) / 2;
+    default: return skills.hacking ?? 0;
   }
 }
 
@@ -587,6 +588,7 @@ export function generateLayersForServer(
       case "cipher": return generateCipherChallenge(difficulty, skills);
       case "port_sequence": return generatePortSequenceChallenge(difficulty, skills);
       case "memory_trace": return generateMemoryTraceChallenge(difficulty, skills);
+      default: return generateCipherChallenge(difficulty, skills); // fallback
     }
   });
 }

@@ -626,6 +626,30 @@ class MissionService extends EventEmitter {
           missionId,
         });
       }
+
+      // Feedback: abandoned missions are important signal
+      const mission = await this.getMission(missionId);
+      if (mission) {
+        const timeActive = playerMission.startedAt
+          ? Math.round((Date.now() - new Date(playerMission.startedAt).getTime()) / 60000)
+          : 0;
+
+        this.emit("mission:feedback", {
+          missionId,
+          templateId: (mission as any).templateId || "unknown",
+          userId,
+          playerLevel: progress.level,
+          missionDifficulty: mission.difficulty,
+          missionType: mission.type,
+          timeToCompleteMin: timeActive,
+          difficultyGrade: "too_hard" as const,
+          objectiveTypes: ((mission.objectives as any[]) || []).map((o: any) => o.type),
+          efficiencyScore: 0,
+          stealthScore: 0,
+          factionId: mission.factionId || undefined,
+          abandoned: true,
+        });
+      }
     } catch (error) {
       this.logger.error({ err: error }, "Error abandoning mission");
       throw new Error(
@@ -852,6 +876,7 @@ class MissionService extends EventEmitter {
         where: { userId },
         data: {
           missionProgress: missionProgress as any,
+          missionsCompleted: { increment: 1 },
         },
       });
 
@@ -905,6 +930,39 @@ class MissionService extends EventEmitter {
           type: obj.type,
           metadata: obj.metadata || {},
         })),
+      });
+
+      // ═══ Mission Feedback — AI learns from outcomes ═══
+      // Grade the mission difficulty relative to the player
+      const timeToCompleteMin = Math.round(timeElapsed / 60000);
+      const expectedTimeMin = mission.difficulty * 5; // ~5 min per difficulty level as baseline
+      const levelDiffRatio = progress.level / Math.max(1, mission.difficulty);
+
+      let difficultyGrade: "too_easy" | "appropriate" | "too_hard";
+      if (levelDiffRatio > 2.5 || timeToCompleteMin < expectedTimeMin * 0.3) {
+        difficultyGrade = "too_easy";
+      } else if (timeToCompleteMin > expectedTimeMin * 3 || efficiencyScore < 40) {
+        difficultyGrade = "too_hard";
+      } else {
+        difficultyGrade = "appropriate";
+      }
+
+      const objectiveTypes = ((mission.objectives as any[]) || []).map((o: any) => o.type);
+
+      this.emit("mission:feedback", {
+        missionId,
+        templateId: (mission as any).templateId || "unknown",
+        userId,
+        playerLevel: progress.level,
+        missionDifficulty: mission.difficulty,
+        missionType: mission.type,
+        timeToCompleteMin,
+        difficultyGrade,
+        objectiveTypes,
+        efficiencyScore,
+        stealthScore,
+        factionId: mission.factionId || undefined,
+        abandoned: false,
       });
 
       return rewards;
@@ -1006,13 +1064,22 @@ class MissionService extends EventEmitter {
         if (newLevel > progress.level) {
           updateData.level = newLevel;
 
-          // Emit level up event
+          // Emit level up event + notification toast to client
           if (this.io) {
             this.io.to(`player:${userId}`).emit("player:levelup", {
               newLevel,
               experience: updateData.experience,
+              userId,
+            });
+            this.io.to(`player:${userId}`).emit("notification", {
+              type: "levelup",
+              title: "Level Up!",
+              message: `You reached Level ${newLevel}!`,
+              severity: "success",
             });
           }
+          // Emit for internal listeners (dynamic content, etc.)
+          this.emit("player:levelup", { userId, newLevel, experience: updateData.experience });
         }
       }
 
@@ -1029,6 +1096,20 @@ class MissionService extends EventEmitter {
         where: { userId },
         data: updateData,
       });
+
+      // Send reward notification toast
+      if (this.io && (rewards.xp > 0 || rewards.credits > 0)) {
+        const parts: string[] = [];
+        if (rewards.xp > 0) parts.push(`+${rewards.xp} XP`);
+        if (rewards.credits > 0) parts.push(`+${rewards.credits} Credits`);
+        if (rewards.skillPoints && rewards.skillPoints > 0) parts.push(`+${rewards.skillPoints} Skill Points`);
+        this.io.to(`player:${userId}`).emit("notification", {
+          type: "reward",
+          title: "Rewards",
+          message: parts.join(", "),
+          severity: "success",
+        });
+      }
 
       // Grant items (shop items by name)
       if (rewards.items && rewards.items.length > 0) {

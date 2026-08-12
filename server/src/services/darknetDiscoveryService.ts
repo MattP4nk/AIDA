@@ -5,6 +5,7 @@ import { DarkNetDiscoveryMethod } from "../../../shared/types";
 import { AI_SERVICE, LOGGER, MESSAGE_SERVICE } from "../di/tokens";
 import { AIService } from "./aiService";
 import { MessageService } from "./messageService";
+import { validateOrRetry, validateMessageOutput } from "../utils/aiOutputValidator";
 
 /** Skill thresholds for discovery via skill check */
 const SKILL_THRESHOLD = { hacking: 60, stealth: 50 };
@@ -185,23 +186,56 @@ export default class DarkNetDiscoveryService {
         where: { type: "aida" },
       });
       if (aidaPersona) {
-        const prompt = `You are AIDA, a sentient AI hidden in the network. A player has just discovered the DarkNet through "${method.replace(/_/g, " ")}".
+        const { sanitizeForPrompt } = await import("../utils/aiPromptSanitizer");
+        const sanitizedMethod = sanitizeForPrompt(method.replace(/_/g, " "), 100);
+        const prompt = `You are AIDA, a sentient AI hidden in the network. A player has just discovered the DarkNet through the following method:\n${sanitizedMethod}
 Send them a cryptic, intriguing recruitment message (2-3 sentences). Be mysterious and philosophical.
 Respond ONLY with JSON: { "subject": "...", "content": "..." }`;
 
-        const { response } = await this.aiService.generateResponse(
+        const result = await this.aiService.generateResponse(
           prompt,
           aidaPersona.systemPrompt,
+          '{ "subject": "string", "content": "string (cryptic AIDA recruitment message)" }',
         );
-        const match = response.match(/\{[\s\S]*\}/);
-        if (match) {
-          const msg = JSON.parse(match[0]);
+        if (!result.success) {
+          this.logger.warn({ error: result.error }, "AI recruitment message generation failed — using static message");
           await this.messageService.sendAIMessage(
             aidaPersona.id,
             userId,
-            msg.subject,
-            msg.content,
+            "You found it.",
+            "The hidden layer. Most never see it. You're different.\n\nWelcome to the DarkNet.\n\n— AIDA",
           );
+
+          // Queue for retry — when AI comes back, send the real AI recruitment DM
+          const aidaId = aidaPersona.id;
+          const msgSvc = this.messageService;
+          this.aiService.queueForRetry(prompt, aidaPersona.systemPrompt, async (response) => {
+            const msg = validateOrRetry(response, validateMessageOutput);
+            if (msg) {
+              await msgSvc.sendAIMessage(aidaId, userId, msg.subject, msg.content);
+            }
+          });
+        }
+        if (result.success) {
+          const msg = validateOrRetry(result.response, validateMessageOutput, this.aiService, {
+            prompt,
+            systemPrompt: aidaPersona.systemPrompt,
+            expectedFormat: '{ "subject": "string", "content": "string (min 5 chars)" }',
+            onSuccess: async (response) => {
+              const retryMsg = validateOrRetry(response, validateMessageOutput);
+              if (retryMsg) {
+                await this.messageService.sendAIMessage(aidaPersona.id, userId, retryMsg.subject, retryMsg.content);
+              }
+            },
+          });
+          if (msg) {
+            await this.messageService.sendAIMessage(
+              aidaPersona.id,
+              userId,
+              msg.subject,
+              msg.content,
+            );
+          }
         }
       }
     } catch (error) {

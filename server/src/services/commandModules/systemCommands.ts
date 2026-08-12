@@ -1,9 +1,17 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
-import { sanitizePath } from "../../utils/pathSanitizer";
 import { table, list, render, Column } from "./asciiBox";
+import {
+  resolvePath,
+  getSession,
+  getServerId,
+  successResult,
+  errorResult,
+} from "./helpers";
+import { VAULT_PAYLOAD_FILENAME, AIDA_FILE_PREFIX } from "../../config/gameBalance";
 
 export class SystemCommandsModule implements CommandModule {
+  public category = "system";
   public commands: Set<string> = new Set([
     "ls",
     "cd",
@@ -22,13 +30,9 @@ export class SystemCommandsModule implements CommandModule {
     command: Command,
     context: CommandContext,
   ): Promise<CommandResult> {
-    const session = this.getSession(context);
+    const session = getSession(context);
     if (!session) {
-      return {
-        success: false,
-        output: "No active session",
-        timestamp: new Date(),
-      };
+      return errorResult("No active session");
     }
 
     try {
@@ -67,19 +71,10 @@ export class SystemCommandsModule implements CommandModule {
           return await this.handleWriteFile(command, context);
 
         default:
-          return {
-            success: false,
-            output: `System command not implemented: ${command.command}`,
-            timestamp: new Date(),
-          };
+          return errorResult(`System command not implemented: ${command.command}`);
       }
     } catch (error) {
-      return {
-        success: false,
-        output: "System command failed",
-        error: error instanceof Error ? error.message : "Unknown error",
-        timestamp: new Date(),
-      };
+      return errorResult("System command failed", error instanceof Error ? error.message : "Unknown error");
     }
   }
 
@@ -172,53 +167,37 @@ export class SystemCommandsModule implements CommandModule {
     ];
   }
 
-  private getSession(context: CommandContext) {
-    return context.gameStateManager?.getSession(context.userId);
-  }
-
-  private getServerId(context: CommandContext): string | undefined {
-    const session = this.getSession(context);
-    return session?.currentServerId || session?.homeServerId;
-  }
+  // getSession() and getServerId() now imported from helpers.ts
 
   private async handleListDirectory(
     command: Command,
     context: CommandContext,
   ): Promise<CommandResult> {
     try {
-      const serverId = this.getServerId(context);
+      const serverId = getServerId(context);
       if (!serverId) {
-        return {
-          success: false,
-          output: "No file system context available",
-          timestamp: new Date(),
-        };
+        return errorResult("No file system context available");
       }
 
-      const session = this.getSession(context);
+      const session = getSession(context);
       const currentDir = session?.currentDirectory || "/";
 
       // Resolve path (absolute or relative)
-      let path = command.args[0] || currentDir;
-      if (!path.startsWith("/")) {
-        path = currentDir === "/" ? `/${path}` : `${currentDir}/${path}`;
-      }
-      path = sanitizePath(path);
+      const path = resolvePath(command.args[0] || currentDir, currentDir);
 
       const showHidden = command.args.includes("-a");
+      const gameSession = context.gameStateManager.getSession(context.userId);
+      const revealedFileIds = (gameSession as any)?.revealedFileIds as string[] || [];
       const result = await context.fileService.listDirectory(
         serverId,
         context.userId,
         path,
         showHidden,
+        revealedFileIds,
       );
 
       if (!result.success) {
-        return {
-          success: false,
-          output: `ls: ${result.message}`,
-          timestamp: new Date(),
-        };
+        return errorResult(`ls: ${result.message}`);
       }
 
       // Format output
@@ -232,39 +211,48 @@ export class SystemCommandsModule implements CommandModule {
           { header: "PERMS", width: 9 },
           { header: "SIZE", width: 10, align: "right" },
           { header: "DATE", width: 20 },
-          { header: "NAME", width: 24 },
+          { header: "NAME", width: 30 },
         ];
-        const rows = entries.map((entry: any) => [
-          entry.type === "directory" ? "d" : "-",
-          entry.permissions || "rwxr-xr-x",
-          entry.size.toString(),
-          new Date(entry.modified).toLocaleString(),
-          entry.name,
-        ]);
-        output = render(table(columns, rows));
+        const rows = entries.map((entry: any) => {
+          let name = entry.name;
+          if (entry.type === "directory") {
+            const count = entry.childCount ?? 0;
+            name = `${entry.name}/ (${count})`;
+          }
+          if (entry.isEncrypted) name += " [ENC]";
+          if (entry.isProtected) name += " [PROT]";
+          return [
+            entry.type === "directory" ? "d" : "-",
+            entry.permissions || "rwxr-xr-x",
+            entry.type === "directory" ? `${entry.childCount ?? 0} items` : entry.size.toString(),
+            new Date(entry.modified).toLocaleString(),
+            name,
+          ];
+        });
+        output = render(table(columns, rows, undefined, context.terminalWidth));
       } else {
-        // Short format — bordered list with bullet points
+        // Short format — bordered list with item counts for directories
         const items = entries.map((entry: any) => {
-          const name =
-            entry.type === "directory" ? `${entry.name}/` : entry.name;
+          if (entry.type === "directory") {
+            const count = entry.childCount ?? 0;
+            return count > 0 ? `${entry.name}/ (${count})` : `${entry.name}/`;
+          }
           const encrypted = entry.isEncrypted ? " [ENC]" : "";
-          return `${name}${encrypted}`;
+          return `${entry.name}${encrypted}`;
         });
         output = render(list(path, items));
       }
 
-      return {
-        success: true,
-        output,
-        timestamp: new Date(),
-      };
+      // Summary line
+      const dirCount = entries.filter((e: any) => e.type === "directory").length;
+      const fileCount = entries.filter((e: any) => e.type === "file").length;
+      if (entries.length > 0) {
+        output += `\n  ${dirCount} director${dirCount !== 1 ? "ies" : "y"}, ${fileCount} file${fileCount !== 1 ? "s" : ""}`;
+      }
+
+      return successResult(output);
     } catch (error) {
-      return {
-        success: false,
-        output: "Failed to list directory",
-        error: error instanceof Error ? error.message : "Unknown error",
-        timestamp: new Date(),
-      };
+      return errorResult("Failed to list directory", error instanceof Error ? error.message : "Unknown error");
     }
   }
 
@@ -273,16 +261,12 @@ export class SystemCommandsModule implements CommandModule {
     context: CommandContext,
   ): Promise<CommandResult> {
     try {
-      const serverId = this.getServerId(context);
+      const serverId = getServerId(context);
       if (!serverId) {
-        return {
-          success: false,
-          output: "No file system context available",
-          timestamp: new Date(),
-        };
+        return errorResult("No file system context available");
       }
 
-      const session = this.getSession(context);
+      const session = getSession(context);
       const currentDir = session?.currentDirectory || "/";
       let targetDir = command.args[0] || "/";
 
@@ -293,14 +277,8 @@ export class SystemCommandsModule implements CommandModule {
           targetDir === "~" ? homeDir : targetDir.replace("~", homeDir);
       }
 
-      // Handle relative paths
-      if (!targetDir.startsWith("/")) {
-        targetDir =
-          currentDir === "/" ? `/${targetDir}` : `${currentDir}/${targetDir}`;
-      }
-
-      // Sanitize path to resolve .. and . components safely
-      targetDir = sanitizePath(targetDir);
+      // Resolve relative path and sanitize
+      targetDir = resolvePath(targetDir, currentDir);
 
       const result = await context.fileService.listDirectory(
         serverId,
@@ -309,11 +287,7 @@ export class SystemCommandsModule implements CommandModule {
       );
 
       if (!result.success) {
-        return {
-          success: false,
-          output: `cd: ${result.message}`,
-          timestamp: new Date(),
-        };
+        return errorResult(`cd: ${result.message}`);
       }
 
       // Update session
@@ -321,19 +295,9 @@ export class SystemCommandsModule implements CommandModule {
         session.currentDirectory = result.data.path; // Use resolved path from service
       }
 
-      return {
-        success: true,
-        output: `Changed directory to ${result.data.path}`,
-        data: { currentDirectory: result.data.path },
-        timestamp: new Date(),
-      };
+      return successResult(`Changed directory to ${result.data.path}`, { currentDirectory: result.data.path });
     } catch (error) {
-      return {
-        success: false,
-        output: "Failed to change directory",
-        error: error instanceof Error ? error.message : "Unknown error",
-        timestamp: new Date(),
-      };
+      return errorResult("Failed to change directory", error instanceof Error ? error.message : "Unknown error");
     }
   }
 
@@ -341,14 +305,10 @@ export class SystemCommandsModule implements CommandModule {
     _command: Command,
     context: CommandContext,
   ): Promise<CommandResult> {
-    const session = this.getSession(context);
+    const session = getSession(context);
     const currentDir = session?.currentDirectory || "/";
 
-    return {
-      success: true,
-      output: currentDir,
-      timestamp: new Date(),
-    };
+    return successResult(currentDir);
   }
 
   private async handleReadFile(
@@ -357,30 +317,18 @@ export class SystemCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     try {
       if (command.args.length === 0) {
-        return {
-          success: false,
-          output: "cat: missing file argument",
-          timestamp: new Date(),
-        };
+        return errorResult("cat: missing file argument");
       }
 
       const filename = command.args[0]!;
-      const serverId = this.getServerId(context);
+      const serverId = getServerId(context);
       if (!serverId) {
-        return {
-          success: false,
-          output: "No file system context available",
-          timestamp: new Date(),
-        };
+        return errorResult("No file system context available");
       }
 
-      const session = this.getSession(context);
+      const session = getSession(context);
       const currentDir = session?.currentDirectory || "/";
-      let filePath = filename;
-      if (!filePath.startsWith("/")) {
-        filePath =
-          currentDir === "/" ? `/${filePath}` : `${currentDir}/${filePath}`;
-      }
+      const filePath = resolvePath(filename, currentDir);
 
       const result = await context.fileService.readFile(
         serverId,
@@ -389,23 +337,16 @@ export class SystemCommandsModule implements CommandModule {
       );
 
       if (!result.success) {
-        return {
-          success: false,
-          output: `cat: ${filename}: ${result.message}`,
-          timestamp: new Date(),
-        };
+        return errorResult(`cat: ${filename}: ${result.message}`);
       }
 
       let output = result.data?.content || "";
 
-      // DarkNet vault conquest: reading vault_payload.enc triggers reward
-      if (filename === "vault_payload.enc") {
+      // DarkNet vault conquest: reading vault payload triggers reward
+      if (filename === VAULT_PAYLOAD_FILENAME) {
         try {
-          const { getService } = await import("../../di/container");
-          const { DARKNET_DUNGEON_SERVICE } = await import("../../di/tokens");
-          const dungeonService = getService<
-            import("../darknetDungeonService").DarkNetDungeonService
-          >(DARKNET_DUNGEON_SERVICE);
+          const dungeonService = context.services.darknetDungeonService;
+          if (!dungeonService) throw new Error("not available");
           const conquest = await dungeonService.conquerVault(
             context.userId,
             serverId,
@@ -431,13 +372,11 @@ export class SystemCommandsModule implements CommandModule {
         }
       }
 
-      // DarkNet discovery: reading .aida files triggers discovery check
-      if (filename.startsWith(".aida") || filename.endsWith(".aida")) {
+      // DarkNet discovery: reading AIDA-related files triggers discovery check
+      if (filename.startsWith(AIDA_FILE_PREFIX) || filename.endsWith(AIDA_FILE_PREFIX)) {
         try {
-          const { getService } = await import("../../di/container");
-          const darknetService = getService<
-            import("../darknetDiscoveryService").default
-          >("DarkNetDiscoveryService");
+          const darknetService = context.services.darknetDiscoveryService;
+          if (!darknetService) throw new Error("not available");
           const discovered = await darknetService.checkDiscoveryTrigger(
             context.userId,
             {
@@ -452,6 +391,37 @@ export class SystemCommandsModule implements CommandModule {
         } catch {
           /* DarkNet service not available */
         }
+      }
+
+      // Key fragment discovery: check if this server contains a fragment
+      try {
+        const keyFragmentService = context.services.keyFragmentService;
+        if (!keyFragmentService) throw new Error("not available");
+        const fragmentResult = await keyFragmentService.checkServerFragment(
+          context.userId,
+          serverId,
+        );
+        if (fragmentResult.claimed && fragmentResult.fragment) {
+          const frag = fragmentResult.fragment;
+          output +=
+            "\n\n" +
+            "╔══════════════════════════════════════════╗\n" +
+            "║       ◆ FRAGMENT CLAIMED ◆              ║\n" +
+            "╠══════════════════════════════════════════╣\n" +
+            `║  ${String(frag.name).padEnd(38)}║\n` +
+            `║  Type: ${String(frag.keyType).toUpperCase().padEnd(33)}║\n` +
+            "║                                          ║\n" +
+            "║  You now hold this piece of AIDA.        ║\n" +
+            "║  Use 'fragments' to view your holdings.  ║\n" +
+            "╚══════════════════════════════════════════╝";
+        } else if (!fragmentResult.claimed && fragmentResult.currentHolder) {
+          output +=
+            "\n\n[INTEL] This server contains an AIDA fragment, but it is already held by " +
+            fragmentResult.currentHolder +
+            ". Hack their home server to steal it, or negotiate a trade.";
+        }
+      } catch {
+        /* Key fragment service not available */
       }
 
       // Apply censorship filtering to file content on faction-owned servers
@@ -469,18 +439,9 @@ export class SystemCommandsModule implements CommandModule {
         /* Censorship service not available */
       }
 
-      return {
-        success: true,
-        output,
-        timestamp: new Date(),
-      };
+      return successResult(output);
     } catch (error) {
-      return {
-        success: false,
-        output: "Failed to read file",
-        error: error instanceof Error ? error.message : "Unknown error",
-        timestamp: new Date(),
-      };
+      return errorResult("Failed to read file", error instanceof Error ? error.message : "Unknown error");
     }
   }
 
@@ -490,30 +451,18 @@ export class SystemCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     try {
       if (command.args.length === 0) {
-        return {
-          success: false,
-          output: "mkdir: missing directory name",
-          timestamp: new Date(),
-        };
+        return errorResult("mkdir: missing directory name");
       }
 
       const dirName = command.args[0]!;
-      const serverId = this.getServerId(context);
+      const serverId = getServerId(context);
       if (!serverId) {
-        return {
-          success: false,
-          output: "No file system context available",
-          timestamp: new Date(),
-        };
+        return errorResult("No file system context available");
       }
 
-      const session = this.getSession(context);
+      const session = getSession(context);
       const currentDir = session?.currentDirectory || "/";
-      let dirPath = dirName;
-      if (!dirPath.startsWith("/")) {
-        dirPath =
-          currentDir === "/" ? `/${dirPath}` : `${currentDir}/${dirPath}`;
-      }
+      const dirPath = resolvePath(dirName, currentDir);
 
       const result = await context.fileService.createDirectory(
         serverId,
@@ -522,25 +471,12 @@ export class SystemCommandsModule implements CommandModule {
       );
 
       if (!result.success) {
-        return {
-          success: false,
-          output: `mkdir: ${result.message}`,
-          timestamp: new Date(),
-        };
+        return errorResult(`mkdir: ${result.message}`);
       }
 
-      return {
-        success: true,
-        output: `Directory created: ${dirName}`,
-        timestamp: new Date(),
-      };
+      return successResult(`Directory created: ${dirName}`);
     } catch (error) {
-      return {
-        success: false,
-        output: "Failed to create directory",
-        error: error instanceof Error ? error.message : "Unknown error",
-        timestamp: new Date(),
-      };
+      return errorResult("Failed to create directory", error instanceof Error ? error.message : "Unknown error");
     }
   }
 
@@ -550,30 +486,18 @@ export class SystemCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     try {
       if (command.args.length === 0) {
-        return {
-          success: false,
-          output: "touch: missing file name",
-          timestamp: new Date(),
-        };
+        return errorResult("touch: missing file name");
       }
 
       const fileName = command.args[0]!;
-      const serverId = this.getServerId(context);
+      const serverId = getServerId(context);
       if (!serverId) {
-        return {
-          success: false,
-          output: "No file system context available",
-          timestamp: new Date(),
-        };
+        return errorResult("No file system context available");
       }
 
-      const session = this.getSession(context);
+      const session = getSession(context);
       const currentDir = session?.currentDirectory || "/";
-      let filePath = fileName;
-      if (!filePath.startsWith("/")) {
-        filePath =
-          currentDir === "/" ? `/${filePath}` : `${currentDir}/${filePath}`;
-      }
+      const filePath = resolvePath(fileName, currentDir);
 
       const result = await context.fileService.createFile(
         serverId,
@@ -584,25 +508,12 @@ export class SystemCommandsModule implements CommandModule {
       );
 
       if (!result.success) {
-        return {
-          success: false,
-          output: `touch: ${result.message}`,
-          timestamp: new Date(),
-        };
+        return errorResult(`touch: ${result.message}`);
       }
 
-      return {
-        success: true,
-        output: `File created: ${fileName}`,
-        timestamp: new Date(),
-      };
+      return successResult(`File created: ${fileName}`);
     } catch (error) {
-      return {
-        success: false,
-        output: "Failed to create file",
-        error: error instanceof Error ? error.message : "Unknown error",
-        timestamp: new Date(),
-      };
+      return errorResult("Failed to create file", error instanceof Error ? error.message : "Unknown error");
     }
   }
 
@@ -612,32 +523,20 @@ export class SystemCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     try {
       if (command.args.length === 0) {
-        return {
-          success: false,
-          output: "rm: missing file name",
-          timestamp: new Date(),
-        };
+        return errorResult("rm: missing file name");
       }
 
       const fileName = command.args[0]!;
       const recursive =
         command.args.includes("-r") || command.args.includes("-R");
-      const serverId = this.getServerId(context);
+      const serverId = getServerId(context);
       if (!serverId) {
-        return {
-          success: false,
-          output: "No file system context available",
-          timestamp: new Date(),
-        };
+        return errorResult("No file system context available");
       }
 
-      const session = this.getSession(context);
+      const session = getSession(context);
       const currentDir = session?.currentDirectory || "/";
-      let filePath = fileName;
-      if (!filePath.startsWith("/")) {
-        filePath =
-          currentDir === "/" ? `/${filePath}` : `${currentDir}/${filePath}`;
-      }
+      const filePath = resolvePath(fileName, currentDir);
 
       const result = await context.fileService.deleteNode(
         serverId,
@@ -647,25 +546,12 @@ export class SystemCommandsModule implements CommandModule {
       );
 
       if (!result.success) {
-        return {
-          success: false,
-          output: `rm: ${result.message}`,
-          timestamp: new Date(),
-        };
+        return errorResult(`rm: ${result.message}`);
       }
 
-      return {
-        success: true,
-        output: `Removed: ${fileName}`,
-        timestamp: new Date(),
-      };
+      return successResult(`Removed: ${fileName}`);
     } catch (error) {
-      return {
-        success: false,
-        output: "Failed to remove file",
-        error: error instanceof Error ? error.message : "Unknown error",
-        timestamp: new Date(),
-      };
+      return errorResult("Failed to remove file", error instanceof Error ? error.message : "Unknown error");
     }
   }
 
@@ -675,38 +561,20 @@ export class SystemCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     try {
       if (command.args.length < 2) {
-        return {
-          success: false,
-          output: "cp: missing source or destination",
-          timestamp: new Date(),
-        };
+        return errorResult("cp: missing source or destination");
       }
 
       const source = command.args[0]!;
       const dest = command.args[1]!;
-      const serverId = this.getServerId(context);
+      const serverId = getServerId(context);
       if (!serverId) {
-        return {
-          success: false,
-          output: "No file system context available",
-          timestamp: new Date(),
-        };
+        return errorResult("No file system context available");
       }
 
-      const session = this.getSession(context);
+      const session = getSession(context);
       const currentDir = session?.currentDirectory || "/";
-
-      let sourcePath = source;
-      if (!sourcePath.startsWith("/")) {
-        sourcePath =
-          currentDir === "/" ? `/${sourcePath}` : `${currentDir}/${sourcePath}`;
-      }
-
-      let destPath = dest;
-      if (!destPath.startsWith("/")) {
-        destPath =
-          currentDir === "/" ? `/${destPath}` : `${currentDir}/${destPath}`;
-      }
+      const sourcePath = resolvePath(source, currentDir);
+      const destPath = resolvePath(dest, currentDir);
 
       const result = await context.fileService.copyNode(
         serverId,
@@ -716,25 +584,12 @@ export class SystemCommandsModule implements CommandModule {
       );
 
       if (!result.success) {
-        return {
-          success: false,
-          output: `cp: ${result.message}`,
-          timestamp: new Date(),
-        };
+        return errorResult(`cp: ${result.message}`);
       }
 
-      return {
-        success: true,
-        output: `Copied ${source} to ${dest}`,
-        timestamp: new Date(),
-      };
+      return successResult(`Copied ${source} to ${dest}`);
     } catch (error) {
-      return {
-        success: false,
-        output: "Failed to copy file",
-        error: error instanceof Error ? error.message : "Unknown error",
-        timestamp: new Date(),
-      };
+      return errorResult("Failed to copy file", error instanceof Error ? error.message : "Unknown error");
     }
   }
 
@@ -744,38 +599,20 @@ export class SystemCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     try {
       if (command.args.length < 2) {
-        return {
-          success: false,
-          output: "mv: missing source or destination",
-          timestamp: new Date(),
-        };
+        return errorResult("mv: missing source or destination");
       }
 
       const source = command.args[0]!;
       const dest = command.args[1]!;
-      const serverId = this.getServerId(context);
+      const serverId = getServerId(context);
       if (!serverId) {
-        return {
-          success: false,
-          output: "No file system context available",
-          timestamp: new Date(),
-        };
+        return errorResult("No file system context available");
       }
 
-      const session = this.getSession(context);
+      const session = getSession(context);
       const currentDir = session?.currentDirectory || "/";
-
-      let sourcePath = source;
-      if (!sourcePath.startsWith("/")) {
-        sourcePath =
-          currentDir === "/" ? `/${sourcePath}` : `${currentDir}/${sourcePath}`;
-      }
-
-      let destPath = dest;
-      if (!destPath.startsWith("/")) {
-        destPath =
-          currentDir === "/" ? `/${destPath}` : `${currentDir}/${destPath}`;
-      }
+      const sourcePath = resolvePath(source, currentDir);
+      const destPath = resolvePath(dest, currentDir);
 
       const result = await context.fileService.moveNode(
         serverId,
@@ -785,25 +622,12 @@ export class SystemCommandsModule implements CommandModule {
       );
 
       if (!result.success) {
-        return {
-          success: false,
-          output: `mv: ${result.message}`,
-          timestamp: new Date(),
-        };
+        return errorResult(`mv: ${result.message}`);
       }
 
-      return {
-        success: true,
-        output: `Moved ${source} to ${dest}`,
-        timestamp: new Date(),
-      };
+      return successResult(`Moved ${source} to ${dest}`);
     } catch (error) {
-      return {
-        success: false,
-        output: "Failed to move file",
-        error: error instanceof Error ? error.message : "Unknown error",
-        timestamp: new Date(),
-      };
+      return errorResult("Failed to move file", error instanceof Error ? error.message : "Unknown error");
     }
   }
 
@@ -815,7 +639,7 @@ export class SystemCommandsModule implements CommandModule {
 
     // Check for output redirection (append first since >> contains >)
     const appendMatch = fullCommand.match(/echo\s+(.+?)\s+>>\s+(.+)/);
-    const writeMatch = fullCommand.match(/echo\s+(.+?)\s+>\s+([^\>].+)/);
+    const writeMatch = fullCommand.match(/echo\s+(.+?)\s+>\s+([^>].+)/);
 
     if (appendMatch || writeMatch) {
       const content = (appendMatch ? appendMatch[1] : writeMatch![1])!.replace(
@@ -825,22 +649,14 @@ export class SystemCommandsModule implements CommandModule {
       const filename = (appendMatch ? appendMatch[2] : writeMatch![2])!.trim();
       const append = !!appendMatch;
 
-      const serverId = this.getServerId(context);
+      const serverId = getServerId(context);
       if (!serverId) {
-        return {
-          success: false,
-          output: "No file system context available for write operation",
-          timestamp: new Date(),
-        };
+        return errorResult("No file system context available for write operation");
       }
 
-      const session = this.getSession(context);
+      const session = getSession(context);
       const currentDir = session?.currentDirectory || "/";
-      let filePath = filename;
-      if (!filePath.startsWith("/")) {
-        filePath =
-          currentDir === "/" ? `/${filePath}` : `${currentDir}/${filePath}`;
-      }
+      const filePath = resolvePath(filename, currentDir);
 
       // Use updateFileContent if file exists, or create if not
       // Actually updateFileContent handles both? No, I implemented it to check existence.
@@ -867,26 +683,14 @@ export class SystemCommandsModule implements CommandModule {
       }
 
       if (!result.success) {
-        return {
-          success: false,
-          output: `echo: ${result.message}`,
-          timestamp: new Date(),
-        };
+        return errorResult(`echo: ${result.message}`);
       }
 
-      return {
-        success: true,
-        output: `Wrote to ${filename}`,
-        timestamp: new Date(),
-      };
+      return successResult(`Wrote to ${filename}`);
     } else {
       // Just echo to stdout
       const text = command.args.join(" ").replace(/^["']|["']$/g, "");
-      return {
-        success: true,
-        output: text,
-        timestamp: new Date(),
-      };
+      return successResult(text);
     }
   }
 
@@ -895,19 +699,11 @@ export class SystemCommandsModule implements CommandModule {
     context: CommandContext,
   ): Promise<CommandResult> {
     if (command.args.length === 0) {
-      return {
-        success: false,
-        output: "write: missing file name\nUsage: write <filename> <content>",
-        timestamp: new Date(),
-      };
+      return errorResult("write: missing file name\nUsage: write <filename> <content>");
     }
 
     if (command.args.length === 1) {
-      return {
-        success: false,
-        output: "write: missing content\nUsage: write <filename> <content>",
-        timestamp: new Date(),
-      };
+      return errorResult("write: missing content\nUsage: write <filename> <content>");
     }
 
     const filename = command.args[0]!;
@@ -916,22 +712,14 @@ export class SystemCommandsModule implements CommandModule {
       .join(" ")
       .replace(/^["']|["']$/g, "");
 
-    const serverId = this.getServerId(context);
+    const serverId = getServerId(context);
     if (!serverId) {
-      return {
-        success: false,
-        output: "No file system context available",
-        timestamp: new Date(),
-      };
+      return errorResult("No file system context available");
     }
 
-    const session = this.getSession(context);
+    const session = getSession(context);
     const currentDir = session?.currentDirectory || "/";
-    let filePath = filename;
-    if (!filePath.startsWith("/")) {
-      filePath =
-        currentDir === "/" ? `/${filePath}` : `${currentDir}/${filePath}`;
-    }
+    const filePath = resolvePath(filename, currentDir);
 
     // Try to update (overwrite)
     let result = await context.fileService.updateFileContent(
@@ -954,22 +742,13 @@ export class SystemCommandsModule implements CommandModule {
     }
 
     if (!result.success) {
-      return {
-        success: false,
-        output: `write: ${result.message}`,
-        timestamp: new Date(),
-      };
+      return errorResult(`write: ${result.message}`);
     }
 
-    return {
-      success: true,
-      output: [
-        `Writing to ${filename}...`,
-        `Content: ${content}`,
-        `✓ File written successfully`,
-      ],
-      data: { filename, content, bytes: content.length },
-      timestamp: new Date(),
-    };
+    return successResult([
+      `Writing to ${filename}...`,
+      `Content: ${content}`,
+      `✓ File written successfully`,
+    ], { filename, content, bytes: content.length });
   }
 }

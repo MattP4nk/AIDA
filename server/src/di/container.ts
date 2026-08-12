@@ -24,6 +24,8 @@ import ServerService from "../services/serverService";
 import HackService from "../services/hackService";
 import FileService from "../services/fileService";
 import MessageService from "../services/messageService";
+import { MessageEncryptionService } from "../services/messageEncryptionService";
+import { ChatService } from "../services/chatService";
 import ForumService from "../services/forumService";
 import PlayerPresenceService from "../services/playerPresenceService";
 import MemoryService from "../services/memoryService";
@@ -33,10 +35,13 @@ import { FactionService } from "../services/factionService";
 import { ReputationEngine } from "../services/reputationEngine";
 import { AIService } from "../services/aiService";
 import { PersonaService } from "../services/personaService";
+import { PersonaMissionGenService } from "../services/personaMissionGenService";
+import { PersonaActionService } from "../services/personaActionService";
 import AISchedulerService from "../services/aiSchedulerService";
 import MissionIntegrationService from "../services/missionIntegration";
 import MissionGeneratorService from "../services/missionGenerator";
 import { ServerContentService } from "../services/serverContentService";
+import { ContentQueueService } from "../services/contentQueueService";
 import ResourceService from "../services/resourceService";
 import ContestService from "../services/contestService";
 import WarfareService from "../services/warfareService";
@@ -55,6 +60,11 @@ import { TutorialService } from "../services/tutorialService";
 import { StoryProgressionService } from "../services/storyProgressionService";
 import { ArchitectInterventionExecutor } from "../services/architectInterventionExecutor";
 import { DarkNetDungeonService } from "../services/darknetDungeonService";
+import { KeyFragmentService } from "../services/keyFragmentService";
+import { ConnectionChallengeService } from "../services/connectionChallengeService";
+import { ContentDraftService } from "../services/contentDraftService";
+import { ReferenceValidationService } from "../services/referenceValidationService";
+import { EpochSchedulerService } from "../services/epochSchedulerService";
 
 import * as TOKENS from "./tokens";
 
@@ -94,9 +104,12 @@ export function setupContainer(
     TOKENS.SERVER_CONTENT_SERVICE,
     ServerContentService,
   );
+  container.registerSingleton(TOKENS.CONTENT_QUEUE_SERVICE, ContentQueueService);
   container.registerSingleton(TOKENS.SERVER_SERVICE, ServerService);
   container.registerSingleton(TOKENS.HACK_SERVICE, HackService);
   container.registerSingleton(TOKENS.FILE_SERVICE, FileService);
+  container.registerSingleton(TOKENS.MESSAGE_ENCRYPTION_SERVICE, MessageEncryptionService);
+  container.registerSingleton(TOKENS.CHAT_SERVICE, ChatService);
   container.registerSingleton(TOKENS.MESSAGE_SERVICE, MessageService);
   container.registerSingleton(TOKENS.FORUM_SERVICE, ForumService);
   container.registerSingleton(
@@ -112,6 +125,8 @@ export function setupContainer(
   container.registerSingleton(TOKENS.FACTION_SERVICE, FactionService);
   container.registerSingleton(TOKENS.REPUTATION_ENGINE, ReputationEngine);
   container.registerSingleton(TOKENS.AI_SERVICE, AIService);
+  container.registerSingleton(TOKENS.PERSONA_MISSION_GEN_SERVICE, PersonaMissionGenService);
+  container.registerSingleton(TOKENS.PERSONA_ACTION_SERVICE, PersonaActionService);
   container.registerSingleton(TOKENS.PERSONA_SERVICE, PersonaService);
   container.registerSingleton(TOKENS.AI_SCHEDULER_SERVICE, AISchedulerService);
 
@@ -180,6 +195,21 @@ export function setupContainer(
     TOKENS.DARKNET_DUNGEON_SERVICE,
     DarkNetDungeonService,
   );
+
+  // Key Fragment / Endgame
+  container.registerSingleton(TOKENS.KEY_FRAGMENT_SERVICE, KeyFragmentService);
+
+  // Connection Challenge
+  container.registerSingleton(TOKENS.CONNECTION_CHALLENGE_SERVICE, ConnectionChallengeService);
+
+  // Content Draft (AI review pipeline)
+  container.registerSingleton(TOKENS.CONTENT_DRAFT_SERVICE, ContentDraftService);
+
+  // Reference Validation (AI content coherence)
+  container.registerSingleton(TOKENS.REFERENCE_VALIDATION_SERVICE, ReferenceValidationService);
+
+  // Epoch Scheduler (timed story events)
+  container.registerSingleton(TOKENS.EPOCH_SCHEDULER_SERVICE, EpochSchedulerService);
 
   logger.info("DI Container initialized with all services");
 }

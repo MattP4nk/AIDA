@@ -43,8 +43,7 @@ export const validateUsername = (): ValidationChain =>
     .isLength({ min: 3, max: 20 })
     .withMessage("Username must be 3-20 characters")
     .matches(/^[a-zA-Z0-9_-]+$/)
-    .withMessage("Username can only contain letters, numbers, underscores, and hyphens")
-    .escape(); // Sanitize to prevent XSS
+    .withMessage("Username can only contain letters, numbers, underscores, and hyphens");
 
 /**
  * Email validation rules
@@ -78,7 +77,7 @@ export const validateCommand = (): ValidationChain =>
     .withMessage("Command cannot be empty")
     .isLength({ max: 1000 })
     .withMessage("Command too long (max 1000 characters)")
-    .matches(/^[a-zA-Z0-9\s\-_./,@:=+*#]*$/)
+    .matches(/^[a-zA-Z0-9\s_./,@:=+*#"'()!?~%^-]*$/)
     .withMessage("Command contains invalid characters");
 
 /**
@@ -140,7 +139,7 @@ export const validateFilePath = (): ValidationChain =>
     .withMessage("File path cannot be empty")
     .isLength({ max: 500 })
     .withMessage("File path too long")
-    .matches(/^[a-zA-Z0-9\/._-]+$/)
+    .matches(/^[a-zA-Z0-9/._-]+$/)
     .withMessage("File path contains invalid characters")
     .custom((value) => {
       // Prevent directory traversal
@@ -206,8 +205,7 @@ export const validateLogin = (): ValidationChain[] => [
   body("username")
     .trim()
     .notEmpty()
-    .withMessage("Username is required")
-    .escape(),
+    .withMessage("Username is required"),
   body("password")
     .notEmpty()
     .withMessage("Password is required"),
@@ -328,11 +326,12 @@ export const detectSqlInjection = (
   res: Response,
   next: NextFunction
 ): void => {
+  // Note: Prisma ORM provides parameterized queries as primary SQL injection defense.
+  // These patterns are defense-in-depth only. Removed overly broad OR/AND patterns
+  // that false-positive on normal English sentences.
   const suspiciousPatterns = [
     /(\b(SELECT|INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|EXEC|EXECUTE|UNION|DECLARE)\b)/i,
     /(--|#|\/\*|\*\/)/,
-    /(\bOR\b.*=.*)/i,
-    /(\bAND\b.*=.*)/i,
     /(;.*--)/,
   ];
 
@@ -373,11 +372,16 @@ export const detectXss = (
   next: NextFunction
 ): void => {
   const xssPatterns = [
-    /<script[^>]*>.*?<\/script>/gi,
-    /<iframe[^>]*>.*?<\/iframe>/gi,
-    /javascript:/gi,
-    /on\w+\s*=/gi, // Event handlers like onclick=
-    /<img[^>]*\s+src\s*=\s*["']?javascript:/gi,
+    /<script[\s>]/gi,                      // script tags (opening is enough)
+    /<iframe[\s>]/gi,                      // iframe tags
+    /<object[\s>]/gi,                      // object tags
+    /<embed[\s>]/gi,                       // embed tags
+    /<base[\s>]/gi,                        // base tags (can redirect all relative URLs)
+    /javascript\s*:/gi,                    // javascript: protocol (with optional whitespace)
+    /vbscript\s*:/gi,                      // vbscript: protocol
+    /data\s*:\s*text\/html/gi,             // data: URI with HTML content
+    /on[a-z]{3,}\s*=/gi,                   // event handlers (onclick=, onload=, onerror=, etc.) — min 3 chars after "on"
+    /expression\s*\(/gi,                   // CSS expression() attacks
   ];
 
   const checkValue = (value: any): boolean => {

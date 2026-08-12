@@ -1,11 +1,12 @@
-import express, { Application } from "express";
+import express, { Application, Request, Response, NextFunction, RequestHandler } from "express";
 import logger from "../logger";
 import cors from "cors";
 import helmet from "helmet";
 import compression from "compression";
+import cookieParser from "cookie-parser";
 import morgan from "morgan";
 import rateLimit from "express-rate-limit";
-import { config, CORS_ORIGINS } from "../config/environment";
+import { config, CORS_ORIGINS, isDevelopment } from "../config/environment";
 import {
   sanitizeInputs,
   detectSqlInjection,
@@ -13,11 +14,30 @@ import {
   detectPathTraversal,
 } from "./validation";
 import { csrfProtection, csrfTokenEndpoint } from "./csrf";
+import { GameError } from "../../../shared/types";
+import { formatServerError } from "../utils/safeExecute";
+
+/**
+ * Wrap an async Express route handler to catch errors automatically.
+ * GameError subclasses map to their statusCode; all others bubble to the global handler.
+ */
+export function asyncHandler(
+  fn: (req: Request, res: Response, next: NextFunction) => Promise<any>
+): RequestHandler {
+  return (req, res, next) => {
+    Promise.resolve(fn(req as Request, res as Response, next)).catch(next);
+  };
+}
 
 /**
  * Configure all Express middleware in the correct order.
  */
 export function setupMiddleware(app: Application): void {
+  // Trust proxy — required for correct req.ip behind reverse proxies (rate limiting, audit logs)
+  if (process.env.TRUST_PROXY) {
+    app.set("trust proxy", Number(process.env.TRUST_PROXY) || 1);
+  }
+
   // Security headers
   app.use(
     helmet({
@@ -27,6 +47,7 @@ export function setupMiddleware(app: Application): void {
           styleSrc: ["'self'", "'unsafe-inline'"],
           scriptSrc: ["'self'"],
           imgSrc: ["'self'", "data:", "https:"],
+          mediaSrc: ["'self'", "data:", "blob:"],
         },
       },
     }),
@@ -46,6 +67,9 @@ export function setupMiddleware(app: Application): void {
       ],
     }),
   );
+
+  // Cookie parsing
+  app.use(cookieParser());
 
   // Compression
   app.use(compression());
@@ -105,8 +129,47 @@ export async function setupRoutes(app: Application): Promise<void> {
   const adminRoutes = (await import("../routes/admin")).default;
   app.use(adminRoutes);
 
+  // Admin API (CRUD for game entities)
+  const adminApi = (await import("../routes/adminApi")).default;
+  app.use("/api/admin", adminApi);
+
+  // Admin panel static files (development only — in production, use the authenticated admin API)
+  if (isDevelopment) {
+    const path = await import("path");
+    const adminPanelPath = path.join(__dirname, "../../public/admin");
+    app.use("/admin", (await import("express")).static(adminPanelPath));
+  }
+
   // Command execution route — THE MAIN INTERFACE
   app.use("/api/command", (await import("../routes/command")).default);
+
+  // Command list endpoint — for client command palette
+  app.get("/api/commands", async (_req, res) => {
+    try {
+      const { createAllModules } = await import("../services/commandModules/registry");
+      const modules = createAllModules();
+      const commands: Array<{ name: string; category: string; description: string }> = [];
+      for (const mod of modules) {
+        const infos = mod.getCommandInfo?.() || [];
+        for (const info of infos) {
+          commands.push({
+            name: info.command,
+            category: info.category || mod.category,
+            description: info.description,
+          });
+        }
+        // Add commands that don't have getCommandInfo entries
+        for (const cmd of mod.commands) {
+          if (!commands.some((c) => c.name === cmd)) {
+            commands.push({ name: cmd, category: mod.category, description: "" });
+          }
+        }
+      }
+      res.json({ success: true, commands });
+    } catch {
+      res.json({ success: true, commands: [] });
+    }
+  });
 
   // Authentication — minimal REST for login/register only
   app.use("/api/auth", (await import("../routes/auth")).default);
@@ -132,14 +195,26 @@ export function setupErrorHandling(app: Application): void {
       res: express.Response,
       _next: express.NextFunction,
     ) => {
-      logger.error({ err }, "Unhandled error");
+      // formatServerError classifies ALL errors uniformly:
+      // Prisma errors → clean message + correct status code
+      // GameError subclasses → preserve code + statusCode
+      // JWT errors → 401
+      // Generic errors → 500 with safe message
+      const formatted = formatServerError(err, "HTTP Request");
 
-      const isDev = config.NODE_ENV === "development";
+      // Log with full error details (pino serializes the stack trace)
+      if (formatted.statusCode >= 500) {
+        logger.error({ err, code: formatted.code }, formatted.logMessage);
+      } else {
+        logger.warn({ err, code: formatted.code }, formatted.logMessage);
+      }
 
-      res.status(500).json({
+      res.status(formatted.statusCode).json({
         success: false,
-        error: isDev ? err.message : "Internal server error",
-        stack: isDev ? err.stack : undefined,
+        error: formatted.message,
+        code: formatted.code,
+        // Include GameError details if present
+        ...(err instanceof GameError && err.details && isDevelopment ? { details: err.details } : {}),
         timestamp: new Date().toISOString(),
       });
     },

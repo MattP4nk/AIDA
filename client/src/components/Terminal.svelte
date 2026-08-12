@@ -1,8 +1,10 @@
 <script lang="ts">
-    import { onMount, tick } from "svelte";
+    import { onMount, onDestroy, tick } from "svelte";
     import { get } from "svelte/store";
     import { terminalService } from "../services/terminal";
     import type { CommandResult } from "../../../shared/types";
+    // Reserved PIDs for virtual UI processes (mirrored from shared/types.ts)
+    const ReservedPID = { HACK_CHALLENGE: -1, CONNECTION_CHALLENGE: -2, FILE_CHALLENGE: -3 } as const;
     import { apiClient } from "../services/api";
     // New ASCII Dialog system
     import MailDialog from "./MailDialog.svelte";
@@ -11,11 +13,18 @@
     import ShopDialog from "./ShopDialog.svelte";
     import EquipmentDialog from "./EquipmentDialog.svelte";
     import NotificationPanel from "./NotificationPanel.svelte";
+    import ProcessBar from "./ProcessBar.svelte";
+    import TerminalToast from "./TerminalToast.svelte";
+    import { sound } from "../services/sound";
+    import { settings, setSetting } from "../stores/settings";
+    import CommandPalette from "./CommandPalette.svelte";
     // Socket service for real-time notifications
-    import { liveMessages, socketService } from "../services/socket";
+    import { liveMessages, socketService, activeProcesses } from "../services/socket";
     import {
         playerResources,
         activeHackSession,
+        activeConnectionSession,
+        activeFileChallenge,
     } from "../services/socketStores";
     // Notification service
     import {
@@ -150,10 +159,78 @@
         "faction",
         "alias",
         "admin",
+        "handshake.ack",
+        "signal.trace",
+        "connect.abort",
+        "leaderboard",
+        "achievements",
+        "fragment",
+        "fragments",
+        "endgame",
+        "gear",
+        "tutorial",
+        "settings",
+        "clear",
+        "report",
     ];
     let tabMatches: string[] = [];
     let tabIndex: number = -1;
     let lastTabPrefix: string = "";
+    let tabHint: string = ""; // Temporary hint showing matches, cleared on non-Tab key
+    let tabOriginalInput: string = ""; // Input value before Tab was first pressed
+
+    // Suggested command extracted from server output (e.g., "Submit with: handshake.ack <answer>")
+    let suggestedCommand: string = "";
+
+    // Command palette state (Ctrl+K)
+    let showPalette = false;
+    const paletteCommands = KNOWN_COMMANDS.map((name) => ({
+        name,
+        description: getCommandDescription(name),
+        category: getCommandCategory(name),
+    }));
+
+    function getCommandCategory(cmd: string): string {
+        const cats: Record<string, string[]> = {
+            system: ["ls","cd","pwd","cat","rm","mkdir","touch","cp","mv","echo","write","clear"],
+            network: ["scan","servers","connect","disconnect","traceroute","probe","netmap","handshake.ack","signal.trace","connect.abort"],
+            hack: ["hack","crack","exploit","backdoor","rootkit","firewall.knock","memory.extract","hack.hint","hack.status","hack.abort","crack.submit","backdoor.list","backdoor.use","backdoor.remove","security.scan","trace.status","trace.evade"],
+            file: ["upload","download","encrypt","decrypt","analyze"],
+            defense: ["defenses","protect","safevault","honeypot","upgrade"],
+            social: ["msg","mail","inbox","contact","chat","forum","proxy"],
+            shop: ["shop","buy","sell","use","equip","unequip","equipment","gear","scripts"],
+            mission: ["missions","mission","accept","abandon","progress","stories","story"],
+            fragment: ["fragment","fragments","endgame"],
+            player: ["status","skills","players","who","whois","share_intel","bounties","bounty","leaderboard","achievements","report"],
+            help: ["help","man","history","stats"],
+            process: ["ps","top","kill","pkill","nice","renice","free","uptime"],
+            math: ["calc","expr","math","vars","set","unset","convert","random","decode","subnet"],
+        };
+        for (const [cat, cmds] of Object.entries(cats)) {
+            if (cmds.includes(cmd)) return cat;
+        }
+        return "other";
+    }
+
+    function getCommandDescription(cmd: string): string {
+        const descs: Record<string, string> = {
+            ls: "List directory contents", cd: "Change directory", pwd: "Print working directory",
+            cat: "Read file contents", rm: "Remove file or directory", mkdir: "Create directory",
+            scan: "Scan for nearby servers", connect: "Connect to a server", disconnect: "Disconnect from server",
+            hack: "Initiate hack on target", crack: "Crack encryption", exploit: "Exploit server vulnerability",
+            download: "Download file to home", upload: "Upload file to server", encrypt: "Encrypt a file",
+            decrypt: "Decrypt a file", status: "View player status", skills: "View skill levels",
+            missions: "List missions", mission: "View mission details", accept: "Accept a mission",
+            shop: "Browse the shop", buy: "Purchase an item", equip: "Equip an item",
+            help: "Show available commands", ps: "Show running processes", kill: "Kill a process",
+            msg: "Send a message", mail: "Read/send mail", chat: "Open chat",
+            forum: "Browse forums", faction: "Faction commands", alias: "Manage identity alias",
+            fragment: "View AIDA fragments", endgame: "Make the final choice",
+            report: "Report intel to faction or submit mission findings",
+            traceroute: "Trace route to server", probe: "Probe server details", netmap: "Network topology map",
+        };
+        return descs[cmd] || "";
+    }
 
     // Multi-terminal tab support - reactive
     $: tabState = $terminalTabsStore;
@@ -217,6 +294,101 @@
         },
     );
     let scanlineEffect = true;
+
+    // ==================== TERMINAL WIDTH TRACKING ====================
+
+    let terminalCols = 100; // estimated character columns
+    let terminalTier: "full" | "medium" | "compact" = "full";
+    let resizeObserver: ResizeObserver | null = null;
+
+    function updateTerminalWidth() {
+        if (!outputElement) return;
+        // Measure actual character width from monospace font (10-char sample for accuracy)
+        const testSpan = document.createElement("span");
+        testSpan.style.cssText = "position:absolute;visibility:hidden;font:inherit;white-space:pre";
+        testSpan.textContent = "MMMMMMMMMM";
+        outputElement.appendChild(testSpan);
+        const charWidth = (testSpan.getBoundingClientRect().width / 10) || 8;
+        outputElement.removeChild(testSpan);
+        // Calculate usable width: container minus padding, scrollbar, and safety margin
+        const style = getComputedStyle(outputElement);
+        const padH = (parseFloat(style.paddingLeft) || 0) + (parseFloat(style.paddingRight) || 0);
+        const scrollbar = outputElement.offsetWidth - outputElement.clientWidth;
+        const usable = outputElement.clientWidth - padH - scrollbar;
+        terminalCols = Math.max(40, Math.floor(usable / charWidth) - 2);
+        terminalTier = terminalCols > 90 ? "full" : terminalCols > 55 ? "medium" : "compact";
+    }
+
+    // ==================== CHALLENGE COUNTDOWN TIMERS ====================
+
+    let challengeCountdowns = new Map<string, number>(); // type -> remaining seconds
+    let challengeTimerIntervals = new Map<string, ReturnType<typeof setInterval>>();
+
+    function startChallengeTimer(type: string, timeLimit: number) {
+        stopChallengeTimer(type);
+        challengeCountdowns.set(type, timeLimit);
+        challengeCountdowns = new Map(challengeCountdowns); // trigger reactivity
+        const interval = setInterval(() => {
+            const current = challengeCountdowns.get(type) ?? 0;
+            if (current <= 0) {
+                stopChallengeTimer(type);
+                // Clear the panel for this specific challenge type when timer expires
+                if (type === "hack" && $activeHackSession?.active) {
+                    activeHackSession.set(null);
+                    activeProcesses.update(procs => procs.filter((p: any) => p.pid !== ReservedPID.HACK_CHALLENGE));
+                }
+                if (type === "connection" && $activeConnectionSession?.active) {
+                    activeConnectionSession.set(null);
+                    activeProcesses.update(procs => procs.filter((p: any) => p.pid !== ReservedPID.CONNECTION_CHALLENGE));
+                }
+                if (type === "file" && $activeFileChallenge?.active) {
+                    activeFileChallenge.set(null);
+                    activeProcesses.update(procs => procs.filter((p: any) => p.pid !== ReservedPID.FILE_CHALLENGE));
+                }
+                return;
+            }
+            challengeCountdowns.set(type, current - 1);
+            challengeCountdowns = new Map(challengeCountdowns); // trigger reactivity
+        }, 1000);
+        challengeTimerIntervals.set(type, interval);
+    }
+
+    function stopChallengeTimer(type: string) {
+        const interval = challengeTimerIntervals.get(type);
+        if (interval) {
+            clearInterval(interval);
+            challengeTimerIntervals.delete(type);
+        }
+        challengeCountdowns.delete(type);
+        challengeCountdowns = new Map(challengeCountdowns); // trigger reactivity
+    }
+
+    function stopAllChallengeTimers() {
+        for (const [type] of challengeTimerIntervals) {
+            stopChallengeTimer(type);
+        }
+    }
+
+    // Start timer when a challenge panel appears
+    $: if ($activeHackSession?.active && $activeHackSession.challenge?.timeLimit) {
+        startChallengeTimer("hack", $activeHackSession.challenge.timeLimit);
+    }
+    $: if ($activeConnectionSession?.active && $activeConnectionSession.challenge?.timeLimit) {
+        startChallengeTimer("connection", $activeConnectionSession.challenge.timeLimit);
+    }
+    $: if ($activeFileChallenge?.active && $activeFileChallenge.challenge?.timeLimit) {
+        startChallengeTimer("file", $activeFileChallenge.challenge.timeLimit);
+    }
+    // Stop individual timers when their challenge is resolved
+    $: if (!$activeHackSession?.active) {
+        stopChallengeTimer("hack");
+    }
+    $: if (!$activeConnectionSession?.active) {
+        stopChallengeTimer("connection");
+    }
+    $: if (!$activeFileChallenge?.active) {
+        stopChallengeTimer("file");
+    }
     let glowEffect = true;
 
     // ==================== LIFECYCLE ====================
@@ -227,12 +399,22 @@
             // Check authentication and load user info first
             await checkAuth();
 
-            // Now show welcome with correct username
+            // Measure terminal width before showing welcome
+            await tick();
+            updateTerminalWidth();
+
+            // Now show welcome with correct username (adapts to terminal width)
             showWelcome();
         })();
 
         // Focus input
         focusInput();
+
+        // Track terminal width changes
+        if (typeof ResizeObserver !== "undefined") {
+            resizeObserver = new ResizeObserver(() => updateTerminalWidth());
+            if (outputElement) resizeObserver.observe(outputElement);
+        }
 
         // Set up keyboard shortcuts
         document.addEventListener("keydown", handleGlobalKeydown);
@@ -271,6 +453,8 @@
             unsubscribe();
             clearInterval(clockInterval);
             unsubResources();
+            resizeObserver?.disconnect();
+            stopAllChallengeTimers();
         };
     });
 
@@ -294,51 +478,64 @@
         }
     }
 
-    // ==================== WELCOME MESSAGE ====================
-    // Format username for display (reactive)
-    $: displayUser = username.toUpperCase().padEnd(30);
-    $: displayServer = currentServer.toUpperCase().padEnd(28);
-    $: welcomeLines = [
-        "",
-        "╔════════════════════════════════════════════════════════════════════════════════════════════╗",
-        "║                                                                                            ║",
-        "║      ███╗   ██╗███████╗██╗   ██╗██████╗  █████╗ ██╗         ██╗     ██╗███╗   ██╗██╗  ██╗║",
-        "║      ████╗  ██║██╔════╝██║   ██║██╔══██╗██╔══██╗██║         ██║     ██║████╗  ██║██║ ██╔╝║",
-        "║      ██╔██╗ ██║█████╗  ██║   ██║██████╔╝███████║██║         ██║     ██║██╔██╗ ██║█████╔╝ ║",
-        "║      ██║╚██╗██║██╔══╝  ██║   ██║██╔══██╗██╔══██║██║         ██║     ██║██║╚██╗██║██╔═██╗ ║",
-        "║      ██║ ╚████║███████╗╚██████╔╝██║  ██║██║  ██║███████╗    ███████╗██║██║ ╚████║██║  ██╗║",
-        "║      ╚═╝  ╚═══╝╚══════╝ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝    ╚══════╝╚═╝╚═╝  ╚═══╝╚═╝  ╚═╝║",
-        "║                                                                                            ║",
-        "║      ████████╗███████╗██████╗ ███╗   ███╗██╗███╗   ██╗ █████╗ ██╗                        ║",
-        "║      ╚══██╔══╝██╔════╝██╔══██╗████╗ ████║██║████╗  ██║██╔══██╗██║                        ║",
-        "║         ██║   █████╗  ██████╔╝██╔████╔██║██║██╔██╗ ██║███████║██║                        ║",
-        "║         ██║   ██╔══╝  ██╔══██╗██║╚██╔╝██║██║██║╚██╗██║██╔══██║██║                      ║",
-        "║         ██║   ███████╗██║  ██║██║ ╚═╝ ██║██║██║ ╚████║██║  ██║███████╗                  ║",
-        "║         ╚═╝   ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝╚═╝  ╚═══╝╚═╝  ╚═╝╚══════╝                   ║",
-        "║                                                                                            ║",
-        "║                    ▓▓▓  Advanced Interactive Data Access  ▓▓▓                            ║",
-        "║                              [ Version 2.0 ]                                              ║",
-        "║                                                                                            ║",
-        "╚════════════════════════════════════════════════════════════════════════════════════════════╝",
-        "",
-        "┌────────────────────────────────────────────────────────────────────────────────────────────┐",
-        "│  🔐 SECURE NEURAL CONNECTION ESTABLISHED                                                   │",
-        `│  👤 User: ${displayUser} │ Status: ACTIVE                                                 │`,
-        `│  🖥️  Server: ${displayServer} │ Uptime: 99.9%                                             │`,
-        "└────────────────────────────────────────────────────────────────────────────────────────────┘",
-        "",
-        `Welcome, ${username}! Your neural link to the AIDA network is active.`,
-        "All activities are monitored and logged for security purposes.",
-        "",
-        "┌─ Quick Start ──────────────────────────────────────────────────────────────────────────────┐",
-        "│  • Type 'help' for available commands                                                     │",
-        "│  • Type 'ls' to list files and directories                                                │",
-        "│  • Type 'status' to view your player information                                          │",
-        "│  • Use ↑/↓ arrows to navigate command history                                             │",
-        "│  • Type 'clear' to clear the terminal screen                                              │",
-        "└────────────────────────────────────────────────────────────────────────────────────────────┘",
-        "",
-    ];
+    // ==================== WELCOME MESSAGE (adapts to terminal width) ====================
+
+    function buildWelcomeLines(): string[] {
+        const lines: string[] = [""];
+
+        if (terminalTier === "full") {
+            // Full banner (>90 columns) — clean spaced letters, no box frame
+            lines.push(
+                "  ╔══════════════════════════════════════════════════╗",
+                "  ║        N E U R A L    L I N K    v 2 . 0        ║",
+                "  ║     Advanced Interactive Data Access [AIDA]      ║",
+                "  ╚══════════════════════════════════════════════════╝",
+                "",
+                "  ════════════════════════════════════════════════════",
+            );
+        } else if (terminalTier === "medium") {
+            // Simplified banner (56-90 columns)
+            lines.push(
+                "",
+                "  N E U R A L   L I N K   T E R M I N A L",
+                "       AIDA Network  [ v2.0 ]",
+                "",
+                "  ════════════════════════════════════════",
+            );
+        } else {
+            // Compact text-only (<56 columns)
+            lines.push(
+                "  NEURAL LINK TERMINAL",
+                "  AIDA Network v2.0",
+                "",
+            );
+        }
+
+        lines.push("");
+
+        if (terminalTier !== "compact") {
+            lines.push(
+                "  SECURE CONNECTION ESTABLISHED",
+                `  User: ${username}  |  Server: ${currentServer}  |  Status: ACTIVE`,
+                "",
+            );
+        } else {
+            lines.push(`  ${username}@${currentServer} [CONNECTED]`, "");
+        }
+
+        lines.push(
+            `  Welcome, ${username}. Neural link active.`,
+            "",
+            "  help     — available commands    status — player info",
+            "  ls       — list files            scan   — find servers",
+            "  ↑/↓      — command history       TAB    — auto-complete",
+            "",
+        );
+
+        return lines;
+    }
+
+    $: welcomeLines = buildWelcomeLines();
 
     function showWelcome() {
         // Add welcome lines to current active tab or fallback to local
@@ -355,6 +552,9 @@
 
     // ==================== OUTPUT MANAGEMENT ====================
 
+    let typewriterActive = false; // true while typewriter is rendering
+    let typewriterCancel = false; // set by keypress to skip animation
+
     function addOutputLine(text: string, type: OutputLine["type"] = "output") {
         outputLines = [
             ...outputLines,
@@ -370,6 +570,62 @@
         tick().then(() => {
             scrollToBottom();
         });
+    }
+
+    /**
+     * Add output with typewriter effect.
+     * Characters appear one by one. Press any key to skip.
+     * Large outputs (>500 chars) auto-skip to instant.
+     * @param speedOverride - Override the user's setting (for server-hinted renderMode)
+     */
+    async function addOutputWithTypewriter(
+        text: string,
+        type: OutputLine["type"] = "output",
+        speedOverride?: "instant" | "fast" | "cinematic" | "typewriter",
+    ): Promise<void> {
+        const speed = speedOverride || $settings.typewriterSpeed;
+
+        // Instant mode or very large text — no animation
+        if (speed === "instant" || text.length > 500) {
+            addOutputLine(text, type);
+            return;
+        }
+
+        // "typewriter" is an alias for "fast"
+        const delayMs = speed === "cinematic" ? 20 : 5;
+        const lineId = ++lineIdCounter;
+
+        // Add empty line that we'll fill character by character
+        outputLines = [
+            ...outputLines,
+            { id: lineId, text: "", type, timestamp: new Date() },
+        ];
+
+        typewriterActive = true;
+        typewriterCancel = false;
+
+        for (let i = 0; i < text.length; i++) {
+            if (typewriterCancel) {
+                // Skip: fill remaining text instantly
+                outputLines = outputLines.map((l) =>
+                    l.id === lineId ? { ...l, text } : l,
+                );
+                break;
+            }
+
+            // Update the line's text one character at a time
+            const partial = text.slice(0, i + 1);
+            outputLines = outputLines.map((l) =>
+                l.id === lineId ? { ...l, text: partial } : l,
+            );
+
+            await new Promise((r) => setTimeout(r, delayMs));
+        }
+
+        typewriterActive = false;
+        typewriterCancel = false;
+        await tick();
+        scrollToBottom();
     }
 
     function addCommandLine(command: string) {
@@ -399,6 +655,7 @@
         if (result.exitCode && result.exitCode !== 0) {
             addOutputLine(`Exit code: ${result.exitCode}`, "system");
         }
+
     }
 
     function clearScreen() {
@@ -417,6 +674,9 @@
         if (!command) {
             return;
         }
+
+        // Sound feedback on submit
+        sound.submit();
 
         // Use tab store if tabs are active, otherwise use local state
         if (activeTabId) {
@@ -526,28 +786,136 @@
                 return;
             }
 
-            // Execute the command on the server
-            const result = await terminalService.executeCommand(command);
+            // Execute the command on the server (send terminal width for adaptive output)
+            const result = await terminalService.executeCommand(command, undefined, terminalCols);
 
             // Check if command wants to open a dialog
             if (result && result.openDialog) {
                 openDialog(result.openDialog, result.data);
             }
 
-            // Display command result
+            // Handle challenge starts from HTTP results (connection/hack)
+            if (result.data?.connectionSessionId && result.data?.connectionChallenge) {
+                activeConnectionSession.set({
+                    active: true,
+                    targetIp: result.data.targetIp,
+                    challenge: result.data.connectionChallenge,
+                    sessionId: result.data.connectionSessionId,
+                });
+                // Register in ProcessBar for countdown
+                const connTimeLimit = result.data.connectionChallenge?.timeLimit || 45;
+                const { activeProcesses } = await import("../services/socket");
+                activeProcesses.update(procs => [
+                    ...procs.filter((p: any) => p.pid !== ReservedPID.CONNECTION_CHALLENGE),
+                    { pid: ReservedPID.CONNECTION_CHALLENGE, type: "connection_challenge", description: `Connection challenge — ${result.data.targetIp}`, progress: 0, eta: connTimeLimit },
+                ]);
+            }
+            if (result.data?.connectionResolved) {
+                activeConnectionSession.set(null);
+                const { activeProcesses } = await import("../services/socket");
+                activeProcesses.update(procs => procs.filter((p: any) => p.pid !== ReservedPID.CONNECTION_CHALLENGE));
+            }
+
+            // Handle hack session start from HTTP fallback (when memoryService unavailable)
+            if (result.data?.sessionId && result.data?.targetIp && !result.data?.connectionSessionId) {
+                const { activeProcesses } = await import("../services/socket");
+                activeHackSession.set({
+                    active: true,
+                    targetIp: result.data.targetIp,
+                    currentLayer: 0,
+                    totalLayers: result.data.totalLayers,
+                    challenge: result.data.challenge,
+                });
+                activeProcesses.update(procs => [
+                    ...procs.filter((p: any) => p.pid !== ReservedPID.HACK_CHALLENGE),
+                    { pid: ReservedPID.HACK_CHALLENGE, type: "hack", description: `Hacking ${result.data.targetIp}`, progress: 0 },
+                ]);
+            }
+            // Handle hack layer progression (nextChallenge) or resolution (hackResolved)
+            if (result.data?.nextChallenge) {
+                activeHackSession.update((session: any) => {
+                    if (!session) return session;
+                    return { ...session, currentLayer: (session.currentLayer || 0) + 1, challenge: result.data.nextChallenge };
+                });
+            }
+            if (result.data?.hackResolved) {
+                activeHackSession.set(null);
+                const { activeProcesses } = await import("../services/socket");
+                activeProcesses.update(procs => procs.filter((p: any) => p.pid !== ReservedPID.HACK_CHALLENGE));
+            }
+
+            // Handle file access challenge start from HTTP
+            if (result.data?.fileAccessSessionId && result.data?.fileAccessType) {
+                const { activeProcesses } = await import("../services/socket");
+                activeFileChallenge.set({
+                    active: true,
+                    type: result.data.fileAccessType,
+                    targetFile: result.data.targetFile,
+                    targetDir: result.data.targetDir,
+                    challenge: result.data.challenge,
+                    sessionId: result.data.fileAccessSessionId,
+                });
+                activeProcesses.update(procs => [
+                    ...procs.filter((p: any) => p.pid !== ReservedPID.FILE_CHALLENGE),
+                    { pid: ReservedPID.FILE_CHALLENGE, type: "file_challenge", description: `${result.data.fileAccessType} challenge`, progress: 0 },
+                ]);
+            }
+            // Handle file access resolution
+            if (result.data?.fileAccessResolved) {
+                activeFileChallenge.set(null);
+                const { activeProcesses } = await import("../services/socket");
+                activeProcesses.update(procs => procs.filter((p: any) => p.pid !== ReservedPID.FILE_CHALLENGE));
+            }
+
+            // Display command result (with typewriter if enabled)
+            const resultOutput = Array.isArray(result.output)
+                ? result.output.join("\n")
+                : result.output;
+            const resultType = result.success ? "output" : "error";
+
+            // Determine render speed: server renderMode > user setting
+            const renderSpeed = result.renderMode || $settings.typewriterSpeed;
+
             if (activeTabId) {
-                // Add output to tab
-                const output = Array.isArray(result.output)
-                    ? result.output.join("\n")
-                    : result.output;
-                terminalTabsStore.addOutputLine(
-                    activeTabId,
-                    output,
-                    result.success ? "output" : "error",
-                );
+                // Typewriter only works with local outputLines — for tabs, render to tab store directly
+                terminalTabsStore.addOutputLine(activeTabId, resultOutput, resultType);
             } else {
-                // Fallback to local state
-                addCommandOutput(result);
+                if (renderSpeed !== "instant" && resultOutput.length <= 500) {
+                    await addOutputWithTypewriter(resultOutput, resultType as OutputLine["type"], renderSpeed);
+                } else {
+                    addCommandOutput(result);
+                }
+            }
+
+            // Sound feedback — use server hint if provided, else default
+            if (result.soundEvent) {
+                const sfn = sound[result.soundEvent as keyof typeof sound];
+                if (typeof sfn === "function") sfn();
+            } else if (result.success) {
+                sound.success();
+            } else {
+                sound.error();
+            }
+
+            // Suggested command — use server field if provided, else regex fallback
+            if (result.suggestedCommand) {
+                suggestedCommand = result.suggestedCommand;
+            } else {
+                // Regex fallback: only match when followed by a KNOWN command name
+                // This prevents matching random words from file content (e.g., "report to...")
+                const outputText = Array.isArray(result.output)
+                    ? result.output.join("\n")
+                    : result.output || "";
+                const suggestionMatch = outputText.match(
+                    /(?:Submit with|Submit:|Try:|Use:|Run:|Type:)\s+([a-z][a-z0-9_.]+(?:\s+\S+)*)/i,
+                );
+                if (suggestionMatch?.[1]) {
+                    const firstWord = suggestionMatch[1].split(/\s+/)[0]?.toLowerCase() || "";
+                    // Only accept if the first word is a known command
+                    if (KNOWN_COMMANDS.includes(firstWord)) {
+                        suggestedCommand = suggestionMatch[1].trim();
+                    }
+                }
             }
 
             // Update context from server data if available
@@ -613,6 +981,57 @@
             return true;
         }
 
+        // Settings command
+        if (cmd.startsWith("settings")) {
+            const parts = cmd.split(/\s+/);
+            const key = parts[1];
+            const value = parts[2];
+
+            if (!key) {
+                // Show all settings
+                const s = $settings;
+                const lines = [
+                    "  Current Settings:",
+                    `    typewriter  = ${s.typewriterSpeed}  (instant | fast | cinematic)`,
+                    `    sound       = ${s.soundEnabled ? "on" : "off"}`,
+                    `    volume      = ${Math.round(s.soundVolume * 100)}%`,
+                    `    crt         = ${s.crtEffects ? "on" : "off"}`,
+                    `    timestamps  = ${s.timestampsVisible ? "on" : "off"}`,
+                    "",
+                    "  Usage: settings <key> <value>",
+                ];
+                const output = lines.join("\n");
+                if (activeTabId) {
+                    terminalTabsStore.addOutputLine(activeTabId, output, "system");
+                } else {
+                    addOutputLine(output, "system");
+                }
+                return true;
+            }
+
+            // Set specific setting
+            if (key === "typewriter" && ["instant", "fast", "cinematic"].includes(value)) {
+                setSetting("typewriterSpeed", value as "instant" | "fast" | "cinematic");
+                addOutputLine(`  Typewriter speed set to: ${value}`, "success");
+            } else if (key === "sound" && (value === "on" || value === "off")) {
+                setSetting("soundEnabled", value === "on");
+                addOutputLine(`  Sound ${value}`, "success");
+            } else if (key === "volume" && !isNaN(Number(value))) {
+                const vol = Math.max(0, Math.min(100, Number(value)));
+                setSetting("soundVolume", vol / 100);
+                addOutputLine(`  Volume set to ${vol}%`, "success");
+            } else if (key === "crt" && (value === "on" || value === "off")) {
+                setSetting("crtEffects", value === "on");
+                addOutputLine(`  CRT effects ${value}`, "success");
+            } else if (key === "timestamps" && (value === "on" || value === "off")) {
+                setSetting("timestampsVisible", value === "on");
+                addOutputLine(`  Timestamps ${value}`, "success");
+            } else {
+                addOutputLine(`  Unknown setting or value: settings ${key} ${value || ""}`, "error");
+            }
+            return true;
+        }
+
         // Not a client-side command
         return false;
     }
@@ -673,19 +1092,27 @@
     // ==================== NOTIFICATION HANDLERS ====================
 
     function handleNotificationPanelClick(event: CustomEvent): void {
-        const { notification, type, data } = event.detail;
-
-        // Close notifications panel
+        const { type, data } = event.detail;
         showNotifications = false;
+        if (type === "chat") openDialog("chat", data);
+        else if (type === "mail" || type === "message") openDialog("mail", data);
+        else if (type === "forum") openDialog("forum", data);
+    }
 
-        // Open appropriate dialog based on notification type
-        if (type === "chat") {
-            openDialog("chat", data);
-        } else if (type === "mail" || type === "message") {
-            openDialog("mail", data);
-        } else if (type === "forum") {
-            openDialog("forum", data);
+    function handleToastClick(event: CustomEvent): void {
+        const { type, data, command } = event.detail;
+
+        // If toast has an action command, fill input
+        if (command) {
+            inputValue = command;
+            focusInput();
+            return;
         }
+
+        // Otherwise open appropriate dialog
+        if (type === "chat") openDialog("chat", data);
+        else if (type === "mail" || type === "message") openDialog("mail", data);
+        else if (type === "forum") openDialog("forum", data);
     }
 
     // ==================== NOTIFICATION SYSTEM ====================
@@ -749,23 +1176,24 @@
                 inputValue = historyCommand;
             }
         } else {
-            // Fallback to local history
-            if (commandHistory.length === 0) {
-                return;
-            }
+            // Fallback to local history — cycle through all stored commands
+            if (commandHistory.length === 0) return;
 
             if (direction === "up") {
+                // historyIndex starts at -1 (no history selected)
+                // Move toward older commands (higher index from end)
+                const newIndex = historyIndex < commandHistory.length - 1
+                    ? historyIndex + 1
+                    : historyIndex;
+                historyIndex = newIndex;
+                inputValue = commandHistory[commandHistory.length - 1 - newIndex] || "";
+            } else {
+                // Move toward newer commands
                 if (historyIndex > 0) {
                     historyIndex--;
-                    inputValue = commandHistory[historyIndex] || "";
-                }
-            } else {
-                // down
-                if (historyIndex < commandHistory.length - 1) {
-                    historyIndex++;
-                    inputValue = commandHistory[historyIndex] || "";
+                    inputValue = commandHistory[commandHistory.length - 1 - historyIndex] || "";
                 } else {
-                    historyIndex = commandHistory.length;
+                    historyIndex = -1;
                     inputValue = "";
                 }
             }
@@ -775,6 +1203,17 @@
     // ==================== KEYBOARD HANDLING ====================
 
     function handleKeyDown(event: KeyboardEvent) {
+        // Skip typewriter animation on any key
+        if (typewriterActive) {
+            typewriterCancel = true;
+            // Don't consume printable characters — let them reach the input
+            if (event.key.length === 1 && !event.ctrlKey && !event.altKey && !event.metaKey) {
+                return;
+            }
+            event.preventDefault();
+            return;
+        }
+
         // Ctrl+C - Cancel input
         if (event.ctrlKey && event.key === "c") {
             event.preventDefault();
@@ -818,39 +1257,66 @@
             return;
         }
 
-        // Tab - Auto-complete
+        // Tab - Auto-complete (suggested command first, then command name completion)
         if (event.key === "Tab") {
             event.preventDefault();
-            const input = inputValue.trimStart();
+
+            // Priority 1: Fill suggested command from server output
+            if (suggestedCommand) {
+                const trimmed = inputValue.trim().toLowerCase();
+                if (!trimmed || suggestedCommand.toLowerCase().startsWith(trimmed)) {
+                    inputValue = suggestedCommand;
+                    suggestedCommand = "";
+                    tabHint = "";
+                    return;
+                }
+            }
+
+            // Use original input for matching (not the already-completed value)
+            const input = tabMatches.length > 0 ? tabOriginalInput : inputValue.trimStart();
             const spaceIdx = input.indexOf(" ");
             const prefix = spaceIdx === -1 ? input : input.slice(0, spaceIdx);
 
             if (!prefix) return;
 
-            // If prefix changed, rebuild matches
+            // Build match list on first Tab press for this prefix
             if (prefix !== lastTabPrefix) {
                 lastTabPrefix = prefix;
+                tabOriginalInput = input;
                 tabMatches = KNOWN_COMMANDS.filter((c) =>
                     c.startsWith(prefix.toLowerCase()),
                 );
                 tabIndex = -1;
             }
 
-            if (tabMatches.length === 0) return;
+            if (tabMatches.length === 0) {
+                tabHint = "";
+                return;
+            }
 
             // Cycle through matches
             tabIndex = (tabIndex + 1) % tabMatches.length;
-            const match = tabMatches[tabIndex];
-            inputValue =
-                spaceIdx === -1 ? match : match + input.slice(spaceIdx);
+            const match = tabMatches[tabIndex]!;
+            inputValue = spaceIdx === -1 ? match : match + input.slice(spaceIdx);
+
+            // Show temporary hint with all matches (highlight current)
+            if (tabMatches.length > 1) {
+                tabHint = tabMatches
+                    .map((m, i) => i === tabIndex ? `[${m}]` : m)
+                    .join("  ");
+            } else {
+                tabHint = "";
+            }
             return;
         }
 
-        // Reset tab cycling on any other key
+        // Any non-Tab, non-Shift key clears tab state + hint
         if (event.key !== "Shift") {
             lastTabPrefix = "";
+            tabOriginalInput = "";
             tabMatches = [];
             tabIndex = -1;
+            tabHint = "";
         }
     }
 
@@ -873,6 +1339,22 @@
         const tabNumber = tabs.length + 1;
         await terminalTabsStore.createTab(`Terminal ${tabNumber}`);
         await tick();
+
+        // Show context greeting in new tab
+        const newTabId = tabState.activeTabId;
+        if (newTabId) {
+            terminalTabsStore.addOutputLine(
+                newTabId,
+                `[Terminal ${tabNumber}] ${username}@${currentServer}:${currentDir}`,
+                "system",
+            );
+            terminalTabsStore.addOutputLine(
+                newTabId,
+                "Type 'help' for commands. Use Ctrl+W to close this tab.",
+                "system",
+            );
+        }
+
         focusInput();
     }
 
@@ -925,6 +1407,13 @@
         if (event.ctrlKey && event.key === "n") {
             event.preventDefault();
             showNotifications = !showNotifications;
+            return;
+        }
+
+        // Ctrl+K: Command palette
+        if (event.ctrlKey && event.key === "k") {
+            event.preventDefault();
+            showPalette = !showPalette;
             return;
         }
 
@@ -1008,6 +1497,50 @@
 
     function getLineClass(line: OutputLine): string {
         return `output-line ${line.type}`;
+    }
+
+    // ==================== CLICKABLE INLINE COMMANDS ====================
+
+    const COMMAND_SET = new Set(KNOWN_COMMANDS);
+
+    /**
+     * Parse output text and wrap recognized commands in clickable spans.
+     * Returns HTML string safe to use with {@html}.
+     * Only wraps commands that appear as standalone tokens (not inside words).
+     */
+    function parseClickableCommands(text: string): string {
+        // Escape HTML first to prevent XSS
+        const escaped = text
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;");
+
+        // Match patterns like: command arg1 arg2 (e.g., "hack 10.0.0.1", "connect.abort")
+        // Only match at word boundaries, and the command must be in KNOWN_COMMANDS
+        return escaped.replace(
+            /\b([a-z][a-z0-9_.]+(?:\s+(?:\d{1,3}(?:\.\d{1,3}){1,3}|[a-z0-9_.-]+))*)\b/gi,
+            (match, group) => {
+                const firstWord = group.split(/\s+/)[0]!.toLowerCase();
+                if (COMMAND_SET.has(firstWord)) {
+                    const escapedMatch = match.replace(/"/g, "&quot;");
+                    return `<span class="clickable-cmd" data-cmd="${escapedMatch}">${match}</span>`;
+                }
+                return match;
+            },
+        );
+    }
+
+    /** Handle click on a clickable command in output. */
+    function handleOutputClick(event: MouseEvent) {
+        const target = event.target as HTMLElement;
+        if (target.classList.contains("clickable-cmd")) {
+            const cmd = target.getAttribute("data-cmd");
+            if (cmd) {
+                inputValue = cmd;
+                focusInput();
+            }
+        }
     }
 
     // ==================== CLICK HANDLERS ====================
@@ -1145,14 +1678,15 @@
     </div>
 
     <!-- Output Area -->
-    <!-- Output (use tab-specific output if tabs are active) -->
-    <div class="output" bind:this={outputElement} role="log" aria-live="polite">
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="output" bind:this={outputElement} role="log" aria-live="polite" on:click={handleOutputClick}>
         {#each currentTabOutputLines as line (line.id)}
             <div class={getLineClass(line)}>
                 <span class="line-timestamp"
                     >{line.timestamp.toLocaleTimeString()}</span
                 >
-                <span class="line-content">{line.text}</span>
+                <span class="line-content">{@html parseClickableCommands(line.text)}</span>
             </div>
         {/each}
     </div>
@@ -1161,8 +1695,13 @@
     {#if $activeHackSession?.active && $activeHackSession.challenge}
         <div class="hack-challenge-panel">
             <div class="challenge-header">
-                HACK SESSION — {$activeHackSession.targetIp} — Layer {($activeHackSession.currentLayer ||
-                    0) + 1}/{$activeHackSession.totalLayers || "?"}
+                <span>HACK SESSION — {$activeHackSession.targetIp} — Layer {($activeHackSession.currentLayer ||
+                    0) + 1}/{$activeHackSession.totalLayers || "?"}</span>
+                {#if (challengeCountdowns.get("hack") ?? 0) > 0}
+                    <span class="challenge-timer" class:warning={(challengeCountdowns.get("hack") ?? 0) <= ($activeHackSession.challenge.timeLimit || 60) * 0.25} class:urgent={(challengeCountdowns.get("hack") ?? 0) <= 5}>
+                        {challengeCountdowns.get("hack")}s
+                    </span>
+                {/if}
             </div>
             {#if $activeHackSession.challenge.displayText}
                 {#each $activeHackSession.challenge.displayText as line}
@@ -1176,6 +1715,73 @@
                     {/each}
                 </div>
             {/if}
+        </div>
+    {/if}
+
+    <!-- Sticky Connection Challenge Panel -->
+    {#if $activeConnectionSession?.active && $activeConnectionSession.challenge}
+        <div class="connection-challenge-panel">
+            <div class="challenge-header connection">
+                <span>CONNECTION — {$activeConnectionSession.targetIp} —
+                {$activeConnectionSession.challenge.type === "handshake"
+                    ? "TCP HANDSHAKE"
+                    : "SIGNAL TRACE"}</span>
+                {#if (challengeCountdowns.get("connection") ?? 0) > 0}
+                    <span class="challenge-timer" class:warning={(challengeCountdowns.get("connection") ?? 0) <= ($activeConnectionSession.challenge.timeLimit || 60) * 0.25} class:urgent={(challengeCountdowns.get("connection") ?? 0) <= 5}>
+                        {challengeCountdowns.get("connection")}s
+                    </span>
+                {/if}
+            </div>
+            {#if $activeConnectionSession.challenge.displayText}
+                {#each $activeConnectionSession.challenge.displayText as line}
+                    <div class="challenge-line">{line}</div>
+                {/each}
+            {/if}
+            {#if $activeConnectionSession.challenge.hints?.length}
+                <div class="challenge-hints">
+                    {#each $activeConnectionSession.challenge.hints as hint}
+                        <div class="hint-line">hint: {hint}</div>
+                    {/each}
+                </div>
+            {/if}
+        </div>
+    {/if}
+
+    <!-- Sticky File Access Challenge Panel (sweep/crack/storm) -->
+    {#if $activeFileChallenge?.active && $activeFileChallenge.challenge}
+        <div class="file-challenge-panel">
+            <div class="challenge-header file-access">
+                <span>{$activeFileChallenge.type === "sweep" ? "SWEEP" : $activeFileChallenge.type === "storm" ? "STORM" : "CRACK"} —
+                {$activeFileChallenge.targetDir || $activeFileChallenge.targetFile || "unknown"}</span>
+                {#if (challengeCountdowns.get("file") ?? 0) > 0}
+                    <span class="challenge-timer" class:warning={(challengeCountdowns.get("file") ?? 0) <= ($activeFileChallenge.challenge.timeLimit || 60) * 0.25} class:urgent={(challengeCountdowns.get("file") ?? 0) <= 5}>
+                        {challengeCountdowns.get("file")}s
+                    </span>
+                {/if}
+            </div>
+            {#if $activeFileChallenge.challenge.displayText}
+                {#each $activeFileChallenge.challenge.displayText as line}
+                    <div class="challenge-line">{line}</div>
+                {/each}
+            {/if}
+            {#if $activeFileChallenge.challenge.hints?.length}
+                <div class="challenge-hints">
+                    {#each $activeFileChallenge.challenge.hints as hint}
+                        <div class="hint-line">hint: {hint}</div>
+                    {/each}
+                </div>
+            {/if}
+        </div>
+    {/if}
+
+    <!-- Live Process Bar -->
+    <ProcessBar />
+
+    <!-- Suggested command hint (above input) -->
+    {#if suggestedCommand && !isExecuting}
+        <div class="suggestion-hint">
+            <span class="suggestion-label">TAB</span>
+            <span class="suggestion-text">{suggestedCommand}</span>
         </div>
     {/if}
 
@@ -1204,6 +1810,22 @@
             </span>
         {/if}
     </div>
+
+    <!-- Tab completion matches (below input, temporary) -->
+    {#if tabHint}
+        <div class="tab-hint">{tabHint}</div>
+    {/if}
+
+    <!-- In-terminal toast notifications -->
+    <TerminalToast on:toastClick={handleToastClick} />
+
+    <!-- Command Palette (Ctrl+K) -->
+    <CommandPalette
+        visible={showPalette}
+        commands={paletteCommands}
+        on:close={() => { showPalette = false; focusInput(); }}
+        on:select={(e) => { inputValue = e.detail.command + " "; focusInput(); }}
+    />
 </div>
 
 <!-- ASCII Dialogs -->
@@ -1706,6 +2328,32 @@
         font-weight: bold;
         margin-bottom: 4px;
         letter-spacing: 1px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
+
+    .challenge-timer {
+        font-size: 1.1em;
+        color: #00ff41;
+        font-variant-numeric: tabular-nums;
+        min-width: 40px;
+        text-align: right;
+    }
+
+    .challenge-timer.warning {
+        color: #ffaa00;
+    }
+
+    .challenge-timer.urgent {
+        color: #ff4444;
+        font-weight: bold;
+        animation: timerPulse 0.5s ease-in-out infinite alternate;
+    }
+
+    @keyframes timerPulse {
+        from { opacity: 1; text-shadow: 0 0 5px rgba(255, 68, 68, 0.5); }
+        to { opacity: 0.6; text-shadow: 0 0 10px rgba(255, 68, 68, 0.8); }
     }
 
     .challenge-line {
@@ -1724,6 +2372,101 @@
         color: #666;
         font-style: italic;
         font-size: 0.9em;
+    }
+
+    /* ==================== CONNECTION CHALLENGE PANEL ==================== */
+
+    .connection-challenge-panel {
+        border-top: 1px solid #0a2a3a;
+        border-bottom: 1px solid #0a2a3a;
+        background: #060e14;
+        padding: 8px 40px;
+        font-family: inherit;
+        font-size: 0.85em;
+        color: #00ccff;
+        max-height: 200px;
+        overflow-y: auto;
+    }
+
+    .challenge-header.connection {
+        color: #00ccff;
+        text-shadow: 0 0 5px rgba(0, 204, 255, 0.3);
+    }
+
+    .connection-challenge-panel .challenge-line {
+        color: #0099cc;
+    }
+
+    /* ==================== FILE ACCESS CHALLENGE PANEL ==================== */
+
+    .file-challenge-panel {
+        border-top: 1px solid #3a2a0a;
+        border-bottom: 1px solid #3a2a0a;
+        background: #14100a;
+        padding: 8px 40px;
+        font-family: inherit;
+        font-size: 0.85em;
+        color: #ffaa00;
+        max-height: 280px;
+        overflow-y: auto;
+    }
+
+    .challenge-header.file-access {
+        color: #ffaa00;
+        text-shadow: 0 0 5px rgba(255, 170, 0, 0.3);
+    }
+
+    .file-challenge-panel .challenge-line {
+        color: #cc8800;
+    }
+
+    /* ==================== CLICKABLE COMMANDS ==================== */
+
+    :global(.clickable-cmd) {
+        color: #00ddaa;
+        cursor: pointer;
+        border-bottom: 1px dotted rgba(0, 221, 170, 0.3);
+        transition: color 0.15s, border-color 0.15s;
+    }
+
+    :global(.clickable-cmd:hover) {
+        color: #00ffcc;
+        border-bottom-color: #00ffcc;
+        text-shadow: 0 0 4px rgba(0, 255, 204, 0.4);
+    }
+
+    /* ==================== TAB COMPLETION HINTS ==================== */
+
+    .suggestion-hint {
+        padding: 2px 40px;
+        font-size: 0.8em;
+        color: #555;
+        font-family: inherit;
+    }
+
+    .suggestion-label {
+        display: inline-block;
+        background: #1a3a1a;
+        color: #00cc33;
+        padding: 1px 5px;
+        border-radius: 2px;
+        font-size: 0.85em;
+        margin-right: 8px;
+        font-weight: bold;
+    }
+
+    .suggestion-text {
+        color: #006622;
+        font-style: italic;
+    }
+
+    .tab-hint {
+        padding: 2px 40px;
+        font-size: 0.8em;
+        color: #00aa33;
+        font-family: inherit;
+        white-space: pre;
+        opacity: 0.8;
     }
 
     /* ==================== INPUT LINE ==================== */
@@ -1882,11 +2625,18 @@
 
         .status-left,
         .status-right {
-            gap: 12px;
+            gap: 8px;
         }
 
         .status-item {
             padding: 3px 6px;
+        }
+
+        /* Hide tab labels, show icons only */
+        .tab-label {
+            max-width: 80px;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
     }
 
@@ -1902,15 +2652,28 @@
 
         .status-bar {
             font-size: 10px;
-            flex-direction: column;
-            gap: 8px;
-            padding: 8px 10px;
+            padding: 6px 10px;
         }
 
-        .status-left,
+        .status-left {
+            flex: 1;
+            overflow-x: auto;
+            overflow-y: hidden;
+            gap: 4px;
+        }
+
         .status-right {
-            width: 100%;
-            justify-content: space-between;
+            gap: 6px;
+        }
+
+        /* Collapse tab labels to icons only */
+        .tab-label {
+            display: none;
+        }
+
+        /* Hide connection quality */
+        .status-icon {
+            display: none;
         }
 
         .output-line.command::before {
@@ -1919,6 +2682,18 @@
 
         .line-timestamp {
             display: none;
+        }
+
+        /* Challenge panels scroll horizontally */
+        .hack-challenge-panel,
+        .connection-challenge-panel,
+        .file-challenge-panel {
+            overflow-x: auto;
+        }
+
+        .challenge-line {
+            white-space: pre;
+            min-width: max-content;
         }
     }
 
@@ -1938,6 +2713,11 @@
 
         .input {
             font-size: 13px;
+        }
+
+        /* Single-line status: just active tab + notification badge */
+        .status-right .status-item:not(.notification) {
+            display: none;
         }
 
         .status-item {

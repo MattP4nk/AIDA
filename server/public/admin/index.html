@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AIDA Admin</title>
+  <link rel="stylesheet" href="/admin/css/admin.css">
+</head>
+<body>
+  <!-- Login Screen -->
+  <div id="login-screen" class="login-screen hidden">
+    <div class="login-box">
+      <h1 class="login-title">AIDA <span class="accent">ADMIN</span></h1>
+      <p class="login-subtitle">System Control Panel</p>
+      <form id="login-form">
+        <input type="text" id="login-username" placeholder="Username" autocomplete="username" required>
+        <input type="password" id="login-password" placeholder="Password" autocomplete="current-password" required>
+        <button type="submit" class="btn btn-primary btn-full">Authenticate</button>
+        <p id="login-error" class="error-text hidden"></p>
+      </form>
+    </div>
+  </div>
+
+  <!-- Main App -->
+  <div id="app" class="app-layout hidden">
+    <!-- Sidebar -->
+    <nav id="sidebar" class="sidebar">
+      <div class="sidebar-header">
+        <h2 class="logo">AIDA</h2>
+        <span class="logo-sub">ADMIN</span>
+      </div>
+      <ul class="nav-list">
+        <li><a href="#dashboard" class="nav-link active" data-page="dashboard">
+          <span class="nav-icon">&#9632;</span> Dashboard
+        </a></li>
+        <li><a href="#servers" class="nav-link" data-page="servers">
+          <span class="nav-icon">&#9654;</span> Servers
+        </a></li>
+        <li><a href="#networks" class="nav-link" data-page="networks">
+          <span class="nav-icon">&#9670;</span> Networks
+        </a></li>
+        <li><a href="#missions" class="nav-link" data-page="missions">
+          <span class="nav-icon">&#9733;</span> Missions
+        </a></li>
+        <li><a href="#forums" class="nav-link" data-page="forums">
+          <span class="nav-icon">&#9998;</span> Forums
+        </a></li>
+        <li><a href="#epochs" class="nav-link" data-page="epochs">
+          <span class="nav-icon">&#8634;</span> Epochs
+        </a></li>
+        <li><a href="#drafts" class="nav-link" data-page="drafts">
+          <span class="nav-icon">&#9888;</span> Drafts <span id="draft-badge" class="badge hidden">0</span>
+        </a></li>
+        <li><a href="#players" class="nav-link" data-page="players">
+          <span class="nav-icon">&#9787;</span> Players
+        </a></li>
+      </ul>
+      <div class="sidebar-footer">
+        <span id="admin-username" class="admin-name"></span>
+        <button id="logout-btn" class="btn btn-small btn-ghost">Logout</button>
+      </div>
+    </nav>
+
+    <!-- Content Area -->
+    <main id="content" class="content">
+      <div id="page-container"></div>
+    </main>
+  </div>
+
+  <!-- Toast Container -->
+  <div id="toast-container" class="toast-container"></div>
+
+  <!-- Modal Overlay -->
+  <div id="modal-overlay" class="modal-overlay hidden">
+    <div id="modal-box" class="modal-box">
+      <div class="modal-header">
+        <h3 id="modal-title"></h3>
+        <button id="modal-close" class="modal-close-btn">&times;</button>
+      </div>
+      <div id="modal-body" class="modal-body"></div>
+      <div id="modal-footer" class="modal-footer"></div>
+    </div>
+  </div>
+
+  <script type="module" src="/admin/js/app.js"></script>
+</body>
+</html>

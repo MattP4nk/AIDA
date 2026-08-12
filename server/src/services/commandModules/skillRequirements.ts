@@ -48,6 +48,19 @@ export const SKILL_REQUIREMENTS: Readonly<Record<string, SkillRequirement>> = {
   "memory.extract": { skill: "forensics", level: 5, label: "Forensics" },
   // hack.hint, hack.status, hack.abort → ungated (session management)
 
+  // ── File access minigames ─────────────────────────────────────────
+  sweep: { skill: "forensics", level: 15, label: "Forensics" },
+  "sweep.reveal": { skill: "forensics", level: 15, label: "Forensics" },
+  "crack.dict": { skill: "cryptography", level: 20, label: "Cryptography" },
+  "crack.mask": { skill: "cryptography", level: 25, label: "Cryptography" },
+  "crack.pattern": { skill: "cryptography", level: 20, label: "Cryptography" },
+  "crack.protected": { skill: "cryptography", level: 40, label: "Cryptography" },
+  "crack.storm": { skill: "cryptography", level: 50, label: "Cryptography" },
+  "crack.storm.submit": { skill: "cryptography", level: 5, label: "Cryptography" },
+  "fragment.crack": { skill: "hacking", level: 50, label: "Hacking" },
+  "collar.shield": { skill: "stealth", level: 30, label: "Stealth" },
+  "key.contact": { skill: "cryptography", level: 20, label: "Cryptography" },
+
   // ── Backdoor commands ──────────────────────────────────────────────
   "backdoor.list": { skill: "hacking", level: 15, label: "Hacking" },
   "backdoor.use": { skill: "stealth", level: 20, label: "Stealth" },
@@ -90,6 +103,15 @@ export const SKILL_REQUIREMENTS: Readonly<Record<string, SkillRequirement>> = {
   proxy: { skill: "networking", level: 10, label: "Networking" },
   share_intel: { skill: "socialEng", level: 10, label: "Social Engineering" },
   // msg, mail, inbox, contact, chat → ungated (basic comms)
+
+  // ── Fragment / Endgame commands ─────────────────────────────────────
+  fragment: { skill: "hacking", level: 30, label: "Hacking" },
+  fragments: { skill: "hacking", level: 30, label: "Hacking" },
+  endgame: { skill: "hacking", level: 50, label: "Hacking" },
+
+  // ── Connection challenge commands ─────────────────────────────────
+  "handshake.ack": { skill: "networking", level: 5, label: "Networking" },
+  "signal.trace": { skill: "networking", level: 5, label: "Networking" },
 
   // ── Alias subcommands (key = "alias:<sub>") ────────────────────────
   "alias:create": {

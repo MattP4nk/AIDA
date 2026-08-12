@@ -1,5 +1,6 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
+import { getSession, successResult, errorResult } from "./helpers";
 import {
   boxTop,
   boxBottom,
@@ -15,6 +16,7 @@ import {
 } from "./asciiBox";
 
 export class ProcessCommandsModule implements CommandModule {
+  public category = "process";
   public commands: Set<string> = new Set([
     "ps",
     "top",
@@ -30,9 +32,9 @@ export class ProcessCommandsModule implements CommandModule {
     command: Command,
     context: CommandContext,
   ): Promise<CommandResult> {
-    const session = context.gameStateManager.getSession(context.userId);
+    const session = getSession(context);
     if (!session) {
-      return { success: false, output: "No active session", timestamp: new Date() };
+      return errorResult("No active session");
     }
 
     try {
@@ -54,10 +56,10 @@ export class ProcessCommandsModule implements CommandModule {
         case "uptime":
           return this.handleUptime(context);
         default:
-          return { success: false, output: `Unknown process command: ${command.command}`, timestamp: new Date() };
+          return errorResult(`Unknown process command: ${command.command}`);
       }
     } catch (error) {
-      return { success: false, output: error instanceof Error ? error.message : "Process command failed", timestamp: new Date() };
+      return errorResult(error instanceof Error ? error.message : "Process command failed");
     }
   }
 
@@ -79,7 +81,7 @@ export class ProcessCommandsModule implements CommandModule {
   private handlePs(context: CommandContext): CommandResult {
     const memoryService = context.services.memoryService;
     if (!memoryService) {
-      return { success: false, output: "Resource system unavailable.", timestamp: new Date() };
+      return errorResult("Resource system unavailable.");
     }
 
     const breakdown = memoryService.getResourceBreakdown(context.userId);
@@ -140,7 +142,7 @@ export class ProcessCommandsModule implements CommandModule {
     lines.push(boxRow(` Total: CPU ${spec.cpuUsed}/${spec.cpuTotal}  RAM ${spec.ramUsed}/${spec.ramTotal}MB  BW ${spec.bwUsed}/${spec.bwTotal}Mbps`, W));
     lines.push(boxBottom(W));
 
-    return { success: true, output: render(lines), timestamp: new Date() };
+    return successResult(render(lines));
   }
 
   // ==================== TOP ====================
@@ -148,7 +150,7 @@ export class ProcessCommandsModule implements CommandModule {
   private handleTop(context: CommandContext): CommandResult {
     const memoryService = context.services.memoryService;
     if (!memoryService) {
-      return { success: false, output: "Resource system unavailable.", timestamp: new Date() };
+      return errorResult("Resource system unavailable.");
     }
 
     const breakdown = memoryService.getResourceBreakdown(context.userId);
@@ -187,7 +189,7 @@ export class ProcessCommandsModule implements CommandModule {
     }
 
     lines.push(boxBottom(W));
-    return { success: true, output: render(lines), timestamp: new Date() };
+    return successResult(render(lines));
   }
 
   // ==================== KILL ====================
@@ -195,27 +197,27 @@ export class ProcessCommandsModule implements CommandModule {
   private handleKill(command: Command, context: CommandContext): CommandResult {
     const memoryService = context.services.memoryService;
     if (!memoryService) {
-      return { success: false, output: "Resource system unavailable.", timestamp: new Date() };
+      return errorResult("Resource system unavailable.");
     }
 
     const pidStr = command.args?.[0];
     if (!pidStr) {
-      return { success: false, output: "Usage: kill <pid>\nUse 'ps' to see running process PIDs.", timestamp: new Date() };
+      return errorResult("Usage: kill <pid>\nUse 'ps' to see running process PIDs.");
     }
 
     const pid = parseInt(pidStr, 10);
     if (isNaN(pid)) {
-      return { success: false, output: `Invalid PID: ${pidStr}`, timestamp: new Date() };
+      return errorResult(`Invalid PID: ${pidStr}`);
     }
 
     const process = memoryService.getGameProcess(context.userId, pid);
     if (!process) {
-      return { success: false, output: `No running process with PID ${pid}.`, timestamp: new Date() };
+      return errorResult(`No running process with PID ${pid}.`);
     }
 
     const cancelled = memoryService.cancelGameProcess(context.userId, pid);
     if (!cancelled) {
-      return { success: false, output: `Failed to kill process ${pid}.`, timestamp: new Date() };
+      return errorResult(`Failed to kill process ${pid}.`);
     }
 
     const W = 44;
@@ -225,7 +227,7 @@ export class ProcessCommandsModule implements CommandModule {
     lines.push(sBoxRow(` Freed: CPU ${process.cpuCost}  RAM ${process.ramCost}MB  BW ${process.bwCost}Mbps`, W));
     lines.push(sBoxBottom(W));
 
-    return { success: true, output: render(lines), timestamp: new Date() };
+    return successResult(render(lines));
   }
 
   // ==================== FREE ====================
@@ -233,7 +235,7 @@ export class ProcessCommandsModule implements CommandModule {
   private handleFree(context: CommandContext): CommandResult {
     const memoryService = context.services.memoryService;
     if (!memoryService) {
-      return { success: false, output: "Resource system unavailable.", timestamp: new Date() };
+      return errorResult("Resource system unavailable.");
     }
 
     const spec = memoryService.getComputerSpec(context.userId);
@@ -251,7 +253,7 @@ export class ProcessCommandsModule implements CommandModule {
     lines.push(boxRow(` ${progressBar(spec.ramUsed / spec.ramTotal, 30)}  ${Math.round((spec.ramUsed / spec.ramTotal) * 100)}%`, W));
     lines.push(boxBottom(W));
 
-    return { success: true, output: render(lines), timestamp: new Date() };
+    return successResult(render(lines));
   }
 
   // ==================== UPTIME ====================
@@ -259,7 +261,7 @@ export class ProcessCommandsModule implements CommandModule {
   private handleUptime(context: CommandContext): CommandResult {
     const memoryService = context.services.memoryService;
     if (!memoryService) {
-      return { success: false, output: "Resource system unavailable.", timestamp: new Date() };
+      return errorResult("Resource system unavailable.");
     }
 
     const spec = memoryService.getComputerSpec(context.userId);
@@ -267,7 +269,7 @@ export class ProcessCommandsModule implements CommandModule {
     const consumers = memoryService.getPassiveConsumers(context.userId);
     const load = memoryService.getLoadAverage(context.userId);
 
-    const session = context.gameStateManager.getSession(context.userId);
+    const session = getSession(context);
     const uptime = session ? Date.now() - session.connectedAt.getTime() : 0;
 
     const lines: string[] = [
@@ -276,7 +278,7 @@ export class ProcessCommandsModule implements CommandModule {
       `resources: CPU ${spec.cpuUsed}/${spec.cpuTotal}  RAM ${spec.ramUsed}/${spec.ramTotal}MB  BW ${spec.bwUsed}/${spec.bwTotal}Mbps`,
     ];
 
-    return { success: true, output: lines.join("\n"), timestamp: new Date() };
+    return successResult(lines.join("\n"));
   }
 
   // ==================== PKILL ====================
@@ -284,19 +286,19 @@ export class ProcessCommandsModule implements CommandModule {
   private handlePkill(command: Command, context: CommandContext): CommandResult {
     const memoryService = context.services.memoryService;
     if (!memoryService) {
-      return { success: false, output: "Resource system unavailable.", timestamp: new Date() };
+      return errorResult("Resource system unavailable.");
     }
 
     const typeName = command.args?.[0];
     if (!typeName) {
-      return { success: false, output: "Usage: pkill <type>\nTypes: hack_prep, scan, decrypt, download, backdoor_install, traceroute, trace_evade", timestamp: new Date() };
+      return errorResult("Usage: pkill <type>\nTypes: hack_prep, scan, decrypt, download, backdoor_install, traceroute, trace_evade");
     }
 
     const processes = memoryService.getGameProcesses(context.userId);
     const matching = processes.filter((p) => p.type === typeName || p.type.replace(/_/g, " ") === typeName);
 
     if (matching.length === 0) {
-      return { success: false, output: `No running processes of type: ${typeName}`, timestamp: new Date() };
+      return errorResult(`No running processes of type: ${typeName}`);
     }
 
     let killed = 0;
@@ -310,11 +312,7 @@ export class ProcessCommandsModule implements CommandModule {
       }
     }
 
-    return {
-      success: true,
-      output: `Killed ${killed} process${killed !== 1 ? "es" : ""}. Freed: CPU ${freedCpu}, RAM ${freedRam}MB, BW ${freedBw}Mbps`,
-      timestamp: new Date(),
-    };
+    return successResult(`Killed ${killed} process${killed !== 1 ? "es" : ""}. Freed: CPU ${freedCpu}, RAM ${freedRam}MB, BW ${freedBw}Mbps`);
   }
 
   // ==================== NICE ====================
@@ -326,20 +324,16 @@ export class ProcessCommandsModule implements CommandModule {
     // For now, nice stores the priority preference in the session.
     const args = command.args || [];
     if (args.length < 2) {
-      return {
-        success: false,
-        output: "Usage: nice <priority> <command> [args...]\nPriority: -10 (fast/expensive) to 10 (slow/cheap). Default: 0.\n\nExample: nice -5 hack 172.16.1.1  (hack 30% faster, uses 20% more CPU)",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: nice <priority> <command> [args...]\nPriority: -10 (fast/expensive) to 10 (slow/cheap). Default: 0.\n\nExample: nice -5 hack 172.16.1.1  (hack 30% faster, uses 20% more CPU)");
     }
 
     const priority = parseInt(args[0]!, 10);
     if (isNaN(priority) || priority < -10 || priority > 10) {
-      return { success: false, output: "Priority must be between -10 (highest) and 10 (lowest).", timestamp: new Date() };
+      return errorResult("Priority must be between -10 (highest) and 10 (lowest).");
     }
 
     // Store the priority preference — the next process spawn will pick it up
-    const session = context.gameStateManager.getSession(context.userId);
+    const session = getSession(context);
     if (session) {
       (session as any)._nextProcessPriority = priority;
     }
@@ -359,7 +353,7 @@ export class ProcessCommandsModule implements CommandModule {
     lines.push(sBoxRow(" Now run your command.", W));
     lines.push(sBoxBottom(W));
 
-    return { success: true, output: render(lines), timestamp: new Date() };
+    return successResult(render(lines));
   }
 
   // ==================== RENICE ====================
@@ -367,31 +361,27 @@ export class ProcessCommandsModule implements CommandModule {
   private handleRenice(command: Command, context: CommandContext): CommandResult {
     const memoryService = context.services.memoryService;
     if (!memoryService) {
-      return { success: false, output: "Resource system unavailable.", timestamp: new Date() };
+      return errorResult("Resource system unavailable.");
     }
 
     const args = command.args || [];
     if (args.length < 2) {
-      return {
-        success: false,
-        output: "Usage: renice <priority> <pid>\nPriority: -10 (fast/expensive) to 10 (slow/cheap).\n\nExample: renice -10 101  (max speed, high CPU cost)",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: renice <priority> <pid>\nPriority: -10 (fast/expensive) to 10 (slow/cheap).\n\nExample: renice -10 101  (max speed, high CPU cost)");
     }
 
     const priority = parseInt(args[0]!, 10);
     const pid = parseInt(args[1]!, 10);
 
     if (isNaN(priority) || priority < -10 || priority > 10) {
-      return { success: false, output: "Priority must be between -10 and 10.", timestamp: new Date() };
+      return errorResult("Priority must be between -10 and 10.");
     }
     if (isNaN(pid)) {
-      return { success: false, output: `Invalid PID: ${args[1]}`, timestamp: new Date() };
+      return errorResult(`Invalid PID: ${args[1]}`);
     }
 
     const result = memoryService.reniceProcess(context.userId, pid, priority);
     if (!result.success) {
-      return { success: false, output: result.reason || "Failed to renice.", timestamp: new Date() };
+      return errorResult(result.reason || "Failed to renice.");
     }
 
     const process = memoryService.getGameProcess(context.userId, pid);
@@ -412,6 +402,6 @@ export class ProcessCommandsModule implements CommandModule {
     }
     lines.push(sBoxBottom(W));
 
-    return { success: true, output: render(lines), timestamp: new Date() };
+    return successResult(render(lines));
   }
 }

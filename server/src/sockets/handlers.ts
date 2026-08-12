@@ -8,6 +8,7 @@ import {
   COMMAND_PROCESSOR,
   PLAYER_PRESENCE_SERVICE,
   MESSAGE_SERVICE,
+  TUTORIAL_SERVICE,
 } from "../di/tokens";
 
 import type GameStateManager from "../services/gameStateManager";
@@ -15,6 +16,7 @@ import type ProgressService from "../services/progressService";
 import type CommandProcessor from "../services/commandProcessor";
 import type PlayerPresenceService from "../services/playerPresenceService";
 import type MessageService from "../services/messageService";
+import { validateCommandInput, sanitizeSocketInput, validateMessageInput } from "../utils/inputValidation";
 
 /**
  * Socket handler context — resolved once from DI, shared across all connections.
@@ -202,6 +204,11 @@ export function setupSocketHandlers(io: SocketIOServer): void {
 
 function setupAuthMiddleware(socket: Socket): void {
   socket.use(async (_packet, next) => {
+    // Skip re-verification if already authenticated
+    if (socket.data.user) {
+      return next();
+    }
+
     try {
       const token = socket.handshake.auth.token;
       if (!token) {
@@ -270,10 +277,8 @@ async function handleAuthentication(
 
     // Check if new player needs tutorial
     try {
-      const { getService: getSvc } = await import("../di/container");
-      const { TUTORIAL_SERVICE } = await import("../di/tokens");
       const tutorialService =
-        getSvc<import("../services/tutorialService").TutorialService>(
+        getService<import("../services/tutorialService").TutorialService>(
           TUTORIAL_SERVICE,
         );
       const needsTutorial = await tutorialService.shouldStartTutorial(userId);
@@ -355,25 +360,34 @@ async function handleCommandExecute(
     args?: string[];
     serverId?: string;
     terminalId?: string;
+    terminalCols?: number;
   },
 ): Promise<void> {
   const userId = getUserId(socket, "command:error");
   if (!userId) return;
 
   try {
-    const { command, args, serverId, terminalId } = data;
+    const { command, args, serverId, terminalId, terminalCols } = data;
 
-    if (!command || typeof command !== "string") {
+    // Validate command input (same rules as HTTP middleware)
+    const sanitizedCommand = typeof command === "string" ? sanitizeSocketInput(command) : "";
+    const validation = validateCommandInput(sanitizedCommand);
+    if (!validation.valid) {
       socket.emit("command:error", {
         success: false,
-        error: "Invalid command format",
+        error: validation.reason || "Invalid command format",
       });
       return;
     }
 
+    // Validate and sanitize args
+    const sanitizedArgs = Array.isArray(args)
+      ? args.filter((a): a is string => typeof a === "string").map(sanitizeSocketInput)
+      : [];
+
     // Build full command string
     const commandString =
-      args && args.length > 0 ? `${command} ${args.join(" ")}` : command;
+      sanitizedArgs.length > 0 ? `${sanitizedCommand} ${sanitizedArgs.join(" ")}` : sanitizedCommand;
 
     // Parse
     const parsed = commandProcessor.parseCommand(
@@ -396,6 +410,8 @@ async function handleCommandExecute(
       parsed,
       serverId,
       terminalId,
+      terminalCols ? Number(terminalCols) : undefined,
+      socket.data.user?.role,
     );
 
     // Send result
@@ -435,20 +451,22 @@ async function handleMessageSend(
     const { recipientId, subject, content, isEncrypted, encryptionLevel } =
       messageData;
 
-    if (!recipientId || !subject || !content) {
+    const msgValidation = validateMessageInput({ recipientId, subject, content });
+    if (!msgValidation.valid) {
       socket.emit("message:result", {
         success: false,
-        error: "recipientId, subject, and content are required",
+        error: msgValidation.reason || "Invalid message data",
       });
       return;
     }
 
+    // After validation, recipientId/subject/content are guaranteed to be strings
     const result = await messageService.sendPrivateMessage(
       senderId,
-      recipientId,
+      recipientId!,
       {
-        subject,
-        content,
+        subject: subject!,
+        content: content!,
         encrypt: isEncrypted || false,
         encryptionLevel: encryptionLevel || 0,
       },

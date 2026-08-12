@@ -18,6 +18,7 @@ import type { CommandResult } from "../../../shared/types";
 export interface CommandRequest {
   command: string;
   serverId?: string;
+  terminalCols?: number;
 }
 
 // ==================== TERMINAL SERVICE ====================
@@ -47,6 +48,7 @@ export class TerminalService {
   async executeCommand(
     command: string,
     serverId?: string,
+    terminalCols?: number,
   ): Promise<CommandResult> {
     try {
       // Validate input
@@ -68,11 +70,15 @@ export class TerminalService {
       if (serverId) {
         request.serverId = serverId;
       }
+      if (terminalCols) {
+        request.terminalCols = terminalCols;
+      }
 
       // Execute command via API
       const response = await apiClient.executeCommand(
         request.command,
         request.serverId,
+        request.terminalCols,
       );
 
       // The response is the CommandResult directly (not wrapped in ApiResponse)

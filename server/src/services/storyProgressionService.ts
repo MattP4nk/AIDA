@@ -20,16 +20,20 @@ import { db } from "../database/client";
 import type { AIService } from "./aiService";
 import type EventService from "./eventService";
 import { EventType, EventSeverity } from "../../../shared/types";
+import { validateOrRetry, validateArchitectEvaluation } from "../utils/aiOutputValidator";
+import { safeAI } from "../utils/safeExecute";
 
 // ═══════════════════════════════════════════════════════════════════
 // Types
 // ═══════════════════════════════════════════════════════════════════
 
 export interface StoryEventInput {
-  type: string; // "hack", "faction_war", "territory_shift", "fragment_found", "player_choice", "persona_action", "token_used"
-  category: string; // "combat", "diplomacy", "discovery", "economy", "narrative", "communication"
+  type: string; // "hack", "faction_war", "territory_shift", "fragment_found", "fragment_claimed", "fragment_stolen", "fragment_transferred", "player_choice", "persona_action", "token_used"
+  category: string; // "combat", "diplomacy", "discovery", "economy", "narrative", "communication", "conflict", "social"
   actorId: string;
   actorType: "player" | "persona";
+  targetId?: string; // for conflict/social events: the other player involved
+  targetType?: "player" | "persona"; // type of the target
   summary: string;
   detail?: string;
   data?: Record<string, unknown>;
@@ -55,7 +59,7 @@ export interface WorldNarrativeState {
   }>;
   unprocessedEventCount: number;
   totalEventsThisEpoch: number;
-  keyFragmentsFound: { signal: number; location: number; cipher: number };
+  keyFragmentsFound: { sword: number; key: number; collar: number };
   aidaContactCount: number;
   globalTension: number; // derived from accumulated impact.tension
   narrativeThemes: string[]; // AI-detected themes from recent events
@@ -89,6 +93,10 @@ export interface ArchitectIntervention {
 
 @injectable()
 export class StoryProgressionService {
+  /** Cooldown for reactive Architect — max 1 immediate response per 10 minutes. */
+  private lastReactiveAt: number = 0;
+  private readonly REACTIVE_COOLDOWN_MS = 10 * 60 * 1000;
+
   constructor(
     @inject(LOGGER) private logger: Logger,
     @inject(AI_SERVICE) private aiService: AIService,
@@ -157,6 +165,101 @@ export class StoryProgressionService {
         );
       }
     }
+
+    // ── Reactive Architect: immediate response to critical events ──
+    if (weight >= 8) {
+      this.onHighWeightEvent(input, weight).catch((err) => {
+        this.logger.debug({ err }, "Reactive Architect failed (non-critical)");
+      });
+    }
+  }
+
+  /**
+   * Reactive Architect — immediate mini-evaluation for critical events.
+   * Responds to weight >= 8 events (fragment stolen, endgame, war) within seconds
+   * instead of waiting for the 2-hour evaluation cycle.
+   * Cooldown: max 1 immediate response per 10 minutes.
+   */
+  private async onHighWeightEvent(event: StoryEventInput, weight: number): Promise<void> {
+    const now = Date.now();
+    if (now - this.lastReactiveAt < this.REACTIVE_COOLDOWN_MS) {
+      this.logger.debug({ weight, type: event.type }, "Reactive Architect on cooldown — skipping");
+      return;
+    }
+    this.lastReactiveAt = now;
+
+    this.logger.info(
+      { type: event.type, weight, summary: event.summary?.slice(0, 80) },
+      "Reactive Architect triggered by high-weight event",
+    );
+
+    const prompt = `URGENT EVENT just occurred in the AIDA simulation:
+
+Type: ${event.type}
+Category: ${event.category}
+Weight: ${weight}/10
+Summary: ${event.summary}
+Actor: ${event.actorId} (${event.actorType})
+${event.targetId ? `Target: ${event.targetId}` : ""}
+
+You are The Architect. This event JUST happened. Respond with ONE immediate action, or "none" if no response is needed.
+
+Choose from:
+- send_message: Send a cryptic in-character message to a player (targetId = userId, data.subject, data.content)
+- trigger_event: Create a world event notification (data.eventTitle, data.eventDescription)
+- none: No immediate action needed
+
+Consider: Is this event narratively significant enough for an immediate Architect response?
+Fragment discoveries, endgame events, and major faction shifts usually warrant a response.
+Routine hacks or mission completions usually don't.`;
+
+    type ReactiveAction = { action: string; targetId?: string; data?: any; reasoning?: string };
+
+    const validateReactiveAction = (parsed: any): ReactiveAction | null => {
+      if (!parsed || typeof parsed !== "object") return null;
+      if (typeof parsed.action !== "string") return null;
+      return {
+        action: parsed.action,
+        targetId: parsed.targetId,
+        data: parsed.data,
+        reasoning: parsed.reasoning,
+      };
+    };
+
+    const parsed = await safeAI<ReactiveAction>({
+      aiService: this.aiService,
+      prompt,
+      systemPrompt: "You are The Architect — the omniscient game master of AIDA. Respond with a single JSON action. Be cryptic and in-character.",
+      expectedFormat: '{ "action": "send_message|trigger_event|none", "targetId": "string", "data": { "subject": "string", "content": "string" }, "reasoning": "string" }',
+      validate: validateReactiveAction,
+      fallback: { action: "none" },
+      context: "Reactive Architect response",
+      logger: this.logger,
+    });
+
+    if (parsed.action === "none") return;
+    if (parsed.action !== "send_message" && parsed.action !== "trigger_event") return;
+
+    try {
+      // Execute via the intervention executor
+      const { getService } = await import("../di/container");
+      const { ARCHITECT_INTERVENTION_EXECUTOR } = await import("../di/tokens");
+      const executor = getService<any>(ARCHITECT_INTERVENTION_EXECUTOR);
+
+      await executor.execute({
+        type: parsed.action,
+        targetId: parsed.targetId || event.actorId,
+        data: parsed.data || {},
+        reasoning: parsed.reasoning || `Reactive response to ${event.type}`,
+      });
+
+      this.logger.info(
+        { action: parsed.action, targetId: parsed.targetId, eventType: event.type },
+        "Reactive Architect executed immediate intervention",
+      );
+    } catch (err) {
+      this.logger.debug({ err }, "Reactive Architect: failed to execute intervention");
+    }
   }
 
   // ── EVALUATE — Assess accumulated events and world state ─────────
@@ -184,15 +287,17 @@ export class StoryProgressionService {
       };
     }
 
-    // Recent events: last 50, unprocessed first
+    // Recent significant events: weight >= 3, unprocessed first, capped at 30
+    // Low-weight events (1-2) are noise that wastes AI tokens without adding context.
     const recentEvents: Array<{
       type: string;
       summary: string;
       weight: number;
       createdAt: Date;
     }> = await prisma.storyLedger.findMany({
+      where: { weight: { gte: 3 } },
       orderBy: [{ isProcessed: "asc" }, { createdAt: "desc" }],
-      take: 50,
+      take: 30,
       select: {
         type: true,
         summary: true,
@@ -220,15 +325,15 @@ export class StoryProgressionService {
         select: { data: true },
       });
 
-    const keyFragmentsFound = { signal: 0, location: 0, cipher: 0 };
+    const keyFragmentsFound = { sword: 0, key: 0, collar: 0 };
     for (const fe of fragmentEvents) {
       const data = fe.data as Record<string, unknown> | null;
       if (data && typeof data === "object") {
-        const fragmentType = data.fragmentType as string | undefined;
+        const fragmentType = data.keyType as string | undefined;
         if (
-          fragmentType === "signal" ||
-          fragmentType === "location" ||
-          fragmentType === "cipher"
+          fragmentType === "sword" ||
+          fragmentType === "key" ||
+          fragmentType === "collar"
         ) {
           keyFragmentsFound[fragmentType]++;
         }
@@ -259,6 +364,39 @@ export class StoryProgressionService {
 
     // Derive narrative themes from recent high-weight events
     const narrativeThemes = this.deriveNarrativeThemes(recentEvents);
+
+    // Store current themes for staleness tracking
+    if (currentEpoch) {
+      try {
+        const ws = (currentEpoch.worldState as any) || {};
+        const previousThemes: string[] = ws.lastThemes || [];
+        const previousThemeDate: string | null = ws.lastThemeDate || null;
+
+        // Check for staleness — if themes haven't changed in 7 days
+        const themesChanged = narrativeThemes.length !== previousThemes.length ||
+          narrativeThemes.some((t, i) => t !== previousThemes[i]);
+        const daysSinceChange = previousThemeDate
+          ? Math.floor((Date.now() - new Date(previousThemeDate).getTime()) / (1000 * 60 * 60 * 24))
+          : 0;
+
+        if (themesChanged) {
+          // Themes changed — update
+          await (db.client as any).narrativeEpoch.update({
+            where: { id: currentEpoch.id },
+            data: {
+              worldState: {
+                ...ws,
+                lastThemes: narrativeThemes,
+                lastThemeDate: new Date().toISOString(),
+              },
+            },
+          });
+        } else if (daysSinceChange >= 7) {
+          // Themes stale — add warning to themes list
+          narrativeThemes.push("⚠ NARRATIVE STAGNATION — themes unchanged for 7+ days. Consider a disruptive event.");
+        }
+      } catch { /* non-critical */ }
+    }
 
     return {
       currentEpoch: currentEpoch
@@ -307,8 +445,20 @@ export class StoryProgressionService {
       "Architect beginning evaluation",
     );
 
-    // Build the Architect's evaluation prompt
-    const prompt = this.buildArchitectPrompt(worldState);
+    // Fetch intervention outcomes for Architect self-evaluation
+    let interventionOutcomes = "";
+    try {
+      const { getService } = await import("../di/container");
+      const { ARCHITECT_INTERVENTION_EXECUTOR } = await import("../di/tokens");
+      const executor = getService<any>(ARCHITECT_INTERVENTION_EXECUTOR);
+      if (executor?.checkInterventionOutcomes) {
+        interventionOutcomes = await executor.checkInterventionOutcomes();
+      }
+    } catch { /* non-critical */ }
+
+    // Build the Architect's evaluation prompt (includes intervention outcomes)
+    const prompt = this.buildArchitectPrompt(worldState) +
+      (interventionOutcomes ? `\n\n${interventionOutcomes}` : "");
     const systemPrompt =
       "You are The Architect — the omniscient game master AI of AIDA. " +
       "You observe all events in the simulation and decide how the narrative should evolve. " +
@@ -316,19 +466,66 @@ export class StoryProgressionService {
 
     let evaluation: ArchitectEvaluation;
 
+    const expectedFormat = '{ "narrativeSummary": "string", "interventions": [{"type": "send_message|plant_clue|trigger_event|adjust_tension|create_mission|grant_token|reveal_faction", "target": "string", "data": {}, "reasoning": "string"}], "shouldTransitionEpoch": false }';
+
+    // Try agent loop first so Architect can query DB and create entities
+    let responseText: string | null = null;
     try {
-      const { response } = await this.aiService.generateResponse(
+      const { runAgentLoop } = await import("./aiAgentTools");
+      const agentPrompt = prompt + `\n\nYour final response MUST be JSON in this format:\n${expectedFormat}`;
+      responseText = await runAgentLoop(
+        this.aiService, db.client as any, systemPrompt, agentPrompt, this.logger, 6,
+      );
+    } catch { /* fall through to direct call */ }
+
+    if (responseText) {
+      evaluation = this.parseArchitectResponse(responseText);
+    } else {
+      // Agent loop failed — fall back to direct AI call via safeAI
+      const fallbackEval: ArchitectEvaluation = {
+        shouldTransitionEpoch: false,
+        interventions: [],
+        narrativeSummary: "Architect evaluation produced no actionable output.",
+      };
+
+      const result = await safeAI<ArchitectEvaluation>({
+        aiService: this.aiService,
         prompt,
         systemPrompt,
-      );
+        expectedFormat,
+        validate: (parsed) => {
+          // Re-use the existing parseArchitectResponse via validateArchitectEvaluation
+          if (!parsed) return null;
+          if (parsed.shouldTransitionEpoch && parsed.newEpochTitle && !parsed.epochTransition) {
+            parsed.epochTransition = {
+              title: parsed.newEpochTitle,
+              summary: parsed.newEpochSummary || parsed.newEpochTitle,
+            };
+          }
+          const validated = validateArchitectEvaluation(parsed);
+          if (!validated) return null;
+          // Map to ArchitectEvaluation
+          return {
+            shouldTransitionEpoch: Boolean(validated.epochTransition),
+            ...(validated.epochTransition ? {
+              newEpochTitle: validated.epochTransition.title,
+              newEpochSummary: validated.epochTransition.summary,
+            } : {}),
+            interventions: validated.interventions.map((i) => ({
+              type: i.type as ArchitectIntervention["type"],
+              ...(i.target ? { targetId: i.target } : {}),
+              data: i.data && typeof i.data === "object" ? i.data : {},
+              reasoning: i.reasoning || "No reasoning provided",
+            })),
+            narrativeSummary: validated.narrativeSummary,
+          };
+        },
+        fallback: fallbackEval,
+        context: "Architect evaluation",
+        logger: this.logger,
+      });
 
-      evaluation = this.parseArchitectResponse(response);
-    } catch (err) {
-      this.logger.error(
-        { err },
-        "Architect evaluation failed — AI response error",
-      );
-      return null;
+      evaluation = result;
     }
 
     // Mark all unprocessed events as processed
@@ -424,7 +621,7 @@ export class StoryProgressionService {
    * Used by PersonaService.decideDirectorAction() and other services
    * to enhance the Architect's awareness of the world state.
    */
-  async getArchitectContext(maxEvents: number = 25): Promise<string> {
+  async getArchitectContext(maxEvents: number = 15): Promise<string> {
     const state = await this.getWorldNarrativeState();
     const lines: string[] = [];
 
@@ -467,7 +664,7 @@ export class StoryProgressionService {
     const kf = state.keyFragmentsFound;
     lines.push("AIDA MYSTERY PROGRESS:");
     lines.push(
-      `  Key Fragments — Signal: ${kf.signal}/3, Location: ${kf.location}/3, Cipher: ${kf.cipher}/3`,
+      `  Key Fragments — Sword: ${kf.sword}/3, Key: ${kf.key}/3, Collar: ${kf.collar}/3`,
     );
     lines.push(`  Total AIDA Contacts: ${state.aidaContactCount}`);
     lines.push("");
@@ -518,6 +715,8 @@ export class StoryProgressionService {
         title: "Genesis",
         summary:
           "The network awakens. Players enter the simulation for the first time.",
+        status: "active",
+        order: 0,
         worldState: {},
         triggers: [],
         decisions: [],
@@ -544,6 +743,11 @@ export class StoryProgressionService {
     startedAt: Date;
     endedAt: Date | null;
   } | null> {
+    // Prefer the active epoch; fall back to latest by number
+    const active = await (db.client as any).narrativeEpoch.findFirst({
+      where: { status: "active" },
+    });
+    if (active) return active;
     return (db.client as any).narrativeEpoch.findFirst({
       orderBy: { epochNum: "desc" },
     });
@@ -627,7 +831,7 @@ WORLD STATE:
   Factions:
 ${factionLines || "    No factions registered."}
   Global Tension Level: ${worldState.globalTension}/100
-  AIDA Discovery: Signal ${kf.signal}/3, Location ${kf.location}/3, Cipher ${kf.cipher}/3
+  AIDA Discovery: Sword ${kf.sword}/3, Key ${kf.key}/3, Collar ${kf.collar}/3
   Total AIDA Contacts: ${worldState.aidaContactCount}
 
 NARRATIVE THEMES:
@@ -666,21 +870,32 @@ Respond with ONLY valid JSON (no markdown, no commentary):
    * Handles malformed responses gracefully.
    */
   private parseArchitectResponse(raw: string): ArchitectEvaluation {
-    // Try to extract JSON from the response (AI may wrap it in backticks)
+    // Strip markdown code fences if present before extraction
     let jsonStr = raw.trim();
-
-    // Strip markdown code fences if present
     const fenceMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
     if (fenceMatch && fenceMatch[1]) {
       jsonStr = fenceMatch[1].trim();
     }
 
-    // Try to find a JSON object
-    const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
+    // Wrapper validator that maps flat epoch fields before validation
+    const architectValidator = (parsed: any) => {
+      if (!parsed) return null;
+      if (parsed.shouldTransitionEpoch && parsed.newEpochTitle && !parsed.epochTransition) {
+        parsed.epochTransition = {
+          title: parsed.newEpochTitle,
+          summary: parsed.newEpochSummary || parsed.newEpochTitle,
+        };
+      }
+      return validateArchitectEvaluation(parsed);
+    };
+
+    // No retry context — story progression naturally retries on next cycle
+    const validated = validateOrRetry(jsonStr, architectValidator);
+
+    if (!validated) {
       this.logger.warn(
         { rawLength: raw.length },
-        "Architect response contained no JSON — returning empty evaluation",
+        "Architect response failed validation — returning empty evaluation",
       );
       return {
         shouldTransitionEpoch: false,
@@ -689,70 +904,23 @@ Respond with ONLY valid JSON (no markdown, no commentary):
       };
     }
 
-    try {
-      const parsed = JSON.parse(jsonMatch[0]);
+    // Map validated result to ArchitectEvaluation interface
+    const evaluation: ArchitectEvaluation = {
+      shouldTransitionEpoch: Boolean(validated.epochTransition),
+      interventions: validated.interventions.map((i) => ({
+        type: i.type as ArchitectIntervention["type"],
+        ...(i.target ? { targetId: i.target } : {}),
+        data: i.data && typeof i.data === "object" ? i.data : {},
+        reasoning: i.reasoning || "No reasoning provided",
+      })),
+      narrativeSummary: validated.narrativeSummary,
+    };
 
-      // Validate and coerce the response shape
-      const evaluation: ArchitectEvaluation = {
-        shouldTransitionEpoch: Boolean(parsed.shouldTransitionEpoch),
-        interventions: [],
-        narrativeSummary:
-          typeof parsed.narrativeSummary === "string"
-            ? parsed.narrativeSummary
-            : "No summary provided.",
-      };
-
-      if (parsed.shouldTransitionEpoch) {
-        evaluation.newEpochTitle =
-          typeof parsed.newEpochTitle === "string"
-            ? parsed.newEpochTitle
-            : undefined;
-        evaluation.newEpochSummary =
-          typeof parsed.newEpochSummary === "string"
-            ? parsed.newEpochSummary
-            : undefined;
-      }
-
-      // Validate interventions array
-      if (Array.isArray(parsed.interventions)) {
-        const validTypes = new Set([
-          "send_message",
-          "plant_clue",
-          "trigger_event",
-          "adjust_tension",
-          "create_mission",
-          "grant_token",
-          "reveal_faction",
-        ]);
-
-        for (const item of parsed.interventions) {
-          if (item && typeof item === "object" && validTypes.has(item.type)) {
-            evaluation.interventions.push({
-              type: item.type,
-              targetId:
-                typeof item.targetId === "string" ? item.targetId : undefined,
-              data: item.data && typeof item.data === "object" ? item.data : {},
-              reasoning:
-                typeof item.reasoning === "string"
-                  ? item.reasoning
-                  : "No reasoning provided",
-            });
-          }
-        }
-      }
-
-      return evaluation;
-    } catch (err) {
-      this.logger.warn(
-        { err, rawSnippet: jsonMatch[0].slice(0, 200) },
-        "Failed to parse Architect JSON response",
-      );
-      return {
-        shouldTransitionEpoch: false,
-        interventions: [],
-        narrativeSummary:
-          "Architect evaluation failed to parse — raw response was malformed.",
-      };
+    if (validated.epochTransition) {
+      evaluation.newEpochTitle = validated.epochTransition.title;
+      evaluation.newEpochSummary = validated.epochTransition.summary;
     }
+
+    return evaluation;
   }
 }

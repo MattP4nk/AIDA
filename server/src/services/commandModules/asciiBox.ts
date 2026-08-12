@@ -11,6 +11,13 @@
  */
 
 // ═══════════════════════════════════════════════════════════════
+//  GLOBAL TERMINAL WIDTH
+// ═══════════════════════════════════════════════════════════════
+
+/** Default terminal output width. All panels, tables, and boxes use this. */
+export const TERM_WIDTH = 70;
+
+// ═══════════════════════════════════════════════════════════════
 //  LOW-LEVEL PRIMITIVES
 // ═══════════════════════════════════════════════════════════════
 
@@ -191,21 +198,25 @@ export function table(
   columns: Column[],
   rows: string[][],
   footer?: string,
+  totalWidth?: number,
 ): string[] {
+  // Auto-distribute column widths if totalWidth is provided
+  const cols = totalWidth ? autoSizeColumns(columns, totalWidth) : columns;
+
   // Build horizontal rules
-  const topRule = "┌" + columns.map(c => "─".repeat(c.width + 2)).join("┬") + "┐";
-  const midRule = "├" + columns.map(c => "─".repeat(c.width + 2)).join("┼") + "┤";
-  const botRule = "└" + columns.map(c => "─".repeat(c.width + 2)).join("┴") + "┘";
+  const topRule = "┌" + cols.map(c => "─".repeat(c.width + 2)).join("┬") + "┐";
+  const midRule = "├" + cols.map(c => "─".repeat(c.width + 2)).join("┼") + "┤";
+  const botRule = "└" + cols.map(c => "─".repeat(c.width + 2)).join("┴") + "┘";
 
   // Build header row
-  const headerRow = "│" + columns.map(c =>
+  const headerRow = "│" + cols.map(c =>
     ` ${pad(c.header, c.width)} `
   ).join("│") + "│";
 
   // Build data rows
   const dataRows = rows.map(row =>
-    "│" + columns.map((col, i) => {
-      const cell = row[i] ?? "";
+    "│" + cols.map((col, i) => {
+      const cell = (row[i] ?? "").slice(0, col.width); // truncate to column width
       const formatted = col.align === "right" ? padRight(cell, col.width) : pad(cell, col.width);
       return ` ${formatted} `;
     }).join("│") + "│"
@@ -216,6 +227,29 @@ export function table(
     lines.push(` ${footer}`);
   }
   return lines;
+}
+
+/**
+ * Auto-size column widths to fill the target total width.
+ * Each column's original width is treated as a weight for proportional distribution.
+ */
+function autoSizeColumns(columns: Column[], totalWidth: number): Column[] {
+  // Total border overhead: │ + (space + content + space) per column + │ between columns
+  // = 1 (left border) + cols * 3 (space+content+space per col) + (cols-1) * 1 (│ separators)
+  // Wait: each cell is ` ${content} ` = width + 2, separated by │
+  // Total = 1 + sum(width + 2) + (n-1) * 1 + ... no:
+  // "│" + columns.map(" content ").join("│") + "│"
+  // = 1 + n*(width+2) + (n-1) + 1 = n*width + 2n + n - 1 + 2 = n*width + 3n + 1
+  const n = columns.length;
+  const overhead = 3 * n + 1; // border chars + padding
+  const available = Math.max(totalWidth - overhead, n * 4); // at least 4 chars per col
+
+  const totalWeight = columns.reduce((sum, c) => sum + c.width, 0);
+
+  return columns.map(c => ({
+    ...c,
+    width: Math.max(4, Math.floor((c.width / totalWeight) * available)),
+  }));
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -302,7 +336,7 @@ export interface HelpEntry {
 export function helpPanel(
   title: string,
   entries: HelpEntry[],
-  width = 50,
+  width = TERM_WIDTH,
 ): string[] {
   // Determine the widest command for alignment
   const cmdWidth = Math.min(
@@ -334,7 +368,7 @@ export function helpPanelSections(
     heading: string;
     entries: HelpEntry[];
   }>,
-  width = 50,
+  width = TERM_WIDTH,
 ): string[] {
   // Global command width across all sections
   const allEntries = sections.flatMap(s => s.entries);

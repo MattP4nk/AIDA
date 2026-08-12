@@ -337,10 +337,22 @@ export const OBJECTIVE_TYPES: Map<string, ObjectiveTypeDefinition> = new Map<
     "join_faction",
     {
       type: "join_faction",
-      description: "Join a specific faction",
+      description: "Join a faction",
       progressType: "boolean",
       trackedBy: "onFactionEvent",
-      requiredMetadata: ["factionId"],
+      requiredMetadata: [],
+      optionalMetadata: ["factionId"],
+      exampleTarget: true,
+    },
+  ],
+  [
+    "faction_choice",
+    {
+      type: "faction_choice",
+      description: "Choose a faction or remain neutral",
+      progressType: "boolean",
+      trackedBy: "onFactionEvent",
+      requiredMetadata: [],
       exampleTarget: true,
     },
   ],
@@ -412,8 +424,8 @@ export const OBJECTIVE_TYPES: Map<string, ObjectiveTypeDefinition> = new Map<
       description: "Download a file to your home server",
       progressType: "boolean",
       trackedBy: "onFileOperation",
-      requiredMetadata: ["fileId"],
-      optionalMetadata: ["serverId"],
+      requiredMetadata: [],
+      optionalMetadata: ["fileId", "serverId"],
       exampleTarget: true,
     },
   ],
@@ -476,6 +488,21 @@ export const OBJECTIVE_TYPES: Map<string, ObjectiveTypeDefinition> = new Map<
       exampleTarget: 2,
     },
   ],
+
+  // ── Intel (tracked by onReportSubmitted) ──────────────────────────
+
+  [
+    "report_intel",
+    {
+      type: "report_intel",
+      description: "Report intel to a faction",
+      progressType: "count",
+      trackedBy: "onReportSubmitted",
+      requiredMetadata: [],
+      optionalMetadata: ["reportType"],
+      exampleTarget: 1,
+    },
+  ],
 ]);
 
 // ---------------------------------------------------------------------------
@@ -521,7 +548,8 @@ export const MISSION_CATEGORIES: Map<string, string[]> = new Map<
   ["forum", ["forum_post", "forum_reply", "forum_interaction"]],
   ["exploration", ["explore", "connect_server", "discover_server_type"]],
   ["progression", ["skill_level", "gain_xp", "earn_credits", "spend_credits"]],
-  ["faction", ["join_faction", "faction_reputation", "faction_mission"]],
+  ["faction", ["join_faction", "faction_choice", "faction_reputation", "faction_mission"]],
+  ["intel", ["report_intel"]],
   ["network", ["infiltrate_network", "trace_connection", "exfiltrate_data"]],
   ["bonus", ["claim_bounty", "survive_trace", "scan_subnet"]],
   ["defense", ["defend_home", "decode_content", "download_file"]],
@@ -674,7 +702,9 @@ const OBJECTIVE_HINTS: Record<string, string> = {
 
   // Faction
   join_faction:
-    "Use 'faction join <factionId>' to join the specified faction",
+    "Use 'faction join <name>' to join a faction",
+  faction_choice:
+    "Use 'faction join <name>' to join a faction or 'faction neutral' to remain independent",
   faction_reputation:
     "Complete faction tasks and missions to increase your reputation",
   faction_mission:
@@ -701,6 +731,8 @@ const OBJECTIVE_HINTS: Record<string, string> = {
     "When traced, use 'trace.evade <id>' to successfully evade before time runs out",
   scan_subnet:
     "Use 'subnet <ip/cidr>' to analyze network ranges and discover target addresses",
+  report_intel:
+    "Use 'report server [to <faction>]' or 'report file <name> [to <faction>]' to submit intel",
 };
 
 /**

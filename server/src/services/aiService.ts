@@ -1,8 +1,9 @@
 import { injectable, inject } from "tsyringe";
 import { Logger } from "pino";
 import type { CacheService } from "./cacheService";
-import { LOGGER } from "../di/tokens";
+import { LOGGER, CACHE_SERVICE } from "../di/tokens";
 import crypto from "crypto";
+import { safeExecute } from "../utils/safeExecute";
 
 interface OllamaChatMessage {
   role: "system" | "user" | "assistant";
@@ -29,6 +30,17 @@ interface OllamaChatResponse {
   eval_duration?: number;
 }
 
+/** A failed AI request queued for retry. */
+interface QueuedRequest {
+  id: string;
+  prompt: string;
+  systemPrompt?: string | undefined;
+  expectedFormat?: string | undefined;
+  onSuccess: (response: string) => void | Promise<void>;
+  attempts: number;
+  createdAt: number;
+}
+
 @injectable()
 export class AIService {
   private apiUrl: string;
@@ -43,11 +55,28 @@ export class AIService {
     successfulRequests: 0,
     failedRequests: 0,
     cacheHits: 0,
+    retryQueueSize: 0,
+    retrySuccesses: 0,
   };
+
+  /** Queue of failed requests to retry later. */
+  private retryQueue: QueuedRequest[] = [];
+  private readonly RETRY_QUEUE_MAX = 20;
+  private readonly RETRY_QUEUE_INTERVAL_MS = 30_000; // Process queue every 30s
+  private readonly RETRY_MAX_ATTEMPTS = 3;
+  private readonly RETRY_MAX_AGE_MS = 10 * 60 * 1000; // Drop requests older than 10 min
+  private retryTimer: NodeJS.Timeout | null = null;
+
+  /** Concurrency throttle — prevents flooding the API with parallel requests. */
+  private activeRequests = 0;
+  private readonly MAX_CONCURRENT_REQUESTS = 2;
+  private readonly MAX_QUEUE_DEPTH = 30;
+  private readonly SLOT_TIMEOUT_MS = 120_000; // 120s — cloud 120B model can be slow on complex prompts
+  private requestQueue: Array<{ resolve: () => void }> = [];
 
   constructor(
     @inject(LOGGER) logger: Logger,
-    @inject("CacheService") cacheService: CacheService,
+    @inject(CACHE_SERVICE) cacheService: CacheService,
   ) {
     this.logger = logger;
     this.cacheService = cacheService;
@@ -65,8 +94,8 @@ export class AIService {
     // Cloud mode is active when an API key is present
     this.isCloudMode = !!this.apiKey;
 
-    // Dynamic timeout: cloud GPUs are fast (60s), local CPU inference is slow (120s)
-    this.requestTimeout = this.isCloudMode ? 60000 : 120000;
+    // 120s for both: cloud 120B model needs time for complex prompts, local CPU is slow
+    this.requestTimeout = 120000;
 
     this.logger.info(
       {
@@ -76,6 +105,10 @@ export class AIService {
       },
       `AIService initialized (${this.isCloudMode ? "cloud" : "local"} mode)`,
     );
+
+    // Start retry queue processor
+    this.retryTimer = setInterval(() => this.processRetryQueue(), this.RETRY_QUEUE_INTERVAL_MS);
+    (this.retryTimer as NodeJS.Timeout & { unref?: () => void }).unref?.();
   }
 
   private getHeaders(): Record<string, string> {
@@ -95,6 +128,42 @@ export class AIService {
     return `ai:${crypto.createHash("md5").update(data).digest("hex")}`;
   }
 
+  /** Acquire a slot in the concurrency throttle. */
+  private async acquireSlot(): Promise<void> {
+    if (this.activeRequests < this.MAX_CONCURRENT_REQUESTS) {
+      this.activeRequests++;
+      return;
+    }
+    if (this.requestQueue.length >= this.MAX_QUEUE_DEPTH) {
+      throw new Error("AI service queue full — try again later");
+    }
+    // Wait for a slot to free up (with timeout)
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const idx = this.requestQueue.findIndex(q => q.resolve === wrappedResolve);
+        if (idx >= 0) this.requestQueue.splice(idx, 1);
+        reject(new Error("AI service request timed out waiting for slot"));
+      }, this.SLOT_TIMEOUT_MS);
+
+      const wrappedResolve = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+
+      this.requestQueue.push({ resolve: wrappedResolve });
+    });
+  }
+
+  /** Release a slot in the concurrency throttle. */
+  private releaseSlot(): void {
+    this.activeRequests--;
+    if (this.requestQueue.length > 0) {
+      const next = this.requestQueue.shift()!;
+      this.activeRequests++;
+      next.resolve();
+    }
+  }
+
   private async retryOperation<T>(
     operation: () => Promise<T>,
     maxRetries: number = 3,
@@ -103,35 +172,50 @@ export class AIService {
       try {
         return await operation();
       } catch (error) {
+        const isRateLimit = error instanceof Error && error.message.includes("Too Many Requests");
         if (i === maxRetries - 1) throw error;
-        const delay = 1000 * Math.pow(2, i);
-        this.logger.warn({ attempt: i + 1, delay }, "Retrying AI request");
+        // Use longer backoff for rate limits (5s, 15s, 30s)
+        const delay = isRateLimit
+          ? 5000 * Math.pow(3, i)
+          : 1000 * Math.pow(2, i);
+        this.logger.warn({ attempt: i + 1, delay, isRateLimit }, "Retrying AI request");
         await new Promise((resolve) => setTimeout(resolve, delay));
       }
     }
     throw new Error("Max retries exceeded");
   }
 
+  /**
+   * Generate an AI response.
+   * @param prompt - The user prompt
+   * @param systemPrompt - Optional system prompt
+   * @param expectedFormat - Optional JSON format hint appended to prompt (improves structured output accuracy)
+   */
   public async generateResponse(
     prompt: string,
     systemPrompt?: string,
-    context?: number[],
-  ): Promise<{ response: string; context?: number[] }> {
+    expectedFormat?: string,
+  ): Promise<{ success: boolean; response: string; error?: string }> {
     this.metrics.totalRequests++;
 
-    if (!context) {
-      const cacheKey = this.getCacheKey(prompt, systemPrompt);
-      const cached = this.cacheService.get<{
-        response: string;
-        context?: number[];
-      }>(cacheKey);
-      if (cached) {
-        this.metrics.cacheHits++;
-        this.logger.debug({ cacheKey }, "AI cache hit");
-        return cached;
-      }
+    // Append format instruction to prompt if provided
+    const fullPrompt = expectedFormat
+      ? `${prompt}\n\nRespond ONLY with valid JSON in this exact format:\n${expectedFormat}`
+      : prompt;
+
+    const cacheKey = this.getCacheKey(fullPrompt, systemPrompt);
+    const cached = this.cacheService.get<{
+      success: boolean;
+      response: string;
+    }>(cacheKey);
+    if (cached) {
+      this.metrics.cacheHits++;
+      this.logger.debug({ cacheKey }, "AI cache hit");
+      return cached;
     }
 
+    // Throttle concurrent requests to avoid rate limiting
+    await this.acquireSlot();
     try {
       const result = await this.retryOperation(async () => {
         const messages: OllamaChatMessage[] = [];
@@ -140,7 +224,7 @@ export class AIService {
           messages.push({ role: "system", content: systemPrompt });
         }
 
-        messages.push({ role: "user", content: prompt });
+        messages.push({ role: "user", content: fullPrompt });
 
         const request: OllamaChatRequest = {
           model: this.defaultModel,
@@ -192,21 +276,156 @@ export class AIService {
 
       this.metrics.successfulRequests++;
 
-      if (!context) {
-        const cacheKey = this.getCacheKey(prompt, systemPrompt);
-        this.cacheService.set(cacheKey, result, 300);
-      }
+      const successResult = { success: true as const, ...result };
 
-      return result;
+      // Cache all responses (including those with context)
+      this.cacheService.set(cacheKey, successResult, 300);
+
+      return successResult;
     } catch (error) {
       this.metrics.failedRequests++;
-      this.logger.error(error, "Error generating AI response");
+      const errMsg = error instanceof Error ? error.message : "Unknown AI error";
+      this.logger.error({ err: error }, "Error generating AI response");
       return {
-        response: "... [Connection Lost] ...",
+        success: false,
+        response: "",
+        error: errMsg,
       };
+    } finally {
+      this.releaseSlot();
     }
   }
 
+  /**
+   * Like generateResponse, but throws on failure instead of returning success=false.
+   * Designed for use with safeExecute/safeAI — lets the error handler catch and log.
+   */
+  public async generateOrThrow(
+    prompt: string,
+    systemPrompt?: string,
+    expectedFormat?: string,
+  ): Promise<{ response: string }> {
+    const result = await this.generateResponse(prompt, systemPrompt, expectedFormat);
+    if (!result.success) {
+      throw new Error(result.error || "AI generation failed");
+    }
+    return { response: result.response };
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // Retry Queue — failed requests are retried later
+  // ═══════════════════════════════════════════════════════════════════
+
+  /**
+   * Queue a failed AI request for background retry.
+   * When the retry succeeds, `onSuccess` is called with the response text.
+   * Callers should use their smart fallback immediately and let the queue
+   * handle eventual consistency (e.g., updating a message, adding a file).
+   *
+   * @param expectedFormat - JSON format hint appended to the prompt on retry
+   *   e.g. '{ "title": "string", "description": "string" }'
+   *   This helps the AI produce valid output on the second attempt.
+   */
+  public queueForRetry(
+    prompt: string,
+    systemPrompt: string | undefined,
+    onSuccess: (response: string) => void | Promise<void>,
+    expectedFormat?: string,
+  ): void {
+    // Don't exceed max queue size
+    if (this.retryQueue.length >= this.RETRY_QUEUE_MAX) {
+      // Drop oldest entry
+      this.retryQueue.shift();
+    }
+
+    const id = `retry_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    this.retryQueue.push({
+      id,
+      prompt,
+      systemPrompt,
+      expectedFormat,
+      onSuccess,
+      attempts: 0,
+      createdAt: Date.now(),
+    });
+
+    this.metrics.retryQueueSize = this.retryQueue.length;
+    this.logger.debug({ queueSize: this.retryQueue.length, id }, "AI request queued for retry");
+  }
+
+  /**
+   * Process the retry queue — attempts one request per cycle.
+   * Runs every RETRY_QUEUE_INTERVAL_MS (30s).
+   */
+  private async processRetryQueue(): Promise<void> {
+    if (this.retryQueue.length === 0) return;
+
+    // Purge expired entries
+    const now = Date.now();
+    this.retryQueue = this.retryQueue.filter(
+      (req) => now - req.createdAt < this.RETRY_MAX_AGE_MS,
+    );
+
+    if (this.retryQueue.length === 0) return;
+
+    // Try the oldest request — pass format hint through generateResponse
+    const req = this.retryQueue[0]!;
+    req.attempts++;
+
+    // On retry, strengthen the format instruction
+    const retryFormat = req.expectedFormat
+      ? `IMPORTANT: Your previous response was invalid. ${req.expectedFormat}`
+      : (req.attempts > 1 ? "Respond ONLY with valid JSON. No markdown, no explanation." : undefined);
+
+    try {
+      const result = await this.generateResponse(req.prompt, req.systemPrompt, retryFormat);
+
+      if (result.success) {
+        // Success — remove from queue and call the callback
+        this.retryQueue.shift();
+        this.metrics.retrySuccesses++;
+        this.metrics.retryQueueSize = this.retryQueue.length;
+
+        this.logger.info({ id: req.id, attempts: req.attempts }, "Retry queue: AI request succeeded");
+
+        try {
+          await req.onSuccess(result.response);
+        } catch (cbErr) {
+          this.logger.warn({ err: cbErr, id: req.id }, "Retry queue: onSuccess callback failed");
+        }
+      } else if (req.attempts >= this.RETRY_MAX_ATTEMPTS) {
+        // Max attempts reached — drop it
+        this.retryQueue.shift();
+        this.metrics.retryQueueSize = this.retryQueue.length;
+        this.logger.warn({ id: req.id, attempts: req.attempts }, "Retry queue: request dropped after max attempts");
+      }
+      // Otherwise leave it in queue for next cycle
+    } catch (err) {
+      if (req.attempts >= this.RETRY_MAX_ATTEMPTS) {
+        this.retryQueue.shift();
+        this.metrics.retryQueueSize = this.retryQueue.length;
+      }
+      this.logger.debug({ err, id: req.id }, "Retry queue: attempt failed");
+    }
+  }
+
+  /** Get retry queue stats. */
+  public getRetryQueueStats(): { size: number; successes: number } {
+    return {
+      size: this.retryQueue.length,
+      successes: this.metrics.retrySuccesses,
+    };
+  }
+
+  /** Stop the retry queue processor. */
+  public stopRetryQueue(): void {
+    if (this.retryTimer) {
+      clearInterval(this.retryTimer);
+      this.retryTimer = null;
+    }
+  }
+
+  /** AI-powered content moderation. Wired into messageService.sendPrivateMessage() and forumService.createPost()/createReply(). */
   public async moderate(
     content: string,
   ): Promise<{ safe: boolean; reason?: string }> {
@@ -214,41 +433,52 @@ export class AIService {
     Flag if it contains: illegal content, hate speech, personal information, exploits, or spam.
     Respond ONLY with a JSON object: { "safe": boolean, "reason": string | null }`;
 
-    try {
-      const { response } = await this.generateResponse(content, systemPrompt);
+    return (await safeExecute({
+      fn: async () => {
+        const result = await this.generateResponse(content, systemPrompt, '{ "safe": true|false, "reason": "string|null" }');
+        if (!result.success) {
+          return { safe: true, reason: "Moderation service unavailable" };
+        }
 
-      const jsonMatch = response.match(/\{.*\}/s);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        return {
-          safe: parsed.safe,
-          reason: parsed.reason || undefined,
-        };
-      }
+        const jsonMatch = result.response.match(/\{.*\}/s);
+        if (jsonMatch) {
+          const parsed = JSON.parse(jsonMatch[0]);
+          const reason = (parsed.reason as string) || undefined;
+          if (reason) {
+            return { safe: parsed.safe as boolean, reason };
+          }
+          return { safe: parsed.safe as boolean };
+        }
 
-      return { safe: true };
-    } catch (error) {
-      this.logger.error(error, "Error moderating content");
-      return { safe: true, reason: "Moderation service unavailable" };
-    }
+        return { safe: true };
+      },
+      context: "Moderate content",
+      logger: this.logger,
+      fallback: { safe: true, reason: "Moderation service unavailable" } as { safe: boolean; reason?: string },
+    })()) ?? { safe: true, reason: "Moderation service unavailable" };
   }
 
   public async summarize(content: string): Promise<string> {
     const systemPrompt =
       "Summarize the following text concisely, retaining key facts and entities.";
-    const { response } = await this.generateResponse(content, systemPrompt);
-    return response;
+    const result = await this.generateResponse(content, systemPrompt);
+    if (!result.success) return content; // fallback to original content
+    return result.response;
   }
 
   public async checkHealth(): Promise<boolean> {
-    try {
-      const response = await fetch(`${this.apiUrl}/api/tags`, {
-        headers: this.getHeaders(),
-      });
-      return response.ok;
-    } catch (error) {
-      return false;
-    }
+    return (await safeExecute({
+      fn: async () => {
+        const response = await fetch(`${this.apiUrl}/api/tags`, {
+          headers: this.getHeaders(),
+        });
+        return response.ok;
+      },
+      context: "AI health check",
+      logger: this.logger,
+      silent: true,
+      fallback: false,
+    })()) ?? false;
   }
 
   public getMetrics() {

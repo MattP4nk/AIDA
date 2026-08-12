@@ -5,6 +5,7 @@ import { SavePriority } from "../types/game";
 import { injectable, inject } from "tsyringe";
 import { LOGGER } from "../di/tokens";
 import type { Logger } from "pino";
+import { safeExecute } from "../utils/safeExecute";
 
 @injectable()
 class ProgressService {
@@ -166,39 +167,32 @@ class ProgressService {
     userId: string,
     reason: string = "manual",
   ): Promise<boolean> {
-    try {
-      // Get current progress data
-      const user = await db.client.user.findUnique({
-        where: { id: userId },
-        include: {
-          progress: true,
-        },
-      });
-
-      if (!user) {
-        this.logger.error({ userId }, "User not found");
-        return false;
-      }
-
-      // Note: User model doesn't have lastSavedAt field
-      // Consider adding it to schema if needed for tracking
-
-      // If progress doesn't exist, create it
-      if (!user.progress) {
-        await db.client.playerProgress.create({
-          data: {
-            userId: userId,
-            // Default values will be set by schema
-          },
+    return await safeExecute({
+      fn: async () => {
+        // Ensure player progress record exists
+        const user = await db.client.user.findUnique({
+          where: { id: userId },
+          include: { progress: true },
         });
-      }
 
-      this.logger.info({ userId, reason }, "Saved progress for user");
-      return true;
-    } catch (error) {
-      this.logger.error({ err: error, userId }, "Error saving progress for user");
-      return false;
-    }
+        if (!user) {
+          this.logger.error({ userId }, "User not found");
+          return false;
+        }
+
+        if (!user.progress) {
+          await db.client.playerProgress.create({
+            data: { userId },
+          });
+        }
+
+        this.logger.debug({ userId, reason }, "Progress checkpoint saved");
+        return true;
+      },
+      context: "Save player progress",
+      logger: this.logger,
+      fallback: false,
+    })() as boolean;
   }
 
   public async saveOnEvent(userId: string, eventType: string): Promise<void> {
@@ -242,132 +236,136 @@ class ProgressService {
     userId: string,
     reason: string = "manual",
   ): Promise<ProgressBackup | null> {
-    try {
-      const user = await db.client.user.findUnique({
-        where: { id: userId },
-        include: {
-          progress: true,
-          ownedServers: {
-            select: {
-              id: true,
-              name: true,
-              ipAddress: true,
-              type: true,
+    return await safeExecute({
+      fn: async () => {
+        const user = await db.client.user.findUnique({
+          where: { id: userId },
+          include: {
+            progress: true,
+            ownedServers: {
+              select: {
+                id: true,
+                name: true,
+                ipAddress: true,
+                type: true,
+              },
             },
           },
-        },
-      });
+        });
 
-      if (!user) {
-        this.logger.error({ userId }, "User not found for backup");
-        return null;
-      }
+        if (!user) {
+          this.logger.error({ userId }, "User not found for backup");
+          return null;
+        }
 
-      const backupData = {
-        user: {
-          id: user.id,
-          username: user.username,
-          email: user.email,
-          homeIp: user.homeIp,
-          lastLogin: user.lastLogin,
-        },
-        progress: user.progress,
-        servers: user.ownedServers,
-        timestamp: new Date(),
-        version: "1.0",
-      };
+        const backupData = {
+          user: {
+            id: user.id,
+            username: user.username,
+            email: user.email,
+            homeIp: user.homeIp,
+            lastLogin: user.lastLogin,
+          },
+          progress: user.progress,
+          servers: user.ownedServers,
+          timestamp: new Date(),
+          version: "1.0",
+        };
 
-      // Calculate checksum for data integrity
-      const checksum = this.calculateChecksum(JSON.stringify(backupData));
+        // Calculate checksum for data integrity
+        const checksum = this.calculateChecksum(JSON.stringify(backupData));
 
-      const backup: ProgressBackup = {
-        id: `backup_${userId}_${Date.now()}`,
-        userId,
-        data: backupData,
-        createdAt: new Date(),
-        reason,
-        checksum,
-      };
-
-      // Store backup in database
-      await db.client.progressBackup.create({
-        data: {
+        const backup: ProgressBackup = {
+          id: `backup_${userId}_${Date.now()}`,
           userId,
           data: backupData,
+          createdAt: new Date(),
           reason,
           checksum,
-        },
-      });
+        };
 
-      // Clean up old backups to maintain retention policy
-      await this.deleteOldBackups(userId, 5);
+        // Store backup in database
+        await db.client.progressBackup.create({
+          data: {
+            userId,
+            data: backupData,
+            reason,
+            checksum,
+          },
+        });
 
-      this.logger.info({ userId, reason }, "Created backup for user");
-      return backup;
-    } catch (error) {
-      this.logger.error({ err: error, userId }, "Error creating backup for user");
-      return null;
-    }
+        // Clean up old backups to maintain retention policy
+        await this.deleteOldBackups(userId, 5);
+
+        this.logger.info({ userId, reason }, "Created backup for user");
+        return backup;
+      },
+      context: "Create backup",
+      logger: this.logger,
+      fallback: null as ProgressBackup | null,
+    })() as ProgressBackup | null;
   }
 
   public async restoreBackup(
     userId: string,
     backupId: string,
   ): Promise<boolean> {
-    try {
-      // Fetch backup from database
-      const backup = await db.client.progressBackup.findUnique({
-        where: { id: backupId },
-      });
-
-      if (!backup) {
-        this.logger.error({ backupId }, "Backup not found");
-        return false;
-      }
-
-      if (backup.userId !== userId) {
-        this.logger.error(
-          { backupId, userId },
-          "Backup does not belong to user",
-        );
-        return false;
-      }
-
-      // Verify checksum
-      const currentChecksum = this.calculateChecksum(
-        JSON.stringify(backup.data),
-      );
-      if (backup.checksum && currentChecksum !== backup.checksum) {
-        this.logger.error(
-          { backupId },
-          "Checksum mismatch for backup - data may be corrupted",
-        );
-        return false;
-      }
-
-      const backupData = backup.data as any;
-
-      // Restore progress data
-      if (backupData.progress) {
-        await db.client.playerProgress.update({
-          where: { userId },
-          data: {
-            ...backupData.progress,
-            userId, // Ensure userId is preserved
-            updatedAt: new Date(),
-          },
+    return await safeExecute({
+      fn: async () => {
+        // Fetch backup from database
+        const backup = await db.client.progressBackup.findUnique({
+          where: { id: backupId },
         });
-      }
 
-      this.logger.info(
-        { backupId, userId },
-        "Successfully restored backup for user",
-      );
-      return true;
-    } catch (error) {
-      this.logger.error({ err: error, backupId }, "Error restoring backup");
-      return false;
-    }
+        if (!backup) {
+          this.logger.error({ backupId }, "Backup not found");
+          return false;
+        }
+
+        if (backup.userId !== userId) {
+          this.logger.error(
+            { backupId, userId },
+            "Backup does not belong to user",
+          );
+          return false;
+        }
+
+        // Verify checksum
+        const currentChecksum = this.calculateChecksum(
+          JSON.stringify(backup.data),
+        );
+        if (backup.checksum && currentChecksum !== backup.checksum) {
+          this.logger.error(
+            { backupId },
+            "Checksum mismatch for backup - data may be corrupted",
+          );
+          return false;
+        }
+
+        const backupData = backup.data as any;
+
+        // Restore progress data
+        if (backupData.progress) {
+          await db.client.playerProgress.update({
+            where: { userId },
+            data: {
+              ...backupData.progress,
+              userId, // Ensure userId is preserved
+              updatedAt: new Date(),
+            },
+          });
+        }
+
+        this.logger.info(
+          { backupId, userId },
+          "Successfully restored backup for user",
+        );
+        return true;
+      },
+      context: "Restore backup",
+      logger: this.logger,
+      fallback: false,
+    })() as boolean;
   }
 
   /**
@@ -377,18 +375,20 @@ class ProgressService {
     userId: string,
     limit: number = 10,
   ): Promise<ProgressBackup[]> {
-    try {
-      const backups = await db.client.progressBackup.findMany({
-        where: { userId },
-        orderBy: { createdAt: "desc" },
-        take: limit,
-      });
+    return await safeExecute({
+      fn: async () => {
+        const backups = await db.client.progressBackup.findMany({
+          where: { userId },
+          orderBy: { createdAt: "desc" },
+          take: limit,
+        });
 
-      return backups as ProgressBackup[];
-    } catch (error) {
-      this.logger.error({ err: error, userId }, "Error fetching backups for user");
-      return [];
-    }
+        return backups as ProgressBackup[];
+      },
+      context: "Fetch backups",
+      logger: this.logger,
+      fallback: [] as ProgressBackup[],
+    })() as ProgressBackup[];
   }
 
   /**
@@ -398,39 +398,38 @@ class ProgressService {
     userId: string,
     keepCount: number = 5,
   ): Promise<number> {
-    try {
-      // Get all backups for user
-      const backups = await db.client.progressBackup.findMany({
-        where: { userId },
-        orderBy: { createdAt: "desc" },
-      });
+    return await safeExecute({
+      fn: async () => {
+        // Get all backups for user
+        const backups = await db.client.progressBackup.findMany({
+          where: { userId },
+          orderBy: { createdAt: "desc" },
+        });
 
-      // If we have more than keepCount, delete the oldest ones
-      if (backups.length <= keepCount) {
-        return 0;
-      }
+        // If we have more than keepCount, delete the oldest ones
+        if (backups.length <= keepCount) {
+          return 0;
+        }
 
-      const backupsToDelete = backups.slice(keepCount);
-      const idsToDelete = backupsToDelete.map((b) => b.id);
+        const backupsToDelete = backups.slice(keepCount);
+        const idsToDelete = backupsToDelete.map((b) => b.id);
 
-      const result = await db.client.progressBackup.deleteMany({
-        where: {
-          id: { in: idsToDelete },
-        },
-      });
+        const result = await db.client.progressBackup.deleteMany({
+          where: {
+            id: { in: idsToDelete },
+          },
+        });
 
-      this.logger.info(
-        { count: result.count, userId },
-        "Deleted old backups for user",
-      );
-      return result.count;
-    } catch (error) {
-      this.logger.error(
-        { err: error, userId },
-        "Error deleting old backups for user",
-      );
-      return 0;
-    }
+        this.logger.info(
+          { count: result.count, userId },
+          "Deleted old backups for user",
+        );
+        return result.count;
+      },
+      context: "Delete old backups",
+      logger: this.logger,
+      fallback: 0,
+    })() as number;
   }
 
   private calculateChecksum(data: string): string {
@@ -449,70 +448,76 @@ class ProgressService {
   public async saveAll(reason: string = "shutdown"): Promise<void> {
     this.logger.info("Saving all player progress");
 
-    try {
-      const onlineUsers = await this.getOnlineUsers();
+    await safeExecute({
+      fn: async () => {
+        const onlineUsers = await this.getOnlineUsers();
 
-      this.logger.info({ count: onlineUsers.length }, "Found online users to save");
+        this.logger.info({ count: onlineUsers.length }, "Found online users to save");
 
-      let successCount = 0;
-      let errorCount = 0;
+        let successCount = 0;
+        let errorCount = 0;
 
-      for (const userId of onlineUsers) {
-        try {
-          await this.savePlayerProgress(userId, reason);
-          successCount++;
-        } catch (error) {
-          this.logger.error({ err: error, userId }, "Error saving user");
-          errorCount++;
+        for (const userId of onlineUsers) {
+          try {
+            await this.savePlayerProgress(userId, reason);
+            successCount++;
+          } catch (error) {
+            this.logger.error({ err: error, userId }, "Error saving user");
+            errorCount++;
+          }
         }
-      }
 
-      this.logger.info(
-        { successCount, errorCount },
-        "Saved progress for users",
-      );
-    } catch (error) {
-      this.logger.error({ err: error }, "Error in saveAll");
-    }
+        this.logger.info(
+          { successCount, errorCount },
+          "Saved progress for users",
+        );
+      },
+      context: "Save all player progress",
+      logger: this.logger,
+    })();
   }
 
   public async createBackupForAll(): Promise<number> {
     this.logger.info("Creating backups for all online users");
 
-    try {
-      const onlineUsers = await this.getOnlineUsers();
+    return await safeExecute({
+      fn: async () => {
+        const onlineUsers = await this.getOnlineUsers();
 
-      let successCount = 0;
+        let successCount = 0;
 
-      for (const userId of onlineUsers) {
-        const backup = await this.createBackup(userId, "batch_backup");
-        if (backup) {
-          successCount++;
+        for (const userId of onlineUsers) {
+          const backup = await this.createBackup(userId, "batch_backup");
+          if (backup) {
+            successCount++;
+          }
         }
-      }
 
-      this.logger.info({ count: successCount }, "Created backups");
-      return successCount;
-    } catch (error) {
-      this.logger.error({ err: error }, "Error creating backups");
-      return 0;
-    }
+        this.logger.info({ count: successCount }, "Created backups");
+        return successCount;
+      },
+      context: "Create backups for all users",
+      logger: this.logger,
+      fallback: 0,
+    })() as number;
   }
 
   // ==================== UTILITY METHODS ====================
 
   private async getOnlineUsers(): Promise<string[]> {
-    try {
-      const users = await db.client.user.findMany({
-        where: { isOnline: true },
-        select: { id: true },
-      });
+    return await safeExecute({
+      fn: async () => {
+        const users = await db.client.user.findMany({
+          where: { isOnline: true },
+          select: { id: true },
+        });
 
-      return users.map((user) => user.id);
-    } catch (error) {
-      this.logger.error({ err: error }, "Error getting online users");
-      return [];
-    }
+        return users.map((user) => user.id);
+      },
+      context: "Get online users",
+      logger: this.logger,
+      fallback: [] as string[],
+    })() as string[];
   }
 
   public getQueueSize(): number {
@@ -562,53 +567,55 @@ class ProgressService {
   }
 
   public async validateUserProgress(userId: string): Promise<boolean> {
-    try {
-      const user = await db.client.user.findUnique({
-        where: { id: userId },
-        include: {
-          progress: true,
-        },
-      });
+    return await safeExecute({
+      fn: async () => {
+        const user = await db.client.user.findUnique({
+          where: { id: userId },
+          include: {
+            progress: true,
+          },
+        });
 
-      if (!user) {
-        this.logger.error({ userId }, "User not found");
-        return false;
-      }
+        if (!user) {
+          this.logger.error({ userId }, "User not found");
+          return false;
+        }
 
-      if (!user.progress) {
-        this.logger.error({ userId }, "No progress found for user");
-        return false;
-      }
+        if (!user.progress) {
+          this.logger.error({ userId }, "No progress found for user");
+          return false;
+        }
 
-      // Validate progress data
-      const progress = user.progress;
+        // Validate progress data
+        const progress = user.progress;
 
-      const isValid =
-        progress.level >= 1 &&
-        progress.experience >= 0 &&
-        progress.credits >= 0 &&
-        progress.hacking >= 0 &&
-        progress.hacking <= 100 &&
-        progress.networking >= 0 &&
-        progress.networking <= 100 &&
-        progress.cryptography >= 0 &&
-        progress.cryptography <= 100 &&
-        progress.stealth >= 0 &&
-        progress.stealth <= 100 &&
-        progress.socialEng >= 0 &&
-        progress.socialEng <= 100 &&
-        progress.forensics >= 0 &&
-        progress.forensics <= 100;
+        const isValid =
+          progress.level >= 1 &&
+          progress.experience >= 0 &&
+          progress.credits >= 0 &&
+          progress.hacking >= 0 &&
+          progress.hacking <= 100 &&
+          progress.networking >= 0 &&
+          progress.networking <= 100 &&
+          progress.cryptography >= 0 &&
+          progress.cryptography <= 100 &&
+          progress.stealth >= 0 &&
+          progress.stealth <= 100 &&
+          progress.socialEng >= 0 &&
+          progress.socialEng <= 100 &&
+          progress.forensics >= 0 &&
+          progress.forensics <= 100;
 
-      if (!isValid) {
-        this.logger.error({ userId }, "Invalid progress data for user");
-      }
+        if (!isValid) {
+          this.logger.error({ userId }, "Invalid progress data for user");
+        }
 
-      return isValid;
-    } catch (error) {
-      this.logger.error({ err: error, userId }, "Error validating progress for user");
-      return false;
-    }
+        return isValid;
+      },
+      context: "Validate user progress",
+      logger: this.logger,
+      fallback: false,
+    })() as boolean;
   }
 
   public resetStats(): void {

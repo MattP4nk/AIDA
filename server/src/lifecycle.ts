@@ -3,7 +3,7 @@ import { Server as SocketIOServer } from "socket.io";
 import logger from "./logger";
 import { db } from "./database/client";
 import { getService } from "./di/container";
-import { GAME_STATE_MANAGER, PROGRESS_SERVICE, AI_SCHEDULER_SERVICE, RESOURCE_SERVICE, WARFARE_SERVICE } from "./di/tokens";
+import { GAME_STATE_MANAGER, PROGRESS_SERVICE, AI_SCHEDULER_SERVICE, RESOURCE_SERVICE, WARFARE_SERVICE, AI_SERVICE, CONTENT_QUEUE_SERVICE, HACK_SERVICE } from "./di/tokens";
 import { stopCsrfCleanup } from "./middleware/csrf";
 import type GameStateManager from "./services/gameStateManager";
 import type ProgressService from "./services/progressService";
@@ -22,6 +22,13 @@ export async function gracefulShutdown(
 ): Promise<void> {
   if (isShuttingDown) return;
   isShuttingDown = true;
+
+  // Force exit after 15 seconds if graceful shutdown hangs
+  const forceExitTimer = setTimeout(() => {
+    logger.error("Shutdown timed out after 15s, forcing exit");
+    process.exit(1);
+  }, 15_000);
+  forceExitTimer.unref(); // Don't prevent exit if everything else finishes
 
   logger.info({ signal }, "Received signal, starting graceful shutdown");
 
@@ -67,17 +74,44 @@ export async function gracefulShutdown(
       logger.info("Mission expiration checker stopped");
     } catch { /* Not fatal */ }
 
+    // Stop AI retry queue
+    try {
+      const aiService = getService<any>(AI_SERVICE);
+      aiService.stopRetryQueue();
+      logger.info("AI retry queue stopped");
+    } catch { /* Not fatal */ }
+
+    // Stop content queue
+    try {
+      const contentQueueService = getService<any>(CONTENT_QUEUE_SERVICE);
+      await contentQueueService.stop();
+      logger.info("Content queue stopped");
+    } catch { /* Not fatal */ }
+
+    // Clear hack session timers
+    try {
+      const hackService = getService<any>(HACK_SERVICE);
+      hackService.cleanup();
+      logger.info("Hack session timers cleared");
+    } catch { /* Not fatal */ }
+
     // Stop CSRF cleanup timer
     stopCsrfCleanup();
 
     // Stop accepting new connections
-    server.close(() => {
-      logger.info("HTTP server closed");
+    await new Promise<void>((resolve) => {
+      server.close(() => {
+        logger.info("HTTP server closed");
+        resolve();
+      });
     });
 
     // Close Socket.IO connections
-    io.close(() => {
-      logger.info("Socket.IO server closed");
+    await new Promise<void>((resolve) => {
+      io.close(() => {
+        logger.info("Socket.IO server closed");
+        resolve();
+      });
     });
 
     // Disconnect from database

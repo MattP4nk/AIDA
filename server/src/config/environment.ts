@@ -113,9 +113,19 @@ export const isProduction = config.NODE_ENV === "production";
 export const isTest = config.NODE_ENV === "test";
 
 /** Single source of truth for allowed CORS origins */
-export const CORS_ORIGINS: string | string[] =
-  process.env.CORS_ORIGIN ||
-  ["http://localhost:8080", "http://localhost:8081", "http://localhost:5173"];
+const ORIGIN_REGEX = /^https?:\/\/[a-zA-Z0-9._-]+(:\d+)?$/;
+export const CORS_ORIGINS: string[] = (() => {
+  const defaults = ["http://localhost:8080", "http://localhost:8081", "http://localhost:5173"];
+  if (!process.env.CORS_ORIGIN) return defaults;
+  const origins = process.env.CORS_ORIGIN.split(",").map(s => s.trim()).filter(Boolean);
+  // Validate all origins are proper URLs (reject wildcards, attacker domains with paths, etc.)
+  for (const origin of origins) {
+    if (!ORIGIN_REGEX.test(origin)) {
+      throw new Error(`Invalid CORS origin: "${origin}" — must be http(s)://hostname(:port) with no path`);
+    }
+  }
+  return origins.length > 0 ? origins : defaults;
+})();
 
 // Validation
 export const validateConfig = (): void => {

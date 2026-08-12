@@ -4,6 +4,7 @@ import { Server as SocketIOServer } from "socket.io";
 import { prisma } from "../database/client";
 import { injectable, inject } from "tsyringe";
 import { LOGGER, SOCKET_IO } from "../di/tokens";
+import { safeExecute } from "../utils/safeExecute";
 
 /**
  * Online player information
@@ -152,7 +153,8 @@ export class PlayerPresenceService extends EventEmitter {
       this.emit("player_online", onlinePlayer);
       this.logger.info({ username: user.username }, "Player is now online");
     } catch (error) {
-      this.logger.error({ err: error }, "Error marking player online");
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.logger.debug?.({ err, context: "playerConnected" }, `[playerConnected] ${err.message}`);
     }
   }
 
@@ -195,7 +197,8 @@ export class PlayerPresenceService extends EventEmitter {
       this.emit("player_offline", { userId, username: player.username });
       this.logger.info({ username: player.username }, "Player is now offline");
     } catch (error) {
-      this.logger.error({ err: error }, "Error marking player offline");
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.logger.debug?.({ err, context: "playerDisconnected" }, `[playerDisconnected] ${err.message}`);
     }
   }
 
@@ -298,7 +301,8 @@ export class PlayerPresenceService extends EventEmitter {
       this.emit("player_joined_server", { userId, serverId });
       this.logger.info({ username: player.username, serverName: server?.name || serverId }, "Player joined server");
     } catch (error) {
-      this.logger.error({ err: error }, "Error handling player server join");
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.logger.debug?.({ err, context: "playerJoinedServer" }, `[playerJoinedServer] ${err.message}`);
     }
   }
 
@@ -342,7 +346,8 @@ export class PlayerPresenceService extends EventEmitter {
       this.emit("player_left_server", { userId, serverId });
       this.logger.info({ username: player.username, serverId }, "Player left server");
     } catch (error) {
-      this.logger.error({ err: error }, "Error handling player server leave");
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.logger.debug?.({ err, context: "playerLeftServer" }, `[playerLeftServer] ${err.message}`);
     }
   }
 
@@ -364,27 +369,29 @@ export class PlayerPresenceService extends EventEmitter {
   public async getServerOccupancy(
     serverId: string,
   ): Promise<ServerOccupancy | null> {
-    try {
-      const server = await prisma.gameServer.findUnique({
-        where: { id: serverId },
-      });
+    return (await safeExecute({
+      fn: async () => {
+        const server = await prisma.gameServer.findUnique({
+          where: { id: serverId },
+        });
 
-      if (!server) return null;
+        if (!server) return null;
 
-      const players = this.getPlayersOnServer(serverId);
+        const players = this.getPlayersOnServer(serverId);
 
-      return {
-        serverId: server.id,
-        serverName: server.name,
-        players,
-        playerCount: players.length,
-        maxConnections: server.maxConnections,
-        isPublic: true, // Could be based on server.accessRules
-      };
-    } catch (error) {
-      this.logger.error({ err: error }, "Error getting server occupancy");
-      return null;
-    }
+        return {
+          serverId: server.id,
+          serverName: server.name,
+          players,
+          playerCount: players.length,
+          maxConnections: server.maxConnections,
+          isPublic: true, // Could be based on server.accessRules
+        };
+      },
+      context: "Get server occupancy",
+      logger: this.logger,
+      fallback: null as ServerOccupancy | null,
+    })()) ?? null;
   }
 
   // ==================== PLAYER DISCOVERY ====================
@@ -474,7 +481,8 @@ export class PlayerPresenceService extends EventEmitter {
 
       return details;
     } catch (error) {
-      this.logger.error({ err: error }, "Error getting player details");
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.logger.debug?.({ err, context: "getPlayerDetails" }, `[getPlayerDetails] ${err.message}`);
       return null;
     }
   }

@@ -1,9 +1,10 @@
 import { Router, Request, Response } from "express";
-import logger from "../logger";
-import { authenticateToken } from "../middleware/auth";
+import { authenticateToken, userRateLimit } from "../middleware/auth";
+import { asyncHandler } from "../middleware/setup";
 import { getService } from "../di/container";
 import { COMMAND_PROCESSOR } from "../di/tokens";
 import type CommandProcessor from "../services/commandProcessor";
+import { GameError } from "../../../shared/types";
 import {
   validateCommandExecution,
   handleValidationErrors,
@@ -11,8 +12,9 @@ import {
 
 const router = Router();
 
-// All command routes require authentication
+// All command routes require authentication + per-user rate limiting
 router.use(authenticateToken);
+router.use(userRateLimit(30)); // 30 commands per minute per user
 
 /**
  * POST /api/command/execute
@@ -38,21 +40,12 @@ router.post(
   "/execute",
   validateCommandExecution(),
   handleValidationErrors,
-  async (req: Request, res: Response) => {
-    try {
+  asyncHandler(async (req: Request, res: Response) => {
       const userId = req.user?.id;
-      if (!userId) {
-        res.status(401).json({
-          success: false,
-          output: ["Authentication required"],
-          exitCode: 1,
-          timestamp: new Date(),
-        });
-        return;
-      }
+      if (!userId) throw new GameError("Authentication required", "AUTH_REQUIRED", 401);
 
       const commandProcessor = getService<CommandProcessor>(COMMAND_PROCESSOR);
-      const { command, serverId } = req.body;
+      const { command, serverId, terminalCols } = req.body;
 
       // Parse command
       const parsed = commandProcessor.parseCommand(userId, command, serverId);
@@ -89,6 +82,9 @@ router.post(
         userId,
         parsed,
         serverId,
+        undefined,
+        terminalCols ? Number(terminalCols) : undefined,
+        req.user?.role,
       );
 
       // Determine exit code: use provided exitCode, or derive from success
@@ -113,16 +109,7 @@ router.post(
         openDialog: result.openDialog, // Optional dialog trigger for social features
         timestamp: new Date(),
       });
-    } catch (error) {
-      logger.error({ err: error }, "Error executing command");
-      res.status(500).json({
-        success: false,
-        output: ["Internal server error while executing command"],
-        exitCode: 1,
-        timestamp: new Date(),
-      });
-    }
-  },
+  }),
 );
 
 export default router;

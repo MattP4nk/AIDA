@@ -177,10 +177,17 @@
 
         try {
             // Use 'mail' command if subject is provided, otherwise 'msg'
+            // Quote recipient if it contains spaces (e.g., "The Architect")
             const encryptFlag = isEncrypted ? " --encrypt" : "";
-            const command = composeSubject.trim()
-                ? `mail ${composeRecipient} ${composeSubject} ${composeBody}${encryptFlag}`
-                : `msg ${composeRecipient} ${composeBody}${encryptFlag}`;
+            const cleanRecipient = composeRecipient.replace(/"/g, "");
+            const safeRecipient = cleanRecipient.includes(" ")
+                ? `"${cleanRecipient}"`
+                : cleanRecipient;
+            const safeSubject = composeSubject.trim().replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+            const safeBody = composeBody.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+            const command = safeSubject
+                ? `mail ${safeRecipient} "${safeSubject}" "${safeBody}"${encryptFlag}`
+                : `msg ${safeRecipient} "${safeBody}"${encryptFlag}`;
             const response = await terminalService.executeCommand(command);
 
             if (response.success) {
@@ -233,6 +240,28 @@
             selectedMessage = null;
         } catch (err) {
             error = "Failed to delete message";
+            console.error(err);
+        }
+    }
+
+    // ==================== REPORT ====================
+
+    async function reportMessage(messageId: string) {
+        const reason = prompt("Report reason:");
+        if (!reason || !reason.trim()) return;
+
+        try {
+            const response = await terminalService.executeCommand(
+                `mail report ${messageId} ${reason.trim()}`,
+            );
+            if (response.success) {
+                successMsg = "Report submitted. Thank you.";
+                setTimeout(() => (successMsg = ""), 3000);
+            } else {
+                error = response.output?.toString() || "Failed to submit report";
+            }
+        } catch (err) {
+            error = "Failed to submit report";
             console.error(err);
         }
     }
@@ -444,6 +473,10 @@
                 case "B":
                     event.preventDefault();
                     backToList();
+                    break;
+                case "!":
+                    event.preventDefault();
+                    reportMessage(selectedMessage.id);
                     break;
             }
         }
@@ -775,7 +808,7 @@
     <div slot="footer" class="mail-footer">
         <pre>
 {#if mode === "list"}║ [↑/↓] Nav [ENTER] Read [C]ompose [T]oggle [R]efresh [D]elete [ESC] Close ║
-            {:else if mode === "read"}║ [R]eply [D]elete [B]ack [ESC] Close                                      ║
+            {:else if mode === "read"}║ [R]eply [D]elete [!]Report [B]ack [ESC] Close                             ║
             {:else if mode === "compose"}║ [CTRL+S] Send [CTRL+E] Encrypt [ESC] Cancel                              ║
             {/if}        </pre>
     </div>

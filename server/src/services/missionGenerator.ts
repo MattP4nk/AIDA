@@ -1,5 +1,6 @@
 import { injectable, inject } from "tsyringe";
 import type { Logger } from "pino";
+import { safeExecute, safeAI } from "../utils/safeExecute";
 import {
   LOGGER,
   MISSION_SERVICE,
@@ -88,7 +89,8 @@ export class MissionGeneratorService {
     userId: string,
     count: number = 5,
   ): Promise<string[]> {
-    try {
+    return await safeExecute({
+      fn: async () => {
       // Get player progress
       const progress = await db.client.playerProgress.findUnique({
         where: { userId },
@@ -161,63 +163,63 @@ export class MissionGeneratorService {
       // Add generated missions to the player's missionProgress as "available"
       // so they appear in getPlayerMissions() results
       if (missionIds.length > 0) {
-        try {
-          const missions = await db.client.mission.findMany({
-            where: { id: { in: missionIds } },
-          });
+        await safeExecute({
+          fn: async () => {
+            const missions = await db.client.mission.findMany({
+              where: { id: { in: missionIds } },
+            });
 
-          const missionProgress =
-            (progress.missionProgress as Record<string, any>) || {};
+            const missionProgress =
+              (progress.missionProgress as Record<string, any>) || {};
 
-          for (const mission of missions) {
-            const objectives = (mission.objectives as unknown as any[]) || [];
+            for (const mission of missions) {
+              const objectives = (mission.objectives as unknown as any[]) || [];
 
-            missionProgress[mission.id] = {
-              missionId: mission.id,
-              userId,
-              status: "available",
-              objectives: objectives.map((obj: any) => ({
-                ...obj,
-                current:
-                  typeof obj.target === "number"
-                    ? 0
-                    : typeof obj.target === "boolean"
-                      ? false
-                      : "",
-                completed: false,
-              })),
-              startedAt: null,
-              completedAt: null,
-              expiresAt: mission.timeLimit
-                ? new Date(Date.now() + (mission.timeLimit as number) * 1000)
-                : null,
-            };
-          }
+              missionProgress[mission.id] = {
+                missionId: mission.id,
+                userId,
+                status: "available",
+                objectives: objectives.map((obj: any) => ({
+                  ...obj,
+                  current:
+                    typeof obj.target === "number"
+                      ? 0
+                      : typeof obj.target === "boolean"
+                        ? false
+                        : "",
+                  completed: false,
+                })),
+                startedAt: null,
+                completedAt: null,
+                expiresAt: mission.timeLimit
+                  ? new Date(Date.now() + (mission.timeLimit as number) * 1000)
+                  : null,
+              };
+            }
 
-          await db.client.playerProgress.update({
-            where: { userId },
-            data: {
-              missionProgress: missionProgress as any,
-            },
-          });
+            await db.client.playerProgress.update({
+              where: { userId },
+              data: {
+                missionProgress: missionProgress as any,
+              },
+            });
 
-          this.logger.info(
-            { userId, count: missionIds.length },
-            "Generated missions added to player missionProgress",
-          );
-        } catch (progressError) {
-          this.logger.error(
-            { err: progressError, userId },
-            "Failed to update missionProgress with generated missions",
-          );
-        }
+            this.logger.info(
+              { userId, count: missionIds.length },
+              "Generated missions added to player missionProgress",
+            );
+          },
+          context: "Update missionProgress with generated missions",
+          logger: this.logger,
+        })();
       }
 
       return missionIds;
-    } catch (error) {
-      this.logger.error({ err: error }, "Error generating missions");
-      return [];
-    }
+      },
+      context: "Generate missions for player",
+      logger: this.logger,
+      fallback: [] as string[],
+    })() as unknown as Promise<string[]>;
   }
 
   /**
@@ -368,7 +370,8 @@ export class MissionGeneratorService {
     _userId: string,
     playerLevel: number,
   ): Promise<GeneratedMission | null> {
-    try {
+    return (await safeExecute({
+      fn: async () => {
       // Get Game Master persona
       const gameMaster =
         await this.personaService.getPersonaByType("game_master");
@@ -403,18 +406,66 @@ Format as JSON:
   ]
 }`;
 
-      const response = await this.aiService.generateResponse(
+      const { enrichWithTopology } = await import("./worldTopologyContext");
+      const enrichedSystemPrompt = await enrichWithTopology(gameMaster.systemPrompt, db.client, this.logger);
+
+      // Validator: extract basic mission fields from AI response
+      const validateAIMission = (parsed: any): { title: string; description: string; type: string; objectives: any[] } | null => {
+        if (!parsed || typeof parsed !== "object") return null;
+        if (typeof parsed.title !== "string" || !parsed.title.trim()) return null;
+        if (!Array.isArray(parsed.objectives) || parsed.objectives.length === 0) return null;
+        return {
+          title: parsed.title.trim(),
+          description: typeof parsed.description === "string" ? parsed.description : "Complete the mission.",
+          type: typeof parsed.type === "string" ? parsed.type : "mixed",
+          objectives: parsed.objectives,
+        };
+      };
+
+      const missionSvc = this.missionService;
+      const gmId = gameMaster.id;
+      const pLevel = playerLevel;
+
+      const aiMission = await safeAI<{ title: string; description: string; type: string; objectives: any[] } | null>({
+        aiService: this.aiService,
         prompt,
-        gameMaster.systemPrompt,
-      );
+        systemPrompt: enrichedSystemPrompt,
+        expectedFormat: '{ "title": "string (3-80 chars)", "description": "string", "difficulty": "number (1-10)", "type": "hack|steal|explore|social", "objectives": [{"type": "string", "description": "string", "target": "number"}] }',
+        validate: validateAIMission,
+        fallback: null,
+        context: "AI mission generation",
+        logger: this.logger,
+        retry: true,
+        onRetrySuccess: async (retryMission) => {
+          if (!retryMission) return;
+          const difficulty = Math.min(10, Math.max(1, Math.floor(pLevel / 5)));
+          const objectives = (retryMission.objectives || []).map((obj: any) => ({
+            id: `obj_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+            type: obj.type || "hack",
+            description: obj.description || "Complete the objective",
+            target: obj.target || 1,
+            current: typeof obj.target === "number" ? 0 : false,
+            completed: false,
+          }));
+          if (objectives.length === 0) return;
+          await missionSvc.createMission({
+            title: retryMission.title,
+            description: retryMission.description || "Complete the mission.",
+            type: retryMission.type || "mixed",
+            difficulty,
+            objectives,
+            reward: {
+              xp: Math.floor(100 + 50 * pLevel),
+              credits: Math.floor(500 + 200 * pLevel),
+              reputation: difficulty * 5,
+            },
+            issuedBy: gmId,
+            createdBy: gmId,
+          });
+        },
+      });
 
-      // Parse AI response
-      const jsonMatch = response.response.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) {
-        return null;
-      }
-
-      const aiMission = JSON.parse(jsonMatch[0]);
+      if (!aiMission) return null;
 
       // Enhance with calculated values
       const difficulty = Math.min(10, Math.max(1, Math.floor(playerLevel / 5)));
@@ -501,10 +552,11 @@ Format as JSON:
         timeLimit: difficulty * 60 * 60 * 1000,
         issuedBy: gameMaster.id,
       };
-    } catch (error) {
-      this.logger.error({ err: error }, "AI generation failed");
-      return null;
-    }
+      },
+      context: "AI mission generation",
+      logger: this.logger,
+      fallback: null,
+    })()) ?? null;
   }
 
   /**
@@ -512,7 +564,7 @@ Format as JSON:
    * Returns null if no reasonable mapping exists.
    */
   private mapToCanonicalType(aiType: string): string | null {
-    const normalized = aiType.toLowerCase().replace(/[\s\-]/g, "_");
+    const normalized = aiType.toLowerCase().replace(/[\s-]/g, "_");
 
     // Direct match after normalization
     if (OBJECTIVE_TYPES.has(normalized)) return normalized;
@@ -571,52 +623,53 @@ Format as JSON:
     mission: GeneratedMission,
     createdBy: string,
   ): Promise<string | null> {
-    try {
+    return (await safeExecute({
+      fn: async () => {
       // Provision mission infrastructure (target server, objective files, etc.)
       // This patches objective metadata with real server/file IDs.
       if (this.serverContent) {
-        try {
-          const provision =
-            await this.serverContent.provisionMissionInfrastructure(
-              {
-                title: mission.title,
-                description: mission.description,
-                type: mission.type,
-                difficulty: mission.difficulty,
-                objectives: mission.objectives,
-                ...(mission.factionId ? { factionId: mission.factionId } : {}),
-              },
-              createdBy,
-            );
+        await safeExecute({
+          fn: async () => {
+            const provision =
+              await this.serverContent!.provisionMissionInfrastructure(
+                {
+                  title: mission.title,
+                  description: mission.description,
+                  type: mission.type,
+                  difficulty: mission.difficulty,
+                  objectives: mission.objectives,
+                  ...(mission.factionId ? { factionId: mission.factionId } : {}),
+                },
+                createdBy,
+              );
 
-          if (provision) {
-            // Set the target server on the mission
-            mission.targetServerId = provision.targetServerId;
+            if (provision) {
+              // Set the target server on the mission
+              mission.targetServerId = provision.targetServerId;
 
-            // Patch objective metadata with real IDs
-            for (const patch of provision.objectives) {
-              const obj = mission.objectives[patch.index];
-              if (obj) {
-                obj.metadata = { ...(obj.metadata || {}), ...patch.metadata };
+              // Patch objective metadata with real IDs
+              for (const patch of provision.objectives) {
+                const obj = mission.objectives[patch.index];
+                if (obj) {
+                  obj.metadata = { ...(obj.metadata || {}), ...patch.metadata };
+                }
               }
-            }
 
-            this.logger.info(
-              {
-                missionTitle: mission.title,
-                targetServerId: provision.targetServerId,
-                patchedObjectives: provision.objectives.length,
-                plantedFiles: provision.plantedFiles.length,
-              },
-              "Mission infrastructure provisioned",
-            );
-          }
-        } catch (provisionErr) {
-          this.logger.warn(
-            { err: provisionErr, missionTitle: mission.title },
-            "Mission infrastructure provisioning failed, creating mission without real targets",
-          );
-        }
+              this.logger.info(
+                {
+                  missionTitle: mission.title,
+                  targetServerId: provision.targetServerId,
+                  patchedObjectives: provision.objectives.length,
+                  plantedFiles: provision.plantedFiles.length,
+                },
+                "Mission infrastructure provisioned",
+              );
+            }
+          },
+          context: "Provision mission infrastructure",
+          logger: this.logger,
+          silent: true,
+        })();
       }
 
       const missionData: any = {
@@ -646,10 +699,11 @@ Format as JSON:
       const result = await this.missionService.createMission(missionData);
 
       return result?.id ?? null;
-    } catch (error) {
-      this.logger.error({ err: error }, "Failed to create mission");
-      return null;
-    }
+      },
+      context: "Create mission",
+      logger: this.logger,
+      fallback: null,
+    })()) ?? null;
   }
 
   // ==================== SCHEDULED GENERATION ====================
@@ -684,51 +738,56 @@ Format as JSON:
    * Generate daily missions for all active players
    */
   public async generateDailyMissions(): Promise<void> {
-    try {
-      // Get all active players (logged in within last 7 days)
-      const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-      const activePlayers = await db.client.user.findMany({
-        where: {
-          lastLogin: {
-            gte: sevenDaysAgo,
+    await safeExecute({
+      fn: async () => {
+        // Get all active players (logged in within last 7 days)
+        const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+        const activePlayers = await db.client.user.findMany({
+          where: {
+            lastLogin: { gte: sevenDaysAgo },
+            isActive: true,
+            role: { not: "npc" },
+            progress: { isNot: null }, // Must have playerProgress
           },
-        },
-        select: { id: true },
-      });
+          select: { id: true },
+        });
 
-      let generated = 0;
-      for (const player of activePlayers) {
-        const missions = await this.generateMissionsForPlayer(player.id, 3);
-        generated += missions.length;
-      }
+        let generated = 0;
+        for (const player of activePlayers) {
+          const missions = await this.generateMissionsForPlayer(player.id, 3);
+          generated += missions.length;
+        }
 
-      this.logger.info(
-        { generated, playerCount: activePlayers.length },
-        "Generated daily missions",
-      );
-    } catch (error) {
-      this.logger.error({ err: error }, "Daily generation failed");
-    }
+        this.logger.info(
+          { generated, playerCount: activePlayers.length },
+          "Generated daily missions",
+        );
+      },
+      context: "Generate daily missions",
+      logger: this.logger,
+    })();
   }
 
   /**
    * Clean up expired missions
    */
   public async cleanupExpiredMissions(): Promise<void> {
-    try {
-      const result = await db.client.mission.deleteMany({
-        where: {
-          expiresAt: {
-            lt: new Date(),
+    await safeExecute({
+      fn: async () => {
+        const result = await db.client.mission.deleteMany({
+          where: {
+            expiresAt: {
+              lt: new Date(),
+            },
+            status: "available",
           },
-          status: "available",
-        },
-      });
+        });
 
-      this.logger.info({ count: result.count }, "Cleaned up expired missions");
-    } catch (error) {
-      this.logger.error({ err: error }, "Cleanup failed");
-    }
+        this.logger.info({ count: result.count }, "Cleaned up expired missions");
+      },
+      context: "Cleanup expired missions",
+      logger: this.logger,
+    })();
   }
 
   // ==================== UTILITY METHODS ====================

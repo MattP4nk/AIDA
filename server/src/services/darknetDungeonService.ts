@@ -13,6 +13,7 @@
 import { injectable, inject } from "tsyringe";
 import type { Logger } from "pino";
 import crypto from "crypto";
+import { safeExecute } from "../utils/safeExecute";
 import { LOGGER, AI_SERVICE, EVENT_SERVICE } from "../di/tokens";
 import { db } from "../database/client";
 import type { AIService } from "./aiService";
@@ -23,6 +24,7 @@ import {
   CRYPTIC_QUOTES,
   WORLD_BACKSTORY_SHORT,
 } from "../lore/worldLore";
+import { safeAI } from "../utils/safeExecute";
 
 // ═══════════════════════════════════════════════════════════════════
 // Constants — Procedural Generation Building Blocks
@@ -183,12 +185,10 @@ function generateClueContent(
 }
 
 /**
- * Shorthand cast so we can access the not-yet-generated `darkNetInstance`
- * delegate without a compile error. The model has been added to the Prisma
- * schema but `prisma generate` hasn't been re-run yet.
+ * Access DarkNetInstance model from Prisma client.
+ * The model is defined in schema.prisma — run `npx prisma generate` if types are missing.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const prismaAny = db.client as any;
+const prisma = db.client;
 
 // ═══════════════════════════════════════════════════════════════════
 // Service
@@ -342,7 +342,7 @@ export class DarkNetDungeonService {
       await this.plantVaultReward(vaultServer.id, reward, dungeonName);
 
       // --- l. DarkNetInstance record ---
-      const instance = await prismaAny.darkNetInstance.create({
+      const instance = await prisma.darkNetInstance.create({
         data: {
           name: dungeonName,
           networkId: network.id,
@@ -352,7 +352,7 @@ export class DarkNetDungeonService {
           depth: actualDepth,
           difficulty: diff,
           rewardType: reward.type,
-          rewardData: reward.data,
+          rewardData: reward.data as any,
           status: "active",
           expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7-day TTL
         },
@@ -406,64 +406,63 @@ export class DarkNetDungeonService {
       const server = servers[index]!;
       const nextServer = servers[index + 1]!;
 
-      try {
-        // Ensure root directory exists
-        let rootDir = await db.client.fileSystemNode.findFirst({
-          where: {
-            serverId: server.id,
-            name: "/",
-            type: "directory",
-            parentId: null,
-          },
-        });
-
-        if (!rootDir) {
-          rootDir = await db.client.fileSystemNode.create({
-            data: {
+      await safeExecute({
+        fn: async () => {
+          // Ensure root directory exists
+          let rootDir = await db.client.fileSystemNode.findFirst({
+            where: {
               serverId: server.id,
               name: "/",
               type: "directory",
+              parentId: null,
             },
           });
-        }
 
-        // Create hidden .signal directory
-        const hiddenDir = await db.client.fileSystemNode.create({
-          data: {
-            serverId: server.id,
-            name: ".signal",
-            type: "directory",
-            parentId: rootDir.id,
-            isHidden: true,
-          },
-        });
+          if (!rootDir) {
+            rootDir = await db.client.fileSystemNode.create({
+              data: {
+                serverId: server.id,
+                name: "/",
+                type: "directory",
+              },
+            });
+          }
 
-        // Build clue content and create file
-        const clueContent = generateClueContent(
-          index,
-          nextServer.ipAddress,
-          dungeonName,
-          totalHops,
-        );
+          // Create hidden .signal directory
+          const hiddenDir = await db.client.fileSystemNode.create({
+            data: {
+              serverId: server.id,
+              name: ".signal",
+              type: "directory",
+              parentId: rootDir.id,
+              isHidden: true,
+            },
+          });
 
-        await db.client.fileSystemNode.create({
-          data: {
-            serverId: server.id,
-            name: `trace_${index}.dat`,
-            type: "file",
-            content: clueContent,
-            parentId: hiddenDir.id,
-            isHidden: true,
-            isEncrypted: index > 1, // later clues require decryption
-            size: clueContent.length,
-          },
-        });
-      } catch (error) {
-        this.logger.error(
-          { err: error, serverId: server.id, index },
-          "Failed to plant clue file on server",
-        );
-      }
+          // Build clue content and create file
+          const clueContent = generateClueContent(
+            index,
+            nextServer.ipAddress,
+            dungeonName,
+            totalHops,
+          );
+
+          await db.client.fileSystemNode.create({
+            data: {
+              serverId: server.id,
+              name: `trace_${index}.dat`,
+              type: "file",
+              content: clueContent,
+              parentId: hiddenDir.id,
+              isHidden: true,
+              isEncrypted: index > 1, // later clues require decryption
+              size: clueContent.length,
+            },
+          });
+        },
+        context: "Plant clue file on server",
+        logger: this.logger,
+      })();
     }
   }
 
@@ -565,7 +564,8 @@ export class DarkNetDungeonService {
    * @returns The forum post ID, or `null` if posting failed.
    */
   async postForumRiddle(instanceId: string): Promise<string | null> {
-    try {
+    return await safeExecute({
+      fn: async () => {
       // a. Find The Architect persona
       const architect = await db.client.aIPersona.findFirst({
         where: { type: "game_master" },
@@ -589,7 +589,7 @@ export class DarkNetDungeonService {
       const forum = pickRandom(publicForums);
 
       // c. Look up instance details
-      const instance = await prismaAny.darkNetInstance.findUnique({
+      const instance = await prisma.darkNetInstance.findUnique({
         where: { id: instanceId },
       });
 
@@ -624,31 +624,60 @@ Respond ONLY with JSON:
       const systemPrompt =
         "You are The Architect, the omniscient game master of AIDA. You speak in riddles and metaphors. You test players by hiding secrets in plain sight.";
 
-      const { response } = await this.aiService.generateResponse(
+      const { enrichWithTopology } = await import("./worldTopologyContext");
+      const enrichedSystemPrompt = await enrichWithTopology(systemPrompt, db.client, this.logger);
+
+      // e. Generate and validate riddle
+      const fallbackTitle = `Signal from the Void — ${instance.name}`;
+      const fallbackContent = `The signal shifts. A new path awaits those who listen.\n\nGateway: ${instance.gatewayIp}\nKey: ${instance.passkey}`;
+
+      // Validate riddle is solvable — IP octets and passkey segments must appear in content
+      const isRiddleSolvable = (riddleContent: string, ip: string, passkey: string): boolean => {
+        const lower = riddleContent.toLowerCase();
+        const octets = ip.split(".");
+        const octetsFound = octets.filter((o) => lower.includes(o)).length;
+        const passKeyChars = passkey.toLowerCase().slice(0, 3);
+        const passKeyFound = lower.includes(passKeyChars) ||
+          lower.includes(passkey.toLowerCase()) ||
+          lower.includes(passkey.toUpperCase());
+        return octetsFound >= 3 && passKeyFound;
+      };
+
+      // Combined validator: parse + solvability check
+      const validateSolvableRiddle = (parsed: any): { title: string; content: string } | null => {
+        if (!parsed || typeof parsed !== "object") return null;
+        if (typeof parsed.title !== "string" || typeof parsed.content !== "string") return null;
+        if (!parsed.title.trim() || !parsed.content.trim()) return null;
+        const result = { title: parsed.title.trim(), content: parsed.content.trim() };
+        if (!isRiddleSolvable(result.content, instance.gatewayIp, instance.passkey)) return null;
+        return result;
+      };
+
+      const riddleInstanceId = instanceId;
+      const riddle = await safeAI({
+        aiService: this.aiService,
         prompt,
-        systemPrompt,
-      );
-
-      // e. Parse AI response and create forum post
-      let title = `Signal from the Void — ${instance.name}`;
-      let content = `The signal shifts. A new path awaits those who listen.\n\nGateway: ${instance.gatewayIp}\nKey: ${instance.passkey}`;
-
-      try {
-        const jsonMatch = response.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-          const parsed = JSON.parse(jsonMatch[0]);
-          if (parsed.title && typeof parsed.title === "string") {
-            title = parsed.title;
+        systemPrompt: enrichedSystemPrompt,
+        expectedFormat: '{ "title": "string", "content": "string (forum riddle with disguised gateway IP and passkey)" }',
+        validate: validateSolvableRiddle,
+        fallback: { title: fallbackTitle, content: fallbackContent },
+        context: "Dark network forum riddle",
+        logger: this.logger,
+        retry: true,
+        onRetrySuccess: async (result) => {
+          const inst = await prisma.darkNetInstance.findUnique({
+            where: { id: riddleInstanceId },
+          });
+          if (inst?.forumClueId) {
+            await db.client.post.update({
+              where: { id: inst.forumClueId },
+              data: { title: result.title, content: result.content },
+            });
           }
-          if (parsed.content && typeof parsed.content === "string") {
-            content = parsed.content;
-          }
-        }
-      } catch {
-        this.logger.warn(
-          "Failed to parse AI riddle response — using fallback text",
-        );
-      }
+        },
+      });
+
+      const { title, content } = riddle;
 
       // Lazy-load ForumService to avoid circular DI
       const { getService } = await import("../di/container");
@@ -663,7 +692,7 @@ Respond ONLY with JSON:
       );
 
       // f. Link forum post back to instance
-      await prismaAny.darkNetInstance.update({
+      await prisma.darkNetInstance.update({
         where: { id: instanceId },
         data: { forumClueId: post.id },
       });
@@ -674,13 +703,11 @@ Respond ONLY with JSON:
       );
 
       return post.id;
-    } catch (error) {
-      this.logger.error(
-        { err: error, instanceId },
-        "Failed to post forum riddle",
-      );
-      return null;
-    }
+      },
+      context: "Post forum riddle",
+      logger: this.logger,
+      fallback: null,
+    })();
   }
 
   // ─────────────────────────────────────────────────────────────────
@@ -702,9 +729,10 @@ Respond ONLY with JSON:
     userId: string,
     vaultServerId: string,
   ): Promise<{ conquered: boolean; reward?: any }> {
-    try {
+    return await safeExecute({
+      fn: async () => {
       // a. Find active instance for this vault
-      const instance = await prismaAny.darkNetInstance.findFirst({
+      const instance = await prisma.darkNetInstance.findFirst({
         where: { vaultServerId, status: "active" },
       });
 
@@ -714,7 +742,7 @@ Respond ONLY with JSON:
       }
 
       // c. Mark as conquered
-      await prismaAny.darkNetInstance.update({
+      await prisma.darkNetInstance.update({
         where: { id: instance.id },
         data: {
           status: "conquered",
@@ -787,13 +815,11 @@ Respond ONLY with JSON:
           ...(instance.rewardData as Record<string, unknown>),
         },
       };
-    } catch (error) {
-      this.logger.error(
-        { err: error, userId, vaultServerId },
-        "Error during vault conquest",
-      );
-      return { conquered: false };
-    }
+      },
+      context: "Conquer vault",
+      logger: this.logger,
+      fallback: { conquered: false } as { conquered: boolean; reward?: any },
+    })() as unknown as Promise<{ conquered: boolean; reward?: any }>;
   }
 
   // ─────────────────────────────────────────────────────────────────
@@ -810,8 +836,9 @@ Respond ONLY with JSON:
    * @param conqueredInstanceId - The DarkNetInstance to replace.
    */
   async regenerateDungeon(conqueredInstanceId: string): Promise<void> {
-    try {
-      const instance = await prismaAny.darkNetInstance.findUnique({
+    await safeExecute({
+      fn: async () => {
+      const instance = await prisma.darkNetInstance.findUnique({
         where: { id: conqueredInstanceId },
       });
 
@@ -824,7 +851,7 @@ Respond ONLY with JSON:
       }
 
       // Mark as regenerating while we work
-      await prismaAny.darkNetInstance.update({
+      await prisma.darkNetInstance.update({
         where: { id: instance.id },
         data: { status: "regenerating" },
       });
@@ -862,7 +889,7 @@ Respond ONLY with JSON:
       });
 
       // Delete instance record
-      await prismaAny.darkNetInstance.delete({
+      await prisma.darkNetInstance.delete({
         where: { id: instance.id },
       });
 
@@ -877,12 +904,10 @@ Respond ONLY with JSON:
         },
         "Dark network dungeon regenerated",
       );
-    } catch (error) {
-      this.logger.error(
-        { err: error, conqueredInstanceId },
-        "Failed to regenerate dungeon",
-      );
-    }
+      },
+      context: "Regenerate dungeon",
+      logger: this.logger,
+    })();
   }
 
   // ─────────────────────────────────────────────────────────────────
@@ -901,7 +926,7 @@ Respond ONLY with JSON:
       gatewayIp: string;
     }>
   > {
-    return prismaAny.darkNetInstance.findMany({
+    return prisma.darkNetInstance.findMany({
       where: { status: "active" },
       select: {
         id: true,
@@ -924,22 +949,21 @@ Respond ONLY with JSON:
    * dungeon exists, one is generated and a riddle is posted for it.
    */
   async ensureActiveDungeon(): Promise<void> {
-    try {
-      const active = await prismaAny.darkNetInstance.count({
-        where: { status: "active" },
-      });
+    await safeExecute({
+      fn: async () => {
+        const active = await prisma.darkNetInstance.count({
+          where: { status: "active" },
+        });
 
-      if (active === 0) {
-        const { instanceId } = await this.generateDungeon();
-        await this.postForumRiddle(instanceId);
-        this.logger.info("Generated initial dark network dungeon");
-      }
-    } catch (error) {
-      this.logger.error(
-        { err: error },
-        "Failed to ensure an active dungeon exists",
-      );
-    }
+        if (active === 0) {
+          const { instanceId } = await this.generateDungeon();
+          await this.postForumRiddle(instanceId);
+          this.logger.info("Generated initial dark network dungeon");
+        }
+      },
+      context: "Ensure active dungeon exists",
+      logger: this.logger,
+    })();
   }
 
   // ─────────────────────────────────────────────────────────────────
@@ -953,27 +977,29 @@ Respond ONLY with JSON:
    * prevent stale dungeons from lingering forever.
    */
   async expireOldDungeons(): Promise<void> {
-    try {
-      const expired = await prismaAny.darkNetInstance.findMany({
-        where: { status: "active", expiresAt: { lt: new Date() } },
-      });
-
-      for (const instance of expired) {
-        this.logger.info(
-          { instanceId: instance.id, name: instance.name },
-          "Expiring stale dungeon",
-        );
-
-        await prismaAny.darkNetInstance.update({
-          where: { id: instance.id },
-          data: { status: "expired" },
+    await safeExecute({
+      fn: async () => {
+        const expired = await prisma.darkNetInstance.findMany({
+          where: { status: "active", expiresAt: { lt: new Date() } },
         });
 
-        await this.regenerateDungeon(instance.id);
-      }
-    } catch (error) {
-      this.logger.error({ err: error }, "Failed to expire old dungeons");
-    }
+        for (const instance of expired) {
+          this.logger.info(
+            { instanceId: instance.id, name: instance.name },
+            "Expiring stale dungeon",
+          );
+
+          await prisma.darkNetInstance.update({
+            where: { id: instance.id },
+            data: { status: "expired" },
+          });
+
+          await this.regenerateDungeon(instance.id);
+        }
+      },
+      context: "Expire old dungeons",
+      logger: this.logger,
+    })();
   }
 
   // ─────────────────────────────────────────────────────────────────
@@ -1026,7 +1052,8 @@ Respond ONLY with JSON:
       rewardData: unknown;
     },
   ): Promise<void> {
-    try {
+    await safeExecute({
+      fn: async () => {
       if (instance.rewardType === "aida_token") {
         const tokenName = (instance.rewardData as any).tokenName;
         const shopItem = await db.client.shopItem.findFirst({
@@ -1112,12 +1139,10 @@ Respond ONLY with JSON:
           },
         });
       }
-    } catch (error) {
-      this.logger.error(
-        { err: error, userId, rewardType: instance.rewardType },
-        "Failed to grant dungeon reward",
-      );
-    }
+      },
+      context: "Grant dungeon reward",
+      logger: this.logger,
+    })();
   }
 
   /**
@@ -1175,7 +1200,8 @@ Respond ONLY with JSON:
     dungeonName: string,
     difficulty: number,
   ): Promise<void> {
-    const contentPromises = servers.map(async (server, index) => {
+    // Process servers sequentially to avoid flooding AI slot queue
+    for (const [index, server] of servers.entries()) {
       try {
         // Determine depth tier for this server
         const depthTier = this.getDepthTier(index, servers.length);
@@ -1223,31 +1249,68 @@ Respond ONLY with JSON:
           "called The Emperor, and warring factions. Your tone is dark, " +
           "technical, and mysterious. Never break character.";
 
-        const { response } = await this.aiService.generateResponse(
-          prompt,
-          systemPrompt,
-        );
+        const { enrichWithTopology } = await import("./worldTopologyContext");
+        const enrichedLoreSystemPrompt = await enrichWithTopology(systemPrompt, db.client, this.logger);
 
-        // Parse the response
-        const jsonMatch = response.match(/\{[\s\S]*\}/);
-        if (!jsonMatch) {
-          this.logger.warn(
-            { serverId: server.id },
-            "AI lore content response was not valid JSON — using fallback",
+        const validateLoreFiles = (parsed: any): { files: Array<{ name: string; content: string }> } | null => {
+          if (!parsed || typeof parsed !== "object") return null;
+          if (!Array.isArray(parsed.files) || parsed.files.length === 0) return null;
+          const files = parsed.files.filter(
+            (f: any) => typeof f.name === "string" && f.name.trim() && typeof f.content === "string" && f.content.trim(),
           );
-          await this.plantFallbackContent(server.id, theme, quote);
-          return;
-        }
+          if (files.length === 0) return null;
+          return { files };
+        };
 
-        let parsed: { files: Array<{ name: string; content: string }> };
-        try {
-          parsed = JSON.parse(jsonMatch[0]);
-        } catch {
-          await this.plantFallbackContent(server.id, theme, quote);
-          return;
-        }
+        const sId = server.id;
+        const depthTierCopy = depthTier;
 
-        if (!parsed.files || !Array.isArray(parsed.files)) {
+        const loreResult = await safeAI({
+          aiService: this.aiService,
+          prompt,
+          systemPrompt: enrichedLoreSystemPrompt,
+          expectedFormat: '{ "files": [{"name": "string", "content": "string"}] }',
+          validate: validateLoreFiles,
+          fallback: null as { files: Array<{ name: string; content: string }> } | null,
+          context: "Dark network lore content generation",
+          logger: this.logger,
+          retry: true,
+          onRetrySuccess: async (result) => {
+            if (!result) return;
+            let rootDir = await db.client.fileSystemNode.findFirst({
+              where: { serverId: sId, name: "/", type: "directory", parentId: null },
+            });
+            if (!rootDir) {
+              rootDir = await db.client.fileSystemNode.create({
+                data: { serverId: sId, name: "/", type: "directory" },
+              });
+            }
+
+            for (const file of result.files) {
+              if (!file.name || !file.content) continue;
+              const fileName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 60);
+              const fileContent = String(file.content).slice(0, 3000);
+              const shouldHide = depthTierCopy !== "gateway" && Math.random() < 0.4;
+              const shouldEncrypt = (depthTierCopy === "deep" || depthTierCopy === "vault") && Math.random() < 0.5;
+
+              await db.client.fileSystemNode.create({
+                data: {
+                  serverId: sId,
+                  name: `ai_${fileName}`,
+                  type: "file",
+                  content: fileContent,
+                  parentId: rootDir.id,
+                  isHidden: shouldHide,
+                  isEncrypted: shouldEncrypt,
+                  size: fileContent.length,
+                },
+              });
+            }
+          },
+        });
+
+        if (!loreResult) {
+          // AI failed — use template fallback content
           await this.plantFallbackContent(server.id, theme, quote);
           return;
         }
@@ -1268,12 +1331,12 @@ Respond ONLY with JSON:
         }
 
         // Create the lore files
-        for (const file of parsed.files) {
+        for (const file of loreResult.files) {
           if (!file.name || !file.content) continue;
 
           // Sanitize name
           const fileName = file.name
-            .replace(/[^a-zA-Z0-9._\-]/g, "_")
+            .replace(/[^a-zA-Z0-9._-]/g, "_")
             .slice(0, 60);
           const content = String(file.content).slice(0, 3000);
 
@@ -1300,7 +1363,7 @@ Respond ONLY with JSON:
         this.logger.debug(
           {
             serverId: server.id,
-            fileCount: parsed.files.length,
+            fileCount: loreResult.files.length,
             depthTier,
           },
           "Populated server with lore content",
@@ -1311,10 +1374,7 @@ Respond ONLY with JSON:
           "Failed to populate server with lore content — skipping",
         );
       }
-    });
-
-    // Run all content generation in parallel
-    await Promise.allSettled(contentPromises);
+    }
   }
 
   /**

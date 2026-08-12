@@ -9,6 +9,7 @@ import {
 } from "../di/tokens";
 import { CacheService } from "./cacheService";
 import type { FactionKnowledgeService } from "./factionKnowledgeService";
+import { safeExecute } from "../utils/safeExecute";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -83,6 +84,7 @@ export interface TopologyView {
 export class NetworkTopologyService {
   private static readonly ADJ_CACHE_TTL = 30; // 30s adjacency cache
   private static readonly PATH_CACHE_TTL = 30;
+  private static readonly GRAPH_CACHE_TTL = 120; // 2min — full adjacency graph cache
 
   private factionKnowledge: FactionKnowledgeService | null = null;
 
@@ -246,6 +248,7 @@ export class NetworkTopologyService {
       where: {
         installerId: userId,
         serverId: targetServerId,
+        isActive: true,
         OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
       },
     });
@@ -268,41 +271,8 @@ export class NetworkTopologyService {
     const cached = this.cacheService.get<PathHop[] | null>(cacheKey);
     if (cached !== undefined) return cached;
 
-    // Build adjacency map from all active links
-    const allLinks = await this.prisma.serverLink.findMany({
-      where: { isActive: true },
-      include: {
-        source: true,
-        target: true,
-      },
-    });
-
-    // Bidirectional adjacency
-    const adj = new Map<string, Array<{ serverId: string; linkType: string; latency: number; serverName: string; serverIp: string; serverRole: string }>>();
-
-    for (const link of allLinks) {
-      // Forward
-      if (!adj.has(link.sourceId)) adj.set(link.sourceId, []);
-      adj.get(link.sourceId)!.push({
-        serverId: link.targetId,
-        linkType: link.linkType,
-        latency: link.latency,
-        serverName: link.target.name,
-        serverIp: link.target.ipAddress,
-        serverRole: link.target.role,
-      });
-
-      // Reverse
-      if (!adj.has(link.targetId)) adj.set(link.targetId, []);
-      adj.get(link.targetId)!.push({
-        serverId: link.sourceId,
-        linkType: link.linkType,
-        latency: link.latency,
-        serverName: link.source.name,
-        serverIp: link.source.ipAddress,
-        serverRole: link.source.role,
-      });
-    }
+    // Get cached adjacency graph (avoids full DB scan per findPath call)
+    const adj = await this.getAdjacencyGraph();
 
     // BFS
     const visited = new Set<string>([fromServerId]);
@@ -369,6 +339,52 @@ export class NetworkTopologyService {
 
     this.cacheService.set(cacheKey, path, NetworkTopologyService.PATH_CACHE_TTL);
     return path;
+  }
+
+  /**
+   * Get the full bidirectional adjacency graph, cached for GRAPH_CACHE_TTL.
+   * Avoids rebuilding from DB on every findPath() call.
+   */
+  private async getAdjacencyGraph(): Promise<
+    Map<string, Array<{ serverId: string; linkType: string; latency: number; serverName: string; serverIp: string; serverRole: string }>>
+  > {
+    const cacheKey = "topo:adj:full_graph";
+    const cached = this.cacheService.get<
+      Map<string, Array<{ serverId: string; linkType: string; latency: number; serverName: string; serverIp: string; serverRole: string }>>
+    >(cacheKey);
+    if (cached) return cached;
+
+    const allLinks = await this.prisma.serverLink.findMany({
+      where: { isActive: true },
+      include: { source: true, target: true },
+    });
+
+    const adj = new Map<string, Array<{ serverId: string; linkType: string; latency: number; serverName: string; serverIp: string; serverRole: string }>>();
+
+    for (const link of allLinks) {
+      if (!adj.has(link.sourceId)) adj.set(link.sourceId, []);
+      adj.get(link.sourceId)!.push({
+        serverId: link.targetId,
+        linkType: link.linkType,
+        latency: link.latency,
+        serverName: link.target.name,
+        serverIp: link.target.ipAddress,
+        serverRole: link.target.role,
+      });
+
+      if (!adj.has(link.targetId)) adj.set(link.targetId, []);
+      adj.get(link.targetId)!.push({
+        serverId: link.sourceId,
+        linkType: link.linkType,
+        latency: link.latency,
+        serverName: link.source.name,
+        serverIp: link.source.ipAddress,
+        serverRole: link.source.role,
+      });
+    }
+
+    this.cacheService.set(cacheKey, adj, NetworkTopologyService.GRAPH_CACHE_TTL);
+    return adj;
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -627,9 +643,10 @@ export class NetworkTopologyService {
       update: data,
     });
 
-    // Invalidate adjacency cache
+    // Invalidate adjacency caches (per-server + full graph)
     this.cacheService.del(`topo:adj:${sourceId}`);
     this.cacheService.del(`topo:adj:${targetId}`);
+    this.cacheService.del("topo:adj:full_graph");
   }
 
   /**
@@ -702,7 +719,7 @@ export class NetworkTopologyService {
       case "open":
         return { allowed: true, reason: "Open access.", requiresHack: false, requiresKey: false };
 
-      case "hackable":
+      case "hackable": {
         // Check if player has previously hacked (has a ServerConnection with accessLevel > 0)
         const hackConnection = await this.prisma.serverConnection.findFirst({
           where: { userId, serverId, accessLevel: { gt: 0 } },
@@ -711,6 +728,7 @@ export class NetworkTopologyService {
           return { allowed: true, reason: "Previously hacked.", requiresHack: false, requiresKey: false };
         }
         return { allowed: false, reason: `${server.name} requires hacking to gain access. Use 'hack ${serverId}'.`, requiresHack: true, requiresKey: false };
+      }
 
       case "keycard": {
         const hasKey = await this.playerHasAccessKey(userId, serverId);
@@ -761,18 +779,20 @@ export class NetworkTopologyService {
     sourceDetail?: string,
     sourceFileId?: string,
   ): Promise<boolean> {
-    try {
-      await this.prisma.serverAccessKey.upsert({
-        where: { userId_serverId: { userId, serverId } },
-        create: { userId, serverId, keyValue, source, sourceDetail: sourceDetail ?? null, sourceFileId: sourceFileId ?? null },
-        update: { keyValue, source, sourceDetail: sourceDetail ?? null, sourceFileId: sourceFileId ?? null },
-      });
-      this.logger.info({ userId, serverId, source }, "Access key granted to player");
-      return true;
-    } catch (error) {
-      this.logger.error({ error, userId, serverId }, "Failed to grant access key");
-      return false;
-    }
+    return await safeExecute({
+      fn: async () => {
+        await this.prisma.serverAccessKey.upsert({
+          where: { userId_serverId: { userId, serverId } },
+          create: { userId, serverId, keyValue, source, sourceDetail: sourceDetail ?? null, sourceFileId: sourceFileId ?? null },
+          update: { keyValue, source, sourceDetail: sourceDetail ?? null, sourceFileId: sourceFileId ?? null },
+        });
+        this.logger.info({ userId, serverId, source }, "Access key granted to player");
+        return true;
+      },
+      context: "Grant access key",
+      logger: this.logger,
+      fallback: false,
+    })() as boolean;
   }
 }
 

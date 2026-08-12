@@ -1,5 +1,6 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
+import { successResult, errorResult } from "./helpers";
 import {
   sanitizeMessageContent,
   validateMessageContent,
@@ -21,6 +22,7 @@ import {
 } from "../../utils/tokenConsumption";
 
 export class SocialCommandsModule implements CommandModule {
+  public category = "social";
   public commands: Set<string> = new Set([
     "msg",
     "mail",
@@ -51,11 +53,7 @@ export class SocialCommandsModule implements CommandModule {
       case "proxy":
         return await this.handleProxy(command, context);
       default:
-        return {
-          success: false,
-          output: [`Unknown social command: ${command.command}`],
-          timestamp: new Date(),
-        };
+        return errorResult(`Unknown social command: ${command.command}`);
     }
   }
 
@@ -145,21 +143,13 @@ export class SocialCommandsModule implements CommandModule {
     const content = filteredArgs.slice(1).join(" ");
 
     if (!recipientUsername || !content) {
-      return {
-        success: false,
-        output: "Usage: msg <username> <message> [--encrypt]",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: msg <username> <message> [--encrypt]");
     }
 
     // Validate and sanitize content
     const contentValidation = validateMessageContent(content);
     if (!contentValidation.isValid) {
-      return {
-        success: false,
-        output: contentValidation.error || "Invalid message content",
-        timestamp: new Date(),
-      };
+      return errorResult(contentValidation.error || "Invalid message content");
     }
 
     const sanitizedContent = sanitizeMessageContent(content);
@@ -170,11 +160,7 @@ export class SocialCommandsModule implements CommandModule {
     });
 
     if (!recipient) {
-      return {
-        success: false,
-        output: `User '${recipientUsername}' not found`,
-        timestamp: new Date(),
-      };
+      return errorResult(`User '${recipientUsername}' not found`);
     }
 
     const messageService = context.services.messageService;
@@ -200,11 +186,7 @@ export class SocialCommandsModule implements CommandModule {
 
         const personaGlyph = getInlineGlyph("ai");
         if (!tokenResult.success) {
-          return {
-            success: false,
-            output: tokenResult.error || "Failed to send token message",
-            timestamp: new Date(),
-          };
+          return errorResult(tokenResult.error || "Failed to send token message");
         }
 
         return {
@@ -253,11 +235,7 @@ export class SocialCommandsModule implements CommandModule {
       });
 
       if (!result.success || !result.data) {
-        return {
-          success: false,
-          output: "Failed to retrieve sent messages",
-          timestamp: new Date(),
-        };
+        return errorResult("Failed to retrieve sent messages");
       }
 
       const messages = result.data.messages;
@@ -286,75 +264,87 @@ export class SocialCommandsModule implements CommandModule {
     if (subCommand === "read") {
       const messageId = command.args[1];
       if (!messageId) {
-        return {
-          success: false,
-          output: "Usage: mail read <messageId>",
-          timestamp: new Date(),
-        };
+        return errorResult("Usage: mail read <messageId>");
       }
 
       const messageService = context.services.messageService;
       const result = await messageService.markAsRead(messageId, userId);
 
-      return {
-        success: result.success,
-        output: result.message,
-        timestamp: new Date(),
-      };
+      return result.success ? successResult(result.message) : errorResult(result.message);
     }
 
     if (subCommand === "delete") {
       const messageId = command.args[1];
       if (!messageId) {
-        return {
-          success: false,
-          output: "Usage: mail delete <messageId>",
-          timestamp: new Date(),
-        };
+        return errorResult("Usage: mail delete <messageId>");
       }
 
       const messageService = context.services.messageService;
       const result = await messageService.deleteMessage(messageId, userId);
 
-      return {
-        success: result.success,
-        output: result.message,
-        timestamp: new Date(),
-      };
+      return result.success ? successResult(result.message) : errorResult(result.message);
+    }
+
+    if (subCommand === "report") {
+      const messageId = command.args[1];
+      const reason = command.args.slice(2).join(" ");
+      if (!messageId || !reason) {
+        return errorResult("Usage: mail report <messageId> <reason>");
+      }
+      const messageService = context.services.messageService;
+      const result = await messageService.reportMessage(userId, messageId, reason);
+      if (!result.success) {
+        return errorResult(result.message);
+      }
+      return successResult("Report submitted. Thank you for helping keep the network safe.");
     }
 
     // Default: Send mail
     // Usage: mail <username> <subject> <message> [--encrypt|-e]
+    // Supports quoted usernames: mail "The Architect" <subject> <message>
     const args = command.args || [];
     const encrypt = args.includes("--encrypt") || args.includes("-e");
     const filteredArgs = args.filter(
       (a: string) => a !== "--encrypt" && a !== "-e",
     );
-    const recipientUsername = filteredArgs[0];
-    const subject = filteredArgs[1];
-    const content = filteredArgs.slice(2).join(" ");
+
+    // Parse recipient — handle quoted multi-word usernames
+    let recipientUsername: string | undefined;
+    let restArgs: string[];
+
+    const rawInput = filteredArgs.join(" ");
+    if (rawInput.startsWith('"')) {
+      const closeQuote = rawInput.indexOf('"', 1);
+      if (closeQuote > 1) {
+        recipientUsername = rawInput.substring(1, closeQuote);
+        restArgs = rawInput.substring(closeQuote + 1).trim().split(/\s+/);
+      } else {
+        // Unclosed quote — strip leading " and use first word
+        recipientUsername = filteredArgs[0]?.replace(/^"|"$/g, "");
+        restArgs = filteredArgs.slice(1);
+      }
+    } else {
+      recipientUsername = filteredArgs[0];
+      restArgs = filteredArgs.slice(1);
+    }
+
+    const subject = restArgs[0];
+    const content = restArgs.slice(1).join(" ");
 
     if (!recipientUsername || !subject || !content) {
-      return {
-        success: false,
-        output: [
-          "Usage: mail <username> <subject> <message> [--encrypt|-e]",
-          "       mail sent",
-          "       mail read <id>",
-          "       mail delete <id>",
-        ],
-        timestamp: new Date(),
-      };
+      return errorResult([
+        "Usage: mail <username> <subject> <message> [--encrypt|-e]",
+        "       mail sent",
+        "       mail read <id>",
+        "       mail delete <id>",
+        "       mail report <id> <reason>",
+      ].join("\n"));
     }
 
     // Validate and sanitize content
     const contentValidation = validateMessageContent(content);
     if (!contentValidation.isValid) {
-      return {
-        success: false,
-        output: contentValidation.error || "Invalid message content",
-        timestamp: new Date(),
-      };
+      return errorResult(contentValidation.error || "Invalid message content");
     }
 
     const sanitizedContent = sanitizeMessageContent(content);
@@ -366,11 +356,7 @@ export class SocialCommandsModule implements CommandModule {
     });
 
     if (!recipient) {
-      return {
-        success: false,
-        output: `User '${recipientUsername}' not found`,
-        timestamp: new Date(),
-      };
+      return errorResult(`User '${recipientUsername}' not found`);
     }
 
     const messageService = context.services.messageService;
@@ -394,11 +380,7 @@ export class SocialCommandsModule implements CommandModule {
 
         const personaGlyph = getInlineGlyph("ai");
         if (!tokenResult.success) {
-          return {
-            success: false,
-            output: tokenResult.error || "Failed to send token message",
-            timestamp: new Date(),
-          };
+          return errorResult(tokenResult.error || "Failed to send token message");
         }
 
         return {
@@ -441,20 +423,12 @@ export class SocialCommandsModule implements CommandModule {
     const result = await messageService.getInbox(userId, { limit: 10 });
 
     if (!result.success || !result.data) {
-      return {
-        success: false,
-        output: "Failed to retrieve inbox",
-        timestamp: new Date(),
-      };
+      return errorResult("Failed to retrieve inbox");
     }
 
     const messages = result.data.messages;
     if (messages.length === 0) {
-      return {
-        success: true,
-        output: "Inbox is empty",
-        timestamp: new Date(),
-      };
+      return successResult("Inbox is empty");
     }
 
     const items = messages.map(
@@ -486,11 +460,7 @@ export class SocialCommandsModule implements CommandModule {
       });
 
       if (contacts.length === 0) {
-        return {
-          success: true,
-          output: "No contacts found.",
-          timestamp: new Date(),
-        };
+        return successResult("No contacts found.");
       }
 
       const items = contacts.map(
@@ -506,11 +476,7 @@ export class SocialCommandsModule implements CommandModule {
 
     if (action === "add") {
       if (!targetUsername) {
-        return {
-          success: false,
-          output: "Usage: contact add <username>",
-          timestamp: new Date(),
-        };
+        return errorResult("Usage: contact add <username>");
       }
 
       const target = await db.client.user.findFirst({
@@ -518,11 +484,7 @@ export class SocialCommandsModule implements CommandModule {
       });
 
       if (!target) {
-        return {
-          success: false,
-          output: "User not found",
-          timestamp: new Date(),
-        };
+        return errorResult("User not found");
       }
 
       // Check if already exists
@@ -531,11 +493,7 @@ export class SocialCommandsModule implements CommandModule {
       });
 
       if (existing) {
-        return {
-          success: false,
-          output: "Contact already exists",
-          timestamp: new Date(),
-        };
+        return errorResult("Contact already exists");
       }
 
       await db.client.contact.create({
@@ -547,20 +505,12 @@ export class SocialCommandsModule implements CommandModule {
         },
       });
 
-      return {
-        success: true,
-        output: `Added ${targetUsername} to contacts`,
-        timestamp: new Date(),
-      };
+      return successResult(`Added ${targetUsername} to contacts`);
     }
 
     if (action === "remove") {
       if (!targetUsername) {
-        return {
-          success: false,
-          output: "Usage: contact remove <username>",
-          timestamp: new Date(),
-        };
+        return errorResult("Usage: contact remove <username>");
       }
 
       const target = await db.client.user.findFirst({
@@ -568,29 +518,17 @@ export class SocialCommandsModule implements CommandModule {
       });
 
       if (!target) {
-        return {
-          success: false,
-          output: "User not found",
-          timestamp: new Date(),
-        };
+        return errorResult("User not found");
       }
 
       await db.client.contact.deleteMany({
         where: { userId, contactUserId: target.id },
       });
 
-      return {
-        success: true,
-        output: `Removed ${targetUsername} from contacts`,
-        timestamp: new Date(),
-      };
+      return successResult(`Removed ${targetUsername} from contacts`);
     }
 
-    return {
-      success: false,
-      output: "Usage: contact [list|add|remove] [username]",
-      timestamp: new Date(),
-    };
+    return errorResult("Usage: contact [list|add|remove] [username]");
   }
 
   private async handleForum(
@@ -608,14 +546,10 @@ export class SocialCommandsModule implements CommandModule {
         const forums = await forumService.getDiscoveredForums(userId);
 
         if (forums.length === 0) {
-          return {
-            success: true,
-            output: [
-              "No forums discovered yet.",
-              "Use 'forum scan' to search for forums.",
-            ],
-            timestamp: new Date(),
-          };
+          return successResult([
+            "No forums discovered yet.",
+            "Use 'forum scan' to search for forums.",
+          ]);
         }
 
         const sections = forums.map((forum: any) => {
@@ -679,11 +613,7 @@ export class SocialCommandsModule implements CommandModule {
       if (subCommand === "access") {
         const forumId = command.args[1];
         if (!forumId) {
-          return {
-            success: false,
-            output: "Usage: forum access <forumId> [--proxy]",
-            timestamp: new Date(),
-          };
+          return errorResult("Usage: forum access <forumId> [--proxy]");
         }
 
         const useProxy = command.args.includes("--proxy");
@@ -766,11 +696,7 @@ export class SocialCommandsModule implements CommandModule {
         const handle = command.args[2];
 
         if (!forumId || !handle) {
-          return {
-            success: false,
-            output: "Usage: forum register <forumId> <handle>",
-            timestamp: new Date(),
-          };
+          return errorResult("Usage: forum register <forumId> <handle>");
         }
 
         await forumService.registerForumAccount(userId, forumId, handle);
@@ -805,12 +731,7 @@ export class SocialCommandsModule implements CommandModule {
         const content = contentParts.join(" ");
 
         if (!forumId || !title || !content) {
-          return {
-            success: false,
-            output:
-              "Usage: forum post <forumId> <title> <content> [--tags tag1,tag2]",
-            timestamp: new Date(),
-          };
+          return errorResult("Usage: forum post <forumId> <title> <content> [--tags tag1,tag2]");
         }
 
         const post = await forumService.createPost(
@@ -840,11 +761,7 @@ export class SocialCommandsModule implements CommandModule {
         const postId = command.args[2];
 
         if (!forumId || !postId) {
-          return {
-            success: false,
-            output: "Usage: forum read <forumId> <postId>",
-            timestamp: new Date(),
-          };
+          return errorResult("Usage: forum read <forumId> <postId>");
         }
 
         const post = await forumService.readPost(userId, forumId, postId);
@@ -901,21 +818,13 @@ export class SocialCommandsModule implements CommandModule {
         const query = command.args.slice(2).join(" ");
 
         if (!forumId || !query) {
-          return {
-            success: false,
-            output: "Usage: forum search <forumId> <query>",
-            timestamp: new Date(),
-          };
+          return errorResult("Usage: forum search <forumId> <query>");
         }
 
         const posts = await forumService.searchPosts(userId, forumId, query);
 
         if (posts.length === 0) {
-          return {
-            success: true,
-            output: "No posts found matching your search.",
-            timestamp: new Date(),
-          };
+          return successResult("No posts found matching your search.");
         }
 
         const items = posts.map(
@@ -945,11 +854,7 @@ export class SocialCommandsModule implements CommandModule {
         const content = command.args.slice(3).join(" ");
 
         if (!forumId || !postId || !content) {
-          return {
-            success: false,
-            output: "Usage: forum reply <forumId> <postId> <content>",
-            timestamp: new Date(),
-          };
+          return errorResult("Usage: forum reply <forumId> <postId> <content>");
         }
 
         const reply = await forumService.createReply(
@@ -982,11 +887,7 @@ export class SocialCommandsModule implements CommandModule {
             !replyId ||
             (direction !== "up" && direction !== "down")
           ) {
-            return {
-              success: false,
-              output: "Usage: forum vote <forumId> <postId> <replyId> up|down",
-              timestamp: new Date(),
-            };
+            return errorResult("Usage: forum vote <forumId> <postId> <replyId> up|down");
           }
 
           const value = direction === "up" ? 1 : -1;
@@ -1014,11 +915,7 @@ export class SocialCommandsModule implements CommandModule {
             !postId ||
             (direction !== "up" && direction !== "down")
           ) {
-            return {
-              success: false,
-              output: "Usage: forum vote <forumId> <postId> up|down",
-              timestamp: new Date(),
-            };
+            return errorResult("Usage: forum vote <forumId> <postId> up|down");
           }
 
           const value = direction === "up" ? 1 : -1;
@@ -1045,21 +942,13 @@ export class SocialCommandsModule implements CommandModule {
         const tag = command.args[2];
 
         if (!forumId || !tag) {
-          return {
-            success: false,
-            output: "Usage: forum tag <forumId> <tag>",
-            timestamp: new Date(),
-          };
+          return errorResult("Usage: forum tag <forumId> <tag>");
         }
 
         const result = await forumService.getPostsByTag(forumId, tag);
 
         if (result.posts.length === 0) {
-          return {
-            success: true,
-            output: `No posts found with tag '${tag}'.`,
-            timestamp: new Date(),
-          };
+          return successResult(`No posts found with tag '${tag}'.`);
         }
 
         const items = result.posts.map(
@@ -1092,11 +981,7 @@ export class SocialCommandsModule implements CommandModule {
         const reason = command.args.slice(3).join(" ");
 
         if (!forumId || !postId || !reason) {
-          return {
-            success: false,
-            output: "Usage: forum report <forumId> <postId> <reason>",
-            timestamp: new Date(),
-          };
+          return errorResult("Usage: forum report <forumId> <postId> <reason>");
         }
 
         const report = await forumService.reportContent(
@@ -1127,11 +1012,7 @@ export class SocialCommandsModule implements CommandModule {
           const result = await forumService.getSystemReports(userId);
 
           if (result.reports.length === 0) {
-            return {
-              success: true,
-              output: "No pending reports across any forum.",
-              timestamp: new Date(),
-            };
+            return successResult("No pending reports across any forum.");
           }
 
           const items = result.reports.map(
@@ -1161,11 +1042,7 @@ export class SocialCommandsModule implements CommandModule {
         const reports = await forumService.getReports(userId, forumId);
 
         if (reports.length === 0) {
-          return {
-            success: true,
-            output: "No pending reports.",
-            timestamp: new Date(),
-          };
+          return successResult("No pending reports.");
         }
 
         const items = reports.map(
@@ -1195,11 +1072,7 @@ export class SocialCommandsModule implements CommandModule {
           !reportId ||
           (action !== "dismiss" && action !== "action")
         ) {
-          return {
-            success: false,
-            output: "Usage: forum resolve <forumId> <reportId> dismiss|action",
-            timestamp: new Date(),
-          };
+          return errorResult("Usage: forum resolve <forumId> <reportId> dismiss|action");
         }
 
         const report = await forumService.resolveReport(
@@ -1224,11 +1097,7 @@ export class SocialCommandsModule implements CommandModule {
         const postId = command.args[2];
 
         if (!forumId || !postId) {
-          return {
-            success: false,
-            output: "Usage: forum pin <forumId> <postId>",
-            timestamp: new Date(),
-          };
+          return errorResult("Usage: forum pin <forumId> <postId>");
         }
 
         const post = await forumService.pinPost(userId, forumId, postId);
@@ -1248,11 +1117,7 @@ export class SocialCommandsModule implements CommandModule {
         const postId = command.args[2];
 
         if (!forumId || !postId) {
-          return {
-            success: false,
-            output: "Usage: forum lock <forumId> <postId>",
-            timestamp: new Date(),
-          };
+          return errorResult("Usage: forum lock <forumId> <postId>");
         }
 
         const post = await forumService.lockPost(userId, forumId, postId);
@@ -1272,11 +1137,7 @@ export class SocialCommandsModule implements CommandModule {
         const handle = command.args[2];
 
         if (!forumId || !handle) {
-          return {
-            success: false,
-            output: "Usage: forum ban <forumId> <handle>",
-            timestamp: new Date(),
-          };
+          return errorResult("Usage: forum ban <forumId> <handle>");
         }
 
         await forumService.banMember(userId, forumId, handle);
@@ -1295,11 +1156,7 @@ export class SocialCommandsModule implements CommandModule {
         const handle = command.args[2];
 
         if (!forumId || !handle) {
-          return {
-            success: false,
-            output: "Usage: forum unban <forumId> <handle>",
-            timestamp: new Date(),
-          };
+          return errorResult("Usage: forum unban <forumId> <handle>");
         }
 
         await forumService.unbanMember(userId, forumId, handle);
@@ -1318,11 +1175,7 @@ export class SocialCommandsModule implements CommandModule {
         const postId = command.args[2];
 
         if (!forumId || !postId) {
-          return {
-            success: false,
-            output: "Usage: forum delete <forumId> <postId>",
-            timestamp: new Date(),
-          };
+          return errorResult("Usage: forum delete <forumId> <postId>");
         }
 
         await forumService.deletePost(userId, forumId, postId);
@@ -1342,11 +1195,7 @@ export class SocialCommandsModule implements CommandModule {
         const newContent = command.args.slice(3).join(" ");
 
         if (!forumId || !postId || !newContent) {
-          return {
-            success: false,
-            output: "Usage: forum edit <forumId> <postId> <content>",
-            timestamp: new Date(),
-          };
+          return errorResult("Usage: forum edit <forumId> <postId> <content>");
         }
 
         const post = await forumService.editPost(
@@ -1370,21 +1219,13 @@ export class SocialCommandsModule implements CommandModule {
         const forumId = command.args[1];
 
         if (!forumId) {
-          return {
-            success: false,
-            output: "Usage: forum members <forumId>",
-            timestamp: new Date(),
-          };
+          return errorResult("Usage: forum members <forumId>");
         }
 
         const result = await forumService.getForumMembers(forumId);
 
         if (result.members.length === 0) {
-          return {
-            success: true,
-            output: "No members found.",
-            timestamp: new Date(),
-          };
+          return successResult("No members found.");
         }
 
         const rows: Array<{ label: string; value: string }> =
@@ -1418,11 +1259,7 @@ export class SocialCommandsModule implements CommandModule {
         const handle = command.args[2];
 
         if (!forumId) {
-          return {
-            success: false,
-            output: "Usage: forum profile <forumId> [handle]",
-            timestamp: new Date(),
-          };
+          return errorResult("Usage: forum profile <forumId> [handle]");
         }
 
         const member = await forumService.getMemberProfile(
@@ -1517,17 +1354,9 @@ export class SocialCommandsModule implements CommandModule {
         },
       ];
 
-      return {
-        success: false,
-        output: render(helpPanel("FORUM COMMANDS", entries, 50)).split("\n"),
-        timestamp: new Date(),
-      };
+      return errorResult(render(helpPanel("FORUM COMMANDS", entries)));
     } catch (error) {
-      return {
-        success: false,
-        output: `Forum error: ${(error as Error).message}`,
-        timestamp: new Date(),
-      };
+      return errorResult(`Forum error: ${(error as Error).message}`);
     }
   }
 
@@ -1584,11 +1413,7 @@ export class SocialCommandsModule implements CommandModule {
         const proxyId = command.args[1];
 
         if (!proxyId) {
-          return {
-            success: false,
-            output: "Usage: proxy connect <proxy_id>",
-            timestamp: new Date(),
-          };
+          return errorResult("Usage: proxy connect <proxy_id>");
         }
 
         const connection = await forumService.connectToProxy(userId, proxyId);
@@ -1621,11 +1446,7 @@ export class SocialCommandsModule implements CommandModule {
       if (subCommand === "disconnect") {
         await forumService.disconnectProxy(userId);
 
-        return {
-          success: true,
-          output: "✓ Disconnected from proxy server",
-          timestamp: new Date(),
-        };
+        return successResult("✓ Disconnected from proxy server");
       }
 
       // proxy status - check current connection
@@ -1683,17 +1504,9 @@ export class SocialCommandsModule implements CommandModule {
         { command: "proxy status", description: "Check connection status" },
       ];
 
-      return {
-        success: false,
-        output: render(helpPanel("PROXY COMMANDS", entries, 50)).split("\n"),
-        timestamp: new Date(),
-      };
+      return errorResult(render(helpPanel("PROXY COMMANDS", entries)));
     } catch (error) {
-      return {
-        success: false,
-        output: `Proxy error: ${(error as Error).message}`,
-        timestamp: new Date(),
-      };
+      return errorResult(`Proxy error: ${(error as Error).message}`);
     }
   }
 
@@ -1707,30 +1520,22 @@ export class SocialCommandsModule implements CommandModule {
     if (subCommand === "history") {
       const contactId = command.args[1];
       if (!contactId) {
-        return {
-          success: false,
-          output: ["Usage: chat history <contactId>"],
-          timestamp: new Date(),
-        };
+        return errorResult("Usage: chat history <contactId>");
       }
 
       try {
-        const messageService = context.services.messageService;
-        const historyResult = await messageService.getChatHistory(
+        const chatService = context.services.chatService!;
+        const historyResult = await chatService.getChatHistory(
           userId,
           contactId,
         );
 
         if (!historyResult.success) {
-          return {
-            success: false,
-            output: [historyResult.message || "Failed to load chat history"],
-            timestamp: new Date(),
-          };
+          return errorResult(historyResult.message || "Failed to load chat history");
         }
 
         // Mark conversation as read
-        await messageService.markConversationRead(userId, contactId);
+        await chatService.markConversationRead(userId, contactId);
 
         return {
           success: true,
@@ -1742,26 +1547,17 @@ export class SocialCommandsModule implements CommandModule {
           timestamp: new Date(),
         };
       } catch (error) {
-        return {
-          success: false,
-          output: ["Failed to load chat history"],
-          error: (error as Error).message,
-          timestamp: new Date(),
-        };
+        return errorResult("Failed to load chat history", (error as Error).message);
       }
     }
 
     if (!subCommand) {
       try {
-        const messageService = context.services.messageService;
-        const contactsResult = await messageService.getChatContacts(userId);
+        const chatService = context.services.chatService!;
+        const contactsResult = await chatService.getChatContacts(userId);
 
         if (!contactsResult.success) {
-          return {
-            success: false,
-            output: [contactsResult.message || "Failed to load contacts"],
-            timestamp: new Date(),
-          };
+          return errorResult(contactsResult.message || "Failed to load contacts");
         }
 
         return {
@@ -1772,19 +1568,10 @@ export class SocialCommandsModule implements CommandModule {
           timestamp: new Date(),
         };
       } catch (error) {
-        return {
-          success: false,
-          output: ["Failed to load chat contacts"],
-          error: (error as Error).message,
-          timestamp: new Date(),
-        };
+        return errorResult("Failed to load chat contacts", (error as Error).message);
       }
     }
 
-    return {
-      success: false,
-      output: ["Unknown chat command"],
-      timestamp: new Date(),
-    };
+    return errorResult("Unknown chat command");
   }
 }

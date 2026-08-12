@@ -1,5 +1,6 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext, CommandInfo } from "./interface";
+import { getSession, successResult, errorResult } from "./helpers";
 import {
   boxTop,
   boxBottom,
@@ -20,6 +21,7 @@ import {
  *   upgrade       — Purchase defense upgrades
  */
 export class DefenseCommandsModule implements CommandModule {
+  public category = "defense";
   public commands: Set<string> = new Set([
     "defenses",
     "protect",
@@ -44,7 +46,7 @@ export class DefenseCommandsModule implements CommandModule {
       case "upgrade":
         return await this.handleUpgrade(command, context);
       default:
-        return { success: false, output: `Unknown command: ${command.command}`, timestamp: new Date() };
+        return errorResult(`Unknown command: ${command.command}`);
     }
   }
 
@@ -55,7 +57,7 @@ export class DefenseCommandsModule implements CommandModule {
     });
 
     if (!progress) {
-      return { success: false, output: "No player data found.", timestamp: new Date() };
+      return errorResult("No player data found.");
     }
 
     const W = 54;
@@ -104,7 +106,7 @@ export class DefenseCommandsModule implements CommandModule {
     lines.push(boxDivider(W));
 
     // Protected folders
-    const session = context.gameStateManager.getSession(context.userId);
+    const session = getSession(context);
     if (session?.homeServerId) {
       const protectedDirs = await context.db.client.fileSystemNode.count({
         where: {
@@ -122,24 +124,24 @@ export class DefenseCommandsModule implements CommandModule {
     lines.push(boxRow(" 'safevault move <file>' to secure a file", W));
     lines.push(boxBottom(W));
 
-    return { success: true, output: render(lines), timestamp: new Date() };
+    return successResult(render(lines));
   }
 
   // ── protect — toggle protection on a directory ──
   private async handleProtect(command: Command, context: CommandContext): Promise<CommandResult> {
-    const session = context.gameStateManager.getSession(context.userId);
+    const session = getSession(context);
     if (!session?.homeServerId) {
-      return { success: false, output: "No home server.", timestamp: new Date() };
+      return errorResult("No home server.");
     }
 
     // Must be on home server
     const currentServerId = session.currentServerId || session.homeServerId;
     if (currentServerId !== session.homeServerId) {
-      return { success: false, output: "You can only protect directories on your home server.", timestamp: new Date() };
+      return errorResult("You can only protect directories on your home server.");
     }
 
     if (command.args.length === 0) {
-      return { success: false, output: "Usage: protect <directory>\nToggles protection on a directory. Protected dirs require memory_trace minigame to access.", timestamp: new Date() };
+      return errorResult("Usage: protect <directory>\nToggles protection on a directory. Protected dirs require memory_trace minigame to access.");
     }
 
     const dirName = command.args[0]!;
@@ -148,7 +150,7 @@ export class DefenseCommandsModule implements CommandModule {
     // Find the directory
     const dir = await this.findNode(context, session.homeServerId, path, "directory");
     if (!dir) {
-      return { success: false, output: `Directory not found: ${path}`, timestamp: new Date() };
+      return errorResult(`Directory not found: ${path}`);
     }
 
     // Toggle protection
@@ -159,25 +161,17 @@ export class DefenseCommandsModule implements CommandModule {
     });
 
     if (newProtected) {
-      return {
-        success: true,
-        output: `Directory '${path}' is now PROTECTED.\nFiles inside cannot be deleted, moved, or modified by attackers.\nProtected files are hidden from low-access intruders.\nUse 'protect ${dirName}' again to remove protection.`,
-        timestamp: new Date(),
-      };
+      return successResult(`Directory '${path}' is now PROTECTED.\nFiles inside cannot be deleted, moved, or modified by attackers.\nProtected files are hidden from low-access intruders.\nUse 'protect ${dirName}' again to remove protection.`);
     } else {
-      return {
-        success: true,
-        output: `Protection removed from '${path}'.`,
-        timestamp: new Date(),
-      };
+      return successResult(`Protection removed from '${path}'.`);
     }
   }
 
   // ── safevault — manage encrypted vault ──
   private async handleSafeVault(command: Command, context: CommandContext): Promise<CommandResult> {
-    const session = context.gameStateManager.getSession(context.userId);
+    const session = getSession(context);
     if (!session?.homeServerId) {
-      return { success: false, output: "No home server.", timestamp: new Date() };
+      return errorResult("No home server.");
     }
 
     const progress = await context.db.client.playerProgress.findUnique({
@@ -186,7 +180,7 @@ export class DefenseCommandsModule implements CommandModule {
     });
 
     if (!progress || progress.homeVault === 0) {
-      return { success: false, output: "You don't have a vault installed. Use 'upgrade vault 1' to purchase one.", timestamp: new Date() };
+      return errorResult("You don't have a vault installed. Use 'upgrade vault 1' to purchase one.");
     }
 
     const action = command.args[0];
@@ -201,7 +195,7 @@ export class DefenseCommandsModule implements CommandModule {
 
       const vaultDir = await this.findNode(context, session.homeServerId, vaultPath, "directory");
       if (!vaultDir) {
-        return { success: true, output: `Vault (Level ${progress.homeVault}) — Empty.\nUse 'safevault move <file>' to secure files.`, timestamp: new Date() };
+        return successResult(`Vault (Level ${progress.homeVault}) — Empty.\nUse 'safevault move <file>' to secure files.`);
       }
 
       const files = await context.db.client.fileSystemNode.findMany({
@@ -210,7 +204,7 @@ export class DefenseCommandsModule implements CommandModule {
       });
 
       if (files.length === 0) {
-        return { success: true, output: `Vault (Level ${progress.homeVault}) — Empty.\nUse 'safevault move <file>' to secure files.`, timestamp: new Date() };
+        return successResult(`Vault (Level ${progress.homeVault}) — Empty.\nUse 'safevault move <file>' to secure files.`);
       }
 
       const W = 48;
@@ -224,13 +218,13 @@ export class DefenseCommandsModule implements CommandModule {
       lines.push(boxDivider(W));
       lines.push(boxRow(` ${files.length} file(s) secured`, W));
       lines.push(boxBottom(W));
-      return { success: true, output: render(lines), timestamp: new Date() };
+      return successResult(render(lines));
     }
 
     if (action === "move") {
       const filename = command.args[1];
       if (!filename) {
-        return { success: false, output: "Usage: safevault move <file>\nMoves a file from ~/downloads/ into the vault.", timestamp: new Date() };
+        return errorResult("Usage: safevault move <file>\nMoves a file from ~/downloads/ into the vault.");
       }
 
       const user = await context.db.client.user.findUnique({
@@ -244,14 +238,14 @@ export class DefenseCommandsModule implements CommandModule {
       // Find the file in downloads
       const downloadsDir = await this.findNode(context, session.homeServerId, downloadsPath, "directory");
       if (!downloadsDir) {
-        return { success: false, output: "No downloads directory found.", timestamp: new Date() };
+        return errorResult("No downloads directory found.");
       }
 
       const file = await context.db.client.fileSystemNode.findFirst({
         where: { parentId: downloadsDir.id, name: filename, type: "file" },
       });
       if (!file) {
-        return { success: false, output: `File '${filename}' not found in ~/downloads/.`, timestamp: new Date() };
+        return errorResult(`File '${filename}' not found in ~/downloads/.`);
       }
 
       // Ensure vault directory exists
@@ -262,7 +256,7 @@ export class DefenseCommandsModule implements CommandModule {
       }
 
       if (!vaultDir) {
-        return { success: false, output: "Failed to create vault directory.", timestamp: new Date() };
+        return errorResult("Failed to create vault directory.");
       }
 
       // Move file: update parentId + mark as protected and hidden
@@ -275,17 +269,13 @@ export class DefenseCommandsModule implements CommandModule {
         },
       });
 
-      return {
-        success: true,
-        output: `Moved '${filename}' to vault.\nFile is now encrypted and hidden. Attackers must crack Level ${progress.homeVault} vault to access it.`,
-        timestamp: new Date(),
-      };
+      return successResult(`Moved '${filename}' to vault.\nFile is now encrypted and hidden. Attackers must crack Level ${progress.homeVault} vault to access it.`);
     }
 
     if (action === "retrieve") {
       const filename = command.args[1];
       if (!filename) {
-        return { success: false, output: "Usage: safevault retrieve <file>\nMoves a file from vault back to ~/downloads/.", timestamp: new Date() };
+        return errorResult("Usage: safevault retrieve <file>\nMoves a file from vault back to ~/downloads/.");
       }
 
       const user = await context.db.client.user.findUnique({
@@ -298,14 +288,14 @@ export class DefenseCommandsModule implements CommandModule {
 
       const vaultDir = await this.findNode(context, session.homeServerId, vaultPath, "directory");
       if (!vaultDir) {
-        return { success: false, output: "Vault is empty.", timestamp: new Date() };
+        return errorResult("Vault is empty.");
       }
 
       const file = await context.db.client.fileSystemNode.findFirst({
         where: { parentId: vaultDir.id, name: filename, type: "file" },
       });
       if (!file) {
-        return { success: false, output: `File '${filename}' not found in vault.`, timestamp: new Date() };
+        return errorResult(`File '${filename}' not found in vault.`);
       }
 
       // Ensure downloads dir exists
@@ -316,7 +306,7 @@ export class DefenseCommandsModule implements CommandModule {
       }
 
       if (!dlDir) {
-        return { success: false, output: "Failed to access downloads directory.", timestamp: new Date() };
+        return errorResult("Failed to access downloads directory.");
       }
 
       await context.db.client.fileSystemNode.update({
@@ -328,21 +318,17 @@ export class DefenseCommandsModule implements CommandModule {
         },
       });
 
-      return {
-        success: true,
-        output: `Retrieved '${filename}' from vault → ~/downloads/.\nFile is no longer protected by vault encryption.`,
-        timestamp: new Date(),
-      };
+      return successResult(`Retrieved '${filename}' from vault → ~/downloads/.\nFile is no longer protected by vault encryption.`);
     }
 
-    return { success: false, output: "Usage: safevault [status|move <file>|retrieve <file>]", timestamp: new Date() };
+    return errorResult("Usage: safevault [status|move <file>|retrieve <file>]");
   }
 
   // ── honeypot — toggle decoy directory ──
   private async handleHoneypot(command: Command, context: CommandContext): Promise<CommandResult> {
-    const session = context.gameStateManager.getSession(context.userId);
+    const session = getSession(context);
     if (!session?.homeServerId) {
-      return { success: false, output: "No home server.", timestamp: new Date() };
+      return errorResult("No home server.");
     }
 
     const progress = await context.db.client.playerProgress.findUnique({
@@ -351,11 +337,11 @@ export class DefenseCommandsModule implements CommandModule {
     });
 
     if (!progress) {
-      return { success: false, output: "No player data found.", timestamp: new Date() };
+      return errorResult("No player data found.");
     }
 
     if (!progress.homeHoneypot) {
-      return { success: false, output: "Honeypot not installed. Use 'upgrade honeypot' to purchase.", timestamp: new Date() };
+      return errorResult("Honeypot not installed. Use 'upgrade honeypot' to purchase.");
     }
 
     const action = command.args[0] || "status";
@@ -377,24 +363,16 @@ export class DefenseCommandsModule implements CommandModule {
         },
       }) : 0;
 
-      return {
-        success: true,
-        output: `Honeypot Status: ACTIVE\nDecoy files deployed: ${decoyFiles}\nAttackers who delete decoy files waste time and trigger additional alerts.`,
-        timestamp: new Date(),
-      };
+      return successResult(`Honeypot Status: ACTIVE\nDecoy files deployed: ${decoyFiles}\nAttackers who delete decoy files waste time and trigger additional alerts.`);
     }
 
     if (action === "refresh") {
       // Generate fresh decoy files
       await this.generateDecoyFiles(context, session.homeServerId);
-      return {
-        success: true,
-        output: "Honeypot decoy files refreshed. New fake downloads deployed.",
-        timestamp: new Date(),
-      };
+      return successResult("Honeypot decoy files refreshed. New fake downloads deployed.");
     }
 
-    return { success: false, output: "Usage: honeypot [status|refresh]", timestamp: new Date() };
+    return errorResult("Usage: honeypot [status|refresh]");
   }
 
   // ── upgrade — purchase defense upgrades ──
@@ -403,7 +381,7 @@ export class DefenseCommandsModule implements CommandModule {
     const levelStr = command.args[1];
 
     if (!defense) {
-      const W = 52;
+      const W = context.terminalWidth;
       const lines: string[] = [];
       lines.push(boxTop(W));
       lines.push(boxCenter("DEFENSE UPGRADES", W));
@@ -423,14 +401,14 @@ export class DefenseCommandsModule implements CommandModule {
       lines.push(boxRow(" upgrade honeypot", W));
       lines.push(boxRow("   5000c — decoy files to waste attackers", W));
       lines.push(boxBottom(W));
-      return { success: true, output: render(lines), timestamp: new Date() };
+      return successResult(render(lines));
     }
 
     const progress = await context.db.client.playerProgress.findUnique({
       where: { userId: context.userId },
     });
     if (!progress) {
-      return { success: false, output: "No player data found.", timestamp: new Date() };
+      return errorResult("No player data found.");
     }
 
     // Price tables
@@ -442,14 +420,14 @@ export class DefenseCommandsModule implements CommandModule {
     if (defense === "firewall") {
       const level = parseInt(levelStr || "0");
       if (level < 1 || level > 3) {
-        return { success: false, output: "Usage: upgrade firewall <1|2|3>", timestamp: new Date() };
+        return errorResult("Usage: upgrade firewall <1|2|3>");
       }
       if (progress.homeFirewall >= level) {
-        return { success: false, output: `Already at firewall level ${progress.homeFirewall}.`, timestamp: new Date() };
+        return errorResult(`Already at firewall level ${progress.homeFirewall}.`);
       }
       const price = FIREWALL_PRICES[level]!;
       if (progress.credits < price) {
-        return { success: false, output: `Not enough credits. Need ${price}c, have ${progress.credits}c.`, timestamp: new Date() };
+        return errorResult(`Not enough credits. Need ${price}c, have ${progress.credits}c.`);
       }
       await context.db.client.playerProgress.update({
         where: { userId: context.userId },
@@ -461,27 +439,27 @@ export class DefenseCommandsModule implements CommandModule {
       if (context.services.missionIntegrationService) {
         context.services.missionIntegrationService.onDefenseEvent(context.userId, "firewall", level).catch(() => {});
       }
-      return { success: true, output: `Firewall upgraded to Level ${level}! (-${price}c)\nAttackers now face additional port_sequence challenges.`, timestamp: new Date() };
+      return successResult(`Firewall upgraded to Level ${level}! (-${price}c)\nAttackers now face additional port_sequence challenges.`);
     }
 
     if (defense === "vault") {
       const level = parseInt(levelStr || "0");
       if (level < 1 || level > 3) {
-        return { success: false, output: "Usage: upgrade vault <1|2|3>", timestamp: new Date() };
+        return errorResult("Usage: upgrade vault <1|2|3>");
       }
       if (progress.homeVault >= level) {
-        return { success: false, output: `Already at vault level ${progress.homeVault}.`, timestamp: new Date() };
+        return errorResult(`Already at vault level ${progress.homeVault}.`);
       }
       const price = VAULT_PRICES[level]!;
       if (progress.credits < price) {
-        return { success: false, output: `Not enough credits. Need ${price}c, have ${progress.credits}c.`, timestamp: new Date() };
+        return errorResult(`Not enough credits. Need ${price}c, have ${progress.credits}c.`);
       }
       await context.db.client.playerProgress.update({
         where: { userId: context.userId },
         data: { credits: { decrement: price }, homeVault: level },
       });
       // Create vault directory on home server
-      const session = context.gameStateManager.getSession(context.userId);
+      const session = getSession(context);
       if (session?.homeServerId) {
         const user = await context.db.client.user.findUnique({
           where: { id: context.userId },
@@ -502,20 +480,20 @@ export class DefenseCommandsModule implements CommandModule {
       if (context.services.missionIntegrationService) {
         context.services.missionIntegrationService.onDefenseEvent(context.userId, "vault", level).catch(() => {});
       }
-      return { success: true, output: `Vault upgraded to Level ${level}! (-${price}c)\nVault directory created at ~/.vault/\nAttackers must solve: ${layerDesc}`, timestamp: new Date() };
+      return successResult(`Vault upgraded to Level ${level}! (-${price}c)\nVault directory created at ~/.vault/\nAttackers must solve: ${layerDesc}`);
     }
 
     if (defense === "ids") {
       const level = parseInt(levelStr || "0");
       if (level < 1 || level > 3) {
-        return { success: false, output: "Usage: upgrade ids <1|2|3>", timestamp: new Date() };
+        return errorResult("Usage: upgrade ids <1|2|3>");
       }
       if (progress.homeIds >= level) {
-        return { success: false, output: `Already at IDS level ${progress.homeIds}.`, timestamp: new Date() };
+        return errorResult(`Already at IDS level ${progress.homeIds}.`);
       }
       const price = IDS_PRICES[level]!;
       if (progress.credits < price) {
-        return { success: false, output: `Not enough credits. Need ${price}c, have ${progress.credits}c.`, timestamp: new Date() };
+        return errorResult(`Not enough credits. Need ${price}c, have ${progress.credits}c.`);
       }
       await context.db.client.playerProgress.update({
         where: { userId: context.userId },
@@ -525,32 +503,32 @@ export class DefenseCommandsModule implements CommandModule {
       if (context.services.missionIntegrationService) {
         context.services.missionIntegrationService.onDefenseEvent(context.userId, "ids", level).catch(() => {});
       }
-      return { success: true, output: `IDS upgraded to Level ${level}! (-${price}c)\n${desc}`, timestamp: new Date() };
+      return successResult(`IDS upgraded to Level ${level}! (-${price}c)\n${desc}`);
     }
 
     if (defense === "honeypot") {
       if (progress.homeHoneypot) {
-        return { success: false, output: "Honeypot already installed.", timestamp: new Date() };
+        return errorResult("Honeypot already installed.");
       }
       if (progress.credits < HONEYPOT_PRICE) {
-        return { success: false, output: `Not enough credits. Need ${HONEYPOT_PRICE}c, have ${progress.credits}c.`, timestamp: new Date() };
+        return errorResult(`Not enough credits. Need ${HONEYPOT_PRICE}c, have ${progress.credits}c.`);
       }
       await context.db.client.playerProgress.update({
         where: { userId: context.userId },
         data: { credits: { decrement: HONEYPOT_PRICE }, homeHoneypot: true },
       });
       // Generate initial decoy files
-      const session = context.gameStateManager.getSession(context.userId);
+      const session = getSession(context);
       if (session?.homeServerId) {
         await this.generateDecoyFiles(context, session.homeServerId);
       }
       if (context.services.missionIntegrationService) {
         context.services.missionIntegrationService.onDefenseEvent(context.userId, "honeypot", 1).catch(() => {});
       }
-      return { success: true, output: `Honeypot installed! (-${HONEYPOT_PRICE}c)\nDecoy files deployed in ~/downloads/.\nAttackers who target decoys waste time and trigger alerts.`, timestamp: new Date() };
+      return successResult(`Honeypot installed! (-${HONEYPOT_PRICE}c)\nDecoy files deployed in ~/downloads/.\nAttackers who target decoys waste time and trigger alerts.`);
     }
 
-    return { success: false, output: `Unknown defense: ${defense}. Options: firewall, vault, ids, honeypot`, timestamp: new Date() };
+    return errorResult(`Unknown defense: ${defense}. Options: firewall, vault, ids, honeypot`);
   }
 
   // ── Helper: generate decoy files ──
@@ -617,7 +595,7 @@ export class DefenseCommandsModule implements CommandModule {
   // ── Helper: resolve path ──
   private resolvePath(input: string, context: CommandContext): string {
     if (input.startsWith("/")) return input;
-    const session = context.gameStateManager.getSession(context.userId);
+    const session = getSession(context);
     const cwd = session?.currentDirectory || "/";
     return cwd === "/" ? `/${input}` : `${cwd}/${input}`;
   }

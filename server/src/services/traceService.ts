@@ -17,13 +17,17 @@ import { LOGGER } from "../di/tokens";
  * - "trace:evaded"     { traceId, targetId }
  */
 
-/** Duration tiers mapped from evidence level (in milliseconds). */
-const DURATION_TIERS: { minEvidence: number; durationMs: number }[] = [
-  { minEvidence: 85, durationMs: 15 * 60 * 1000 }, // 85+   → 15 minutes
-  { minEvidence: 70, durationMs: 30 * 60 * 1000 }, // 70-84 → 30 minutes
-  { minEvidence: 50, durationMs: 60 * 60 * 1000 }, // 50-69 → 1 hour
-  { minEvidence: 0, durationMs: 2 * 60 * 60 * 1000 }, // <50   → 2 hours
-];
+import {
+  TRACE_DURATION_TIERS,
+  getTraceEvasionChance,
+} from "../config/gameBalance";
+
+/** Duration tiers mapped from evidence level (in milliseconds) — derived from gameBalance. */
+const DURATION_TIERS: { minEvidence: number; durationMs: number }[] =
+  TRACE_DURATION_TIERS.map(t => ({
+    minEvidence: t.minEvidence,
+    durationMs: t.baseMins * 60 * 1000,
+  }));
 
 /** How often the progress loop ticks (ms). */
 const PROGRESS_INTERVAL_MS = 60 * 1000;
@@ -326,9 +330,8 @@ class TraceService extends EventEmitter {
 
       const stealthSkill = progress.stealth;
 
-      // Calculate evasion chance
-      const evadeChance =
-        (stealthSkill / 100) * 0.7 - (trace.progress / 100) * 0.5;
+      // Calculate evasion chance — scales with stealth, penalized by trace progress
+      const evadeChance = getTraceEvasionChance(stealthSkill, trace.progress);
       const roll = Math.random();
       const evaded = roll < evadeChance;
 

@@ -3,6 +3,13 @@ import { injectable, inject } from "tsyringe";
 import type { Logger } from "pino";
 import { LOGGER } from "../di/tokens";
 import { db } from "../database/client";
+import { safeExecute } from "../utils/safeExecute";
+import {
+  BACKDOOR_INITIAL_RISK,
+  BACKDOOR_DISCOVERY_THRESHOLD,
+  getBackdoorDuration,
+  getBackdoorDetectionIncrement,
+} from "../config/gameBalance";
 
 /**
  * BackdoorService - Manages persistent backdoors on hacked servers
@@ -16,22 +23,11 @@ import { db } from "../database/client";
  */
 @injectable()
 export class BackdoorService extends EventEmitter {
-  /** Hours until expiration by backdoor type */
-  private readonly EXPIRATION_HOURS: Record<string, number | null> = {
-    standard: 24,
-    persistent: 72,
-    rootkit: null, // permanent
-  };
+  /** Initial detection risk by backdoor type — from gameBalance */
+  private readonly INITIAL_DETECTION_RISK = BACKDOOR_INITIAL_RISK;
 
-  /** Initial detection risk by backdoor type */
-  private readonly INITIAL_DETECTION_RISK: Record<string, number> = {
-    rootkit: 10,
-    persistent: 15,
-    standard: 20,
-  };
-
-  /** Detection risk increment per use */
-  private readonly DETECTION_RISK_INCREMENT = 5;
+  /** Discovery threshold — from gameBalance */
+  private readonly DISCOVERY_THRESHOLD = BACKDOOR_DISCOVERY_THRESHOLD;
 
   constructor(@inject(LOGGER) private logger: Logger) {
     super();
@@ -59,102 +55,101 @@ export class BackdoorService extends EventEmitter {
     upgraded?: boolean;
     error?: string;
   }> {
-    try {
-      const type = this.resolveBackdoorType(method);
-      const expiresAt = this.calculateExpiration(type);
-      const detectionRisk = this.INITIAL_DETECTION_RISK[type] ?? 20;
+    return await safeExecute({
+      fn: async () => {
+        const type = this.resolveBackdoorType(method);
+        const stealthSkill = await this.getInstallerStealth(installerId);
+        const expiresAt = this.calculateExpiration(type, stealthSkill);
+        const detectionRisk = this.INITIAL_DETECTION_RISK[type] ?? 20;
 
-      this.logger.info(
-        { installerId, serverId, type, accessLevel, method, tools },
-        "Attempting backdoor installation",
-      );
-
-      // Check for an existing backdoor from this installer on this server
-      const existing = await db.client.backdoor.findUnique({
-        where: {
-          installerId_serverId: { installerId, serverId },
-        },
-      });
-
-      if (existing) {
-        // Upgrade path — only if the new access level exceeds the current one
-        if (accessLevel > existing.accessLevel) {
-          const upgraded = await db.client.backdoor.update({
-            where: { id: existing.id },
-            data: {
-              accessLevel,
-              type,
-              isActive: true,
-              detectionRisk: Math.min(detectionRisk, existing.detectionRisk), // keep the stealthier value
-              expiresAt,
-              metadata: {
-                method,
-                tools,
-                upgradedAt: new Date().toISOString(),
-                previousAccessLevel: existing.accessLevel,
-              },
-            },
-          });
-
-          this.logger.info(
-            {
-              backdoorId: upgraded.id,
-              installerId,
-              serverId,
-              oldAccessLevel: existing.accessLevel,
-              newAccessLevel: accessLevel,
-              type,
-            },
-            "Backdoor upgraded",
-          );
-
-          this.emit("backdoor:installed", { installerId, serverId, type });
-
-          return { success: true, backdoor: upgraded, upgraded: true };
-        }
-
-        // Already exists with equal or higher access — no change needed
         this.logger.info(
-          { installerId, serverId, existingAccessLevel: existing.accessLevel, requestedAccessLevel: accessLevel },
-          "Backdoor already exists with equal or higher access level",
+          { installerId, serverId, type, accessLevel, method, tools },
+          "Attempting backdoor installation",
         );
 
-        return { success: true, backdoor: existing, upgraded: false };
-      }
-
-      // Fresh install
-      const backdoor = await db.client.backdoor.create({
-        data: {
-          installerId,
-          serverId,
-          accessLevel,
-          type,
-          isActive: true,
-          detectionRisk,
-          expiresAt,
-          metadata: {
-            method,
-            tools,
-            installedAt: new Date().toISOString(),
+        // Check for an existing backdoor from this installer on this server
+        const existing = await db.client.backdoor.findUnique({
+          where: {
+            installerId_serverId: { installerId, serverId },
           },
-        },
-      });
+        });
 
-      this.logger.info(
-        { backdoorId: backdoor.id, installerId, serverId, type, accessLevel, detectionRisk },
-        "Backdoor installed successfully",
-      );
+        if (existing) {
+          // Upgrade path — only if the new access level exceeds the current one
+          if (accessLevel > existing.accessLevel) {
+            const upgraded = await db.client.backdoor.update({
+              where: { id: existing.id },
+              data: {
+                accessLevel,
+                type,
+                isActive: true,
+                detectionRisk, // reset to new type's base risk on upgrade
+                expiresAt,
+                metadata: {
+                  method,
+                  tools,
+                  upgradedAt: new Date().toISOString(),
+                  previousAccessLevel: existing.accessLevel,
+                },
+              },
+            });
 
-      this.emit("backdoor:installed", { installerId, serverId, type });
+            this.logger.info(
+              {
+                backdoorId: upgraded.id,
+                installerId,
+                serverId,
+                oldAccessLevel: existing.accessLevel,
+                newAccessLevel: accessLevel,
+                type,
+              },
+              "Backdoor upgraded",
+            );
 
-      return { success: true, backdoor };
-    } catch (error) {
-      this.logger.error(
-        { err: error, installerId, serverId, accessLevel, method },
-        "Failed to install backdoor",
-      );
-      return { success: false, error: "Failed to install backdoor" };
-    }
+            this.emit("backdoor:installed", { installerId, serverId, type });
+
+            return { success: true, backdoor: upgraded, upgraded: true };
+          }
+
+          // Already exists with equal or higher access — no change needed
+          this.logger.info(
+            { installerId, serverId, existingAccessLevel: existing.accessLevel, requestedAccessLevel: accessLevel },
+            "Backdoor already exists with equal or higher access level",
+          );
+
+          return { success: true, backdoor: existing, upgraded: false };
+        }
+
+        // Fresh install
+        const backdoor = await db.client.backdoor.create({
+          data: {
+            installerId,
+            serverId,
+            accessLevel,
+            type,
+            isActive: true,
+            detectionRisk,
+            expiresAt,
+            metadata: {
+              method,
+              tools,
+              installedAt: new Date().toISOString(),
+            },
+          },
+        });
+
+        this.logger.info(
+          { backdoorId: backdoor.id, installerId, serverId, type, accessLevel, detectionRisk },
+          "Backdoor installed successfully",
+        );
+
+        this.emit("backdoor:installed", { installerId, serverId, type });
+
+        return { success: true, backdoor };
+      },
+      context: "Install backdoor",
+      logger: this.logger,
+    })() ?? { success: false, error: "Failed to install backdoor" };
   }
 
   // ==================== BACKDOOR USAGE ====================
@@ -175,90 +170,92 @@ export class BackdoorService extends EventEmitter {
     discovered?: boolean;
     error?: string;
   }> {
-    try {
-      const backdoor = await db.client.backdoor.findUnique({
-        where: {
-          installerId_serverId: { installerId: userId, serverId },
-        },
-      });
+    return await safeExecute({
+      fn: async () => {
+        const backdoor = await db.client.backdoor.findUnique({
+          where: {
+            installerId_serverId: { installerId: userId, serverId },
+          },
+        });
 
-      if (!backdoor) {
-        this.logger.warn({ userId, serverId }, "No backdoor found for this user/server pair");
-        return { success: false, error: "No backdoor installed on this server" };
-      }
+        if (!backdoor) {
+          this.logger.warn({ userId, serverId }, "No backdoor found for this user/server pair");
+          return { success: false, error: "No backdoor installed on this server" };
+        }
 
-      if (!backdoor.isActive) {
-        this.logger.warn({ userId, serverId, backdoorId: backdoor.id }, "Attempted to use inactive backdoor");
-        return { success: false, error: "Backdoor is no longer active" };
-      }
+        if (!backdoor.isActive) {
+          this.logger.warn({ userId, serverId, backdoorId: backdoor.id }, "Attempted to use inactive backdoor");
+          return { success: false, error: "Backdoor is no longer active" };
+        }
 
-      // Check expiration
-      if (backdoor.expiresAt && backdoor.expiresAt < new Date()) {
+        // Check expiration
+        if (backdoor.expiresAt && backdoor.expiresAt < new Date()) {
+          await db.client.backdoor.update({
+            where: { id: backdoor.id },
+            data: { isActive: false },
+          });
+
+          this.logger.info(
+            { backdoorId: backdoor.id, serverId },
+            "Backdoor expired on use attempt",
+          );
+
+          this.emit("backdoor:expired", { backdoorId: backdoor.id, serverId });
+
+          return { success: false, error: "Backdoor has expired" };
+        }
+
+        // Increment detection risk
+        // Skill-scaled detection increment — higher stealth = smaller increment
+        const stealthSkill = await this.getInstallerStealth(backdoor.installerId);
+        const increment = getBackdoorDetectionIncrement(stealthSkill);
+        const newDetectionRisk = Math.min(100, backdoor.detectionRisk + increment);
+
+        // Discovery check — only triggers when risk exceeds threshold
+        let discovered = false;
+        if (newDetectionRisk > this.DISCOVERY_THRESHOLD) {
+          const discoveryRoll = Math.random();
+          if (discoveryRoll < newDetectionRisk / 100) {
+            discovered = true;
+          }
+        }
+
+        // Update the backdoor record
         await db.client.backdoor.update({
           where: { id: backdoor.id },
-          data: { isActive: false },
+          data: {
+            detectionRisk: newDetectionRisk,
+            lastUsed: new Date(),
+            isActive: !discovered,
+          },
         });
+
+        if (discovered) {
+          this.logger.warn(
+            { backdoorId: backdoor.id, userId, serverId, detectionRisk: newDetectionRisk },
+            "Backdoor discovered during use — deactivated",
+          );
+
+          this.emit("backdoor:discovered", {
+            backdoorId: backdoor.id,
+            serverId,
+            discoveredBy: "system",
+          });
+
+          return { success: true, accessLevel: backdoor.accessLevel, discovered: true };
+        }
 
         this.logger.info(
-          { backdoorId: backdoor.id, serverId },
-          "Backdoor expired on use attempt",
-        );
-
-        this.emit("backdoor:expired", { backdoorId: backdoor.id, serverId });
-
-        return { success: false, error: "Backdoor has expired" };
-      }
-
-      // Increment detection risk
-      const newDetectionRisk = Math.min(100, backdoor.detectionRisk + this.DETECTION_RISK_INCREMENT);
-
-      // Discovery check — only triggers when risk > 75
-      let discovered = false;
-      if (newDetectionRisk > 75) {
-        const discoveryRoll = Math.random();
-        if (discoveryRoll < newDetectionRisk / 100) {
-          discovered = true;
-        }
-      }
-
-      // Update the backdoor record
-      await db.client.backdoor.update({
-        where: { id: backdoor.id },
-        data: {
-          detectionRisk: newDetectionRisk,
-          lastUsed: new Date(),
-          isActive: !discovered,
-        },
-      });
-
-      if (discovered) {
-        this.logger.warn(
           { backdoorId: backdoor.id, userId, serverId, detectionRisk: newDetectionRisk },
-          "Backdoor discovered during use — deactivated",
+          "Backdoor used successfully",
         );
 
-        this.emit("backdoor:discovered", {
-          backdoorId: backdoor.id,
-          serverId,
-          discoveredBy: "system",
-        });
-
-        return { success: true, accessLevel: backdoor.accessLevel, discovered: true };
-      }
-
-      this.logger.info(
-        { backdoorId: backdoor.id, userId, serverId, detectionRisk: newDetectionRisk },
-        "Backdoor used successfully",
-      );
-
-      return { success: true, accessLevel: backdoor.accessLevel, discovered: false };
-    } catch (error) {
-      this.logger.error(
-        { err: error, userId, serverId },
-        "Failed to use backdoor",
-      );
-      return { success: false, error: "Failed to use backdoor" };
-    }
+        return { success: true, accessLevel: backdoor.accessLevel, discovered: false };
+      },
+      context: "Use backdoor",
+      logger: this.logger,
+      fallback: { success: false, error: "Failed to use backdoor" } as { success: boolean; accessLevel?: number; discovered?: boolean; error?: string },
+    })() as { success: boolean; accessLevel?: number; discovered?: boolean; error?: string };
   }
 
   // ==================== LISTING ====================
@@ -268,36 +265,35 @@ export class BackdoorService extends EventEmitter {
    * name and IP address.
    */
   async getBackdoors(userId: string): Promise<any[]> {
-    try {
-      const backdoors = await db.client.backdoor.findMany({
-        where: {
-          installerId: userId,
-          isActive: true,
-        },
-        include: {
-          server: {
-            select: {
-              name: true,
-              ipAddress: true,
+    return await safeExecute({
+      fn: async () => {
+        const backdoors = await db.client.backdoor.findMany({
+          where: {
+            installerId: userId,
+            isActive: true,
+          },
+          include: {
+            server: {
+              select: {
+                name: true,
+                ipAddress: true,
+              },
             },
           },
-        },
-        orderBy: { createdAt: "desc" },
-      });
+          orderBy: { createdAt: "desc" },
+        });
 
-      this.logger.info(
-        { userId, count: backdoors.length },
-        "Retrieved active backdoors for user",
-      );
+        this.logger.info(
+          { userId, count: backdoors.length },
+          "Retrieved active backdoors for user",
+        );
 
-      return backdoors;
-    } catch (error) {
-      this.logger.error(
-        { err: error, userId },
-        "Failed to retrieve backdoors",
-      );
-      return [];
-    }
+        return backdoors;
+      },
+      context: "Retrieve backdoors",
+      logger: this.logger,
+      fallback: [] as any[],
+    })() as any[];
   }
 
   // ==================== REMOVAL ====================
@@ -309,36 +305,35 @@ export class BackdoorService extends EventEmitter {
     userId: string,
     serverId: string,
   ): Promise<{ success: boolean; error?: string }> {
-    try {
-      const backdoor = await db.client.backdoor.findUnique({
-        where: {
-          installerId_serverId: { installerId: userId, serverId },
-        },
-      });
+    return await safeExecute({
+      fn: async () => {
+        const backdoor = await db.client.backdoor.findUnique({
+          where: {
+            installerId_serverId: { installerId: userId, serverId },
+          },
+        });
 
-      if (!backdoor) {
-        this.logger.warn({ userId, serverId }, "No backdoor found to remove");
-        return { success: false, error: "No backdoor found on this server" };
-      }
+        if (!backdoor) {
+          this.logger.warn({ userId, serverId }, "No backdoor found to remove");
+          return { success: false, error: "No backdoor found on this server" };
+        }
 
-      await db.client.backdoor.update({
-        where: { id: backdoor.id },
-        data: { isActive: false },
-      });
+        await db.client.backdoor.update({
+          where: { id: backdoor.id },
+          data: { isActive: false },
+        });
 
-      this.logger.info(
-        { backdoorId: backdoor.id, userId, serverId },
-        "Backdoor manually removed",
-      );
+        this.logger.info(
+          { backdoorId: backdoor.id, userId, serverId },
+          "Backdoor manually removed",
+        );
 
-      return { success: true };
-    } catch (error) {
-      this.logger.error(
-        { err: error, userId, serverId },
-        "Failed to remove backdoor",
-      );
-      return { success: false, error: "Failed to remove backdoor" };
-    }
+        return { success: true };
+      },
+      context: "Remove backdoor",
+      logger: this.logger,
+      fallback: { success: false, error: "Failed to remove backdoor" } as { success: boolean; error?: string },
+    })() as { success: boolean; error?: string };
   }
 
   /**
@@ -346,49 +341,51 @@ export class BackdoorService extends EventEmitter {
    * Intended to be called periodically (e.g. via a cron / scheduler).
    */
   async cleanupExpired(): Promise<number> {
-    try {
-      const now = new Date();
+    return await safeExecute({
+      fn: async () => {
+        const now = new Date();
 
-      // Fetch expired backdoors so we can emit events for each
-      const expiredBackdoors = await db.client.backdoor.findMany({
-        where: {
-          isActive: true,
-          expiresAt: { not: null, lte: now },
-        },
-        select: { id: true, serverId: true },
-      });
-
-      if (expiredBackdoors.length === 0) {
-        return 0;
-      }
-
-      // Bulk deactivate
-      const result = await db.client.backdoor.updateMany({
-        where: {
-          isActive: true,
-          expiresAt: { not: null, lte: now },
-        },
-        data: { isActive: false },
-      });
-
-      // Emit individual expiry events
-      for (const expired of expiredBackdoors) {
-        this.emit("backdoor:expired", {
-          backdoorId: expired.id,
-          serverId: expired.serverId,
+        // Fetch expired backdoors so we can emit events for each
+        const expiredBackdoors = await db.client.backdoor.findMany({
+          where: {
+            isActive: true,
+            expiresAt: { not: null, lte: now },
+          },
+          select: { id: true, serverId: true },
         });
-      }
 
-      this.logger.info(
-        { deactivated: result.count },
-        "Cleaned up expired backdoors",
-      );
+        if (expiredBackdoors.length === 0) {
+          return 0;
+        }
 
-      return result.count;
-    } catch (error) {
-      this.logger.error({ err: error }, "Failed to cleanup expired backdoors");
-      return 0;
-    }
+        // Bulk deactivate
+        const result = await db.client.backdoor.updateMany({
+          where: {
+            isActive: true,
+            expiresAt: { not: null, lte: now },
+          },
+          data: { isActive: false },
+        });
+
+        // Emit individual expiry events
+        for (const expired of expiredBackdoors) {
+          this.emit("backdoor:expired", {
+            backdoorId: expired.id,
+            serverId: expired.serverId,
+          });
+        }
+
+        this.logger.info(
+          { deactivated: result.count },
+          "Cleaned up expired backdoors",
+        );
+
+        return result.count;
+      },
+      context: "Cleanup expired backdoors",
+      logger: this.logger,
+      fallback: 0,
+    })() as number;
   }
 
   // ==================== SCANNING ====================
@@ -407,69 +404,68 @@ export class BackdoorService extends EventEmitter {
     serverId: string,
     scannerForensicsLevel: number,
   ): Promise<any[]> {
-    try {
-      const backdoors = await db.client.backdoor.findMany({
-        where: {
-          serverId,
-          isActive: true,
-        },
-        include: {
-          installer: {
-            select: {
-              id: true,
-              username: true,
+    return await safeExecute({
+      fn: async () => {
+        const backdoors = await db.client.backdoor.findMany({
+          where: {
+            serverId,
+            isActive: true,
+          },
+          include: {
+            installer: {
+              select: {
+                id: true,
+                username: true,
+              },
             },
           },
-        },
-      });
+        });
 
-      if (backdoors.length === 0) {
-        this.logger.info({ serverId, scannerForensicsLevel }, "Scan complete — no active backdoors on server");
-        return [];
-      }
+        if (backdoors.length === 0) {
+          this.logger.info({ serverId, scannerForensicsLevel }, "Scan complete — no active backdoors on server");
+          return [];
+        }
 
-      const discovered: any[] = [];
+        const discovered: any[] = [];
 
-      for (const backdoor of backdoors) {
-        const threshold = 100 - backdoor.detectionRisk;
-        const scanPower = scannerForensicsLevel * 10;
+        for (const backdoor of backdoors) {
+          const threshold = 100 - backdoor.detectionRisk;
+          const scanPower = scannerForensicsLevel * 10;
 
-        if (scanPower > threshold) {
-          discovered.push(backdoor);
+          if (scanPower > threshold) {
+            discovered.push(backdoor);
 
-          this.logger.info(
-            {
+            this.logger.info(
+              {
+                backdoorId: backdoor.id,
+                serverId,
+                detectionRisk: backdoor.detectionRisk,
+                scannerForensicsLevel,
+                scanPower,
+                threshold,
+              },
+              "Backdoor discovered during scan",
+            );
+
+            this.emit("backdoor:discovered", {
               backdoorId: backdoor.id,
               serverId,
-              detectionRisk: backdoor.detectionRisk,
-              scannerForensicsLevel,
-              scanPower,
-              threshold,
-            },
-            "Backdoor discovered during scan",
-          );
-
-          this.emit("backdoor:discovered", {
-            backdoorId: backdoor.id,
-            serverId,
-            discoveredBy: "scan",
-          });
+              discoveredBy: "scan",
+            });
+          }
         }
-      }
 
-      this.logger.info(
-        { serverId, scannerForensicsLevel, totalBackdoors: backdoors.length, discoveredCount: discovered.length },
-        "Server scan completed",
-      );
+        this.logger.info(
+          { serverId, scannerForensicsLevel, totalBackdoors: backdoors.length, discoveredCount: discovered.length },
+          "Server scan completed",
+        );
 
-      return discovered;
-    } catch (error) {
-      this.logger.error(
-        { err: error, serverId, scannerForensicsLevel },
-        "Failed to scan for backdoors",
-      );
-      return [];
-    }
+        return discovered;
+      },
+      context: "Scan for backdoors",
+      logger: this.logger,
+      fallback: [] as any[],
+    })() as any[];
   }
 
   // ==================== DETECTED REMOVAL ====================
@@ -480,39 +476,38 @@ export class BackdoorService extends EventEmitter {
   async removeDetectedBackdoor(
     backdoorId: string,
   ): Promise<{ success: boolean; error?: string }> {
-    try {
-      const backdoor = await db.client.backdoor.findUnique({
-        where: { id: backdoorId },
-      });
+    return await safeExecute({
+      fn: async () => {
+        const backdoor = await db.client.backdoor.findUnique({
+          where: { id: backdoorId },
+        });
 
-      if (!backdoor) {
-        this.logger.warn({ backdoorId }, "Detected backdoor not found");
-        return { success: false, error: "Backdoor not found" };
-      }
+        if (!backdoor) {
+          this.logger.warn({ backdoorId }, "Detected backdoor not found");
+          return { success: false, error: "Backdoor not found" };
+        }
 
-      if (!backdoor.isActive) {
-        this.logger.info({ backdoorId }, "Detected backdoor already inactive");
+        if (!backdoor.isActive) {
+          this.logger.info({ backdoorId }, "Detected backdoor already inactive");
+          return { success: true };
+        }
+
+        await db.client.backdoor.update({
+          where: { id: backdoorId },
+          data: { isActive: false },
+        });
+
+        this.logger.info(
+          { backdoorId, serverId: backdoor.serverId, installerId: backdoor.installerId },
+          "Detected backdoor removed",
+        );
+
         return { success: true };
-      }
-
-      await db.client.backdoor.update({
-        where: { id: backdoorId },
-        data: { isActive: false },
-      });
-
-      this.logger.info(
-        { backdoorId, serverId: backdoor.serverId, installerId: backdoor.installerId },
-        "Detected backdoor removed",
-      );
-
-      return { success: true };
-    } catch (error) {
-      this.logger.error(
-        { err: error, backdoorId },
-        "Failed to remove detected backdoor",
-      );
-      return { success: false, error: "Failed to remove detected backdoor" };
-    }
+      },
+      context: "Remove detected backdoor",
+      logger: this.logger,
+      fallback: { success: false, error: "Failed to remove detected backdoor" } as { success: boolean; error?: string },
+    })() as { success: boolean; error?: string };
   }
 
   // ==================== PRIVATE HELPERS ====================
@@ -528,13 +523,31 @@ export class BackdoorService extends EventEmitter {
   }
 
   /**
-   * Calculate the expiration date based on backdoor type.
+   * Calculate the expiration date based on backdoor type and installer's stealth.
    * Returns null for permanent (rootkit) backdoors.
+   * Higher stealth = longer duration.
    */
-  private calculateExpiration(type: string): Date | null {
-    const hours = this.EXPIRATION_HOURS[type];
-    if (hours === null || hours === undefined) return null;
+  private calculateExpiration(type: string, stealthSkill: number = 0): Date | null {
+    const hours = getBackdoorDuration(type, stealthSkill);
+    if (hours === null) return null;
     return new Date(Date.now() + hours * 60 * 60 * 1000);
+  }
+
+  /** Helper to fetch the installer's stealth skill for scaling. */
+  private async getInstallerStealth(installerId: string): Promise<number> {
+    return await safeExecute({
+      fn: async () => {
+        const progress = await db.client.playerProgress.findUnique({
+          where: { userId: installerId },
+          select: { stealth: true },
+        });
+        return progress?.stealth ?? 0;
+      },
+      context: "Get installer stealth",
+      logger: this.logger,
+      silent: true,
+      fallback: 0,
+    })() as number;
   }
 }
 

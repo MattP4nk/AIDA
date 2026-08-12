@@ -13,6 +13,8 @@ import type ProcessStateService from "../processStateService";
 import type PlayerPresenceService from "../playerPresenceService";
 import type HackService from "../hackService";
 import type MessageService from "../messageService";
+import type { ChatService } from "../chatService";
+import type { MessageEncryptionService } from "../messageEncryptionService";
 import type ForumService from "../forumService";
 import type { FactionService } from "../factionService";
 import type { InventoryService } from "../inventoryService";
@@ -24,10 +26,15 @@ import type { NetworkTopologyService } from "../networkTopologyService";
 import type MissionIntegrationService from "../missionIntegration";
 import type { LeaderboardService } from "../leaderboardService";
 import type { AchievementService } from "../achievementService";
+import type { KeyFragmentService } from "../keyFragmentService";
+import type { DarkNetDungeonService } from "../darknetDungeonService";
+import type DarkNetDiscoveryService from "../darknetDiscoveryService";
+import type { ConnectionChallengeService } from "../connectionChallengeService";
 
 export interface CommandContext {
   userId: string;
   role: string;
+  terminalWidth: number;
   db: { client: PrismaClient };
   fileService: FileService;
   io?: SocketIOServer;
@@ -54,6 +61,12 @@ export interface CommandContext {
     missionIntegrationService?: MissionIntegrationService;
     leaderboardService?: LeaderboardService;
     achievementService?: AchievementService;
+    keyFragmentService?: KeyFragmentService;
+    darknetDungeonService?: DarkNetDungeonService;
+    darknetDiscoveryService?: DarkNetDiscoveryService;
+    connectionChallengeService?: ConnectionChallengeService;
+    chatService?: ChatService;
+    messageEncryptionService?: MessageEncryptionService;
     [key: string]: any;
   };
 }
@@ -67,6 +80,8 @@ export interface CommandInfo {
 }
 
 export interface CommandModule {
+  /** The category name for this module (e.g. "system", "network", "hack"). */
+  category: string;
   commands: Set<string>;
   execute(command: Command, context: CommandContext): Promise<CommandResult>;
   getCommandInfo?(): CommandInfo[];

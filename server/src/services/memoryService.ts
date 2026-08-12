@@ -27,7 +27,9 @@ export type GameProcessType =
   | "download"
   | "backdoor_install"
   | "traceroute"
-  | "trace_evade";
+  | "trace_evade"
+  | "sweep"
+  | "crack_file";
 
 export interface GameProcess {
   pid: number;
@@ -98,6 +100,8 @@ export const PROCESS_COSTS: Record<GameProcessType, ProcessCostConfig> = {
   backdoor_install: { cpuCost: 60,  ramCost: 96,  bwCost: 40, baseDuration: 90000,  minDuration: 18000, skillName: "stealth",       skillScaleFactor: 1500 },
   traceroute:       { cpuCost: 20,  ramCost: 16,  bwCost: 40, baseDuration: 8000,   minDuration: 2000,  skillName: "networking",    skillScaleFactor: 200  },
   trace_evade:      { cpuCost: 70,  ramCost: 64,  bwCost: 30, baseDuration: 30000,  minDuration: 6000,  skillName: "stealth",       skillScaleFactor: 800  },
+  sweep:            { cpuCost: 60,  ramCost: 64,  bwCost: 20, baseDuration: 20000,  minDuration: 5000,  skillName: "forensics",     skillScaleFactor: 800  },
+  crack_file:       { cpuCost: 90,  ramCost: 96,  bwCost: 10, baseDuration: 40000,  minDuration: 8000,  skillName: "cryptography",  skillScaleFactor: 1200 },
 };
 
 /** Passive consumer costs */
@@ -460,10 +464,22 @@ class MemoryService extends EventEmitter {
 
     // Push Socket.IO event
     if (this.io) {
+      // Build contextual description for the ProcessBar
+      const descriptions: Record<string, string> = {
+        hack_prep: `Preparing hack on ${targetLabel || "target"}`,
+        scan: `Scanning ${targetLabel || "network"}`,
+        download: `Downloading ${targetLabel || "file"}`,
+        decrypt: `Decrypting ${targetLabel || "file"}`,
+        backdoor_install: `Installing backdoor on ${targetLabel || "server"}`,
+        traceroute: `Tracing route to ${targetLabel || "target"}`,
+        trace_evade: `Evading active trace`,
+      };
+
       this.io.to(`player:${userId}`).emit("process:started", {
         pid,
         type,
         targetLabel,
+        description: descriptions[type] || `Running ${type}`,
         eta: Math.ceil(adjusted.duration / 1000),
         cpuCost: adjusted.cpuCost,
         ramCost: cost.ramCost,
@@ -620,9 +636,11 @@ class MemoryService extends EventEmitter {
       }
     }
 
-    // Push resource updates to all active players every 5 seconds
+    // Push resource updates only to players with running processes (every 5 ticks)
     if (this.io && now % 5000 < 1000) {
-      for (const userId of this.baseSpecs.keys()) {
+      for (const [userId, userProcesses] of this.gameProcesses) {
+        // Only broadcast if the player has running processes
+        if (userProcesses.size === 0) continue;
         const spec = this.getComputerSpec(userId);
         this.io.to(`player:${userId}`).emit("resources:update", {
           cpuUsed: spec.cpuUsed,

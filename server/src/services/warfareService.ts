@@ -4,6 +4,7 @@ import { Logger } from "pino";
 import { FactionWarInfo, WarStatus } from "../../../shared/types";
 import { getService } from "../di/container";
 import { LOGGER, PERSONA_SERVICE, RESOURCE_SERVICE, DYNAMIC_CONTENT_SERVICE } from "../di/tokens";
+import { safeExecute } from "../utils/safeExecute";
 
 /** War duration safety valve: 14 days */
 const MAX_WAR_DURATION_MS = 14 * 24 * 60 * 60 * 1000;
@@ -27,11 +28,11 @@ export default class WarfareService {
   startWarMonitor(): void {
     // Check every 5 minutes
     this.warCheckInterval = setInterval(async () => {
-      try {
-        await this.processActiveWars();
-      } catch (error) {
-        this.logger.error({ error }, "Error processing active wars");
-      }
+      await safeExecute({
+        fn: () => this.processActiveWars(),
+        context: "Process active wars",
+        logger: this.logger,
+      })();
     }, 5 * 60 * 1000);
     this.warCheckInterval.unref?.();
     this.logger.info("Warfare monitor started");
@@ -115,26 +116,32 @@ export default class WarfareService {
     ]);
 
     // Notify faction leaders via PersonaService
-    try {
-      const personaService = getService<import("./personaService").PersonaService>(PERSONA_SERVICE);
-      await personaService.onWarDeclared(attackerFactionId, defenderFactionId, war.id);
-    } catch {
-      // PersonaService may not be available
-    }
+    await safeExecute({
+      fn: async () => {
+        const personaService = getService<import("./personaService").PersonaService>(PERSONA_SERVICE);
+        await personaService.onWarDeclared(attackerFactionId, defenderFactionId, war.id);
+      },
+      context: "Notify personas of war declaration",
+      logger: this.logger,
+      silent: true,
+    })();
 
     // Inject war notices into faction servers
-    try {
-      const dynamicContent = getService<import("./dynamicContentService").DynamicContentService>(DYNAMIC_CONTENT_SERVICE);
-      await dynamicContent.processEvent("war:declared", {
-        attackerFactionId,
-        defenderFactionId,
-        attackerName: attacker.name,
-        defenderName: defender.name,
-        warId: war.id,
-      });
-    } catch {
-      // DynamicContentService may not be available
-    }
+    await safeExecute({
+      fn: async () => {
+        const dynamicContent = getService<import("./dynamicContentService").DynamicContentService>(DYNAMIC_CONTENT_SERVICE);
+        await dynamicContent.processEvent("war:declared", {
+          attackerFactionId,
+          defenderFactionId,
+          attackerName: attacker.name,
+          defenderName: defender.name,
+          warId: war.id,
+        });
+      },
+      context: "Inject war notices into faction servers",
+      logger: this.logger,
+      silent: true,
+    })();
 
     this.logger.info({ warId: war.id, attacker: attacker.name, defender: defender.name }, "War declared");
 
@@ -184,35 +191,44 @@ export default class WarfareService {
     });
 
     // Transfer resources from loser to winner
-    try {
-      const resourceService = getService<import("./resourceService").default>(RESOURCE_SERVICE);
-      await resourceService.spendResources(factionId, reparations);
-    } catch {
-      // Resource transfer is best-effort
-    }
+    await safeExecute({
+      fn: async () => {
+        const resourceService = getService<import("./resourceService").default>(RESOURCE_SERVICE);
+        await resourceService.spendResources(factionId, reparations);
+      },
+      context: "Transfer war reparation resources",
+      logger: this.logger,
+      silent: true,
+    })();
 
     // Notify AI personas of war end
-    try {
-      const personaService = getService<import("./personaService").PersonaService>(PERSONA_SERVICE);
-      await personaService.onWarEnded(warId, winnerId, factionId, "surrender");
-    } catch {
-      // PersonaService may not be available
-    }
+    await safeExecute({
+      fn: async () => {
+        const personaService = getService<import("./personaService").PersonaService>(PERSONA_SERVICE);
+        await personaService.onWarEnded(warId, winnerId, factionId, "surrender");
+      },
+      context: "Notify personas of war surrender",
+      logger: this.logger,
+      silent: true,
+    })();
 
     // Inject ceasefire notices into faction servers
-    try {
-      const dynamicContent = getService<import("./dynamicContentService").DynamicContentService>(DYNAMIC_CONTENT_SERVICE);
-      await dynamicContent.processEvent("war:ended", {
-        winnerFactionId: winnerId,
-        loserFactionId: factionId,
-        winnerName: winnerName,
-        loserName: loserName,
-        reason: "surrendered",
-        warId,
-      });
-    } catch {
-      // DynamicContentService may not be available
-    }
+    await safeExecute({
+      fn: async () => {
+        const dynamicContent = getService<import("./dynamicContentService").DynamicContentService>(DYNAMIC_CONTENT_SERVICE);
+        await dynamicContent.processEvent("war:ended", {
+          winnerFactionId: winnerId,
+          loserFactionId: factionId,
+          winnerName: winnerName,
+          loserName: loserName,
+          reason: "surrendered",
+          warId,
+        });
+      },
+      context: "Inject surrender ceasefire notices",
+      logger: this.logger,
+      silent: true,
+    })();
 
     this.logger.info({ warId, surrenderedBy: factionId, winnerId }, "War ended by surrender");
 
@@ -293,23 +309,29 @@ export default class WarfareService {
       }
 
       // Apply resource bleed to both factions
-      try {
-        const resourceService = getService<import("./resourceService").default>(RESOURCE_SERVICE);
-        await resourceService.spendResources(war.attackerFactionId, WAR_RESOURCE_BLEED);
-        await resourceService.spendResources(war.defenderFactionId, WAR_RESOURCE_BLEED);
-      } catch {
-        // Resource service may not be available
-      }
+      await safeExecute({
+        fn: async () => {
+          const resourceService = getService<import("./resourceService").default>(RESOURCE_SERVICE);
+          await resourceService.spendResources(war.attackerFactionId, WAR_RESOURCE_BLEED);
+          await resourceService.spendResources(war.defenderFactionId, WAR_RESOURCE_BLEED);
+        },
+        context: "Apply war resource bleed",
+        logger: this.logger,
+        silent: true,
+      })();
 
       // Throttled AI notification: every 6th tick (~30 min) so leaders know about war costs
       const warMinutes = Math.floor((Date.now() - war.startedAt.getTime()) / (5 * 60 * 1000));
       if (warMinutes % 6 === 0) {
-        try {
-          const personaService = getService<import("./personaService").PersonaService>(PERSONA_SERVICE);
-          await personaService.onWarResourceBleed(war.attackerFactionId, war.defenderFactionId, WAR_RESOURCE_BLEED);
-        } catch {
-          // PersonaService may not be available
-        }
+        await safeExecute({
+          fn: async () => {
+            const personaService = getService<import("./personaService").PersonaService>(PERSONA_SERVICE);
+            await personaService.onWarResourceBleed(war.attackerFactionId, war.defenderFactionId, WAR_RESOURCE_BLEED);
+          },
+          context: "Notify personas of war resource bleed",
+          logger: this.logger,
+          silent: true,
+        })();
       }
     }
   }
@@ -331,29 +353,35 @@ export default class WarfareService {
     });
 
     // Notify AI personas of ceasefire
-    try {
-      const personaService = getService<import("./personaService").PersonaService>(PERSONA_SERVICE);
-      await personaService.onWarEnded(war.id, winnerId, null, "ceasefire");
-    } catch {
-      // PersonaService may not be available
-    }
+    await safeExecute({
+      fn: async () => {
+        const personaService = getService<import("./personaService").PersonaService>(PERSONA_SERVICE);
+        await personaService.onWarEnded(war.id, winnerId, null, "ceasefire");
+      },
+      context: "Notify personas of forced ceasefire",
+      logger: this.logger,
+      silent: true,
+    })();
 
     // Inject ceasefire notices into faction servers
-    try {
-      const loserId = winnerId === war.attackerFactionId ? war.defenderFactionId : war.attackerFactionId;
-      const loserName = winnerId === war.attackerFactionId ? war.defenderFaction.name : war.attackerFaction.name;
-      const dynamicContent = getService<import("./dynamicContentService").DynamicContentService>(DYNAMIC_CONTENT_SERVICE);
-      await dynamicContent.processEvent("war:ended", {
-        winnerFactionId: winnerId,
-        loserFactionId: loserId,
-        winnerName,
-        loserName,
-        reason: "ceasefire (14-day limit)",
-        warId: war.id,
-      });
-    } catch {
-      // DynamicContentService may not be available
-    }
+    await safeExecute({
+      fn: async () => {
+        const loserId = winnerId === war.attackerFactionId ? war.defenderFactionId : war.attackerFactionId;
+        const loserName = winnerId === war.attackerFactionId ? war.defenderFaction.name : war.attackerFaction.name;
+        const dynamicContent = getService<import("./dynamicContentService").DynamicContentService>(DYNAMIC_CONTENT_SERVICE);
+        await dynamicContent.processEvent("war:ended", {
+          winnerFactionId: winnerId,
+          loserFactionId: loserId,
+          winnerName,
+          loserName,
+          reason: "ceasefire (14-day limit)",
+          warId: war.id,
+        });
+      },
+      context: "Inject ceasefire notices into faction servers",
+      logger: this.logger,
+      silent: true,
+    })();
 
     this.logger.info({ warId: war.id, winnerId, winnerName }, "War ended by forced ceasefire (14-day limit)");
   }

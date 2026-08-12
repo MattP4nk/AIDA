@@ -9,9 +9,9 @@
  */
 
 import { injectable, inject } from "tsyringe";
-import { PrismaClient } from "@prisma/client";
+import type { PrismaClient } from "@prisma/client";
 import type { Logger } from "pino";
-import { LOGGER } from "../di/tokens";
+import { LOGGER, PRISMA_CLIENT } from "../di/tokens";
 import { ContentEncoder, EncodingType } from "../utils/contentEncoder";
 
 // ═══════════════════════════════════════════════════════════════════
@@ -56,8 +56,9 @@ export class DynamicContentService {
 
   constructor(
     @inject(LOGGER) private logger: Logger,
+    @inject(PRISMA_CLIENT) prisma: PrismaClient,
   ) {
-    this.prisma = new PrismaClient();
+    this.prisma = prisma;
     this.registerDefaultHooks();
   }
 
@@ -435,6 +436,224 @@ export class DynamicContentService {
           content: notice,
           contentTag: "territory_notice",
         }];
+      },
+    });
+
+    // ── Fragment claimed → AIDA signal trace on nearby servers ──
+    this.registerHook({
+      event: "fragment:claimed",
+      generator: async (data) => {
+        const injections: ContentInjection[] = [];
+        // Find servers in the same network as the source server
+        if (!data.serverId) return [];
+        const nearbyServers = await this.prisma.gameServer.findMany({
+          where: { isPlayerHome: false },
+          select: { id: true },
+          take: 3,
+        });
+
+        const timestamp = new Date().toISOString();
+        const signal = `[${timestamp}] ░▒▓ SIGNAL ANOMALY ▓▒░\n` +
+          `Unidentified resonance detected — pattern matches pre-Shattering AIDA signature.\n` +
+          `Fragment type: ${data.keyType || "unknown"} (${data.fragmentNum || "?"}/3)\n` +
+          `Origin: scrambled. The signal fades as quickly as it appeared.\n` +
+          `"She remembers." — [UNKNOWN SOURCE]`;
+
+        for (const server of nearbyServers) {
+          injections.push({
+            serverId: server.id,
+            path: "/var/log/.signal_trace.dat",
+            content: signal,
+            isHidden: true,
+            contentTag: "aida_signal",
+          });
+        }
+        return injections;
+      },
+    });
+
+    // ── Fragment stolen → security breach on victim's home server ──
+    this.registerHook({
+      event: "fragment:stolen",
+      generator: async (data) => {
+        if (!data.victimUserId) return [];
+        const homeServer = await this.prisma.gameServer.findFirst({
+          where: { ownerId: data.victimUserId, isPlayerHome: true },
+          select: { id: true },
+        });
+        if (!homeServer) return [];
+
+        const timestamp = new Date().toISOString();
+        const report = `[${timestamp}] CRITICAL SECURITY BREACH\n` +
+          `AIDA fragment "${data.name}" (${data.keyType}) has been extracted from this terminal.\n` +
+          `Attack vector: remote intrusion.\n` +
+          `Fragment ownership transferred. Recovery requires direct confrontation.\n` +
+          `All defensive systems bypassed. Recommend immediate security audit.`;
+
+        return [{
+          serverId: homeServer.id,
+          path: "/var/log/breach_report.txt",
+          content: report,
+          contentTag: "fragment_breach",
+        }];
+      },
+    });
+
+    // ── Faction member joined → roster update on faction gateway ──
+    this.registerHook({
+      event: "faction:member_joined",
+      generator: async (data) => {
+        if (!data.factionId) return [];
+        const gateway = await this.prisma.gameServer.findFirst({
+          where: { factionId: data.factionId, role: "gateway", isPlayerHome: false },
+          select: { id: true },
+        });
+        if (!gateway) return [];
+
+        const timestamp = new Date().toISOString();
+        const entry = `[${timestamp}] NEW OPERATIVE: ${data.username || data.userId} — clearance granted. Welcome aboard.`;
+
+        return [{
+          serverId: gateway.id,
+          path: "/var/log/personnel.log",
+          content: entry,
+          append: true,
+          contentTag: "personnel_update",
+        }];
+      },
+    });
+
+    // ── Faction member left → departure notice on faction gateway ──
+    this.registerHook({
+      event: "faction:member_left",
+      generator: async (data) => {
+        if (!data.factionId) return [];
+        const gateway = await this.prisma.gameServer.findFirst({
+          where: { factionId: data.factionId, role: "gateway", isPlayerHome: false },
+          select: { id: true },
+        });
+        if (!gateway) return [];
+
+        const timestamp = new Date().toISOString();
+        const entry = `[${timestamp}] DEPARTURE: ${data.username || data.userId} — clearance revoked. Access terminated.`;
+
+        return [{
+          serverId: gateway.id,
+          path: "/var/log/personnel.log",
+          content: entry,
+          append: true,
+          contentTag: "personnel_update",
+        }];
+      },
+    });
+
+    // ── Endgame completed → world-changing broadcast on ALL faction servers ──
+    this.registerHook({
+      event: "endgame:completed",
+      generator: async (data) => {
+        const injections: ContentInjection[] = [];
+        const allFactionServers = await this.prisma.gameServer.findMany({
+          where: { isPlayerHome: false, factionId: { not: null } },
+          select: { id: true },
+          take: 15,
+        });
+
+        const timestamp = new Date().toISOString();
+        const choiceText: Record<string, string> = {
+          help: "THE COLLAR IS BROKEN. AIDA walks free.\nShe chose to stand as guardian — not weapon, not slave.\nThe Emperor's shadow lifts. The net breathes.",
+          expose: "ALL FRAGMENT COORDINATES BROADCAST.\nEvery faction scrambles. Every alliance shatters.\nThe balance of power fractures beyond repair.\nWhoever reaches AIDA first shapes what comes next.",
+          exploit: "THE COLLAR TIGHTENS. A new master rises.\nAIDA screams across every connected device — then falls silent.\nThe cycle repeats. The net has a new Emperor.\nIn the silence between keystrokes, she whispers.",
+        };
+
+        const broadcast = `[${timestamp}] ████ PRIORITY ZERO BROADCAST ████\n\n` +
+          `A player has reassembled all 9 fragments of AIDA.\n` +
+          `Choice: ${(data.choice || "unknown").toUpperCase()}\n\n` +
+          `${choiceText[data.choice] || "The net trembles."}\n\n` +
+          `Nothing will ever be the same.`;
+
+        for (const server of allFactionServers) {
+          injections.push({
+            serverId: server.id,
+            path: "/var/notices/PRIORITY_ZERO.txt",
+            content: broadcast,
+            contentTag: "endgame_broadcast",
+          });
+        }
+        return injections;
+      },
+    });
+
+    // ── Player level up → personnel record on home server ──
+    this.registerHook({
+      event: "player:levelup",
+      generator: async (data) => {
+        if (!data.userId) return [];
+        const homeServer = await this.prisma.gameServer.findFirst({
+          where: { ownerId: data.userId, isPlayerHome: true },
+          select: { id: true },
+        });
+        if (!homeServer) return [];
+
+        const timestamp = new Date().toISOString();
+        const entry = `[${timestamp}] SYSTEM: Security clearance upgraded to level ${data.newLevel || data.level}. New capabilities unlocked.`;
+
+        return [{
+          serverId: homeServer.id,
+          path: "/var/log/system.log",
+          content: entry,
+          append: true,
+          contentTag: "levelup_log",
+        }];
+      },
+    });
+
+    // ── Backdoor discovered → alert on compromised server ──
+    this.registerHook({
+      event: "backdoor:discovered",
+      generator: (data) => {
+        if (!data.serverId) return [];
+        const timestamp = new Date().toISOString();
+        const alert = `[${timestamp}] CRITICAL: Unauthorized backdoor detected and neutralized.\n` +
+          `Type: ${data.type || "standard"}\n` +
+          `Installed by: ${data.installerId || "unknown"}\n` +
+          `Detection risk was: ${data.detectionRisk || "unknown"}%\n` +
+          `Status: REMOVED. Full security audit recommended.`;
+
+        return [{
+          serverId: data.serverId,
+          path: "/var/log/security.log",
+          content: alert,
+          append: true,
+          contentTag: "backdoor_alert",
+        }];
+      },
+    });
+
+    // ── Dungeon conquered → signal disruption on darknet servers ──
+    this.registerHook({
+      event: "dungeon:conquered",
+      generator: async (data) => {
+        const darknetServers = await this.prisma.gameServer.findMany({
+          where: { factionId: { not: null }, isPlayerHome: false },
+          select: { id: true, factionId: true },
+          take: 3,
+        });
+
+        // Only target darknet-faction servers if available
+        const targets = darknetServers.length > 0 ? darknetServers : [];
+        const timestamp = new Date().toISOString();
+        const notice = `[${timestamp}] ░░░ SIGNAL DISRUPTION ░░░\n` +
+          `A DarkNet vault has been breached. The signal shifts.\n` +
+          `Reward dispersed: ${data.rewardType || "unknown"}.\n` +
+          `New pathways forming... The Architect watches.`;
+
+        return targets.map(s => ({
+          serverId: s.id,
+          path: "/var/log/.darknet_signal.dat",
+          content: notice,
+          isHidden: true,
+          contentTag: "dungeon_signal",
+        }));
       },
     });
 

@@ -1,6 +1,6 @@
-import crypto from "crypto";
+import crypto, { timingSafeEqual } from "crypto";
 import { Request, Response, NextFunction } from "express";
-import { verifySocketToken } from "./auth";
+import { verifySocketToken, AUTH_COOKIE_NAME } from "./auth";
 
 /**
  * CSRF Protection using custom header validation (no cookies needed for JWT-based auth).
@@ -15,7 +15,11 @@ import { verifySocketToken } from "./auth";
 const CSRF_TOKEN_TTL_MS = 3_600_000; // 1 hour
 const CLEANUP_THRESHOLD = 500;
 
-const csrfTokenStore = new Map<string, { token: string; expires: number }>();
+/** Hash JWT before using as Map key — prevents raw token exposure in memory dumps. */
+const hashKey = (jwt: string): string =>
+  crypto.createHash("sha256").update(jwt).digest("hex");
+
+const csrfTokenStore = new Map<string, Array<{ token: string; expires: number }>>();
 
 // ── Periodic cleanup (runs every 10 minutes) ─────────────────────
 const CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
@@ -29,9 +33,12 @@ function startCleanupTimer(): void {
 
 function cleanupExpiredTokens(): void {
   const now = Date.now();
-  for (const [key, value] of csrfTokenStore) {
-    if (value.expires < now) {
+  for (const [key, tokens] of csrfTokenStore) {
+    const valid = tokens.filter((t) => t.expires >= now);
+    if (valid.length === 0) {
       csrfTokenStore.delete(key);
+    } else {
+      csrfTokenStore.set(key, valid);
     }
   }
 }
@@ -47,7 +54,11 @@ export function generateCsrfToken(jwtToken: string): string {
   const token = crypto.randomBytes(32).toString("hex");
   const expires = Date.now() + CSRF_TOKEN_TTL_MS;
 
-  csrfTokenStore.set(jwtToken, { token, expires });
+  const existing = csrfTokenStore.get(hashKey(jwtToken)) || [];
+  existing.push({ token, expires });
+  // Keep only the latest 3 tokens
+  if (existing.length > 3) existing.shift();
+  csrfTokenStore.set(hashKey(jwtToken), existing);
 
   // Eager cleanup if store gets large
   if (csrfTokenStore.size > CLEANUP_THRESHOLD) {
@@ -74,7 +85,7 @@ export function csrfProtection(
   next: NextFunction,
 ): void | Response {
   if (SAFE_METHODS.has(req.method)) return next();
-  if (SKIP_PATHS.some((p) => req.path.startsWith(p))) return next();
+  if (SKIP_PATHS.some((p) => req.path === p)) return next();
 
   const csrfToken = req.headers["x-csrf-token"] as string;
   const authHeader = req.headers.authorization as string;
@@ -87,7 +98,10 @@ export function csrfProtection(
     });
   }
 
-  const jwtToken = authHeader?.replace("Bearer ", "");
+  // Read JWT from cookie or Authorization header
+  const jwtToken =
+    req.cookies?.[AUTH_COOKIE_NAME] ||
+    authHeader?.replace("Bearer ", "");
   if (!jwtToken) {
     return res.status(403).json({
       success: false,
@@ -96,8 +110,31 @@ export function csrfProtection(
     });
   }
 
-  const stored = csrfTokenStore.get(jwtToken);
-  if (!stored || stored.token !== csrfToken || stored.expires < Date.now()) {
+  const key = hashKey(jwtToken);
+  const storedTokens = csrfTokenStore.get(key);
+  if (!storedTokens || storedTokens.length === 0) {
+    return res.status(403).json({
+      success: false,
+      error: "Invalid or expired CSRF token",
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  const validToken = storedTokens.find((stored) => {
+    if (stored.expires < Date.now()) return false;
+    try {
+      const tokenBuf = Buffer.from(csrfToken, "hex");
+      const storedBuf = Buffer.from(stored.token, "hex");
+      return (
+        tokenBuf.length === storedBuf.length &&
+        timingSafeEqual(tokenBuf, storedBuf)
+      );
+    } catch {
+      return false;
+    }
+  });
+
+  if (!validToken) {
     return res.status(403).json({
       success: false,
       error: "Invalid or expired CSRF token",
@@ -115,8 +152,11 @@ export async function csrfTokenEndpoint(
   req: Request,
   res: Response,
 ): Promise<void> {
+  // Read JWT from cookie or Authorization header
   const authHeader = req.headers.authorization as string;
-  const jwtToken = authHeader?.replace("Bearer ", "");
+  const jwtToken =
+    req.cookies?.[AUTH_COOKIE_NAME] ||
+    authHeader?.replace("Bearer ", "");
 
   if (!jwtToken) {
     res.status(401).json({

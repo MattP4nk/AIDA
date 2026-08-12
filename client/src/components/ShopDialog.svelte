@@ -1,7 +1,6 @@
 <script lang="ts">
     import { onMount } from "svelte";
     import { apiClient } from "../services/api";
-    // socketService removed — shop data refreshes on buy/sell, no real-time socket events needed
 
     export let visible = false;
     export let onClose: () => void;
@@ -64,6 +63,11 @@
         await loadShopData();
         await loadPlayerData();
     });
+
+    // Re-fetch player credits when dialog becomes visible (covers external credit changes)
+    $: if (visible) {
+        loadPlayerData();
+    }
 
     async function loadShopData() {
         try {

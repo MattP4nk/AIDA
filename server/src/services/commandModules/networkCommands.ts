@@ -1,5 +1,7 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
+import logger from "../../logger";
+import { spawnBackgroundProcess, successResult, errorResult } from "./helpers";
 import {
   validateIPAddress,
   validateServerId,
@@ -23,6 +25,7 @@ import {
 } from "./asciiBox";
 
 export class NetworkCommandsModule implements CommandModule {
+  public category = "network";
   public commands: Set<string> = new Set([
     "scan",
     "servers",
@@ -31,6 +34,9 @@ export class NetworkCommandsModule implements CommandModule {
     "traceroute",
     "probe",
     "netmap",
+    "handshake.ack",
+    "signal.trace",
+    "connect.abort",
   ]);
 
   public async execute(
@@ -53,20 +59,17 @@ export class NetworkCommandsModule implements CommandModule {
           return await this.handleTraceroute(command, context);
         case "netmap":
           return await this.handleNetmap(command, context);
+        case "handshake.ack":
+          return await this.handleChallengeSubmit(command, context, "handshake");
+        case "signal.trace":
+          return await this.handleChallengeSubmit(command, context, "signal_trace");
+        case "connect.abort":
+          return this.handleConnectAbort(context);
         default:
-          return {
-            success: false,
-            output: `Network command not implemented: ${command.command}`,
-            timestamp: new Date(),
-          };
+          return errorResult(`Network command not implemented: ${command.command}`);
       }
     } catch (error) {
-      return {
-        success: false,
-        output: "Network command failed",
-        error: error instanceof Error ? error.message : "Unknown error",
-        timestamp: new Date(),
-      };
+      return errorResult("Network command failed", error instanceof Error ? error.message : "Unknown error");
     }
   }
 
@@ -140,11 +143,7 @@ export class NetworkCommandsModule implements CommandModule {
       const validation = validatePartialIP(partialIp);
 
       if (!validation.isValid) {
-        return {
-          success: false,
-          output: `Invalid partial IP: ${partialIp}\nUsage: scan 10.10.10  or  scan 10.10.10.x  or  scan 192.168\nProvide at least two octets of a known IP to sweep that subnet.`,
-          timestamp: new Date(),
-        };
+        return errorResult(`Invalid partial IP: ${partialIp}\nUsage: scan 10.10.10  or  scan 10.10.10.x  or  scan 192.168\nProvide at least two octets of a known IP to sweep that subnet.`);
       }
 
       const ipPrefix = partialIpToPrefix(partialIp)!;
@@ -164,11 +163,7 @@ export class NetworkCommandsModule implements CommandModule {
     const currentServerId = session?.currentServerId || session?.homeServerId;
 
     if (!currentServerId) {
-      return {
-        success: false,
-        output: "Not connected to any server. Use 'connect home' first.",
-        timestamp: new Date(),
-      };
+      return errorResult("Not connected to any server. Use 'connect home' first.");
     }
 
     const progress = await context.db.client.playerProgress.findUnique({
@@ -179,51 +174,41 @@ export class NetworkCommandsModule implements CommandModule {
 
     // ── Resource check: spawn scan as a background process ──
     if (memoryService && topoService) {
-      memoryService.initComputerSpec(context.userId, progress?.level ?? 1);
-
-      const check = memoryService.canSpawnProcess(context.userId, "scan");
-      if (!check.allowed) {
-        return {
-          success: false,
-          output: `Scan failed: ${check.reason}`,
-          timestamp: new Date(),
-        };
-      }
-
-      const proc = memoryService.spawnGameProcess(
-        context.userId,
-        session!.socketId || context.userId,
-        "scan",
-        scanLevel,
-        "network scan",
-        currentServerId,
-        async () => {
+      const spawn = await spawnBackgroundProcess({
+        context,
+        processType: "scan",
+        skillKey: "networking",
+        label: "network scan",
+        targetServerId: currentServerId,
+        onComplete: async () => {
           // ── On completion: run the actual scan and push results ──
           try {
-            console.log(
-              "[SCAN] Adjacency scan onComplete fired for",
-              context.userId,
-            );
+            logger.debug({ userId: context.userId }, "Adjacency scan onComplete fired");
             const results = await topoService.discoverNeighbors(
               context.userId,
               currentServerId,
               scanLevel,
             );
-            console.log(
-              "[SCAN] discoverNeighbors returned",
-              results.length,
-              "results",
-            );
+            logger.debug({ count: results.length }, "discoverNeighbors returned results");
+
+            // Pre-warm discovered servers via content queue
+            try {
+              const { getService } = await import("../../di/container");
+              const { CONTENT_QUEUE_SERVICE } = await import("../../di/tokens");
+              const contentQueue = getService<any>(CONTENT_QUEUE_SERVICE);
+              for (const r of results) {
+                const sid = (r as any).serverId || (r as any).server?.id || (r as any).id;
+                if (sid) {
+                  await contentQueue.enqueue(sid, 5 /* NORMAL */);
+                }
+              }
+            } catch { /* non-critical */ }
+
             const currentServer =
               await context.services.serverService.getServer(currentServerId);
             const output = this.formatScanResults(
               results,
               currentServer?.name || currentServerId,
-            );
-
-            console.log(
-              "[SCAN] Emitting command:result, io available:",
-              !!context.io,
             );
             if (context.io) {
               context.io.to(`player:${context.userId}`).emit("command:result", {
@@ -234,19 +219,9 @@ export class NetworkCommandsModule implements CommandModule {
               });
             }
 
-            // Also emit as notification for guaranteed delivery
-            if (context.io) {
-              context.io.to(`player:${context.userId}`).emit("notification", {
-                title: "Network Scan Complete",
-                message:
-                  results.length > 0
-                    ? `Discovered ${results.length} adjacent server(s). Check terminal for details.`
-                    : `No new servers found nearby.`,
-                severity: "info",
-              });
-            }
+            // Notification handled by process:completed event — no duplicate needed
           } catch (err) {
-            console.error("[SCAN] Adjacency scan callback error:", err);
+            logger.error({ err }, "Adjacency scan callback error");
             if (context.io) {
               context.io.to(`player:${context.userId}`).emit("command:result", {
                 success: false,
@@ -257,22 +232,9 @@ export class NetworkCommandsModule implements CommandModule {
             }
           }
         },
-      );
+      });
 
-      if (!proc) {
-        return {
-          success: false,
-          output: "Failed to start scan process.",
-          timestamp: new Date(),
-        };
-      }
-
-      const etaSec = Math.ceil(proc.duration / 1000);
-      return {
-        success: true,
-        output: `Scanning network... ETA ${etaSec}s [PID ${proc.pid}]\nUse 'ps' to monitor progress.`,
-        timestamp: new Date(),
-      };
+      if (spawn) return spawn.result;
     }
 
     // ── Fallback: no resource system — instant scan ──
@@ -287,14 +249,10 @@ export class NetworkCommandsModule implements CommandModule {
       }
       const currentServer =
         await context.services.serverService.getServer(currentServerId);
-      return {
-        success: true,
-        output: this.formatScanResults(
-          results,
-          currentServer?.name || currentServerId,
-        ),
-        timestamp: new Date(),
-      };
+      return successResult(this.formatScanResults(
+        results,
+        currentServer?.name || currentServerId,
+      ));
     }
 
     return await this.legacyScan(context, currentServerId, scanLevel);
@@ -321,48 +279,24 @@ export class NetworkCommandsModule implements CommandModule {
 
     // ── Resource check: spawn as a background process if available ──
     if (memoryService) {
-      memoryService.initComputerSpec(context.userId, progress?.level ?? 1);
-
-      const check = memoryService.canSpawnProcess(context.userId, "scan");
-      if (!check.allowed) {
-        return {
-          success: false,
-          output: `Scan failed: ${check.reason}`,
-          timestamp: new Date(),
-        };
-      }
-
-      const proc = memoryService.spawnGameProcess(
-        context.userId,
-        session?.socketId || context.userId,
-        "scan",
-        scanLevel,
-        `subnet sweep ${partialIp}`,
-        session?.currentServerId || session?.homeServerId || context.userId,
-        async () => {
+      const spawn = await spawnBackgroundProcess({
+        context,
+        processType: "scan",
+        skillKey: "networking",
+        label: `subnet sweep ${partialIp}`,
+        targetServerId: session?.currentServerId || session?.homeServerId,
+        onComplete: async () => {
           try {
-            console.log(
-              "[SCAN] Subnet sweep onComplete fired for",
-              context.userId,
-            );
+            logger.debug({ userId: context.userId }, "Subnet sweep onComplete fired");
             const servers =
               await context.services.serverService.scanByPartialIp(
                 context.userId,
                 ipPrefix,
                 scanLevel,
               );
-            console.log(
-              "[SCAN] scanByPartialIp returned",
-              servers.length,
-              "servers for prefix",
-              ipPrefix,
-            );
+            logger.debug({ count: servers.length, ipPrefix }, "scanByPartialIp returned results");
             const output = this.formatSubnetSweepResults(servers, partialIp);
 
-            console.log(
-              "[SCAN] Emitting command:result, io available:",
-              !!context.io,
-            );
             if (context.io) {
               context.io.to(`player:${context.userId}`).emit("command:result", {
                 success: true,
@@ -370,21 +304,10 @@ export class NetworkCommandsModule implements CommandModule {
                 terminalId,
                 timestamp: new Date(),
               });
-            }
-
-            // Also emit as notification for guaranteed delivery
-            if (context.io) {
-              context.io.to(`player:${context.userId}`).emit("notification", {
-                title: "Subnet Sweep Complete",
-                message:
-                  servers.length > 0
-                    ? `Found ${servers.length} server(s) on ${partialIp}. Check terminal for details.`
-                    : `No servers found on ${partialIp}.`,
-                severity: "info",
-              });
+              // Notification handled by process:completed event — no duplicate needed
             }
           } catch (err) {
-            console.error("[SCAN] Subnet sweep callback error:", err);
+            logger.error({ err }, "Subnet sweep callback error");
             if (context.io) {
               context.io.to(`player:${context.userId}`).emit("command:result", {
                 success: false,
@@ -395,22 +318,9 @@ export class NetworkCommandsModule implements CommandModule {
             }
           }
         },
-      );
+      });
 
-      if (!proc) {
-        return {
-          success: false,
-          output: "Failed to start subnet sweep.",
-          timestamp: new Date(),
-        };
-      }
-
-      const etaSec = Math.ceil(proc.duration / 1000);
-      return {
-        success: true,
-        output: `Sweeping subnet ${partialIp}... ETA ${etaSec}s [PID ${proc.pid}]\nUse 'ps' to monitor progress.`,
-        timestamp: new Date(),
-      };
+      if (spawn) return spawn.result;
     }
 
     // ── Fallback: instant sweep (no resource system) ──
@@ -419,11 +329,7 @@ export class NetworkCommandsModule implements CommandModule {
       ipPrefix,
       scanLevel,
     );
-    return {
-      success: true,
-      output: this.formatSubnetSweepResults(servers, partialIp),
-      timestamp: new Date(),
-    };
+    return successResult(this.formatSubnetSweepResults(servers, partialIp));
   }
 
   /** Format subnet sweep results into an ASCII table */
@@ -550,11 +456,7 @@ export class NetworkCommandsModule implements CommandModule {
     );
 
     if (servers.length === 0) {
-      return {
-        success: true,
-        output: `Scanning ${subnet}... No unknown servers found.\nTry 'connect <ip>' to reach a different network, then scan again.`,
-        timestamp: new Date(),
-      };
+      return successResult(`Scanning ${subnet}... No unknown servers found.\nTry 'connect <ip>' to reach a different network, then scan again.`);
     }
 
     const columns: Column[] = [
@@ -577,7 +479,7 @@ export class NetworkCommandsModule implements CommandModule {
     const lines = [`Subnet Scan: ${subnet} (Level ${scanLevel})`, ""];
     lines.push(...table(columns, rows, footer));
 
-    return { success: true, output: render(lines), timestamp: new Date() };
+    return successResult(render(lines));
   }
 
   // ==================== SERVERS ====================
@@ -703,14 +605,9 @@ export class NetworkCommandsModule implements CommandModule {
       lines.push(boxRow("  'netmap' to see network topology", W));
       lines.push(boxBottom(W));
 
-      return { success: true, output: render(lines), timestamp: new Date() };
+      return successResult(render(lines));
     } catch (error) {
-      return {
-        success: false,
-        output:
-          error instanceof Error ? error.message : "Failed to list servers",
-        timestamp: new Date(),
-      };
+      return errorResult(error instanceof Error ? error.message : "Failed to list servers");
     }
   }
 
@@ -722,12 +619,7 @@ export class NetworkCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const args = command.args || [];
     if (args.length === 0) {
-      return {
-        success: false,
-        output:
-          "Usage: connect <ip|id|home>\nMust be adjacent server or use 'connect home'.",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: connect <ip|id|home>\nMust be adjacent server or use 'connect home'.");
     }
 
     const target = args[0]!;
@@ -751,29 +643,17 @@ export class NetworkCommandsModule implements CommandModule {
           session.homeServerId,
         );
         if (connected) {
-          return {
-            success: true,
-            output: "Returned to home server.",
-            timestamp: new Date(),
-          };
+          return successResult("Returned to home server.");
         }
       }
-      return {
-        success: false,
-        output: "Home server not found.",
-        timestamp: new Date(),
-      };
+      return errorResult("Home server not found.");
     }
 
     // Validate format
     const isIP = validateIPAddress(target);
     const isValidId = validateServerId(target);
     if (!isIP && !isValidId) {
-      return {
-        success: false,
-        output: "Invalid server ID or IP address format.",
-        timestamp: new Date(),
-      };
+      return errorResult("Invalid server ID or IP address format.");
     }
 
     // Resolve target server
@@ -782,11 +662,7 @@ export class NetworkCommandsModule implements CommandModule {
       targetServer = await context.services.serverService.getServerByIp(target);
     }
     if (!targetServer) {
-      return {
-        success: false,
-        output: `Server not found: ${target}`,
-        timestamp: new Date(),
-      };
+      return errorResult(`Server not found: ${target}`);
     }
 
     // ── Topology enforcement ──
@@ -808,7 +684,7 @@ export class NetworkCommandsModule implements CommandModule {
         );
 
         if (!traversal.allowed) {
-          const W = 52;
+          const W = context.terminalWidth;
           const lines: string[] = [];
           lines.push(sBoxTop(W));
           lines.push(sBoxRow(" [!] CONNECTION BLOCKED", W));
@@ -819,11 +695,7 @@ export class NetworkCommandsModule implements CommandModule {
           lines.push(sBoxRow(" Use 'scan' to discover adjacent servers.", W));
           lines.push(sBoxRow(" Use 'traceroute <ip>' to find a path.", W));
           lines.push(sBoxBottom(W));
-          return {
-            success: false,
-            output: render(lines),
-            timestamp: new Date(),
-          };
+          return errorResult(render(lines));
         }
       }
     }
@@ -835,7 +707,7 @@ export class NetworkCommandsModule implements CommandModule {
         targetServer.id,
       );
       if (!access.allowed) {
-        const W = 52;
+        const W = context.terminalWidth;
         const lines: string[] = [];
         lines.push(sBoxTop(W));
         lines.push(sBoxRow(" [!] ACCESS DENIED", W));
@@ -851,11 +723,115 @@ export class NetworkCommandsModule implements CommandModule {
           lines.push(sBoxRow(` Try: hack ${target}`, W));
         }
         lines.push(sBoxBottom(W));
-        return { success: false, output: render(lines), timestamp: new Date() };
+        return {
+          success: false,
+          output: render(lines),
+          ...(access.requiresHack ? { suggestedCommand: `hack ${target}` } : {}),
+          timestamp: new Date(),
+        };
       }
     }
 
-    // ── Proceed with connection ──
+    // ── Connection challenge check ──
+    const challengeService = context.services.connectionChallengeService;
+    if (challengeService) {
+      // Check if player already has an active challenge
+      const existing = challengeService.getActiveSession(context.userId);
+      if (existing && existing.status === "active") {
+        const cmd = existing.challenge.type === "handshake" ? "handshake.ack" : "signal.trace";
+        return errorResult(`Active connection challenge in progress.\nSubmit: ${cmd} <answer>\nOr: connect.abort to cancel.`);
+      }
+
+      // Check if this is a first visit
+      const previousConn = await context.db.client.serverConnection.findFirst({
+        where: { userId: context.userId, serverId: targetServer.id },
+      });
+      const isFirstVisit = !previousConn;
+
+      // Check for active backdoor on this server (bypasses challenge on revisit)
+      let hasBackdoorOnServer = false;
+      if (topoService && !isFirstVisit) {
+        hasBackdoorOnServer = await topoService.resolveBackdoorBypass(
+          context.userId,
+          targetServer.id,
+        );
+      }
+
+      const check = challengeService.shouldChallenge(context.userId, targetServer, isFirstVisit, hasBackdoorOnServer);
+
+      if (check.needed) {
+        // Get player networking skill
+        const prog = await context.db.client.playerProgress.findUnique({
+          where: { userId: context.userId },
+          select: { networking: true },
+        });
+
+        // Get network zone for challenge type selection
+        let networkZone: string | null = null;
+        if (targetServer.networkId) {
+          const net = await context.db.client.network.findUnique({
+            where: { id: targetServer.networkId },
+            select: { zone: true },
+          });
+          networkZone = net?.zone ?? null;
+        }
+
+        const { challenge } = challengeService.initiateChallenge(
+          context.userId,
+          targetServer,
+          networkZone,
+          prog?.networking ?? 0,
+          isFirstVisit,
+        );
+
+        // Fire content provisioning early so it runs during the challenge
+        // Queue content generation during challenge (urgent — player is connecting)
+        if (isFirstVisit && !targetServer.isPlayerHome) {
+          try {
+            const { getService } = await import("../../di/container");
+            const { CONTENT_QUEUE_SERVICE } = await import("../../di/tokens");
+            const contentQueue = getService<any>(CONTENT_QUEUE_SERVICE);
+            await contentQueue.enqueue(targetServer.id, 1 /* URGENT */, {}, context.userId);
+          } catch { /* non-critical */ }
+        }
+
+        const submitCmd = challenge.type === "handshake" ? "handshake.ack" : "signal.trace";
+        return {
+          success: true,
+          output: challenge.displayText,
+          data: {
+            connectionSessionId: challenge.type,
+            targetIp: targetServer.ipAddress,
+            connectionChallenge: challenge,
+          },
+          suggestedCommand: submitCmd,
+          soundEvent: "alert" as const,
+          timestamp: new Date(),
+        };
+      }
+    }
+
+    // ── Ensure content is ready before connecting ──
+    if (!targetServer.isPlayerHome && targetServer.type !== "player_home") {
+      try {
+        const { getService } = await import("../../di/container");
+        const { CONTENT_QUEUE_SERVICE } = await import("../../di/tokens");
+        const contentQueue = getService<any>(CONTENT_QUEUE_SERVICE);
+        await contentQueue.ensureReady(targetServer.id, context.userId);
+      } catch { /* non-critical — connect anyway */ }
+    }
+
+    return await this.completeConnection(context, target, targetServer);
+  }
+
+  /**
+   * Complete a server connection — shared by direct connect and challenge success.
+   */
+  private async completeConnection(
+    context: CommandContext,
+    target: string,
+    targetServer: any,
+  ): Promise<CommandResult> {
     try {
       const result = await context.services.serverService.connectToServer(
         context.userId,
@@ -863,11 +839,7 @@ export class NetworkCommandsModule implements CommandModule {
       );
 
       if (!result.success) {
-        return {
-          success: false,
-          output: result.message || "Connection failed",
-          timestamp: new Date(),
-        };
+        return errorResult(result.message || "Connection failed");
       }
 
       const connected = await context.gameStateManager.connectPlayerToServer(
@@ -875,14 +847,9 @@ export class NetworkCommandsModule implements CommandModule {
         result.serverId,
       );
       if (!connected) {
-        return {
-          success: false,
-          output: "Failed to update connection state",
-          timestamp: new Date(),
-        };
+        return errorResult("Failed to update connection state");
       }
 
-      // Show connection info with role and network
       const serverRole = (targetServer as any).role || "general";
       const network = targetServer.networkId
         ? await context.db.client.network.findUnique({
@@ -903,11 +870,22 @@ export class NetworkCommandsModule implements CommandModule {
       }
 
       const lines = statusCard("CONNECTED", infoRows);
-      return { success: true, output: render(lines), timestamp: new Date() };
+      return {
+        success: true,
+        output: render(lines),
+        data: {
+          connectionResolved: true,
+          server: { name: targetServer.ipAddress, id: targetServer.id },
+          directory: { path: "/" },
+        },
+        soundEvent: "connected" as const,
+        timestamp: new Date(),
+      };
     } catch (error) {
       return {
         success: false,
         output: error instanceof Error ? error.message : "Connection failed",
+        data: { connectionResolved: true },
         timestamp: new Date(),
       };
     }
@@ -922,11 +900,7 @@ export class NetworkCommandsModule implements CommandModule {
     try {
       const session = context.gameStateManager.getSession(context.userId);
       if (!session || !session.currentServerId) {
-        return {
-          success: false,
-          output: "Not connected to any server.",
-          timestamp: new Date(),
-        };
+        return errorResult("Not connected to any server.");
       }
 
       const serverId = session.currentServerId;
@@ -936,17 +910,23 @@ export class NetworkCommandsModule implements CommandModule {
         serverId,
       );
 
+      // Get home info for client context update
+      const user = await context.db.client.user.findUnique({
+        where: { id: context.userId },
+        select: { homeIp: true },
+      });
+
       return {
         success: true,
         output: "Disconnected. Returned to home server.",
+        data: {
+          server: { name: user?.homeIp || "local" },
+          directory: { path: "~" },
+        },
         timestamp: new Date(),
       };
     } catch (error) {
-      return {
-        success: false,
-        output: error instanceof Error ? error.message : "Disconnect failed",
-        timestamp: new Date(),
-      };
+      return errorResult(error instanceof Error ? error.message : "Disconnect failed");
     }
   }
 
@@ -958,11 +938,7 @@ export class NetworkCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const args = command.args || [];
     if (args.length === 0) {
-      return {
-        success: false,
-        output: "Usage: probe <ip|id>\nExample: probe 192.168.1.1",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: probe <ip|id>\nExample: probe 192.168.1.1");
     }
 
     const target = args[0]!;
@@ -973,11 +949,7 @@ export class NetworkCommandsModule implements CommandModule {
         server = await context.services.serverService.getServerByIp(target);
       }
       if (!server) {
-        return {
-          success: false,
-          output: `Server not found: ${target}`,
-          timestamp: new Date(),
-        };
+        return errorResult(`Server not found: ${target}`);
       }
 
       const accessCheck = await context.services.serverService.canAccessServer(
@@ -1057,14 +1029,10 @@ export class NetworkCommandsModule implements CommandModule {
         }
       }
 
-      const lines = panel(`Probe: ${server.name}`, probeRows, 50);
-      return { success: true, output: render(lines), timestamp: new Date() };
+      const lines = panel(`Probe: ${server.name}`, probeRows, context.terminalWidth);
+      return successResult(render(lines));
     } catch (error) {
-      return {
-        success: false,
-        output: error instanceof Error ? error.message : "Probe failed",
-        timestamp: new Date(),
-      };
+      return errorResult(error instanceof Error ? error.message : "Probe failed");
     }
   }
 
@@ -1076,11 +1044,7 @@ export class NetworkCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const args = command.args || [];
     if (args.length === 0) {
-      return {
-        success: false,
-        output: "Usage: traceroute <ip|id>",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: traceroute <ip|id>");
     }
 
     const target = args[0]!;
@@ -1089,11 +1053,7 @@ export class NetworkCommandsModule implements CommandModule {
     const currentServerId = session?.currentServerId || session?.homeServerId;
 
     if (!currentServerId) {
-      return {
-        success: false,
-        output: "Not connected to any server.",
-        timestamp: new Date(),
-      };
+      return errorResult("Not connected to any server.");
     }
 
     // Resolve target server
@@ -1102,11 +1062,7 @@ export class NetworkCommandsModule implements CommandModule {
       targetServer = await context.services.serverService.getServerByIp(target);
     }
     if (!targetServer) {
-      return {
-        success: false,
-        output: `Server not found: ${target}`,
-        timestamp: new Date(),
-      };
+      return errorResult(`Server not found: ${target}`);
     }
 
     // ── Spawn as background process ──
@@ -1120,11 +1076,7 @@ export class NetworkCommandsModule implements CommandModule {
 
       const check = memoryService.canSpawnProcess(context.userId, "traceroute");
       if (!check.allowed) {
-        return {
-          success: false,
-          output: `Insufficient resources: ${check.reason}`,
-          timestamp: new Date(),
-        };
+        return errorResult(`Insufficient resources: ${check.reason}`);
       }
 
       const userId = context.userId;
@@ -1157,18 +1109,10 @@ export class NetworkCommandsModule implements CommandModule {
       );
 
       if (!proc)
-        return {
-          success: false,
-          output: "Failed to start traceroute.",
-          timestamp: new Date(),
-        };
+        return errorResult("Failed to start traceroute.");
 
       const etaSec = Math.ceil(proc.duration / 1000);
-      return {
-        success: true,
-        output: `Tracing route to ${targetServer.ipAddress}... ETA ${etaSec}s [PID ${proc.pid}]`,
-        timestamp: new Date(),
-      };
+      return successResult(`Tracing route to ${targetServer.ipAddress}... ETA ${etaSec}s [PID ${proc.pid}]`);
     }
 
     // Use real topology path if available (no process system — direct execution)
@@ -1180,7 +1124,7 @@ export class NetworkCommandsModule implements CommandModule {
         targetServer,
         context.userId,
       );
-      return { success: true, output, timestamp: new Date() };
+      return successResult(output);
     }
 
     // Fallback: simulated traceroute
@@ -1285,7 +1229,7 @@ export class NetworkCommandsModule implements CommandModule {
     const lines = [`Traceroute to ${target}`, ""];
     lines.push(...table(columns, rows));
 
-    return { success: true, output: render(lines), timestamp: new Date() };
+    return successResult(render(lines));
   }
 
   // ==================== NETMAP ====================
@@ -1296,21 +1240,13 @@ export class NetworkCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const topoService = context.services.networkTopologyService;
     if (!topoService) {
-      return {
-        success: false,
-        output: "Network topology service unavailable.",
-        timestamp: new Date(),
-      };
+      return errorResult("Network topology service unavailable.");
     }
 
     const session = context.gameStateManager.getSession(context.userId);
     const currentServerId = session?.currentServerId || session?.homeServerId;
     if (!currentServerId) {
-      return {
-        success: false,
-        output: "Not connected to any server.",
-        timestamp: new Date(),
-      };
+      return errorResult("Not connected to any server.");
     }
 
     // Parse depth flag
@@ -1329,12 +1265,7 @@ export class NetworkCommandsModule implements CommandModule {
     );
 
     if (topology.nodes.length === 0) {
-      return {
-        success: true,
-        output:
-          "No discovered network topology. Use 'scan' to discover adjacent servers.",
-        timestamp: new Date(),
-      };
+      return successResult("No discovered network topology. Use 'scan' to discover adjacent servers.");
     }
 
     const W = 62;
@@ -1423,6 +1354,122 @@ export class NetworkCommandsModule implements CommandModule {
     );
     lines.push(boxBottom(W));
 
-    return { success: true, output: render(lines), timestamp: new Date() };
+    return successResult(render(lines));
+  }
+
+  // ==================== CONNECTION CHALLENGE HANDLERS ====================
+
+  /**
+   * Handle handshake.ack and signal.trace submissions.
+   */
+  private async handleChallengeSubmit(
+    command: Command,
+    context: CommandContext,
+    expectedType: "handshake" | "signal_trace",
+  ): Promise<CommandResult> {
+    const answer = command.args?.join(" ");
+    if (!answer) {
+      const cmd = expectedType === "handshake" ? "handshake.ack" : "signal.trace";
+      return errorResult(`Usage: ${cmd} <answer>`);
+    }
+
+    const service = context.services.connectionChallengeService;
+    if (!service) {
+      return errorResult("Connection challenge service unavailable.");
+    }
+
+    const session = service.getActiveSession(context.userId);
+    if (!session || session.status !== "active") {
+      return errorResult("No active connection challenge. Use 'connect <ip>' first.");
+    }
+
+    if (session.challenge.type !== expectedType) {
+      const correctCmd = session.challenge.type === "handshake" ? "handshake.ack" : "signal.trace";
+      return errorResult(`Wrong command. This challenge requires: ${correctCmd}`);
+    }
+
+    try {
+      const result = service.submitAnswer(context.userId, answer);
+
+      if (result.correct) {
+        // Challenge passed — complete the connection
+        const targetServer = await context.db.client.gameServer.findUnique({
+          where: { id: session.targetServerId },
+        });
+        if (!targetServer) {
+          return { success: false, output: "Target server no longer exists.", data: { connectionResolved: true }, timestamp: new Date() };
+        }
+
+        // Ensure content is ready after challenge (may have been queued during challenge)
+        if (!targetServer.isPlayerHome && targetServer.type !== "player_home") {
+          try {
+            const { getService } = await import("../../di/container");
+            const { CONTENT_QUEUE_SERVICE } = await import("../../di/tokens");
+            const contentQueue = getService<any>(CONTENT_QUEUE_SERVICE);
+            await contentQueue.ensureReady(targetServer.id, context.userId);
+          } catch { /* non-critical */ }
+        }
+
+        const connectResult = await this.completeConnection(context, targetServer.ipAddress, targetServer);
+        const outputParts = Array.isArray(connectResult.output) ? [...connectResult.output] : [connectResult.output];
+
+        // Suggest backdoor for high-security servers
+        const { BACKDOOR_CHALLENGE_SUGGESTION_THRESHOLD } = await import("../../config/gameBalance");
+        if (targetServer.securityLevel > BACKDOOR_CHALLENGE_SUGGESTION_THRESHOLD) {
+          outputParts.push("");
+          outputParts.push("  [TIP] Use 'backdoor install' to skip this challenge next time.");
+        }
+
+        return {
+          success: true,
+          output: [`  [+] ${result.feedback}`, "", ...outputParts],
+          data: {
+            ...connectResult.data,
+            connectionResolved: true,
+          },
+          soundEvent: "connected" as const,
+          timestamp: new Date(),
+        };
+      }
+
+      // Wrong answer
+      if (result.session.status === "failed") {
+        return {
+          success: false,
+          output: `  [-] ${result.feedback}\n  Connection rejected. Maximum attempts reached.\n  Try 'connect ${session.targetIp}' again for a new challenge.`,
+          data: { connectionResolved: true },
+          timestamp: new Date(),
+        };
+      }
+
+      const remaining = result.session.challenge.maxAttempts - result.session.attempts;
+      const timeLeft = Math.max(0, Math.ceil((result.session.expiresAt - Date.now()) / 1000));
+      return errorResult(`  [-] ${result.feedback}\n  Attempts remaining: ${remaining} | Time: ${timeLeft}s`);
+    } catch (err) {
+      return {
+        success: false,
+        output: err instanceof Error ? err.message : "Challenge error.",
+        data: { connectionResolved: true },
+        timestamp: new Date(),
+      };
+    }
+  }
+
+  /**
+   * Abort an active connection challenge.
+   */
+  private handleConnectAbort(context: CommandContext): CommandResult {
+    const service = context.services.connectionChallengeService;
+    if (!service) {
+      return errorResult("No active connection challenge.");
+    }
+
+    const session = service.getActiveSession(context.userId);
+    if (!session || session.status !== "active") {
+      return errorResult("No active connection challenge to abort.");
+    }
+
+    service.abortSession(context.userId);
+    return successResult("Connection challenge aborted.", { connectionResolved: true });
   }
 }

@@ -7,22 +7,11 @@ import type {
   CommandResult,
   ValidationResult,
 } from "../types/game";
-import { SystemCommandsModule } from "./commandModules/systemCommands";
-import { NetworkCommandsModule } from "./commandModules/networkCommands";
-import { HackCommandsModule } from "./commandModules/hackCommands";
-import { FileCommandsModule } from "./commandModules/fileCommands";
-import { SocialCommandsModule } from "./commandModules/socialCommands";
-import { GameCommandsModule } from "./commandModules/gameCommands";
-import { HelpCommandsModule } from "./commandModules/helpCommands";
-import { ProcessCommandsModule } from "./commandModules/processCommands";
-import { MathCommandsModule } from "./commandModules/mathCommands";
-import { FactionCommandsModule } from "./commandModules/factionCommands";
-import { AliasCommandsModule } from "./commandModules/aliasCommands";
-import { AdminCommandsModule } from "./commandModules/adminCommands";
-import { DefenseCommandsModule } from "./commandModules/defenseCommands";
-
 import { CommandModule, CommandContext } from "./commandModules/interface";
+import { createAllModules } from "./commandModules/registry";
 import { checkSkillRequirement } from "./commandModules/skillRequirements";
+import { TERM_WIDTH } from "./commandModules/asciiBox";
+import { formatCommandOutput } from "./commandModules/outputFormatter";
 import { injectable, inject } from "tsyringe";
 import type { Logger } from "pino";
 import {
@@ -31,6 +20,7 @@ import {
   PROGRESS_SERVICE,
   GAME_STATE_MANAGER,
 } from "../di/tokens";
+import { safeExecute } from "../utils/safeExecute";
 import { getService } from "../di/container";
 import * as TOKENS from "../di/tokens";
 import {
@@ -38,6 +28,7 @@ import {
   validateArgs,
   validateUserId,
 } from "../utils/validators";
+import { COMMAND_RATE_LIMIT, COMMAND_RATE_WINDOW_MS } from "../config/gameBalance";
 
 import type ProgressService from "./progressService";
 import type GameStateManager from "./gameStateManager";
@@ -50,6 +41,8 @@ import type MemoryService from "./memoryService";
 import type ProcessStateService from "./processStateService";
 import type HackService from "./hackService";
 import type MessageService from "./messageService";
+import type { ChatService } from "./chatService";
+import type { MessageEncryptionService } from "./messageEncryptionService";
 import type ForumService from "./forumService";
 import type { FactionService } from "./factionService";
 import type InventoryService from "./inventoryService";
@@ -77,8 +70,14 @@ import type { PlayerProgress } from "@prisma/client";
 class CommandProcessor extends EventEmitter {
   private commandHistory: Map<string, Command[]>;
   private rateLimitMap: Map<string, number[]>; // userId -> timestamps[]
-  private readonly RATE_LIMIT_WINDOW = 1000; // 1 second
-  private readonly MAX_COMMANDS_PER_WINDOW = 10;
+  private readonly RATE_LIMIT_WINDOW = COMMAND_RATE_WINDOW_MS;
+  private readonly MAX_COMMANDS_PER_WINDOW = COMMAND_RATE_LIMIT;
+  private readonly rateLimitCleanupTimer: ReturnType<typeof setInterval>;
+
+  // Service resolution cache (avoids ~26 DI lookups per command)
+  private serviceCache = new Map<string, any>();
+  private serviceCacheTime = 0;
+  private readonly SERVICE_CACHE_TTL = 60_000; // 1 minute
 
   // Command categories removed - now handled by modules
 
@@ -96,34 +95,29 @@ class CommandProcessor extends EventEmitter {
     this.commandHistory = new Map();
     this.rateLimitMap = new Map();
 
-    // Initialize command modules
-    this.modules = [
-      new SystemCommandsModule(),
-      new NetworkCommandsModule(),
-      new HackCommandsModule(),
-      new FileCommandsModule(),
-      new SocialCommandsModule(),
-      new GameCommandsModule(),
-      new HelpCommandsModule(),
-      new ProcessCommandsModule(),
-      new MathCommandsModule(),
-      new FactionCommandsModule(),
-      new AliasCommandsModule(),
-      new AdminCommandsModule(),
-      new DefenseCommandsModule(),
-    ];
+    // Initialize command modules from registry
+    this.modules = createAllModules();
 
     // Build command map from modules
     this.buildCommandMap();
+
+    // Periodic cleanup of stale rateLimitMap entries (every 5 min)
+    this.rateLimitCleanupTimer = setInterval(() => {
+      const now = Date.now();
+      for (const [userId, timestamps] of this.rateLimitMap) {
+        const recent = timestamps.filter(t => now - t < this.RATE_LIMIT_WINDOW);
+        if (recent.length === 0) {
+          this.rateLimitMap.delete(userId);
+        } else {
+          this.rateLimitMap.set(userId, recent);
+        }
+      }
+    }, 5 * 60 * 1000);
+    this.rateLimitCleanupTimer.unref();
+
     this.logger.info("Command Processor initialized");
   }
 
-  /**
-   * Initialize with Socket.IO (kept for backward compatibility)
-   */
-  public initialize(_io: SocketIOServer): void {
-    // Now handled by DI injection
-  }
 
   private buildCommandMap() {
     for (const module of this.modules) {
@@ -147,76 +141,101 @@ class CommandProcessor extends EventEmitter {
     }
   }
 
-  private async buildCommandContext(userId: string): Promise<CommandContext> {
-    const fileService = this.resolveService<FileService>(TOKENS.FILE_SERVICE)!;
-    const shopService = this.resolveService<ShopService>(TOKENS.SHOP_SERVICE)!;
-    const missionService = this.resolveService<MissionService>(
+  /** Resolve a service with TTL-based caching to avoid repeated DI lookups. */
+  private getCachedService<T>(token: string): T | undefined {
+    if (Date.now() - this.serviceCacheTime > this.SERVICE_CACHE_TTL) {
+      this.serviceCache.clear();
+      this.serviceCacheTime = Date.now();
+    }
+    if (!this.serviceCache.has(token)) {
+      this.serviceCache.set(token, this.resolveService(token));
+    }
+    return this.serviceCache.get(token);
+  }
+
+  private async buildCommandContext(userId: string, terminalCols?: number, userRole?: string): Promise<CommandContext> {
+    const fileService = this.getCachedService<FileService>(TOKENS.FILE_SERVICE)!;
+    const shopService = this.getCachedService<ShopService>(TOKENS.SHOP_SERVICE)!;
+    const missionService = this.getCachedService<MissionService>(
       TOKENS.MISSION_SERVICE,
     )!;
-    const missionGenerator = this.resolveService<MissionGeneratorService>(
+    const missionGenerator = this.getCachedService<MissionGeneratorService>(
       TOKENS.MISSION_GENERATOR_SERVICE,
     )!;
-    const serverService = this.resolveService<ServerService>(
+    const serverService = this.getCachedService<ServerService>(
       TOKENS.SERVER_SERVICE,
     )!;
-    const memoryService = this.resolveService<MemoryService>(
+    const memoryService = this.getCachedService<MemoryService>(
       TOKENS.MEMORY_SERVICE,
     )!;
-    const processStateService = this.resolveService<ProcessStateService>(
+    const processStateService = this.getCachedService<ProcessStateService>(
       TOKENS.PROCESS_STATE_SERVICE,
     )!;
-    const hackService = this.resolveService<HackService>(TOKENS.HACK_SERVICE)!;
-    const messageService = this.resolveService<MessageService>(
+    const hackService = this.getCachedService<HackService>(TOKENS.HACK_SERVICE)!;
+    const messageService = this.getCachedService<MessageService>(
       TOKENS.MESSAGE_SERVICE,
     )!;
-    const forumService = this.resolveService<ForumService>(
+    const forumService = this.getCachedService<ForumService>(
       TOKENS.FORUM_SERVICE,
     )!;
-    const factionService = this.resolveService<FactionService>(
+    const factionService = this.getCachedService<FactionService>(
       TOKENS.FACTION_SERVICE,
     )!;
-    const inventoryService = this.resolveService<InventoryService>(
+    const inventoryService = this.getCachedService<InventoryService>(
       TOKENS.INVENTORY_SERVICE,
     )!;
-    const playerPresenceService = this.resolveService<PlayerPresenceService>(
+    const playerPresenceService = this.getCachedService<PlayerPresenceService>(
       TOKENS.PLAYER_PRESENCE_SERVICE,
     );
-    const backdoorService = this.resolveService<BackdoorService>(
+    const backdoorService = this.getCachedService<BackdoorService>(
       TOKENS.BACKDOOR_SERVICE,
     )!;
-    const traceService = this.resolveService<TraceService>(
+    const traceService = this.getCachedService<TraceService>(
       TOKENS.TRACE_SERVICE,
     )!;
     const factionKnowledgeService =
-      this.resolveService<FactionKnowledgeService>(
+      this.getCachedService<FactionKnowledgeService>(
         TOKENS.FACTION_KNOWLEDGE_SERVICE,
       );
-    const networkTopologyService = this.resolveService<NetworkTopologyService>(
+    const networkTopologyService = this.getCachedService<NetworkTopologyService>(
       TOKENS.NETWORK_TOPOLOGY_SERVICE,
     );
     const missionIntegrationService =
-      this.resolveService<MissionIntegrationService>(
+      this.getCachedService<MissionIntegrationService>(
         TOKENS.MISSION_INTEGRATION_SERVICE,
       );
-    const storyMissionService = this.resolveService<StoryMissionService>(
+    const storyMissionService = this.getCachedService<StoryMissionService>(
       TOKENS.STORY_MISSION_SERVICE,
     );
-    const leaderboardService = this.resolveService<
+    const leaderboardService = this.getCachedService<
       import("./leaderboardService").LeaderboardService
     >(TOKENS.LEADERBOARD_SERVICE);
-    const achievementService = this.resolveService<
+    const achievementService = this.getCachedService<
       import("./achievementService").AchievementService
     >(TOKENS.ACHIEVEMENT_SERVICE);
-
-    // Fetch user role for command-level role gating
-    const user = await db.client.user.findUnique({
-      where: { id: userId },
-      select: { role: true },
-    });
+    const keyFragmentService = this.getCachedService<
+      import("./keyFragmentService").KeyFragmentService
+    >(TOKENS.KEY_FRAGMENT_SERVICE);
+    const darknetDungeonService = this.getCachedService<
+      import("./darknetDungeonService").DarkNetDungeonService
+    >(TOKENS.DARKNET_DUNGEON_SERVICE);
+    const darknetDiscoveryService = this.getCachedService<
+      import("./darknetDiscoveryService").default
+    >("DarkNetDiscoveryService");
+    const connectionChallengeService = this.getCachedService<
+      import("./connectionChallengeService").ConnectionChallengeService
+    >(TOKENS.CONNECTION_CHALLENGE_SERVICE);
+    const chatService = this.getCachedService<ChatService>(
+      TOKENS.CHAT_SERVICE,
+    );
+    const messageEncryptionService = this.getCachedService<MessageEncryptionService>(
+      TOKENS.MESSAGE_ENCRYPTION_SERVICE,
+    );
 
     return {
       userId,
-      role: user?.role ?? "player",
+      role: userRole ?? "player",
+      terminalWidth: terminalCols && terminalCols > 40 ? Math.min(terminalCols - 2, 200) : TERM_WIDTH,
       db,
       fileService,
       ...(this.io ? { io: this.io } : {}),
@@ -244,6 +263,12 @@ class CommandProcessor extends EventEmitter {
         ...(storyMissionService ? { storyMissionService } : {}),
         ...(leaderboardService ? { leaderboardService } : {}),
         ...(achievementService ? { achievementService } : {}),
+        ...(keyFragmentService ? { keyFragmentService } : {}),
+        ...(darknetDungeonService ? { darknetDungeonService } : {}),
+        ...(darknetDiscoveryService ? { darknetDiscoveryService } : {}),
+        ...(connectionChallengeService ? { connectionChallengeService } : {}),
+        ...(chatService ? { chatService } : {}),
+        ...(messageEncryptionService ? { messageEncryptionService } : {}),
       },
     };
   }
@@ -387,29 +412,20 @@ class CommandProcessor extends EventEmitter {
       // Get module for command
       const module = this.commandMap.get(command);
 
-      // Network commands require network access (being connected to a server)
-      if (module instanceof NetworkCommandsModule) {
-        if (
-          !session.currentServerId &&
-          command !== "connect" &&
-          command !== "scan" &&
-          command !== "servers"
-        ) {
+      // Network commands require network context (home server or connected to remote)
+      if (module?.category === "network") {
+        const hasNetworkContext = !!(session.currentServerId || session.homeServerId);
+        if (!hasNetworkContext) {
           return {
             valid: false,
-            error: "Network access required. Connect to a server first.",
+            error: "Network access required. No server context available.",
           };
         }
       }
 
-      // Skill-gated commands (hack, network, file, social, alias modules)
-      if (
-        module instanceof HackCommandsModule ||
-        module instanceof NetworkCommandsModule ||
-        module instanceof FileCommandsModule ||
-        module instanceof SocialCommandsModule ||
-        module instanceof AliasCommandsModule
-      ) {
+      // Skill-gated command categories
+      const skillGatedCategories = new Set(["hack", "network", "file", "social", "alias"]);
+      if (module && skillGatedCategories.has(module.category)) {
         const validation = await this.validateSkillRequirements(
           parsedCommand,
           user.progress,
@@ -429,12 +445,11 @@ class CommandProcessor extends EventEmitter {
 
       return { valid: true };
     } catch (error) {
-      this.logger.error({ err: error }, "Command validation error");
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.logger.error({ err, context: "Command validation" }, `[Command validation] ${err.message}`);
       return {
         valid: false,
-        error:
-          "Validation failed: " +
-          (error instanceof Error ? error.message : "Unknown error"),
+        error: `Validation failed: ${err.message}`,
       };
     }
   }
@@ -516,6 +531,8 @@ class CommandProcessor extends EventEmitter {
     parsedCommand: ParsedCommand,
     serverId?: string,
     terminalId?: string,
+    terminalCols?: number,
+    userRole?: string,
   ): Promise<CommandResult> {
     const startTime = Date.now();
 
@@ -556,7 +573,7 @@ class CommandProcessor extends EventEmitter {
 
       if (this.commandMap.has(command.command)) {
         const module = this.commandMap.get(command.command)!;
-        const context = await this.buildCommandContext(userId);
+        const context = await this.buildCommandContext(userId, terminalCols, userRole);
         result = await module.execute(command, context);
       } else {
         result = {
@@ -567,6 +584,9 @@ class CommandProcessor extends EventEmitter {
         };
       }
 
+      // Reformat output to fit client terminal width
+      result.output = formatCommandOutput(result.output, terminalCols);
+
       // Add execution time and terminal ID to result
       result.executionTime = Date.now() - startTime;
       if (terminalId !== undefined) {
@@ -575,6 +595,14 @@ class CommandProcessor extends EventEmitter {
 
       // Emit event for logging/monitoring
       this.emit("command:executed", { userId, command, result });
+
+      // Increment command counter (fire-and-forget)
+      db.client.playerProgress.update({
+        where: { userId },
+        data: { commandsExecuted: { increment: 1 } },
+      }).catch((err) => {
+        this.logger.debug({ err, userId }, "Failed to increment commandsExecuted");
+      });
 
       // Log to database (async, don't wait)
       this.logCommandExecution(userId, command, result).catch((err) =>
@@ -588,11 +616,12 @@ class CommandProcessor extends EventEmitter {
 
       return result;
     } catch (error) {
-      this.logger.error({ err: error }, "Command execution error");
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.logger.error({ err, context: "Command execution" }, `[Command execution] ${err.message}`);
       return {
         success: false,
         output: "Command execution failed",
-        error: error instanceof Error ? error.message : "Unknown error",
+        error: err.message,
         timestamp: new Date(),
         executionTime: Date.now() - startTime,
       };
@@ -602,7 +631,7 @@ class CommandProcessor extends EventEmitter {
   // ==================== UTILITY METHODS ====================
 
   private generateCommandId(): string {
-    return `cmd_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    return `cmd_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
   }
 
   private addToHistory(userId: string, command: Command): void {
@@ -640,8 +669,8 @@ class CommandProcessor extends EventEmitter {
     command: Command,
     _result: CommandResult,
   ): Promise<void> {
-    try {
-      await db.client.auditLog.create({
+    await safeExecute({
+      fn: () => db.client.auditLog.create({
         data: {
           userId,
           action: `command:${command.command}`,
@@ -649,10 +678,11 @@ class CommandProcessor extends EventEmitter {
           ipAddress: command.serverId || "local",
           timestamp: new Date(),
         },
-      });
-    } catch (error) {
-      this.logger.error({ err: error }, "Failed to log command execution");
-    }
+      }),
+      context: "Log command execution",
+      logger: this.logger,
+      silent: true,
+    })();
   }
 
   // ==================== ADMIN/DEBUG METHODS ====================
@@ -671,8 +701,10 @@ class CommandProcessor extends EventEmitter {
   public clearHistory(userId?: string): void {
     if (userId) {
       this.commandHistory.delete(userId);
+      this.rateLimitMap.delete(userId); // Clean up rate limit entry too
     } else {
       this.commandHistory.clear();
+      this.rateLimitMap.clear();
     }
   }
 
@@ -682,6 +714,11 @@ class CommandProcessor extends EventEmitter {
     } else {
       this.rateLimitMap.clear();
     }
+  }
+
+  /** Stop the rate limit cleanup timer (called during shutdown) */
+  public stop(): void {
+    clearInterval(this.rateLimitCleanupTimer);
   }
 
   // ==================== PUBLIC QUERY METHODS ====================
@@ -701,7 +738,7 @@ class CommandProcessor extends EventEmitter {
     const history = this.commandHistory.get(userId) || [];
 
     // Filter by serverId if provided
-    let filtered = serverId
+    const filtered = serverId
       ? history.filter((cmd) => cmd.serverId === serverId)
       : history;
 
@@ -716,18 +753,7 @@ class CommandProcessor extends EventEmitter {
    * @returns Array of command information objects
    */
   private getCategoryFromModule(module?: CommandModule): string {
-    if (!module) return "other";
-    if (module instanceof SystemCommandsModule) return "system";
-    if (module instanceof NetworkCommandsModule) return "network";
-    if (module instanceof HackCommandsModule) return "hack";
-    if (module instanceof FileCommandsModule) return "file";
-    if (module instanceof SocialCommandsModule) return "social";
-    if (module instanceof GameCommandsModule) return "game";
-    if (module instanceof HelpCommandsModule) return "help";
-    if (module instanceof ProcessCommandsModule) return "process";
-    if (module instanceof MathCommandsModule) return "math";
-    if (module instanceof FactionCommandsModule) return "faction";
-    return "other";
+    return module?.category ?? "other";
   }
 
   /**

@@ -1,7 +1,7 @@
 /**
  * Dependency Injection Tokens
  *
- * Define injection tokens as const symbols for type-safe DI.
+ * Define injection tokens as const strings for type-safe DI.
  * These are used with the @inject() decorator to specify dependencies.
  */
 
@@ -21,6 +21,8 @@ export const SERVER_SERVICE = "ServerService";
 export const HACK_SERVICE = "HackService";
 export const FILE_SERVICE = "FileService";
 export const MESSAGE_SERVICE = "MessageService";
+export const MESSAGE_ENCRYPTION_SERVICE = "MessageEncryptionService";
+export const CHAT_SERVICE = "ChatService";
 export const FORUM_SERVICE = "ForumService";
 export const PLAYER_PRESENCE_SERVICE = "PlayerPresenceService";
 export const MEMORY_SERVICE = "MemoryService";
@@ -35,6 +37,7 @@ export const MISSION_GENERATOR_SERVICE = "MissionGeneratorService";
 
 // Server Content
 export const SERVER_CONTENT_SERVICE = "ServerContentService";
+export const CONTENT_QUEUE_SERVICE = "ContentQueueService";
 
 // Reputation
 export const REPUTATION_ENGINE = "ReputationEngine";
@@ -47,6 +50,8 @@ export const CONTEST_SERVICE = "ContestService";
 export const FACTION_SERVICE = "FactionService";
 export const AI_SERVICE = "AIService";
 export const PERSONA_SERVICE = "PersonaService";
+export const PERSONA_MISSION_GEN_SERVICE = "PersonaMissionGenService";
+export const PERSONA_ACTION_SERVICE = "PersonaActionService";
 export const AI_SCHEDULER_SERVICE = "AISchedulerService";
 
 // Phase 5: Warfare, Alias, DarkNet, Censorship
@@ -86,3 +91,18 @@ export const ARCHITECT_INTERVENTION_EXECUTOR = "ArchitectInterventionExecutor";
 
 // DarkNet Dungeon
 export const DARKNET_DUNGEON_SERVICE = "DarkNetDungeonService";
+
+// Key Fragment / Endgame
+export const KEY_FRAGMENT_SERVICE = "KeyFragmentService";
+
+// Connection Challenge
+export const CONNECTION_CHALLENGE_SERVICE = "ConnectionChallengeService";
+
+// Content Draft (AI-created content review pipeline)
+export const CONTENT_DRAFT_SERVICE = "ContentDraftService";
+
+// Reference Validation (AI content coherence — backfill missing servers/forums)
+export const REFERENCE_VALIDATION_SERVICE = "ReferenceValidationService";
+
+// Epoch Scheduling (timed story events)
+export const EPOCH_SCHEDULER_SERVICE = "EpochSchedulerService";

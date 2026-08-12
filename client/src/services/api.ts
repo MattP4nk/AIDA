@@ -10,58 +10,93 @@ const API_BASE_URL =
 const SOCKET_URL =
   (import.meta.env.VITE_SOCKET_URL as string) || "http://localhost:3001";
 
-// Token management
+// Token management — JWT is stored in httpOnly cookie (not accessible to JS).
+// We keep a lightweight in-memory flag + token for Socket.IO auth only.
+// The token is returned in the JSON response body alongside the cookie.
 let authToken: string | null = null;
 let csrfToken: string | null = null;
+// Track whether we *believe* we're authenticated (confirmed on verify)
+let authenticated = false;
 
 class ApiClient {
   private baseURL: string;
 
   constructor(baseURL: string = API_BASE_URL) {
     this.baseURL = baseURL;
-    // Load token from localStorage on initialization
-    this.loadTokenFromStorage();
-  }
-
-  // Token management methods
-  private loadTokenFromStorage(): void {
+    // Migrate: clear any legacy localStorage token
     if (typeof window !== "undefined") {
-      authToken = localStorage.getItem("aida_auth_token");
+      const legacy = localStorage.getItem("aida_auth_token");
+      if (legacy) {
+        authToken = legacy; // Keep in memory for this session
+        authenticated = true;
+        localStorage.removeItem("aida_auth_token"); // Don't persist in localStorage anymore
+      }
     }
   }
 
-  private saveTokenToStorage(token: string): void {
-    if (typeof window !== "undefined") {
-      localStorage.setItem("aida_auth_token", token);
-    }
+  private refreshTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly REFRESH_INTERVAL_MS = 20 * 60 * 60 * 1000; // 20 hours (refresh before 24h expiry)
+
+  private setToken(token: string): void {
     authToken = token;
+    authenticated = true;
+    this.scheduleRefresh();
   }
 
-  private removeTokenFromStorage(): void {
-    if (typeof window !== "undefined") {
-      localStorage.removeItem("aida_auth_token");
-    }
+  private clearToken(): void {
     authToken = null;
     csrfToken = null;
+    authenticated = false;
+    if (this.refreshTimer) {
+      clearTimeout(this.refreshTimer);
+      this.refreshTimer = null;
+    }
   }
 
+  private scheduleRefresh(): void {
+    if (this.refreshTimer) clearTimeout(this.refreshTimer);
+    this.refreshTimer = setTimeout(() => this.refreshToken(), this.REFRESH_INTERVAL_MS);
+  }
+
+  private async refreshToken(): Promise<void> {
+    if (!authenticated) return;
+    try {
+      const response = await this.post("/auth/refresh");
+      const data = response as any;
+      if (data.success && data.token) {
+        authToken = data.token;
+        await this.fetchCsrfToken();
+        this.scheduleRefresh();
+      }
+    } catch {
+      // Refresh failed — session will expire naturally, user re-authenticates
+      console.warn("Token refresh failed — session may expire");
+    }
+  }
+
+  /** Returns the in-memory token (for Socket.IO auth handshake). */
   public getToken(): string | null {
     return authToken;
   }
 
   public isAuthenticated(): boolean {
-    return !!authToken;
+    return authenticated;
   }
 
   // CSRF token management
   private async fetchCsrfToken(): Promise<string | null> {
-    if (!authToken) return null;
+    if (!authenticated) return null;
 
     try {
+      const headers: HeadersInit = {};
+      // Include Bearer token if available (for Socket.IO-initiated requests)
+      if (authToken) {
+        headers["Authorization"] = `Bearer ${authToken}`;
+      }
+
       const response = await fetch(`${this.baseURL}/csrf-token`, {
-        headers: {
-          Authorization: `Bearer ${authToken}`,
-        },
+        credentials: "include", // Send httpOnly cookie
+        headers,
       });
 
       if (response.ok) {
@@ -77,7 +112,7 @@ class ApiClient {
   }
 
   public async ensureCsrfToken(): Promise<void> {
-    if (!csrfToken && authToken) {
+    if (!csrfToken && authenticated) {
       await this.fetchCsrfToken();
     }
   }
@@ -117,6 +152,7 @@ class ApiClient {
       const response = await fetch(url, {
         ...options,
         headers,
+        credentials: "include", // Send httpOnly cookie with every request
       });
 
       // Parse JSON response
@@ -134,7 +170,7 @@ class ApiClient {
         if (newToken) {
           // Retry the request with the fresh CSRF token
           (headers as any)["X-CSRF-Token"] = newToken;
-          const retryResponse = await fetch(url, { ...options, headers });
+          const retryResponse = await fetch(url, { ...options, headers, credentials: "include" });
           const retryData = await retryResponse.json();
           if (!retryResponse.ok) {
             throw new ApiError(
@@ -204,13 +240,11 @@ class ApiClient {
   async register(userData: AuthRequest): Promise<AuthResponse> {
     try {
       const response = await this.post("/auth/register", userData);
-
-      // The response is already AuthResponse, not wrapped in ApiResponse
       const authResponse = response as unknown as AuthResponse;
 
       if (authResponse.success && authResponse.token) {
-        this.saveTokenToStorage(authResponse.token);
-        // Fetch CSRF token after successful registration
+        // Keep token in memory for Socket.IO auth; cookie handles persistence
+        this.setToken(authResponse.token);
         await this.fetchCsrfToken();
       }
 
@@ -223,13 +257,11 @@ class ApiClient {
   async login(credentials: AuthRequest): Promise<AuthResponse> {
     try {
       const response = await this.post("/auth/login", credentials);
-
-      // The response is already AuthResponse, not wrapped in ApiResponse
       const authResponse = response as unknown as AuthResponse;
 
       if (authResponse.success && authResponse.token) {
-        this.saveTokenToStorage(authResponse.token);
-        // Fetch CSRF token after successful login
+        // Keep token in memory for Socket.IO auth; cookie handles persistence
+        this.setToken(authResponse.token);
         await this.fetchCsrfToken();
       }
 
@@ -246,17 +278,27 @@ class ApiClient {
       // Continue with logout even if API call fails
       console.warn("Logout API call failed:", error);
     } finally {
-      this.removeTokenFromStorage();
+      this.clearToken();
     }
   }
 
   async verifyToken(): Promise<AuthResponse> {
     try {
+      // Cookie is sent automatically via credentials:'include'
       const response = await this.get("/auth/verify");
-      return response as unknown as AuthResponse;
+      const authResponse = response as unknown as AuthResponse;
+      if (authResponse.success) {
+        // Token came from cookie — mark as authenticated
+        // The token is also in the response for Socket.IO auth
+        if (authResponse.token) {
+          this.setToken(authResponse.token);
+        } else {
+          authenticated = true;
+        }
+      }
+      return authResponse;
     } catch (error) {
-      // Token is invalid, remove it
-      this.removeTokenFromStorage();
+      this.clearToken();
       throw this.handleAuthError(error);
     }
   }
@@ -582,10 +624,11 @@ class ApiClient {
 
   // ==================== COMMAND EXECUTION ====================
 
-  async executeCommand(command: string, serverId?: string): Promise<any> {
+  async executeCommand(command: string, serverId?: string, terminalCols?: number): Promise<any> {
     const response = await this.post("/command/execute", {
       command,
       ...(serverId ? { serverId } : {}),
+      ...(terminalCols ? { terminalCols } : {}),
     });
     return response;
   }

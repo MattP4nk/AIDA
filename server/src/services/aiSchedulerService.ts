@@ -7,6 +7,7 @@ import { getService } from "../di/container";
 import { LOGGER, RESOURCE_SERVICE, FACTION_KNOWLEDGE_SERVICE } from "../di/tokens";
 import ResourceService from "./resourceService";
 import type { FactionKnowledgeService } from "./factionKnowledgeService";
+import { safeExecute } from "../utils/safeExecute";
 
 /**
  * AISchedulerService - Automated AI Persona Actions
@@ -128,12 +129,13 @@ export class AISchedulerService {
       return; // ResourceService not available
     }
 
-    // Expire stale faction knowledge entries + decay confidence
+    // Knowledge lifecycle: expire, source-weighted decay, purge old, verify assets
     let fkService: FactionKnowledgeService | null = null;
     try {
       fkService = getService<FactionKnowledgeService>(FACTION_KNOWLEDGE_SERVICE);
       await fkService.expireEntries();
       await fkService.decayConfidence();
+      await fkService.purgeOldEntries(14, 0.3);
     } catch {
       // FactionKnowledgeService not available — not fatal
     }
@@ -323,17 +325,20 @@ export class AISchedulerService {
 
     this.logger.info({ personaId, eventType }, "Triggering event-based AI action");
 
-    try {
-      // Event-triggered actions bypass daily limits
-      const action = await this.personaService.decideAction(personaId);
+    await safeExecute({
+      fn: async () => {
+        // Event-triggered actions bypass daily limits
+        const action = await this.personaService.decideAction(personaId);
 
-      if (action) {
-        this.logger.info({ personaId, actionId: action.id, eventType }, "Event action created");
-        await this.personaService.executeAction(action.id);
-      }
-    } catch (error) {
-      this.logger.error({ error, personaId, eventType }, "Error in event-triggered action");
-    }
+        if (action) {
+          this.logger.info({ personaId, actionId: action.id, eventType }, "Event action created");
+          await this.personaService.executeAction(action.id);
+        }
+      },
+      context: "Event-triggered AI action",
+      logger: this.logger,
+      silent: true,
+    })();
   }
 
   /**
@@ -352,7 +357,7 @@ export class AISchedulerService {
       },
       null,
       true, // Start immediately
-      "America/Sao_Paulo" // Timezone (adjust as needed)
+      "UTC"
     );
 
     this.logger.info("Midnight reset job scheduled");
@@ -371,6 +376,21 @@ export class AISchedulerService {
     });
 
     this.logger.info({ count: result.count }, "Daily counters reset");
+
+    // Daily knowledge verification — check assets still exist
+    try {
+      const fkService = getService<FactionKnowledgeService>(FACTION_KNOWLEDGE_SERVICE);
+      const factions = await this.prisma.faction.findMany({ select: { id: true } });
+      let totalRemoved = 0;
+      for (const faction of factions) {
+        totalRemoved += await fkService.verifyKnowledge(faction.id);
+      }
+      if (totalRemoved > 0) {
+        this.logger.info({ totalRemoved }, "Knowledge verification removed stale entries");
+      }
+    } catch {
+      // Non-critical
+    }
   }
 
   /**

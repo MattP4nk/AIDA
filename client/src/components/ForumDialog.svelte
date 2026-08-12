@@ -130,7 +130,8 @@
                 mode = "browse";
                 return;
             }
-            await runCommand(`forum reply ${nav.forumId} ${nav.postId} ${val}`);
+            const safeContent = val.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+            await runCommand(`forum reply ${nav.forumId} ${nav.postId} "${safeContent}"`);
             // Refresh post to show new reply
             await runCommand(`forum read ${nav.forumId} ${nav.postId}`);
             mode = "browse";
@@ -149,7 +150,10 @@
                 return;
             }
             // Step 2: got content, submit
-            await runCommand(`forum post ${nav.forumId} "${inputStash}" "${val}"`);
+            // Escape backslashes then double quotes to prevent command injection
+            const safeTitle = inputStash.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+            const safeContent = val.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+            await runCommand(`forum post ${nav.forumId} "${safeTitle}" "${safeContent}"`);
             await runCommand(`forum access ${nav.forumId}`);
             mode = "browse";
         } else if (inputAction === "search") {

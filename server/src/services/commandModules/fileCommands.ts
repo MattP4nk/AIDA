@@ -1,8 +1,17 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
 import { infoBox, render } from "./asciiBox";
+import {
+  resolvePath,
+  getSession,
+  getServerId,
+  spawnBackgroundProcess,
+  successResult,
+  errorResult,
+} from "./helpers";
 
 export class FileCommandsModule implements CommandModule {
+  public category = "file";
   public commands: Set<string> = new Set([
     "upload",
     "download",
@@ -27,11 +36,7 @@ export class FileCommandsModule implements CommandModule {
       case "analyze":
         return await this.handleAnalyze(command, context);
       default:
-        return {
-          success: false,
-          output: `File command not implemented: ${command.command}`,
-          timestamp: new Date(),
-        };
+        return errorResult(`File command not implemented: ${command.command}`);
     }
   }
 
@@ -79,23 +84,7 @@ export class FileCommandsModule implements CommandModule {
     ];
   }
 
-  private getSession(context: CommandContext) {
-    return context.gameStateManager?.getSession(context.userId);
-  }
-
-  private getServerId(context: CommandContext): string | undefined {
-    const session = this.getSession(context);
-    return session?.currentServerId || session?.homeServerId;
-  }
-
-  private resolvePath(filename: string, context: CommandContext): string {
-    const session = this.getSession(context);
-    const currentDir = session?.currentDirectory || "/";
-    if (filename.startsWith("/")) {
-      return filename;
-    }
-    return currentDir === "/" ? `/${filename}` : `${currentDir}/${filename}`;
-  }
+  // getSession(), getServerId(), resolvePath() now imported from helpers.ts
 
   private async handleUpload(
     command: Command,
@@ -103,26 +92,18 @@ export class FileCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     // Usage: upload <filename> <content>
     if (command.args.length < 2) {
-      return {
-        success: false,
-        output: "Usage: upload <filename> <content>",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: upload <filename> <content>");
     }
 
     const filename = command.args[0]!;
     const content = command.args.slice(1).join(" ");
-    const serverId = this.getServerId(context);
+    const serverId = getServerId(context);
 
     if (!serverId) {
-      return {
-        success: false,
-        output: "No file system context",
-        timestamp: new Date(),
-      };
+      return errorResult("No file system context");
     }
 
-    const path = this.resolvePath(filename, context);
+    const path = resolvePath(filename, getSession(context)?.currentDirectory || "/");
 
     try {
       const result = await context.fileService.createFile(
@@ -134,25 +115,12 @@ export class FileCommandsModule implements CommandModule {
       );
 
       if (!result.success) {
-        return {
-          success: false,
-          output: `Upload failed: ${result.message}`,
-          timestamp: new Date(),
-        };
+        return errorResult(`Upload failed: ${result.message}`);
       }
 
-      return {
-        success: true,
-        output: `File uploaded: ${filename}`,
-        timestamp: new Date(),
-      };
+      return successResult(`File uploaded: ${filename}`);
     } catch (error) {
-      return {
-        success: false,
-        output: "Upload failed",
-        error: error instanceof Error ? error.message : "Unknown error",
-        timestamp: new Date(),
-      };
+      return errorResult("Upload failed", error instanceof Error ? error.message : "Unknown error");
     }
   }
 
@@ -161,31 +129,31 @@ export class FileCommandsModule implements CommandModule {
     context: CommandContext,
   ): Promise<CommandResult> {
     if (command.args.length === 0) {
-      return { success: false, output: "Usage: download <filename>\nCopies file to your home server's /home/{user}/downloads/", timestamp: new Date() };
+      return errorResult("Usage: download <filename>\nCopies file to your home server's /home/{user}/downloads/");
     }
 
     const filename = command.args[0]!;
-    const serverId = this.getServerId(context);
+    const serverId = getServerId(context);
     if (!serverId) {
-      return { success: false, output: "No file system context", timestamp: new Date() };
+      return errorResult("No file system context");
     }
 
     const session = context.gameStateManager.getSession(context.userId);
     if (!session?.homeServerId) {
-      return { success: false, output: "No home server available.", timestamp: new Date() };
+      return errorResult("No home server available.");
     }
 
     // Can't download from your own home server
     if (serverId === session.homeServerId) {
-      return { success: false, output: "Already on your home server. Files are already local.", timestamp: new Date() };
+      return errorResult("Already on your home server. Files are already local.");
     }
 
-    const path = this.resolvePath(filename, context);
+    const path = resolvePath(filename, getSession(context)?.currentDirectory || "/");
 
     // Verify file exists and is readable first
     const readCheck = await context.fileService.readFile(serverId, context.userId, path);
     if (!readCheck.success || !readCheck.data) {
-      return { success: false, output: `Cannot download: ${readCheck.message}`, timestamp: new Date() };
+      return errorResult(`Cannot download: ${readCheck.message}`);
     }
 
     const fileContent = readCheck.data.content;
@@ -194,32 +162,27 @@ export class FileCommandsModule implements CommandModule {
 
     // ── Spawn download as a background process ──
     if (memoryService) {
-      const progress = await context.db.client.playerProgress.findUnique({
-        where: { userId: context.userId },
-        select: { networking: true, level: true },
-      });
-      memoryService.initComputerSpec(context.userId, progress?.level ?? 1);
-
-      const check = memoryService.canSpawnProcess(context.userId, "download");
-      if (!check.allowed) {
-        return { success: false, output: `Download failed: ${check.reason}`, timestamp: new Date() };
-      }
-
-      const networkingSkill = progress?.networking ?? 1;
       const sourceServerId = serverId;
       const homeServerId = session.homeServerId;
       const userId = context.userId;
 
-      const proc = memoryService.spawnGameProcess(
-        userId,
-        session.socketId || userId,
-        "download",
-        networkingSkill,
-        filename,
-        sourceServerId,
-        async () => {
+      const spawn = await spawnBackgroundProcess({
+        context,
+        processType: "download",
+        skillKey: "networking",
+        label: filename,
+        targetServerId: sourceServerId,
+        onComplete: async () => {
           // ── On completion: copy file to home server ──
           try {
+            // Track download for mission objectives FIRST (before file copy which can fail)
+            const missionIntegration = context.services.missionIntegrationService;
+            if (missionIntegration) {
+              try {
+                await (missionIntegration as any).onFileOperation(userId, "download", "", sourceServerId);
+              } catch { /* non-critical */ }
+            }
+
             // Get or create downloads directory on home server
             const user = await context.db.client.user.findUnique({
               where: { id: userId },
@@ -270,6 +233,7 @@ export class FileCommandsModule implements CommandModule {
                   node?.id,
                 );
               }
+
             }
 
             // Push result to player
@@ -290,22 +254,21 @@ export class FileCommandsModule implements CommandModule {
             }
           }
         },
-      );
+      });
 
-      if (!proc) {
-        return { success: false, output: "Failed to start download process.", timestamp: new Date() };
-      }
-
-      const etaSec = Math.ceil(proc.duration / 1000);
-      return {
-        success: true,
-        output: `Downloading ${filename}... ETA ${etaSec}s [PID ${proc.pid}]\nFile will be saved to ~/downloads/ on your home server.\nUse 'ps' to monitor progress.`,
-        timestamp: new Date(),
-      };
+      if (spawn) return spawn.result;
     }
 
     // Fallback: no process system available — direct copy
     try {
+      // Track download for mission objectives FIRST
+      const missionIntegration = context.services.missionIntegrationService;
+      if (missionIntegration) {
+        try {
+          await (missionIntegration as any).onFileOperation(context.userId, "download", "", serverId);
+        } catch { /* non-critical */ }
+      }
+
       const user = await context.db.client.user.findUnique({
         where: { id: context.userId },
         select: { username: true },
@@ -323,7 +286,7 @@ export class FileCommandsModule implements CommandModule {
       );
 
       if (!result.success) {
-        return { success: false, output: `Download failed: ${result.message}`, timestamp: new Date() };
+        return errorResult(`Download failed: ${result.message}`);
       }
 
       // Mark with source metadata
@@ -356,18 +319,9 @@ export class FileCommandsModule implements CommandModule {
         );
       }
 
-      return {
-        success: true,
-        output: `Downloaded ${filename} → ~/downloads/\n${fileIsEncrypted ? "[ENCRYPTED] " : ""}File saved to home server.`,
-        timestamp: new Date(),
-      };
+      return successResult(`Downloaded ${filename} → ~/downloads/\n${fileIsEncrypted ? "[ENCRYPTED] " : ""}File saved to home server.`);
     } catch (error) {
-      return {
-        success: false,
-        output: "Download failed",
-        error: error instanceof Error ? error.message : "Unknown error",
-        timestamp: new Date(),
-      };
+      return errorResult("Download failed", error instanceof Error ? error.message : "Unknown error");
     }
   }
 
@@ -377,26 +331,18 @@ export class FileCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     // Usage: encrypt <filename> [password]
     if (command.args.length === 0) {
-      return {
-        success: false,
-        output: "Usage: encrypt <filename> [password]",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: encrypt <filename> [password]");
     }
 
     const filename = command.args[0]!;
     const password = command.args[1]; // Optional
-    const serverId = this.getServerId(context);
+    const serverId = getServerId(context);
 
     if (!serverId) {
-      return {
-        success: false,
-        output: "No file system context",
-        timestamp: new Date(),
-      };
+      return errorResult("No file system context");
     }
 
-    const path = this.resolvePath(filename, context);
+    const path = resolvePath(filename, getSession(context)?.currentDirectory || "/");
 
     try {
       // 1. Read existing content
@@ -407,19 +353,11 @@ export class FileCommandsModule implements CommandModule {
       );
 
       if (!readResult.success || !readResult.data) {
-        return {
-          success: false,
-          output: `Cannot encrypt: ${readResult.message || "File not found"}`,
-          timestamp: new Date(),
-        };
+        return errorResult(`Cannot encrypt: ${readResult.message || "File not found"}`);
       }
 
       if (readResult.data.isEncrypted) {
-        return {
-          success: false,
-          output: "File is already encrypted",
-          timestamp: new Date(),
-        };
+        return errorResult("File is already encrypted");
       }
 
       const content = readResult.data.content;
@@ -446,11 +384,7 @@ export class FileCommandsModule implements CommandModule {
         } catch {
           // Ignore cleanup errors
         }
-        return {
-          success: false,
-          output: `Encryption failed: ${createResult.message}`,
-          timestamp: new Date(),
-        };
+        return errorResult(`Encryption failed: ${createResult.message}`);
       }
 
       // 3. Delete original and rename temp to original path
@@ -476,25 +410,12 @@ export class FileCommandsModule implements CommandModule {
       }
 
       if (!finalResult.success) {
-        return {
-          success: false,
-          output: `Encryption partially failed - check file: ${path}`,
-          timestamp: new Date(),
-        };
+        return errorResult(`Encryption partially failed - check file: ${path}`);
       }
 
-      return {
-        success: true,
-        output: `File encrypted: ${filename}`,
-        timestamp: new Date(),
-      };
+      return successResult(`File encrypted: ${filename}`);
     } catch (error) {
-      return {
-        success: false,
-        output: "Encryption failed",
-        error: error instanceof Error ? error.message : "Unknown error",
-        timestamp: new Date(),
-      };
+      return errorResult("Encryption failed", error instanceof Error ? error.message : "Unknown error");
     }
   }
 
@@ -503,62 +424,48 @@ export class FileCommandsModule implements CommandModule {
     context: CommandContext,
   ): Promise<CommandResult> {
     if (command.args.length === 0) {
-      return { success: false, output: "Usage: decrypt <filename> [password]", timestamp: new Date() };
+      return errorResult("Usage: decrypt <filename> [password]");
     }
 
     const filename = command.args[0]!;
     const password = command.args[1];
-    const serverId = this.getServerId(context);
+    const serverId = getServerId(context);
     if (!serverId) {
-      return { success: false, output: "No file system context", timestamp: new Date() };
+      return errorResult("No file system context");
     }
 
-    const path = this.resolvePath(filename, context);
+    const path = resolvePath(filename, getSession(context)?.currentDirectory || "/");
     const memoryService = context.services.memoryService;
 
     // ── Resource check: spawn decrypt as background process ──
     if (memoryService) {
-      const progress = await context.db.client.playerProgress.findUnique({
+      // With key → faster (use skill override). Without → brute force at actual skill.
+      const cryptoProgress = await context.db.client.playerProgress.findUnique({
         where: { userId: context.userId },
-        select: { cryptography: true, level: true },
+        select: { cryptography: true },
       });
-      memoryService.initComputerSpec(context.userId, progress?.level ?? 1);
+      const cryptoSkill = cryptoProgress?.cryptography ?? 1;
+      const effectiveSkill = password ? Math.max(cryptoSkill, 30) : undefined;
 
-      const check = memoryService.canSpawnProcess(context.userId, "decrypt");
-      if (!check.allowed) {
-        return { success: false, output: `Decrypt failed: ${check.reason}`, timestamp: new Date() };
-      }
-
-      const session = context.gameStateManager.getSession(context.userId);
-      const cryptoSkill = progress?.cryptography ?? 1;
-      // With key → faster (use skill * 3 for much shorter duration). Without → brute force.
-      const effectiveSkill = password ? Math.max(cryptoSkill, 30) : cryptoSkill;
-
-      const proc = memoryService.spawnGameProcess(
-        context.userId,
-        session?.socketId || context.userId,
-        "decrypt",
-        effectiveSkill,
-        filename,
-        undefined,
-        async () => {
-          // ── On completion: perform the actual decryption ──
+      const spawn = await spawnBackgroundProcess({
+        context,
+        processType: "decrypt",
+        skillKey: "cryptography",
+        label: filename,
+        effectiveSkillOverride: effectiveSkill,
+        onComplete: async () => {
           try {
             const readResult = await context.fileService.readFile(serverId, context.userId, path, password);
             if (!readResult.success || !readResult.data) {
-              if (context.io) {
-                context.io.to(`player:${context.userId}`).emit("command:result", {
-                  success: false, output: `Decryption failed: ${readResult.message}`, timestamp: new Date(),
-                });
-              }
+              context.io?.to(`player:${context.userId}`).emit("command:result", {
+                success: false, output: `Decryption failed: ${readResult.message}`, timestamp: new Date(),
+              });
               return;
             }
             if (!readResult.data.isEncrypted) {
-              if (context.io) {
-                context.io.to(`player:${context.userId}`).emit("command:result", {
-                  success: true, output: "File is not encrypted.", timestamp: new Date(),
-                });
-              }
+              context.io?.to(`player:${context.userId}`).emit("command:result", {
+                success: true, output: "File is not encrypted.", timestamp: new Date(),
+              });
               return;
             }
 
@@ -566,49 +473,34 @@ export class FileCommandsModule implements CommandModule {
             await context.fileService.deleteNode(serverId, context.userId, path);
             await context.fileService.createFile(serverId, context.userId, path, content, false);
 
-            if (context.io) {
-              context.io.to(`player:${context.userId}`).emit("command:result", {
-                success: true, output: `File decrypted: ${filename}`, timestamp: new Date(),
-              });
-            }
+            context.io?.to(`player:${context.userId}`).emit("command:result", {
+              success: true, output: `File decrypted: ${filename}`, timestamp: new Date(),
+            });
           } catch {
-            // Player is notified of failure via emit below
-            if (context.io) {
-              context.io.to(`player:${context.userId}`).emit("command:result", {
-                success: false, output: "Decryption process failed.", timestamp: new Date(),
-              });
-            }
+            context.io?.to(`player:${context.userId}`).emit("command:result", {
+              success: false, output: "Decryption process failed.", timestamp: new Date(),
+            });
           }
         },
-      );
+      });
 
-      if (!proc) {
-        return { success: false, output: "Failed to start decrypt process.", timestamp: new Date() };
-      }
-
-      const etaSec = Math.ceil(proc.duration / 1000);
-      const modeLabel = password ? "key-based" : "brute force";
-      return {
-        success: true,
-        output: `Decrypting ${filename} (${modeLabel})... ETA ${etaSec}s [PID ${proc.pid}]\nUse 'ps' to monitor progress.`,
-        timestamp: new Date(),
-      };
+      if (spawn) return spawn.result;
     }
 
     // ── Fallback: instant decrypt (no resource system) ──
     try {
       const readResult = await context.fileService.readFile(serverId, context.userId, path, password);
       if (!readResult.success || !readResult.data) {
-        return { success: false, output: `Cannot decrypt: ${readResult.message}`, timestamp: new Date() };
+        return errorResult(`Cannot decrypt: ${readResult.message}`);
       }
       if (!readResult.data.isEncrypted) {
-        return { success: true, output: "File is not encrypted", timestamp: new Date() };
+        return successResult("File is not encrypted");
       }
       await context.fileService.deleteNode(serverId, context.userId, path);
       await context.fileService.createFile(serverId, context.userId, path, readResult.data.content, false);
-      return { success: true, output: `File decrypted: ${filename}`, timestamp: new Date() };
+      return successResult(`File decrypted: ${filename}`);
     } catch (error) {
-      return { success: false, output: "Decryption failed", error: error instanceof Error ? error.message : "Unknown error", timestamp: new Date() };
+      return errorResult("Decryption failed", error instanceof Error ? error.message : "Unknown error");
     }
   }
 
@@ -618,25 +510,17 @@ export class FileCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     // Usage: analyze <filename>
     if (command.args.length === 0) {
-      return {
-        success: false,
-        output: "Usage: analyze <filename>",
-        timestamp: new Date(),
-      };
+      return errorResult("Usage: analyze <filename>");
     }
 
     const filename = command.args[0]!;
-    const serverId = this.getServerId(context);
+    const serverId = getServerId(context);
 
     if (!serverId) {
-      return {
-        success: false,
-        output: "No file system context",
-        timestamp: new Date(),
-      };
+      return errorResult("No file system context");
     }
 
-    const path = this.resolvePath(filename, context);
+    const path = resolvePath(filename, getSession(context)?.currentDirectory || "/");
 
     try {
       // Use listDirectory to find the node without reading content
@@ -651,21 +535,13 @@ export class FileCommandsModule implements CommandModule {
       );
 
       if (!listResult.success || !listResult.data) {
-        return {
-          success: false,
-          output: `Analyze failed: ${listResult.message}`,
-          timestamp: new Date(),
-        };
+        return errorResult(`Analyze failed: ${listResult.message}`);
       }
 
       const entry = listResult.data.entries.find((e: any) => e.name === name);
 
       if (!entry) {
-        return {
-          success: false,
-          output: `File not found: ${filename}`,
-          timestamp: new Date(),
-        };
+        return errorResult(`File not found: ${filename}`);
       }
 
       const labelWidth = 14;
@@ -692,19 +568,9 @@ export class FileCommandsModule implements CommandModule {
         ),
       );
 
-      return {
-        success: true,
-        output,
-        data: { entry },
-        timestamp: new Date(),
-      };
+      return successResult(output, { entry });
     } catch (error) {
-      return {
-        success: false,
-        output: "Analysis failed",
-        error: error instanceof Error ? error.message : "Unknown error",
-        timestamp: new Date(),
-      };
+      return errorResult("Analysis failed", error instanceof Error ? error.message : "Unknown error");
     }
   }
 }

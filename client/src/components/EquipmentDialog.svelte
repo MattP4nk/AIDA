@@ -1,7 +1,6 @@
 <script lang="ts">
     import { onMount } from "svelte";
     import { apiClient } from "../services/api";
-    // socketService removed — equipment data refreshes on equip/unequip, no real-time socket events needed
 
     export let visible = false;
     export let onClose: () => void;
@@ -90,6 +89,12 @@
         await loadInventory();
         await loadEquipment();
     });
+
+    // Re-fetch inventory and equipment when dialog becomes visible (covers external changes)
+    $: if (visible) {
+        loadInventory();
+        loadEquipment();
+    }
 
     async function loadInventory() {
         try {
