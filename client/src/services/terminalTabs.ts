@@ -53,9 +53,7 @@ const createTerminalTabsStore = () => {
               if (currentSocket && currentSocket.connected) {
                 clearTimeout(timeout);
 
-                currentSocket.emit("terminal:list");
-
-                // Listen for response (remove old listener first to prevent leaks)
+                // Register listener BEFORE emitting to avoid race
                 currentSocket.off("terminal:list");
                 currentSocket.once(
                   "terminal:list",
@@ -86,6 +84,9 @@ const createTerminalTabsStore = () => {
                     resolve();
                   },
                 );
+
+                // Emit AFTER listener is registered
+                currentSocket.emit("terminal:list");
               } else {
                 // Retry after a short delay
                 setTimeout(attemptInitialize, 100);
@@ -96,10 +97,7 @@ const createTerminalTabsStore = () => {
           });
         }
 
-        // Socket is already connected
-        socket.emit("terminal:list");
-
-        // Listen for response
+        // Socket is already connected — register listener BEFORE emitting to avoid race
         return new Promise<void>((resolve, reject) => {
           const timeout = setTimeout(() => {
             reject(new Error("Terminal list response timeout"));
@@ -134,6 +132,9 @@ const createTerminalTabsStore = () => {
               resolve();
             },
           );
+
+          // Emit AFTER listener is registered
+          socket.emit("terminal:list");
         });
       } catch (error) {
         console.error("Failed to initialize terminals:", error);

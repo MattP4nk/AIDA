@@ -102,11 +102,13 @@
         }
     }
 
-    function handleAuthenticated(event: CustomEvent) {
+    async function handleAuthenticated(event: CustomEvent) {
         user = event.detail;
         isAuthenticated = true;
+        // Ensure CSRF token is available before initializing
+        await apiClient.ensureCsrfToken();
         // Initialize socket connection and terminals after successful authentication
-        initializeSocketAndTerminals();
+        await initializeSocketAndTerminals();
     }
 </script>
 
