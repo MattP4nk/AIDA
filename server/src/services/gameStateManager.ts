@@ -57,6 +57,7 @@ class GameStateManager extends EventEmitter {
   private readonly SESSION_IDLE_TIMEOUT_MS = SESSION_IDLE_TIMEOUT_MIN * 60 * 1000;
   private readonly SESSION_LOCK_TTL_MS = SESSION_LOCK_TTL_MS_CFG;
   private sessionLocks = new Map<string, number>(); // userId -> lock timestamp
+  private connectionLocks = new Map<string, number>(); // userId -> lock timestamp (prevents concurrent connectPlayerToServer)
 
   private get commandProcessor(): CommandProcessor {
     if (!this._commandProcessor) {
@@ -356,7 +357,7 @@ class GameStateManager extends EventEmitter {
             this.missionService.getPlayerMissions(userId),
             this.eventService.getUserEvents(userId, 10),
             session?.currentServerId
-              ? this.getServerInfo(session.currentServerId)
+              ? this.getServerInfo(session.currentServerId, userId)
               : Promise.resolve(undefined),
           ]);
 
@@ -422,13 +423,13 @@ class GameStateManager extends EventEmitter {
           })),
           stats: {
             totalPlayTime: 0,
-            commandsExecuted: 0,
-            successfulHacks: 0,
-            failedHacks: 0,
-            missionsCompleted: 0,
-            serversDiscovered: 0,
-            filesAccessed: 0,
-            messagesSent: 0,
+            commandsExecuted: user.progress?.commandsExecuted ?? 0,
+            successfulHacks: user.progress?.successfulHacks ?? 0,
+            failedHacks: user.progress?.failedHacks ?? 0,
+            missionsCompleted: user.progress?.missionsCompleted ?? 0,
+            serversDiscovered: user.progress?.serversDiscovered ?? 0,
+            filesAccessed: user.progress?.filesAccessed ?? 0,
+            messagesSent: user.progress?.messagesSent ?? 0,
           },
         };
 
@@ -501,6 +502,15 @@ class GameStateManager extends EventEmitter {
     userId: string,
     serverId: string,
   ): Promise<boolean> {
+    // Per-user lock to prevent concurrent connection changes (mirrors sessionLocks pattern)
+    const lockTime = this.connectionLocks.get(userId);
+    if (lockTime !== undefined && Date.now() - lockTime < this.SESSION_LOCK_TTL_MS) {
+      this.logger.warn({ userId }, "Connection change already in progress");
+      return false;
+    }
+    this.connectionLocks.set(userId, Date.now());
+
+    try {
     return await safeExecute({
       fn: async () => {
         const session = this.playerSessions.get(userId);
@@ -613,6 +623,9 @@ class GameStateManager extends EventEmitter {
       logger: this.logger,
       fallback: false,
     })() as unknown as Promise<boolean>;
+    } finally {
+      this.connectionLocks.delete(userId);
+    }
   }
 
   public async disconnectPlayerFromServer(userId: string): Promise<void> {
@@ -933,7 +946,7 @@ Tips:
     })();
   }
 
-  private async getServerInfo(serverId: string): Promise<any> {
+  private async getServerInfo(serverId: string, userId?: string): Promise<any> {
     return await safeExecute({
       fn: async () => {
         const server = await db.client.gameServer.findUnique({
@@ -942,12 +955,33 @@ Tips:
 
         if (!server) return null;
 
+        // Calculate player's access level for this server
+        let accessLevel = 0;
+        if (userId) {
+          if (server.ownerId === userId) {
+            accessLevel = 10; // Full access to own server
+          } else {
+            const [connection, backdoor] = await Promise.all([
+              db.client.serverConnection.findFirst({
+                where: { userId, serverId },
+                orderBy: { connectedAt: "desc" },
+                select: { accessLevel: true },
+              }),
+              db.client.backdoor.findFirst({
+                where: { installerId: userId, serverId, isActive: true },
+                select: { accessLevel: true },
+              }),
+            ]);
+            accessLevel = Math.max(connection?.accessLevel ?? 0, backdoor?.accessLevel ?? 0);
+          }
+        }
+
         return {
           id: server.id,
           name: server.name,
           ip: server.ipAddress,
           type: server.type,
-          accessLevel: 0, // TODO: Calculate based on player's access
+          accessLevel,
           ownerId: server.ownerId,
           encryptionLevel: server.encryptionLevel,
         };
@@ -971,7 +1005,7 @@ Tips:
     const newTerminal: TerminalTab = {
       id: `term_${Date.now()}_${terminalNumber}`,
       label: label || `Terminal ${terminalNumber}`,
-      currentDirectory: `/home/${userId}`,
+      currentDirectory: session.terminals[0]?.currentDirectory || "/",
       commandHistory: [],
       createdAt: new Date(),
       lastActivity: new Date(),

@@ -663,6 +663,24 @@ export class ForumService extends EventEmitter {
         });
       }
 
+      // Async content moderation (non-blocking — post created first, hidden if flagged)
+      void (async () => {
+        try {
+          const { getService } = await import("../di/container");
+          const { AI_SERVICE } = await import("../di/tokens");
+          const aiService = getService<any>(AI_SERVICE);
+          const modResult = await aiService.moderate(`${filteredTitle}\n${filteredContent}`);
+          if (!modResult.safe) {
+            await prisma.post.update({ where: { id: post.id }, data: { isHidden: true } });
+            this.io?.to(`user:${userId}`).emit("moderation:flagged", {
+              type: "post",
+              id: post.id,
+              reason: modResult.reason || "Content policy violation",
+            });
+          }
+        } catch { /* moderation unavailable */ }
+      })();
+
       // Notify AI personas of forum activity (knowledge pipeline)
       const forumRecord = await prisma.forum.findUnique({
         where: { id: forumId },
@@ -1976,6 +1994,24 @@ YOUR POST TITLE: "${post.title}"`;
           author: member.handle,
         });
       }
+
+      // Async content moderation (non-blocking — reply created first, hidden if flagged)
+      void (async () => {
+        try {
+          const { getService } = await import("../di/container");
+          const { AI_SERVICE } = await import("../di/tokens");
+          const aiService = getService<any>(AI_SERVICE);
+          const modResult = await aiService.moderate(filteredContent);
+          if (!modResult.safe) {
+            await prisma.postReply.update({ where: { id: reply.id }, data: { isHidden: true } });
+            this.io?.to(`user:${userId}`).emit("moderation:flagged", {
+              type: "reply",
+              id: reply.id,
+              reason: modResult.reason || "Content policy violation",
+            });
+          }
+        } catch { /* moderation unavailable */ }
+      })();
 
       // Track for mission objectives
       if (this.missionIntegration) {

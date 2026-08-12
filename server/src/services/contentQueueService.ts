@@ -70,6 +70,7 @@ export class ContentQueueService {
   private readonly CLEANUP_AGE_MS = 24 * 60 * 60 * 1000; // 24h
   private readonly COOLDOWN_MS = 15_000;             // 15s cooldown between jobs to avoid flooding AI
   private lastJobCompletedAt = 0;
+  private lastCleanupAt = 0;
 
   // Late-bound to avoid circular DI
   private serverContentService: ServerContentService | null = null;
@@ -318,8 +319,11 @@ export class ContentQueueService {
     const now = Date.now();
     const timeSinceLastJob = now - this.lastJobCompletedAt;
 
-    // Periodic cleanup of old completed/failed jobs
-    await this.cleanup();
+    // Periodic cleanup of old completed/failed jobs (throttled to once per hour)
+    if (now - this.lastCleanupAt > 3_600_000) {
+      await this.cleanup();
+      this.lastCleanupAt = now;
+    }
 
     // Pick highest-priority pending job (FIFO within same priority)
     const nextJob = this.queue

@@ -98,6 +98,10 @@ export class AdminCommandsModule implements CommandModule {
         return this.handleServers(context);
       case "resetpw":
         return this.handleResetPassword(command, context);
+      case "reports":
+        return this.handleReports(command, context);
+      case "resolve":
+        return this.handleResolve(command, context);
       case "help":
         return this.showHelp(userRole);
       default:
@@ -512,6 +516,10 @@ export class AdminCommandsModule implements CommandModule {
       data: { isActive: false },
     });
 
+    // Immediately invalidate auth cache so banned user can't use cached sessions
+    const { invalidateAuthCacheForUser } = await import("../../middleware/auth");
+    invalidateAuthCacheForUser(user.id);
+
     await this.auditAction(context, "admin_ban", "user", user.id, {
       target,
       reason,
@@ -727,6 +735,85 @@ export class AdminCommandsModule implements CommandModule {
     return successResult(`Password reset for '${target}'.\nTemporary password: ${tempPw}\nAll sessions invalidated.`);
   }
 
+  // ==================== REPORTS ====================
+
+  private async handleReports(
+    command: Command,
+    context: CommandContext,
+  ): Promise<CommandResult> {
+    const reportType = command.args[1]?.toLowerCase();
+    if (reportType !== "mail") {
+      return errorResult("Usage: admin reports mail [pending|actioned|dismissed]");
+    }
+
+    const status = command.args[2]?.toLowerCase() || "pending";
+    if (!["pending", "actioned", "dismissed"].includes(status)) {
+      return errorResult("Status must be: pending, actioned, or dismissed");
+    }
+
+    const messageService = context.services.messageService;
+    const result = await messageService.getMessageReports(status);
+
+    if (result.reports.length === 0) {
+      return successResult(`No ${status} message reports.`);
+    }
+
+    const header = `┌${"─".repeat(10)}┬${"─".repeat(18)}┬${"─".repeat(18)}┬${"─".repeat(22)}┐`;
+    const divider = `├${"─".repeat(10)}┼${"─".repeat(18)}┼${"─".repeat(18)}┼${"─".repeat(22)}┤`;
+    const footer = `└${"─".repeat(10)}┴${"─".repeat(18)}┴${"─".repeat(18)}┴${"─".repeat(22)}┘`;
+    const headerRow = `│ ${pad("ID", 8)} │ ${pad("REPORTER", 16)} │ ${pad("MSG SUBJECT", 16)} │ ${pad("REASON", 20)} │`;
+
+    const rows = result.reports.map((r: any) => {
+      const id = r.id.slice(0, 8);
+      const reporter = (r.reporter?.username ?? "unknown").slice(0, 16);
+      const subject = (r.message?.subject ?? "N/A").slice(0, 16);
+      const reason = (r.reason ?? "").slice(0, 20);
+      return `│ ${pad(id, 8)} │ ${pad(reporter, 16)} │ ${pad(subject, 16)} │ ${pad(reason, 20)} │`;
+    });
+
+    const lines = [
+      `MESSAGE REPORTS (${status}) — ${result.total} total`,
+      header,
+      headerRow,
+      divider,
+      ...rows,
+      footer,
+    ];
+    if (result.hasMore) lines.push(`  ... and more. Showing first ${result.reports.length}.`);
+
+    return successResult(lines.join("\n"));
+  }
+
+  private async handleResolve(
+    command: Command,
+    context: CommandContext,
+  ): Promise<CommandResult> {
+    const resolveType = command.args[1]?.toLowerCase();
+    if (resolveType !== "mail") {
+      return errorResult("Usage: admin resolve mail <reportId> <dismiss|action>");
+    }
+
+    const reportId = command.args[2];
+    const action = command.args[3]?.toLowerCase() as "dismiss" | "action";
+
+    if (!reportId || !action || !["dismiss", "action"].includes(action)) {
+      return errorResult("Usage: admin resolve mail <reportId> <dismiss|action>");
+    }
+
+    const messageService = context.services.messageService;
+    const result = await messageService.resolveMessageReport(context.userId, reportId, action);
+
+    if (!result.success) {
+      return errorResult(result.message);
+    }
+
+    await this.auditAction(context, "admin_resolve_report", "message_report", reportId, {
+      action,
+    });
+
+    return successResult(result.message);
+  }
+
   // ==================== HELP ====================
 
   private showHelp(userRole: string): CommandResult {
@@ -742,6 +829,8 @@ export class AdminCommandsModule implements CommandModule {
       "║  admin kick <user>     Disconnect player      ║",
       "║  admin mute <user> <m> Mute for m minutes     ║",
       "║  admin unmute <user>   Remove mute            ║",
+      "║  admin reports mail    View message reports   ║",
+      "║  admin resolve mail    Resolve a report       ║",
     ];
 
     if (roleLevel(userRole) >= roleLevel("admin")) {

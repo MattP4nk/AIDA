@@ -19,7 +19,7 @@
     import { settings, setSetting } from "../stores/settings";
     import CommandPalette from "./CommandPalette.svelte";
     // Socket service for real-time notifications
-    import { liveMessages, socketService } from "../services/socket";
+    import { liveMessages, socketService, activeProcesses } from "../services/socket";
     import {
         playerResources,
         activeHackSession,
@@ -332,6 +332,19 @@
                 challengeCountdown--;
             } else {
                 stopChallengeTimer();
+                // Clear whichever panel is active when timer expires
+                if ($activeHackSession?.active) {
+                    activeHackSession.set(null);
+                    activeProcesses.update(procs => procs.filter((p: any) => p.pid !== ReservedPID.HACK_CHALLENGE));
+                }
+                if ($activeConnectionSession?.active) {
+                    activeConnectionSession.set(null);
+                    activeProcesses.update(procs => procs.filter((p: any) => p.pid !== ReservedPID.CONNECTION_CHALLENGE));
+                }
+                if ($activeFileChallenge?.active) {
+                    activeFileChallenge.set(null);
+                    activeProcesses.update(procs => procs.filter((p: any) => p.pid !== ReservedPID.FILE_CHALLENGE));
+                }
             }
         }, 1000);
     }
@@ -354,8 +367,8 @@
     $: if ($activeFileChallenge?.active && $activeFileChallenge.challenge?.timeLimit) {
         startChallengeTimer($activeFileChallenge.challenge.timeLimit);
     }
-    // Stop when challenge resolves
-    $: if (!$activeHackSession?.active && !$activeConnectionSession?.active) {
+    // Stop when all challenges are resolved
+    $: if (!$activeHackSession?.active && !$activeConnectionSession?.active && !$activeFileChallenge?.active) {
         stopChallengeTimer();
     }
     let glowEffect = true;
@@ -783,6 +796,57 @@
                 activeConnectionSession.set(null);
                 const { activeProcesses } = await import("../services/socket");
                 activeProcesses.update(procs => procs.filter((p: any) => p.pid !== ReservedPID.CONNECTION_CHALLENGE));
+            }
+
+            // Handle hack session start from HTTP fallback (when memoryService unavailable)
+            if (result.data?.sessionId && result.data?.targetIp && !result.data?.connectionSessionId) {
+                const { activeProcesses } = await import("../services/socket");
+                activeHackSession.set({
+                    active: true,
+                    targetIp: result.data.targetIp,
+                    currentLayer: 0,
+                    totalLayers: result.data.totalLayers,
+                    challenge: result.data.challenge,
+                });
+                activeProcesses.update(procs => [
+                    ...procs.filter((p: any) => p.pid !== ReservedPID.HACK_CHALLENGE),
+                    { pid: ReservedPID.HACK_CHALLENGE, type: "hack", description: `Hacking ${result.data.targetIp}`, progress: 0 },
+                ]);
+            }
+            // Handle hack layer progression (nextChallenge) or resolution (hackResolved)
+            if (result.data?.nextChallenge) {
+                activeHackSession.update((session: any) => {
+                    if (!session) return session;
+                    return { ...session, currentLayer: (session.currentLayer || 0) + 1, challenge: result.data.nextChallenge };
+                });
+            }
+            if (result.data?.hackResolved) {
+                activeHackSession.set(null);
+                const { activeProcesses } = await import("../services/socket");
+                activeProcesses.update(procs => procs.filter((p: any) => p.pid !== ReservedPID.HACK_CHALLENGE));
+            }
+
+            // Handle file access challenge start from HTTP
+            if (result.data?.fileAccessSessionId && result.data?.fileAccessType) {
+                const { activeProcesses } = await import("../services/socket");
+                activeFileChallenge.set({
+                    active: true,
+                    type: result.data.fileAccessType,
+                    targetFile: result.data.targetFile,
+                    targetDir: result.data.targetDir,
+                    challenge: result.data.challenge,
+                    sessionId: result.data.fileAccessSessionId,
+                });
+                activeProcesses.update(procs => [
+                    ...procs.filter((p: any) => p.pid !== ReservedPID.FILE_CHALLENGE),
+                    { pid: ReservedPID.FILE_CHALLENGE, type: "file_challenge", description: `${result.data.fileAccessType} challenge`, progress: 0 },
+                ]);
+            }
+            // Handle file access resolution
+            if (result.data?.fileAccessResolved) {
+                activeFileChallenge.set(null);
+                const { activeProcesses } = await import("../services/socket");
+                activeProcesses.update(procs => procs.filter((p: any) => p.pid !== ReservedPID.FILE_CHALLENGE));
             }
 
             // Display command result (with typewriter if enabled)

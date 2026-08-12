@@ -1,5 +1,5 @@
 import { Router, Request, Response } from "express";
-import { authenticateToken } from "../middleware/auth";
+import { authenticateToken, userRateLimit } from "../middleware/auth";
 import { asyncHandler } from "../middleware/setup";
 import { getService } from "../di/container";
 import { COMMAND_PROCESSOR } from "../di/tokens";
@@ -12,8 +12,9 @@ import {
 
 const router = Router();
 
-// All command routes require authentication
+// All command routes require authentication + per-user rate limiting
 router.use(authenticateToken);
+router.use(userRateLimit(30)); // 30 commands per minute per user
 
 /**
  * POST /api/command/execute

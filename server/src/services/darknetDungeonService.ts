@@ -185,12 +185,10 @@ function generateClueContent(
 }
 
 /**
- * Shorthand cast so we can access the not-yet-generated `darkNetInstance`
- * delegate without a compile error. The model has been added to the Prisma
- * schema but `prisma generate` hasn't been re-run yet.
+ * Access DarkNetInstance model from Prisma client.
+ * The model is defined in schema.prisma — run `npx prisma generate` if types are missing.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const prismaAny = db.client as any;
+const prisma = db.client;
 
 // ═══════════════════════════════════════════════════════════════════
 // Service
@@ -344,7 +342,7 @@ export class DarkNetDungeonService {
       await this.plantVaultReward(vaultServer.id, reward, dungeonName);
 
       // --- l. DarkNetInstance record ---
-      const instance = await prismaAny.darkNetInstance.create({
+      const instance = await prisma.darkNetInstance.create({
         data: {
           name: dungeonName,
           networkId: network.id,
@@ -354,7 +352,7 @@ export class DarkNetDungeonService {
           depth: actualDepth,
           difficulty: diff,
           rewardType: reward.type,
-          rewardData: reward.data,
+          rewardData: reward.data as any,
           status: "active",
           expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7-day TTL
         },
@@ -591,7 +589,7 @@ export class DarkNetDungeonService {
       const forum = pickRandom(publicForums);
 
       // c. Look up instance details
-      const instance = await prismaAny.darkNetInstance.findUnique({
+      const instance = await prisma.darkNetInstance.findUnique({
         where: { id: instanceId },
       });
 
@@ -667,7 +665,7 @@ Respond ONLY with JSON:
         logger: this.logger,
         retry: true,
         onRetrySuccess: async (result) => {
-          const inst = await prismaAny.darkNetInstance.findUnique({
+          const inst = await prisma.darkNetInstance.findUnique({
             where: { id: riddleInstanceId },
           });
           if (inst?.forumClueId) {
@@ -694,7 +692,7 @@ Respond ONLY with JSON:
       );
 
       // f. Link forum post back to instance
-      await prismaAny.darkNetInstance.update({
+      await prisma.darkNetInstance.update({
         where: { id: instanceId },
         data: { forumClueId: post.id },
       });
@@ -734,7 +732,7 @@ Respond ONLY with JSON:
     return await safeExecute({
       fn: async () => {
       // a. Find active instance for this vault
-      const instance = await prismaAny.darkNetInstance.findFirst({
+      const instance = await prisma.darkNetInstance.findFirst({
         where: { vaultServerId, status: "active" },
       });
 
@@ -744,7 +742,7 @@ Respond ONLY with JSON:
       }
 
       // c. Mark as conquered
-      await prismaAny.darkNetInstance.update({
+      await prisma.darkNetInstance.update({
         where: { id: instance.id },
         data: {
           status: "conquered",
@@ -840,7 +838,7 @@ Respond ONLY with JSON:
   async regenerateDungeon(conqueredInstanceId: string): Promise<void> {
     await safeExecute({
       fn: async () => {
-      const instance = await prismaAny.darkNetInstance.findUnique({
+      const instance = await prisma.darkNetInstance.findUnique({
         where: { id: conqueredInstanceId },
       });
 
@@ -853,7 +851,7 @@ Respond ONLY with JSON:
       }
 
       // Mark as regenerating while we work
-      await prismaAny.darkNetInstance.update({
+      await prisma.darkNetInstance.update({
         where: { id: instance.id },
         data: { status: "regenerating" },
       });
@@ -891,7 +889,7 @@ Respond ONLY with JSON:
       });
 
       // Delete instance record
-      await prismaAny.darkNetInstance.delete({
+      await prisma.darkNetInstance.delete({
         where: { id: instance.id },
       });
 
@@ -928,7 +926,7 @@ Respond ONLY with JSON:
       gatewayIp: string;
     }>
   > {
-    return prismaAny.darkNetInstance.findMany({
+    return prisma.darkNetInstance.findMany({
       where: { status: "active" },
       select: {
         id: true,
@@ -953,7 +951,7 @@ Respond ONLY with JSON:
   async ensureActiveDungeon(): Promise<void> {
     await safeExecute({
       fn: async () => {
-        const active = await prismaAny.darkNetInstance.count({
+        const active = await prisma.darkNetInstance.count({
           where: { status: "active" },
         });
 
@@ -981,7 +979,7 @@ Respond ONLY with JSON:
   async expireOldDungeons(): Promise<void> {
     await safeExecute({
       fn: async () => {
-        const expired = await prismaAny.darkNetInstance.findMany({
+        const expired = await prisma.darkNetInstance.findMany({
           where: { status: "active", expiresAt: { lt: new Date() } },
         });
 
@@ -991,7 +989,7 @@ Respond ONLY with JSON:
             "Expiring stale dungeon",
           );
 
-          await prismaAny.darkNetInstance.update({
+          await prisma.darkNetInstance.update({
             where: { id: instance.id },
             data: { status: "expired" },
           });

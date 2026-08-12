@@ -1,7 +1,7 @@
 /**
  * Dependency Injection Tokens
  *
- * Define injection tokens as const symbols for type-safe DI.
+ * Define injection tokens as const strings for type-safe DI.
  * These are used with the @inject() decorator to specify dependencies.
  */
 

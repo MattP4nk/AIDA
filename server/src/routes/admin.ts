@@ -17,9 +17,7 @@ router.get("/health", async (_req, res) => {
   res.status(dbHealth ? 200 : 503).json({
     status,
     timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
     database: dbHealth ? "connected" : "disconnected",
-    version: process.env.npm_package_version || "1.0.0",
   });
 });
 

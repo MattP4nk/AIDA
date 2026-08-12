@@ -72,6 +72,12 @@ class CommandProcessor extends EventEmitter {
   private rateLimitMap: Map<string, number[]>; // userId -> timestamps[]
   private readonly RATE_LIMIT_WINDOW = COMMAND_RATE_WINDOW_MS;
   private readonly MAX_COMMANDS_PER_WINDOW = COMMAND_RATE_LIMIT;
+  private readonly rateLimitCleanupTimer: ReturnType<typeof setInterval>;
+
+  // Service resolution cache (avoids ~26 DI lookups per command)
+  private serviceCache = new Map<string, any>();
+  private serviceCacheTime = 0;
+  private readonly SERVICE_CACHE_TTL = 60_000; // 1 minute
 
   // Command categories removed - now handled by modules
 
@@ -94,15 +100,24 @@ class CommandProcessor extends EventEmitter {
 
     // Build command map from modules
     this.buildCommandMap();
+
+    // Periodic cleanup of stale rateLimitMap entries (every 5 min)
+    this.rateLimitCleanupTimer = setInterval(() => {
+      const now = Date.now();
+      for (const [userId, timestamps] of this.rateLimitMap) {
+        const recent = timestamps.filter(t => now - t < this.RATE_LIMIT_WINDOW);
+        if (recent.length === 0) {
+          this.rateLimitMap.delete(userId);
+        } else {
+          this.rateLimitMap.set(userId, recent);
+        }
+      }
+    }, 5 * 60 * 1000);
+    this.rateLimitCleanupTimer.unref();
+
     this.logger.info("Command Processor initialized");
   }
 
-  /**
-   * Initialize with Socket.IO (kept for backward compatibility)
-   */
-  public initialize(_io: SocketIOServer): void {
-    // Now handled by DI injection
-  }
 
   private buildCommandMap() {
     for (const module of this.modules) {
@@ -126,82 +141,94 @@ class CommandProcessor extends EventEmitter {
     }
   }
 
+  /** Resolve a service with TTL-based caching to avoid repeated DI lookups. */
+  private getCachedService<T>(token: string): T | undefined {
+    if (Date.now() - this.serviceCacheTime > this.SERVICE_CACHE_TTL) {
+      this.serviceCache.clear();
+      this.serviceCacheTime = Date.now();
+    }
+    if (!this.serviceCache.has(token)) {
+      this.serviceCache.set(token, this.resolveService(token));
+    }
+    return this.serviceCache.get(token);
+  }
+
   private async buildCommandContext(userId: string, terminalCols?: number): Promise<CommandContext> {
-    const fileService = this.resolveService<FileService>(TOKENS.FILE_SERVICE)!;
-    const shopService = this.resolveService<ShopService>(TOKENS.SHOP_SERVICE)!;
-    const missionService = this.resolveService<MissionService>(
+    const fileService = this.getCachedService<FileService>(TOKENS.FILE_SERVICE)!;
+    const shopService = this.getCachedService<ShopService>(TOKENS.SHOP_SERVICE)!;
+    const missionService = this.getCachedService<MissionService>(
       TOKENS.MISSION_SERVICE,
     )!;
-    const missionGenerator = this.resolveService<MissionGeneratorService>(
+    const missionGenerator = this.getCachedService<MissionGeneratorService>(
       TOKENS.MISSION_GENERATOR_SERVICE,
     )!;
-    const serverService = this.resolveService<ServerService>(
+    const serverService = this.getCachedService<ServerService>(
       TOKENS.SERVER_SERVICE,
     )!;
-    const memoryService = this.resolveService<MemoryService>(
+    const memoryService = this.getCachedService<MemoryService>(
       TOKENS.MEMORY_SERVICE,
     )!;
-    const processStateService = this.resolveService<ProcessStateService>(
+    const processStateService = this.getCachedService<ProcessStateService>(
       TOKENS.PROCESS_STATE_SERVICE,
     )!;
-    const hackService = this.resolveService<HackService>(TOKENS.HACK_SERVICE)!;
-    const messageService = this.resolveService<MessageService>(
+    const hackService = this.getCachedService<HackService>(TOKENS.HACK_SERVICE)!;
+    const messageService = this.getCachedService<MessageService>(
       TOKENS.MESSAGE_SERVICE,
     )!;
-    const forumService = this.resolveService<ForumService>(
+    const forumService = this.getCachedService<ForumService>(
       TOKENS.FORUM_SERVICE,
     )!;
-    const factionService = this.resolveService<FactionService>(
+    const factionService = this.getCachedService<FactionService>(
       TOKENS.FACTION_SERVICE,
     )!;
-    const inventoryService = this.resolveService<InventoryService>(
+    const inventoryService = this.getCachedService<InventoryService>(
       TOKENS.INVENTORY_SERVICE,
     )!;
-    const playerPresenceService = this.resolveService<PlayerPresenceService>(
+    const playerPresenceService = this.getCachedService<PlayerPresenceService>(
       TOKENS.PLAYER_PRESENCE_SERVICE,
     );
-    const backdoorService = this.resolveService<BackdoorService>(
+    const backdoorService = this.getCachedService<BackdoorService>(
       TOKENS.BACKDOOR_SERVICE,
     )!;
-    const traceService = this.resolveService<TraceService>(
+    const traceService = this.getCachedService<TraceService>(
       TOKENS.TRACE_SERVICE,
     )!;
     const factionKnowledgeService =
-      this.resolveService<FactionKnowledgeService>(
+      this.getCachedService<FactionKnowledgeService>(
         TOKENS.FACTION_KNOWLEDGE_SERVICE,
       );
-    const networkTopologyService = this.resolveService<NetworkTopologyService>(
+    const networkTopologyService = this.getCachedService<NetworkTopologyService>(
       TOKENS.NETWORK_TOPOLOGY_SERVICE,
     );
     const missionIntegrationService =
-      this.resolveService<MissionIntegrationService>(
+      this.getCachedService<MissionIntegrationService>(
         TOKENS.MISSION_INTEGRATION_SERVICE,
       );
-    const storyMissionService = this.resolveService<StoryMissionService>(
+    const storyMissionService = this.getCachedService<StoryMissionService>(
       TOKENS.STORY_MISSION_SERVICE,
     );
-    const leaderboardService = this.resolveService<
+    const leaderboardService = this.getCachedService<
       import("./leaderboardService").LeaderboardService
     >(TOKENS.LEADERBOARD_SERVICE);
-    const achievementService = this.resolveService<
+    const achievementService = this.getCachedService<
       import("./achievementService").AchievementService
     >(TOKENS.ACHIEVEMENT_SERVICE);
-    const keyFragmentService = this.resolveService<
+    const keyFragmentService = this.getCachedService<
       import("./keyFragmentService").KeyFragmentService
     >(TOKENS.KEY_FRAGMENT_SERVICE);
-    const darknetDungeonService = this.resolveService<
+    const darknetDungeonService = this.getCachedService<
       import("./darknetDungeonService").DarkNetDungeonService
     >(TOKENS.DARKNET_DUNGEON_SERVICE);
-    const darknetDiscoveryService = this.resolveService<
+    const darknetDiscoveryService = this.getCachedService<
       import("./darknetDiscoveryService").default
     >("DarkNetDiscoveryService");
-    const connectionChallengeService = this.resolveService<
+    const connectionChallengeService = this.getCachedService<
       import("./connectionChallengeService").ConnectionChallengeService
     >(TOKENS.CONNECTION_CHALLENGE_SERVICE);
-    const chatService = this.resolveService<ChatService>(
+    const chatService = this.getCachedService<ChatService>(
       TOKENS.CHAT_SERVICE,
     );
-    const messageEncryptionService = this.resolveService<MessageEncryptionService>(
+    const messageEncryptionService = this.getCachedService<MessageEncryptionService>(
       TOKENS.MESSAGE_ENCRYPTION_SERVICE,
     );
 
@@ -574,6 +601,12 @@ class CommandProcessor extends EventEmitter {
       // Emit event for logging/monitoring
       this.emit("command:executed", { userId, command, result });
 
+      // Increment command counter (fire-and-forget)
+      db.client.playerProgress.update({
+        where: { userId },
+        data: { commandsExecuted: { increment: 1 } },
+      }).catch(() => {});
+
       // Log to database (async, don't wait)
       this.logCommandExecution(userId, command, result).catch((err) =>
         this.logger.error({ err }, "Failed to log command"),
@@ -601,7 +634,7 @@ class CommandProcessor extends EventEmitter {
   // ==================== UTILITY METHODS ====================
 
   private generateCommandId(): string {
-    return `cmd_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    return `cmd_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
   }
 
   private addToHistory(userId: string, command: Command): void {

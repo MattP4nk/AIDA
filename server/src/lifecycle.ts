@@ -3,7 +3,7 @@ import { Server as SocketIOServer } from "socket.io";
 import logger from "./logger";
 import { db } from "./database/client";
 import { getService } from "./di/container";
-import { GAME_STATE_MANAGER, PROGRESS_SERVICE, AI_SCHEDULER_SERVICE, RESOURCE_SERVICE, WARFARE_SERVICE } from "./di/tokens";
+import { GAME_STATE_MANAGER, PROGRESS_SERVICE, AI_SCHEDULER_SERVICE, RESOURCE_SERVICE, WARFARE_SERVICE, AI_SERVICE, CONTENT_QUEUE_SERVICE } from "./di/tokens";
 import { stopCsrfCleanup } from "./middleware/csrf";
 import type GameStateManager from "./services/gameStateManager";
 import type ProgressService from "./services/progressService";
@@ -65,6 +65,20 @@ export async function gracefulShutdown(
       const missionService = getService<any>(MISSION_SERVICE);
       missionService.stopExpirationChecker();
       logger.info("Mission expiration checker stopped");
+    } catch { /* Not fatal */ }
+
+    // Stop AI retry queue
+    try {
+      const aiService = getService<any>(AI_SERVICE);
+      aiService.stopRetryQueue();
+      logger.info("AI retry queue stopped");
+    } catch { /* Not fatal */ }
+
+    // Stop content queue
+    try {
+      const contentQueueService = getService<any>(CONTENT_QUEUE_SERVICE);
+      await contentQueueService.stop();
+      logger.info("Content queue stopped");
     } catch { /* Not fatal */ }
 
     // Stop CSRF cleanup timer

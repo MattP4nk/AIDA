@@ -195,102 +195,77 @@ export class KeyFragmentService extends EventEmitter {
   }> {
     return await safeExecute({
       fn: async () => {
-        // Use interactive transaction for atomicity — prevents two players
-        // from claiming the same unclaimed fragment simultaneously.
-        const result = await this.prisma.$transaction(async (tx) => {
-          // Lock the row via findFirst + FOR UPDATE (Prisma raw fallback)
-          // Using findUnique inside a transaction provides serializable reads
-          const fragment = await tx.keyFragment.findUnique({
-            where: { id: fragmentId },
-          });
-
-          if (!fragment) {
-            this.logger.warn(
-              { userId, fragmentId },
-              "Attempted to claim non-existent key fragment",
-            );
-            return { claimed: false } as const;
-          }
-
-          // Already held by this player
-          if (fragment.heldByUserId === userId) {
-            return { claimed: false, alreadyHeld: true } as const;
-          }
-
-          // Held by someone else — look up their username
-          if (fragment.heldByUserId) {
-            const holder = await tx.user.findUnique({
-              where: { id: fragment.heldByUserId },
-              select: { username: true },
-            });
-            return {
-              claimed: false,
-              currentHolder: holder?.username ?? "unknown",
-            } as const;
-          }
-
-          // Unclaimed — claim it atomically
-          const now = new Date();
-          const updatedFragment = await tx.keyFragment.update({
-            where: { id: fragmentId },
-            data: {
-              heldByUserId: userId,
-              heldSince: now,
-            },
-          });
-
-          // Create historical discovery record (idempotent via upsert)
-          await tx.keyFragmentDiscovery.upsert({
-            where: {
-              userId_fragmentId: { userId, fragmentId },
-            },
-            create: {
-              userId,
-              fragmentId,
-              method,
-            },
-            update: {},
-          });
-
-          return { claimed: true, fragment: updatedFragment } as const;
-        });
-
-        if (!result.claimed) {
-          return result;
-        }
-
-        // Post-transaction side effects (notifications, counters)
-        await this.updatePlayerCounters(userId);
-        await this.checkEndgameUnlock(userId);
-
-        this.emit("fragment:claimed", {
-          userId,
-          fragmentId: result.fragment.id,
-          keyType: result.fragment.keyType,
-          fragmentNum: result.fragment.fragmentNum,
-          name: result.fragment.name,
-        });
-
-        this.io.to(`user:${userId}`).emit("story:key-fragment", {
-          name: result.fragment.name,
-          keyType: result.fragment.keyType,
-          fragmentNum: result.fragment.fragmentNum,
-          description: result.fragment.description,
+        return await this.changeFragmentOwnership({
+          newOwnerId: userId,
+          fragmentId,
           method,
-        });
+          validate: async (fragment, tx) => {
+            if (!fragment) {
+              this.logger.warn(
+                { userId, fragmentId },
+                "Attempted to claim non-existent key fragment",
+              );
+              return { ok: false, result: { claimed: false } };
+            }
 
-        this.logger.info(
-          {
-            userId,
-            fragmentId: result.fragment.id,
-            keyType: result.fragment.keyType,
-            fragmentNum: result.fragment.fragmentNum,
+            // Already held by this player
+            if (fragment.heldByUserId === userId) {
+              return { ok: false, result: { claimed: false, alreadyHeld: true } };
+            }
+
+            // Held by someone else — look up their username
+            if (fragment.heldByUserId) {
+              const holder = await tx.user.findUnique({
+                where: { id: fragment.heldByUserId },
+                select: { username: true },
+              });
+              return {
+                ok: false,
+                result: {
+                  claimed: false,
+                  currentHolder: holder?.username ?? "unknown",
+                },
+              };
+            }
+
+            return { ok: true };
           },
-          "Key fragment claimed: %s",
-          result.fragment.name,
-        );
+          buildSuccess: (updatedFragment) => ({
+            claimed: true,
+            fragment: updatedFragment,
+          }),
+          onSuccess: async (fragment) => {
+            await this.updatePlayerCounters(userId);
+            await this.checkEndgameUnlock(userId);
 
-        return { claimed: true, fragment: result.fragment };
+            this.emit("fragment:claimed", {
+              userId,
+              fragmentId: fragment.id,
+              keyType: fragment.keyType,
+              fragmentNum: fragment.fragmentNum,
+              name: fragment.name,
+            });
+
+            this.io.to(`user:${userId}`).emit("story:key-fragment", {
+              name: fragment.name,
+              keyType: fragment.keyType,
+              fragmentNum: fragment.fragmentNum,
+              description: fragment.description,
+              method,
+            });
+
+            this.logger.info(
+              {
+                userId,
+                fragmentId: fragment.id,
+                keyType: fragment.keyType,
+                fragmentNum: fragment.fragmentNum,
+              },
+              "Key fragment claimed: %s",
+              fragment.name,
+            );
+          },
+        });
       },
       context: "Claim key fragment",
       logger: this.logger,
@@ -329,113 +304,85 @@ export class KeyFragmentService extends EventEmitter {
   }> {
     return await safeExecute({
       fn: async () => {
-        // Use interactive transaction for atomicity — prevents two attackers
-        // from stealing the same fragment simultaneously.
-        const result = await this.prisma.$transaction(async (tx) => {
-          const fragment = await tx.keyFragment.findUnique({
-            where: { id: fragmentId },
-          });
+        return await this.changeFragmentOwnership({
+          newOwnerId: attackerUserId,
+          fragmentId,
+          method: "steal",
+          validate: async (fragment, _tx) => {
+            if (!fragment) {
+              return {
+                ok: false,
+                result: {
+                  stolen: false,
+                  success: false,
+                  message: "Fragment does not exist.",
+                },
+              };
+            }
 
-          if (!fragment) {
-            return {
-              stolen: false,
-              success: false,
-              message: "Fragment does not exist.",
-            } as const;
-          }
+            // Verify the victim actually holds it (inside transaction)
+            if (fragment.heldByUserId !== victimUserId) {
+              return {
+                ok: false,
+                result: {
+                  stolen: false,
+                  success: false,
+                  message: "The target player does not hold this fragment.",
+                },
+              };
+            }
 
-          // Verify the victim actually holds it (inside transaction)
-          if (fragment.heldByUserId !== victimUserId) {
-            return {
-              stolen: false,
-              success: false,
-              message: "The target player does not hold this fragment.",
-            } as const;
-          }
-
-          // Transfer ownership atomically
-          const now = new Date();
-          const updatedFragment = await tx.keyFragment.update({
-            where: { id: fragmentId },
-            data: {
-              heldByUserId: attackerUserId,
-              heldSince: now,
-            },
-          });
-
-          // Create historical discovery record for attacker (idempotent)
-          await tx.keyFragmentDiscovery.upsert({
-            where: {
-              userId_fragmentId: { userId: attackerUserId, fragmentId },
-            },
-            create: {
-              userId: attackerUserId,
-              fragmentId,
-              method: "steal",
-            },
-            update: {},
-          });
-
-          return {
+            return { ok: true };
+          },
+          buildSuccess: (updatedFragment) => ({
             stolen: true,
             success: true,
             fragment: updatedFragment,
             message: `Successfully stole "${updatedFragment.name}"!`,
-          } as const;
-        });
+          }),
+          onSuccess: async (fragment) => {
+            await this.updatePlayerCounters(attackerUserId);
+            await this.updatePlayerCounters(victimUserId);
+            await this.checkEndgameUnlock(attackerUserId);
 
-        if (!result.stolen) {
-          return result;
-        }
+            this.emit("fragment:stolen", {
+              attackerUserId,
+              victimUserId,
+              fragmentId: fragment.id,
+              keyType: fragment.keyType,
+              fragmentNum: fragment.fragmentNum,
+              name: fragment.name,
+            });
 
-        // Post-transaction side effects
-        await this.updatePlayerCounters(attackerUserId);
-        await this.updatePlayerCounters(victimUserId);
-        await this.checkEndgameUnlock(attackerUserId);
+            this.io.to(`user:${victimUserId}`).emit("story:fragment-stolen", {
+              fragmentId: fragment.id,
+              name: fragment.name,
+              keyType: fragment.keyType,
+              fragmentNum: fragment.fragmentNum,
+              message: `Your fragment "${fragment.name}" has been stolen!`,
+            });
 
-        this.emit("fragment:stolen", {
-          attackerUserId,
-          victimUserId,
-          fragmentId: result.fragment.id,
-          keyType: result.fragment.keyType,
-          fragmentNum: result.fragment.fragmentNum,
-          name: result.fragment.name,
-        });
+            this.io.to(`user:${attackerUserId}`).emit("story:key-fragment", {
+              name: fragment.name,
+              keyType: fragment.keyType,
+              fragmentNum: fragment.fragmentNum,
+              description: fragment.description,
+              method: "steal",
+            });
 
-        this.io.to(`user:${victimUserId}`).emit("story:fragment-stolen", {
-          fragmentId: result.fragment.id,
-          name: result.fragment.name,
-          keyType: result.fragment.keyType,
-          fragmentNum: result.fragment.fragmentNum,
-          message: `Your fragment "${result.fragment.name}" has been stolen!`,
-        });
-
-        this.io.to(`user:${attackerUserId}`).emit("story:key-fragment", {
-          name: result.fragment.name,
-          keyType: result.fragment.keyType,
-          fragmentNum: result.fragment.fragmentNum,
-          description: result.fragment.description,
-          method: "steal",
-        });
-
-        this.logger.info(
-          {
-            attackerUserId,
-            victimUserId,
-            fragmentId: result.fragment.id,
-            keyType: result.fragment.keyType,
-            fragmentNum: result.fragment.fragmentNum,
+            this.logger.info(
+              {
+                attackerUserId,
+                victimUserId,
+                fragmentId: fragment.id,
+                keyType: fragment.keyType,
+                fragmentNum: fragment.fragmentNum,
+              },
+              "Key fragment stolen: %s",
+              fragment.name,
+            );
           },
-          "Key fragment stolen: %s",
-          result.fragment.name,
-        );
-
-        return {
-          stolen: true,
-          success: true,
-          fragment: result.fragment,
-          message: result.message,
-        };
+        });
       },
       context: "Steal key fragment",
       logger: this.logger,
@@ -473,113 +420,85 @@ export class KeyFragmentService extends EventEmitter {
   }> {
     return await safeExecute({
       fn: async () => {
-        // Use interactive transaction for atomicity — prevents the sender
-        // from transferring a fragment they no longer hold.
-        const result = await this.prisma.$transaction(async (tx) => {
-          const fragment = await tx.keyFragment.findUnique({
-            where: { id: fragmentId },
-          });
+        return await this.changeFragmentOwnership({
+          newOwnerId: toUserId,
+          fragmentId,
+          method: "transfer",
+          validate: async (fragment, _tx) => {
+            if (!fragment) {
+              return {
+                ok: false,
+                result: {
+                  transferred: false,
+                  success: false,
+                  message: "Fragment does not exist.",
+                },
+              };
+            }
 
-          if (!fragment) {
-            return {
-              transferred: false,
-              success: false,
-              message: "Fragment does not exist.",
-            } as const;
-          }
+            // Verify the sender actually holds it (inside transaction)
+            if (fragment.heldByUserId !== fromUserId) {
+              return {
+                ok: false,
+                result: {
+                  transferred: false,
+                  success: false,
+                  message: "You do not hold this fragment.",
+                },
+              };
+            }
 
-          // Verify the sender actually holds it (inside transaction)
-          if (fragment.heldByUserId !== fromUserId) {
-            return {
-              transferred: false,
-              success: false,
-              message: "You do not hold this fragment.",
-            } as const;
-          }
-
-          // Transfer ownership atomically
-          const now = new Date();
-          const updatedFragment = await tx.keyFragment.update({
-            where: { id: fragmentId },
-            data: {
-              heldByUserId: toUserId,
-              heldSince: now,
-            },
-          });
-
-          // Create historical discovery record for recipient (idempotent)
-          await tx.keyFragmentDiscovery.upsert({
-            where: {
-              userId_fragmentId: { userId: toUserId, fragmentId },
-            },
-            create: {
-              userId: toUserId,
-              fragmentId,
-              method: "transfer",
-            },
-            update: {},
-          });
-
-          return {
+            return { ok: true };
+          },
+          buildSuccess: (updatedFragment) => ({
             transferred: true,
             success: true,
             fragment: updatedFragment,
             message: `Successfully transferred "${updatedFragment.name}".`,
-          } as const;
-        });
+          }),
+          onSuccess: async (fragment) => {
+            await this.updatePlayerCounters(fromUserId);
+            await this.updatePlayerCounters(toUserId);
+            await this.checkEndgameUnlock(toUserId);
 
-        if (!result.transferred) {
-          return result;
-        }
+            this.emit("fragment:transferred", {
+              fromUserId,
+              toUserId,
+              fragmentId: fragment.id,
+              keyType: fragment.keyType,
+              fragmentNum: fragment.fragmentNum,
+              name: fragment.name,
+            });
 
-        // Post-transaction side effects
-        await this.updatePlayerCounters(fromUserId);
-        await this.updatePlayerCounters(toUserId);
-        await this.checkEndgameUnlock(toUserId);
+            this.io.to(`user:${toUserId}`).emit("story:key-fragment", {
+              name: fragment.name,
+              keyType: fragment.keyType,
+              fragmentNum: fragment.fragmentNum,
+              description: fragment.description,
+              method: "transfer",
+            });
 
-        this.emit("fragment:transferred", {
-          fromUserId,
-          toUserId,
-          fragmentId: result.fragment.id,
-          keyType: result.fragment.keyType,
-          fragmentNum: result.fragment.fragmentNum,
-          name: result.fragment.name,
-        });
+            this.io.to(`user:${fromUserId}`).emit("story:fragment-transferred", {
+              fragmentId: fragment.id,
+              name: fragment.name,
+              keyType: fragment.keyType,
+              fragmentNum: fragment.fragmentNum,
+              message: `You transferred "${fragment.name}" successfully.`,
+            });
 
-        this.io.to(`user:${toUserId}`).emit("story:key-fragment", {
-          name: result.fragment.name,
-          keyType: result.fragment.keyType,
-          fragmentNum: result.fragment.fragmentNum,
-          description: result.fragment.description,
-          method: "transfer",
-        });
-
-        this.io.to(`user:${fromUserId}`).emit("story:fragment-transferred", {
-          fragmentId: result.fragment.id,
-          name: result.fragment.name,
-          keyType: result.fragment.keyType,
-          fragmentNum: result.fragment.fragmentNum,
-          message: `You transferred "${result.fragment.name}" successfully.`,
-        });
-
-        this.logger.info(
-          {
-            fromUserId,
-            toUserId,
-            fragmentId: result.fragment.id,
-            keyType: result.fragment.keyType,
-            fragmentNum: result.fragment.fragmentNum,
+            this.logger.info(
+              {
+                fromUserId,
+                toUserId,
+                fragmentId: fragment.id,
+                keyType: fragment.keyType,
+                fragmentNum: fragment.fragmentNum,
+              },
+              "Key fragment transferred: %s",
+              fragment.name,
+            );
           },
-          "Key fragment transferred: %s",
-          result.fragment.name,
-        );
-
-        return {
-          transferred: true,
-          success: true,
-          fragment: result.fragment,
-          message: result.message,
-        };
+        });
       },
       context: "Transfer key fragment",
       logger: this.logger,
@@ -1049,6 +968,96 @@ export class KeyFragmentService extends EventEmitter {
   }
 
   // ── PRIVATE HELPERS ──────────────────────────────────────────────
+
+  /**
+   * Shared helper for claim/steal/transfer — handles the transactional
+   * ownership change pattern that all three operations share:
+   *   1. Open prisma.$transaction
+   *   2. findUnique the fragment
+   *   3. Run caller-provided validation (guard checks)
+   *   4. keyFragment.update to set heldByUserId + heldSince
+   *   5. keyFragmentDiscovery.upsert
+   *   6. Run caller-provided onSuccess for post-transaction side effects
+   *
+   * @param params.newOwnerId  - The user who will hold the fragment after this operation
+   * @param params.fragmentId  - The KeyFragment record ID
+   * @param params.method      - Discovery method for the keyFragmentDiscovery record
+   * @param params.validate    - Called inside the transaction with the fetched fragment (or null)
+   *                             and the transaction client. Return { ok: false, result } to abort
+   *                             with that result, or { ok: true } to proceed with the transfer.
+   * @param params.buildSuccess - Called inside the transaction after a successful update to build
+   *                              the success result object (must include a `fragment` property).
+   * @param params.onSuccess   - Called after a successful transaction with the updated fragment
+   *                             for side effects (emit events, socket notifications, logging).
+   * @returns The result from validate (on failure) or buildSuccess + onSuccess (on success)
+   */
+  private async changeFragmentOwnership(params: {
+    newOwnerId: string;
+    fragmentId: string;
+    method: string;
+    /** Called inside the transaction to validate the fragment can be transferred. Return an error result to abort. */
+    validate: (fragment: any, tx: any) => Promise<{ ok: true } | { ok: false; result: any }>;
+    /** Called inside the transaction after a successful update to build the success result. */
+    buildSuccess: (updatedFragment: any) => any;
+    /** Called after a successful transaction with the updated fragment for side effects. */
+    onSuccess: (fragment: any) => Promise<void>;
+  }): Promise<any> {
+    const { newOwnerId, fragmentId, method, validate, buildSuccess, onSuccess } = params;
+
+    // Use interactive transaction for atomicity — prevents race conditions
+    // (e.g. two players claiming the same fragment simultaneously).
+    const result = await this.prisma.$transaction(async (tx) => {
+      // Using findUnique inside a transaction provides serializable reads
+      const fragment = await tx.keyFragment.findUnique({
+        where: { id: fragmentId },
+      });
+
+      // Run caller-specific validation (not-found, ownership checks, etc.)
+      const validation = await validate(fragment, tx);
+      if (!validation.ok) {
+        return { __aborted: true as const, ...validation.result };
+      }
+
+      // Transfer ownership atomically
+      const now = new Date();
+      const updatedFragment = await tx.keyFragment.update({
+        where: { id: fragmentId },
+        data: {
+          heldByUserId: newOwnerId,
+          heldSince: now,
+        },
+      });
+
+      // Create historical discovery record (idempotent via upsert)
+      await tx.keyFragmentDiscovery.upsert({
+        where: {
+          userId_fragmentId: { userId: newOwnerId, fragmentId },
+        },
+        create: {
+          userId: newOwnerId,
+          fragmentId,
+          method,
+        },
+        update: {},
+      });
+
+      return { __aborted: false as const, ...buildSuccess(updatedFragment) };
+    });
+
+    // If validation aborted the transaction, return the early-exit result as-is
+    if (result.__aborted) {
+      const { __aborted, ...earlyResult } = result;
+      return earlyResult;
+    }
+
+    // Extract __aborted flag from the success result before returning
+    const { __aborted, ...successResult } = result;
+
+    // Post-transaction side effects (notifications, counters, events)
+    await onSuccess(successResult.fragment);
+
+    return successResult;
+  }
 
   /**
    * Recompute a player's fragment counters from the source of truth

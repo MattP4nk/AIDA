@@ -48,9 +48,7 @@ router.post(
 
     if (existingUser) {
       throw new GameError(
-        existingUser.username === username
-          ? "Username already exists"
-          : "Email already registered",
+        "Username or email already in use",
         "CONFLICT",
         409,
       );
@@ -249,6 +247,10 @@ router.post(
       // Set httpOnly cookie with JWT
       res.cookie(AUTH_COOKIE_NAME, token, AUTH_COOKIE_OPTIONS);
 
+      // Note: Token is returned in both the cookie AND the JSON body.
+      // The body token is needed for Socket.IO auth (cookies can't be sent via WebSocket handshake).
+      // This is an intentional security tradeoff — XSS can access the body token,
+      // but the httpOnly cookie remains the primary session mechanism.
       const response: AuthResponse = {
         success: true,
         token,
@@ -260,6 +262,22 @@ router.post(
   }),
 );
 
+// Per-account lockout after repeated failed login attempts
+const LOGIN_ATTEMPT_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+const MAX_LOGIN_ATTEMPTS = 10;
+const loginAttempts = new Map<string, { count: number; firstAttempt: number }>();
+
+// Periodic cleanup of expired lockout entries (every 5 minutes)
+const loginAttemptsCleanupTimer = setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of loginAttempts) {
+    if (now - entry.firstAttempt > LOGIN_ATTEMPT_WINDOW_MS) {
+      loginAttempts.delete(key);
+    }
+  }
+}, 5 * 60 * 1000);
+loginAttemptsCleanupTimer.unref();
+
 // User Login
 router.post(
   "/login",
@@ -267,6 +285,23 @@ router.post(
   handleValidationErrors,
   asyncHandler(async (req: any, res: any) => {
     const { username, password }: AuthRequest = req.body;
+
+      // Check account lockout
+      const lockoutKey = username.toLowerCase();
+      const attempts = loginAttempts.get(lockoutKey);
+      if (attempts) {
+        if (Date.now() - attempts.firstAttempt > LOGIN_ATTEMPT_WINDOW_MS) {
+          loginAttempts.delete(lockoutKey); // Window expired, reset
+        } else if (attempts.count >= MAX_LOGIN_ATTEMPTS) {
+          const remainingMs = LOGIN_ATTEMPT_WINDOW_MS - (Date.now() - attempts.firstAttempt);
+          const remainingMin = Math.ceil(remainingMs / 60000);
+          throw new GameError(
+            `Too many failed attempts. Try again in ${remainingMin} minute${remainingMin > 1 ? "s" : ""}.`,
+            "ACCOUNT_LOCKED",
+            429,
+          );
+        }
+      }
 
       // Find user
       const user = await prisma.user.findFirst({
@@ -292,14 +327,23 @@ router.post(
       });
 
       if (!user) {
+        // Record failed attempt
+        const prev = loginAttempts.get(lockoutKey);
+        if (prev) { prev.count++; } else { loginAttempts.set(lockoutKey, { count: 1, firstAttempt: Date.now() }); }
         throw new GameError("Invalid username or password", "AUTH_FAILED", 401);
       }
 
       // Verify password
       const validPassword = await bcrypt.compare(password, user.password);
       if (!validPassword) {
+        // Record failed attempt
+        const prev = loginAttempts.get(lockoutKey);
+        if (prev) { prev.count++; } else { loginAttempts.set(lockoutKey, { count: 1, firstAttempt: Date.now() }); }
         throw new GameError("Invalid username or password", "AUTH_FAILED", 401);
       }
+
+      // Clear lockout on successful login
+      loginAttempts.delete(lockoutKey);
 
       // Update last login and online status
       await prisma.user.update({

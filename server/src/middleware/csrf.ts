@@ -15,6 +15,10 @@ import { verifySocketToken, AUTH_COOKIE_NAME } from "./auth";
 const CSRF_TOKEN_TTL_MS = 3_600_000; // 1 hour
 const CLEANUP_THRESHOLD = 500;
 
+/** Hash JWT before using as Map key — prevents raw token exposure in memory dumps. */
+const hashKey = (jwt: string): string =>
+  crypto.createHash("sha256").update(jwt).digest("hex");
+
 const csrfTokenStore = new Map<string, { token: string; expires: number }>();
 
 // ── Periodic cleanup (runs every 10 minutes) ─────────────────────
@@ -47,7 +51,7 @@ export function generateCsrfToken(jwtToken: string): string {
   const token = crypto.randomBytes(32).toString("hex");
   const expires = Date.now() + CSRF_TOKEN_TTL_MS;
 
-  csrfTokenStore.set(jwtToken, { token, expires });
+  csrfTokenStore.set(hashKey(jwtToken), { token, expires });
 
   // Eager cleanup if store gets large
   if (csrfTokenStore.size > CLEANUP_THRESHOLD) {
@@ -99,7 +103,7 @@ export function csrfProtection(
     });
   }
 
-  const stored = csrfTokenStore.get(jwtToken);
+  const stored = csrfTokenStore.get(hashKey(jwtToken));
   if (!stored || stored.token !== csrfToken || stored.expires < Date.now()) {
     return res.status(403).json({
       success: false,

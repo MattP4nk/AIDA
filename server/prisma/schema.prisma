@@ -53,8 +53,10 @@ model User {
   intelligence     IntelligenceReport[]
   postReplies      PostReply[]
   postVotes        PostVote[]
-  reportsMade      PostReport[]         @relation("ReportCreator")
-  reportsResolved  PostReport[]         @relation("ReportResolver")
+  reportsMade            PostReport[]      @relation("ReportCreator")
+  reportsResolved        PostReport[]      @relation("ReportResolver")
+  messageReportsMade     MessageReport[]   @relation("MessageReportCreator")
+  messageReportsResolved MessageReport[]   @relation("MessageReportResolver")
 
   // Game mechanics
   inventoryItems   InventoryItem[]
@@ -134,7 +136,17 @@ model PlayerProgress {
 
   missionProgress Json     @default("{}") @map("mission_progress")
   achievements    String[] @default([])
-  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  // Stat counters
+  commandsExecuted  Int @default(0) @map("commands_executed")
+  successfulHacks   Int @default(0) @map("successful_hacks")
+  failedHacks       Int @default(0) @map("failed_hacks")
+  missionsCompleted Int @default(0) @map("missions_completed")
+  serversDiscovered Int @default(0) @map("servers_discovered")
+  filesAccessed     Int @default(0) @map("files_accessed")
+  messagesSent      Int @default(0) @map("messages_sent")
+
+  updatedAt DateTime @updatedAt @map("updated_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -292,11 +304,31 @@ model Message {
   messageType     String   @default("private") @map("message_type")
   requiredSkill   Json?    @map("required_skill")
   triggerEvent    String?  @map("trigger_event")
+  isHidden        Boolean  @default(false) @map("is_hidden")
 
-  sender    User @relation("MessageSender", fields: [senderId], references: [id], onDelete: Cascade)
-  recipient User @relation("MessageRecipient", fields: [recipientId], references: [id], onDelete: Cascade)
+  sender    User            @relation("MessageSender", fields: [senderId], references: [id], onDelete: Cascade)
+  recipient User            @relation("MessageRecipient", fields: [recipientId], references: [id], onDelete: Cascade)
+  reports   MessageReport[]
 
   @@map("messages")
+}
+
+model MessageReport {
+  id         String    @id @default(cuid())
+  reporterId String    @map("reporter_id")
+  messageId  String    @map("message_id")
+  reason     String
+  status     String    @default("pending") // "pending" | "reviewed" | "dismissed" | "actioned"
+  createdAt  DateTime  @default(now()) @map("created_at")
+  resolvedAt DateTime? @map("resolved_at")
+  resolvedBy String?   @map("resolved_by")
+
+  reporter User    @relation("MessageReportCreator", fields: [reporterId], references: [id])
+  resolver User?   @relation("MessageReportResolver", fields: [resolvedBy], references: [id])
+  message  Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@map("message_reports")
 }
 
 model Contact {

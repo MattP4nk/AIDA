@@ -364,17 +364,26 @@ async function handleCommandExecute(
   try {
     const { command, args, serverId, terminalId, terminalCols } = data;
 
-    if (!command || typeof command !== "string") {
+    // Validate command input (same rules as HTTP middleware)
+    const { validateCommandInput, sanitizeSocketInput } = await import("../utils/inputValidation");
+    const sanitizedCommand = typeof command === "string" ? sanitizeSocketInput(command) : "";
+    const validation = validateCommandInput(sanitizedCommand);
+    if (!validation.valid) {
       socket.emit("command:error", {
         success: false,
-        error: "Invalid command format",
+        error: validation.reason || "Invalid command format",
       });
       return;
     }
 
+    // Validate and sanitize args
+    const sanitizedArgs = Array.isArray(args)
+      ? args.filter((a): a is string => typeof a === "string").map(sanitizeSocketInput)
+      : [];
+
     // Build full command string
     const commandString =
-      args && args.length > 0 ? `${command} ${args.join(" ")}` : command;
+      sanitizedArgs.length > 0 ? `${sanitizedCommand} ${sanitizedArgs.join(" ")}` : sanitizedCommand;
 
     // Parse
     const parsed = commandProcessor.parseCommand(
@@ -437,20 +446,23 @@ async function handleMessageSend(
     const { recipientId, subject, content, isEncrypted, encryptionLevel } =
       messageData;
 
-    if (!recipientId || !subject || !content) {
+    const { validateMessageInput } = await import("../utils/inputValidation");
+    const msgValidation = validateMessageInput({ recipientId, subject, content });
+    if (!msgValidation.valid) {
       socket.emit("message:result", {
         success: false,
-        error: "recipientId, subject, and content are required",
+        error: msgValidation.reason || "Invalid message data",
       });
       return;
     }
 
+    // After validation, recipientId/subject/content are guaranteed to be strings
     const result = await messageService.sendPrivateMessage(
       senderId,
-      recipientId,
+      recipientId!,
       {
-        subject,
-        content,
+        subject: subject!,
+        content: content!,
         encrypt: isEncrypted || false,
         encryptionLevel: encryptionLevel || 0,
       },

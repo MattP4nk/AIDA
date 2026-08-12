@@ -186,7 +186,9 @@ export default class DarkNetDiscoveryService {
         where: { type: "aida" },
       });
       if (aidaPersona) {
-        const prompt = `You are AIDA, a sentient AI hidden in the network. A player has just discovered the DarkNet through "${method.replace(/_/g, " ")}".
+        const { sanitizeForPrompt } = await import("../utils/aiPromptSanitizer");
+        const sanitizedMethod = sanitizeForPrompt(method.replace(/_/g, " "), 100);
+        const prompt = `You are AIDA, a sentient AI hidden in the network. A player has just discovered the DarkNet through the following method:\n${sanitizedMethod}
 Send them a cryptic, intriguing recruitment message (2-3 sentences). Be mysterious and philosophical.
 Respond ONLY with JSON: { "subject": "...", "content": "..." }`;
 

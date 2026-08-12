@@ -242,7 +242,12 @@ export class FileAccessCommandsModule implements CommandModule {
     // Check expiry
     if (Date.now() > sweepSession.expiresAt) {
       activeSweepSessions.delete(context.userId);
-      return errorResult("Sweep session expired. Run 'sweep' again.");
+      return {
+        success: false,
+        output: "Sweep session expired. Run 'sweep' again.",
+        data: { fileAccessResolved: true },
+        timestamp: new Date(),
+      };
     }
 
     const answer = command.args.join(" ").trim();
@@ -271,17 +276,25 @@ export class FileAccessCommandsModule implements CommandModule {
       } catch { /* non-critical */ }
 
       activeSweepSessions.delete(context.userId);
-      return successResult(
-        `Sweep successful! ${sweepSession.hiddenFileIds.length} hidden entries revealed.\n` +
-        "Use 'ls -a' to see them.",
-      );
+      return {
+        success: true,
+        output: `Sweep successful! ${sweepSession.hiddenFileIds.length} hidden entries revealed.\n` +
+          "Use 'ls -a' to see them.",
+        data: { fileAccessResolved: true },
+        timestamp: new Date(),
+      };
     }
 
     // Wrong answer
     sweepSession.attemptsLeft--;
     if (sweepSession.attemptsLeft <= 0) {
       activeSweepSessions.delete(context.userId);
-      return errorResult("All attempts exhausted. Sweep session ended. Run 'sweep' to try again.");
+      return {
+        success: false,
+        output: "All attempts exhausted. Sweep session ended. Run 'sweep' to try again.",
+        data: { fileAccessResolved: true },
+        timestamp: new Date(),
+      };
     }
 
     return errorResult(`Incorrect. ${sweepSession.attemptsLeft} attempt(s) remaining.`);

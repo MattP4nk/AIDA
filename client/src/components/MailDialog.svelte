@@ -242,6 +242,28 @@
         }
     }
 
+    // ==================== REPORT ====================
+
+    async function reportMessage(messageId: string) {
+        const reason = prompt("Report reason:");
+        if (!reason || !reason.trim()) return;
+
+        try {
+            const response = await terminalService.executeCommand(
+                `mail report ${messageId} ${reason.trim()}`,
+            );
+            if (response.success) {
+                successMsg = "Report submitted. Thank you.";
+                setTimeout(() => (successMsg = ""), 3000);
+            } else {
+                error = response.output?.toString() || "Failed to submit report";
+            }
+        } catch (err) {
+            error = "Failed to submit report";
+            console.error(err);
+        }
+    }
+
     // ==================== DECRYPT / CATEGORY ====================
 
     async function decryptMessage(messageId: string) {
@@ -449,6 +471,10 @@
                 case "B":
                     event.preventDefault();
                     backToList();
+                    break;
+                case "!":
+                    event.preventDefault();
+                    reportMessage(selectedMessage.id);
                     break;
             }
         }
@@ -780,7 +806,7 @@
     <div slot="footer" class="mail-footer">
         <pre>
 {#if mode === "list"}║ [↑/↓] Nav [ENTER] Read [C]ompose [T]oggle [R]efresh [D]elete [ESC] Close ║
-            {:else if mode === "read"}║ [R]eply [D]elete [B]ack [ESC] Close                                      ║
+            {:else if mode === "read"}║ [R]eply [D]elete [!]Report [B]ack [ESC] Close                             ║
             {:else if mode === "compose"}║ [CTRL+S] Send [CTRL+E] Encrypt [ESC] Cancel                              ║
             {/if}        </pre>
     </div>

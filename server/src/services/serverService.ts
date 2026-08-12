@@ -506,6 +506,14 @@ class ServerService {
           });
         }
 
+        const newDiscoveries = servers.length;
+        if (newDiscoveries > 0) {
+          await this.prisma.playerProgress.update({
+            where: { userId },
+            data: { serversDiscovered: { increment: newDiscoveries } },
+          }).catch(() => {});
+        }
+
         return servers.map((server) => ({
           id: server.id,
           name: server.name,

@@ -304,6 +304,12 @@ export class FileService {
       // Log file access
       await this.logFileAccess(userId, serverId, file.id, "read");
 
+      // Increment filesAccessed stat (fire-and-forget)
+      prisma.playerProgress.update({
+        where: { userId },
+        data: { filesAccessed: { increment: 1 } },
+      }).catch(() => {});
+
       // Track for mission objectives
       if (this.missionIntegration) {
         await this.missionIntegration.onFileOperation(

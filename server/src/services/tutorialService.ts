@@ -588,11 +588,12 @@ export class TutorialService {
       const stepIndex = TUTORIAL_STEPS.indexOf(step);
 
       // ── 6. Build AI prompt and generate a response ─────────────
+      const { sanitizeForPrompt } = await import("../utils/aiPromptSanitizer");
       const userPrompt =
         `The recruit is on training step ${stepIndex + 1}: '${step.title}'. ` +
         `The objective is: ${step.objective.description}. ` +
         `The correct hint is: ${step.hint}. ` +
-        `The recruit asks: '${messageContent}'`;
+        `The recruit asks:\n${sanitizeForPrompt(messageContent)}`;
 
       const { safeExecute } = await import("../utils/safeExecute");
 

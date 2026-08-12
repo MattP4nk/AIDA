@@ -285,6 +285,20 @@ export class SocialCommandsModule implements CommandModule {
       return result.success ? successResult(result.message) : errorResult(result.message);
     }
 
+    if (subCommand === "report") {
+      const messageId = command.args[1];
+      const reason = command.args.slice(2).join(" ");
+      if (!messageId || !reason) {
+        return errorResult("Usage: mail report <messageId> <reason>");
+      }
+      const messageService = context.services.messageService;
+      const result = await messageService.reportMessage(userId, messageId, reason);
+      if (!result.success) {
+        return errorResult(result.message);
+      }
+      return successResult("Report submitted. Thank you for helping keep the network safe.");
+    }
+
     // Default: Send mail
     // Usage: mail <username> <subject> <message> [--encrypt|-e]
     // Supports quoted usernames: mail "The Architect" <subject> <message>
@@ -323,6 +337,7 @@ export class SocialCommandsModule implements CommandModule {
         "       mail sent",
         "       mail read <id>",
         "       mail delete <id>",
+        "       mail report <id> <reason>",
       ].join("\n"));
     }
 

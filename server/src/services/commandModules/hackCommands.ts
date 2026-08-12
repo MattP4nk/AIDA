@@ -559,7 +559,10 @@ export class HackCommandsModule implements CommandModule {
       output: result.output || [
         result.feedback || result.error || "Unknown error",
       ],
-      data: result.finalResult ? { ...result.finalResult } : undefined,
+      data: {
+        ...(result.nextChallenge ? { nextChallenge: result.nextChallenge } : {}),
+        ...(result.finalResult ? { ...result.finalResult, hackResolved: true } : {}),
+      },
       timestamp: new Date(),
     };
   }
@@ -588,7 +591,10 @@ export class HackCommandsModule implements CommandModule {
       output: result.output || [
         result.feedback || result.error || "Unknown error",
       ],
-      data: result.finalResult ? { ...result.finalResult } : undefined,
+      data: {
+        ...(result.nextChallenge ? { nextChallenge: result.nextChallenge } : {}),
+        ...(result.finalResult ? { ...result.finalResult, hackResolved: true } : {}),
+      },
       timestamp: new Date(),
     };
   }
@@ -617,7 +623,10 @@ export class HackCommandsModule implements CommandModule {
       output: result.output || [
         result.feedback || result.error || "Unknown error",
       ],
-      data: result.finalResult ? { ...result.finalResult } : undefined,
+      data: {
+        ...(result.nextChallenge ? { nextChallenge: result.nextChallenge } : {}),
+        ...(result.finalResult ? { ...result.finalResult, hackResolved: true } : {}),
+      },
       timestamp: new Date(),
     };
   }
@@ -938,7 +947,12 @@ export class HackCommandsModule implements CommandModule {
     }
     if (Date.now() > crackSession.expiresAt) {
       activeFileCrackSessions.delete(context.userId);
-      return errorResult("Crack session expired. Run 'crack <filename>' again.");
+      return {
+        success: false,
+        output: "Crack session expired. Run 'crack <filename>' again.",
+        data: { fileAccessResolved: true },
+        timestamp: new Date(),
+      };
     }
 
     const strategyMap: Record<string, "dict" | "mask" | "pattern"> = {
@@ -982,28 +996,37 @@ export class HackCommandsModule implements CommandModule {
       activeFileCrackSessions.delete(context.userId);
 
       const strategyLabel = isCorrect ? "Optimal strategy!" : "Suboptimal strategy, but it worked.";
-      return successResult(
-        `Encryption cracked! ${strategyLabel}\n` +
-        `File '${crackSession.challenge.metadata?.fileName}' is now readable.\n` +
-        `+${xpGain} cryptography XP`,
-      );
+      return {
+        success: true,
+        output: `Encryption cracked! ${strategyLabel}\n` +
+          `File '${crackSession.challenge.metadata?.fileName}' is now readable.\n` +
+          `+${xpGain} cryptography XP`,
+        data: { fileAccessResolved: true },
+        timestamp: new Date(),
+      };
     }
 
     // Failure
     crackSession.attemptsLeft--;
     if (crackSession.attemptsLeft <= 0) {
       activeFileCrackSessions.delete(context.userId);
-      return errorResult(
-        `Decryption failed. ${isCorrect ? "Bad luck." : "Wrong approach."}\n` +
-        "All attempts exhausted. Run 'crack <filename>' to try again.",
-      );
+      return {
+        success: false,
+        output: `Decryption failed. ${isCorrect ? "Bad luck." : "Wrong approach."}\n` +
+          "All attempts exhausted. Run 'crack <filename>' to try again.",
+        data: { fileAccessResolved: true },
+        timestamp: new Date(),
+      };
     }
 
     activeFileCrackSessions.delete(context.userId); // allow re-analysis
-    return errorResult(
-      `Decryption attempt failed. ${isCorrect ? "Almost had it." : "Try a different strategy."}\n` +
-      "Run 'crack <filename>' to analyze again.",
-    );
+    return {
+      success: false,
+      output: `Decryption attempt failed. ${isCorrect ? "Almost had it." : "Try a different strategy."}\n` +
+        "Run 'crack <filename>' to analyze again.",
+      data: { fileAccessResolved: true },
+      timestamp: new Date(),
+    };
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -1142,7 +1165,12 @@ export class HackCommandsModule implements CommandModule {
 
     if (Date.now() > stormSession.expiresAt) {
       activeStormSessions.delete(context.userId);
-      return errorResult("Storm session expired. Time's up.");
+      return {
+        success: false,
+        output: "Storm session expired. Time's up.",
+        data: { fileAccessResolved: true },
+        timestamp: new Date(),
+      };
     }
 
     const answer = command.args.join(" ").trim();
@@ -1168,14 +1196,22 @@ export class HackCommandsModule implements CommandModule {
         });
       } catch { /* non-critical */ }
 
-      return successResult(
-        "PROTECTION BREACHED.\n" +
-        `File '${stormSession.filePath.split("/").pop()}' is now accessible.\n` +
-        "+25 cryptography XP, +15 hacking XP",
-      );
+      return {
+        success: true,
+        output: "PROTECTION BREACHED.\n" +
+          `File '${stormSession.filePath.split("/").pop()}' is now accessible.\n` +
+          "+25 cryptography XP, +15 hacking XP",
+        data: { fileAccessResolved: true },
+        timestamp: new Date(),
+      };
     }
 
-    return errorResult("Incorrect. The protection holds. Session ended.");
+    return {
+      success: false,
+      output: "Incorrect. The protection holds. Session ended.",
+      data: { fileAccessResolved: true },
+      timestamp: new Date(),
+    };
   }
 
   private async handleExploit(

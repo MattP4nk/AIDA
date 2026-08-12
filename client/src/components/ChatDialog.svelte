@@ -307,6 +307,26 @@
         }
     }
 
+    async function reportChatMessage(messageId: string) {
+        const reason = prompt("Report reason:");
+        if (!reason || !reason.trim()) return;
+        try {
+            const response = await terminalService.executeCommand(
+                `mail report ${messageId} ${reason.trim()}`,
+            );
+            if (response.success) {
+                error = ""; // clear any existing error
+                // Brief success flash via the error field (reuse existing UI)
+                error = "Report submitted.";
+                setTimeout(() => { if (error === "Report submitted.") error = ""; }, 2000);
+            } else {
+                error = response.output?.toString() || "Failed to report";
+            }
+        } catch {
+            error = "Failed to submit report";
+        }
+    }
+
     function handleKeydown(event: KeyboardEvent) {
         if (!visible) return;
 
@@ -585,6 +605,13 @@
                                             <span class="msg-content"
                                                 >{message.content}</span
                                             >
+                                        {/if}
+                                        {#if message.senderId !== userId}
+                                            <button
+                                                class="report-btn"
+                                                title="Report this message"
+                                                on:click|stopPropagation={() => reportChatMessage(message.id)}
+                                            >[!]</button>
                                         {/if}
                                     </div>
                                 {/each}
@@ -939,6 +966,26 @@
 
     .chat-message.incoming {
         color: #00cccc;
+    }
+
+    .report-btn {
+        background: none;
+        border: none;
+        color: #444;
+        font-family: inherit;
+        font-size: 0.8em;
+        cursor: pointer;
+        padding: 0 0.3ch;
+        opacity: 0;
+        transition: opacity 0.15s;
+    }
+
+    .chat-message:hover .report-btn {
+        opacity: 1;
+    }
+
+    .report-btn:hover {
+        color: #ff4444;
     }
 
     .msg-time {

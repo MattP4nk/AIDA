@@ -1,8 +1,13 @@
 import { Request, Response, NextFunction } from "express";
+import { createHash } from "crypto";
 import jwt from "jsonwebtoken";
 import logger from "../logger";
 import { prisma } from "../database/client";
 import { config, isProduction } from "../config/environment";
+
+/** Hash token before using as cache key — prevents raw JWT exposure in memory. */
+const hashToken = (token: string): string =>
+  createHash("sha256").update(token).digest("hex");
 
 // ── Cookie configuration ─────────────────────────────────────────
 export const AUTH_COOKIE_NAME = "aida_token";
@@ -44,8 +49,13 @@ const authCacheCleanupTimer = setInterval(() => {
 }, AUTH_CACHE_CLEANUP_INTERVAL_MS);
 authCacheCleanupTimer.unref(); // Don't prevent process exit
 
+// Warn about insecure cookie settings in development
+if (!isProduction) {
+  logger.warn("Running with sameSite=none cookies — NOT safe for public deployment");
+}
+
 export function invalidateAuthCache(token: string): void {
-  authCache.delete(token);
+  authCache.delete(hashToken(token));
 }
 
 /** Invalidate all cached sessions for a specific user (e.g., on ban). */
@@ -98,8 +108,9 @@ export const authenticateToken = async (
       });
     }
 
-    // Cache hit — skip DB entirely
-    const cached = authCache.get(token);
+    // Cache hit — skip DB entirely (keyed by hash of token)
+    const tokenHash = hashToken(token);
+    const cached = authCache.get(tokenHash);
     if (cached && cached.expiresAt > Date.now()) {
       req.user = cached.user;
       return next();
@@ -118,7 +129,7 @@ export const authenticateToken = async (
     });
 
     if (!session) {
-      authCache.delete(token);
+      authCache.delete(tokenHash);
       return res.status(401).json({
         success: false,
         error: "Session expired or invalid",
@@ -141,7 +152,7 @@ export const authenticateToken = async (
     });
 
     if (!user || !user.isActive) {
-      authCache.delete(token);
+      authCache.delete(tokenHash);
       return res.status(401).json({
         success: false,
         error: "User not found or inactive",
@@ -154,7 +165,7 @@ export const authenticateToken = async (
       const firstKey = authCache.keys().next().value;
       if (firstKey) authCache.delete(firstKey);
     }
-    authCache.set(token, { user, expiresAt: Date.now() + AUTH_CACHE_TTL_MS });
+    authCache.set(tokenHash, { user, expiresAt: Date.now() + AUTH_CACHE_TTL_MS });
 
     // Attach user to request
     req.user = user;
@@ -197,7 +208,8 @@ export const optionalAuth = async (
       return next(); // Continue without user
     }
 
-    const cached = authCache.get(token);
+    const optTokenHash = hashToken(token);
+    const cached = authCache.get(optTokenHash);
     if (cached && cached.expiresAt > Date.now()) {
       req.user = cached.user;
       return next();
@@ -232,7 +244,7 @@ export const optionalAuth = async (
           const firstKey = authCache.keys().next().value;
           if (firstKey) authCache.delete(firstKey);
         }
-        authCache.set(token, { user, expiresAt: Date.now() + AUTH_CACHE_TTL_MS });
+        authCache.set(optTokenHash, { user, expiresAt: Date.now() + AUTH_CACHE_TTL_MS });
         req.user = user;
       }
     }
@@ -247,7 +259,8 @@ export const optionalAuth = async (
 // Socket.io authentication helper
 export const verifySocketToken = async (token: string) => {
   try {
-    const cached = authCache.get(token);
+    const socketTokenHash = hashToken(token);
+    const cached = authCache.get(socketTokenHash);
     if (cached && cached.expiresAt > Date.now()) {
       return cached.user;
     }
@@ -284,7 +297,7 @@ export const verifySocketToken = async (token: string) => {
         const firstKey = authCache.keys().next().value;
         if (firstKey) authCache.delete(firstKey);
       }
-      authCache.set(token, { user, expiresAt: Date.now() + AUTH_CACHE_TTL_MS });
+      authCache.set(socketTokenHash, { user, expiresAt: Date.now() + AUTH_CACHE_TTL_MS });
       return user;
     }
     return null;

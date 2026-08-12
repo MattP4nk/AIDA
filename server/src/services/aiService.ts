@@ -1,7 +1,7 @@
 import { injectable, inject } from "tsyringe";
 import { Logger } from "pino";
 import type { CacheService } from "./cacheService";
-import { LOGGER } from "../di/tokens";
+import { LOGGER, CACHE_SERVICE } from "../di/tokens";
 import crypto from "crypto";
 import { safeExecute } from "../utils/safeExecute";
 
@@ -77,7 +77,7 @@ export class AIService {
 
   constructor(
     @inject(LOGGER) logger: Logger,
-    @inject("CacheService") cacheService: CacheService,
+    @inject(CACHE_SERVICE) cacheService: CacheService,
   ) {
     this.logger = logger;
     this.cacheService = cacheService;
@@ -433,6 +433,7 @@ export class AIService {
     }
   }
 
+  /** AI-powered content moderation. Wired into messageService.sendPrivateMessage() and forumService.createPost()/createReply(). */
   public async moderate(
     content: string,
   ): Promise<{ safe: boolean; reason?: string }> {

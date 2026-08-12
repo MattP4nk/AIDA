@@ -6,7 +6,7 @@ import compression from "compression";
 import cookieParser from "cookie-parser";
 import morgan from "morgan";
 import rateLimit from "express-rate-limit";
-import { config, CORS_ORIGINS } from "../config/environment";
+import { config, CORS_ORIGINS, isDevelopment } from "../config/environment";
 import {
   sanitizeInputs,
   detectSqlInjection,
@@ -33,6 +33,11 @@ export function asyncHandler(
  * Configure all Express middleware in the correct order.
  */
 export function setupMiddleware(app: Application): void {
+  // Trust proxy — required for correct req.ip behind reverse proxies (rate limiting, audit logs)
+  if (process.env.TRUST_PROXY) {
+    app.set("trust proxy", Number(process.env.TRUST_PROXY) || 1);
+  }
+
   // Security headers
   app.use(
     helmet({
@@ -128,10 +133,12 @@ export async function setupRoutes(app: Application): Promise<void> {
   const adminApi = (await import("../routes/adminApi")).default;
   app.use("/api/admin", adminApi);
 
-  // Admin panel static files
-  const path = await import("path");
-  const adminPanelPath = path.join(__dirname, "../../public/admin");
-  app.use("/admin", (await import("express")).static(adminPanelPath));
+  // Admin panel static files (development only — in production, use the authenticated admin API)
+  if (isDevelopment) {
+    const path = await import("path");
+    const adminPanelPath = path.join(__dirname, "../../public/admin");
+    app.use("/admin", (await import("express")).static(adminPanelPath));
+  }
 
   // Command execution route — THE MAIN INTERFACE
   app.use("/api/command", (await import("../routes/command")).default);

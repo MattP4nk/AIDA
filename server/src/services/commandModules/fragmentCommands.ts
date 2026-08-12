@@ -800,8 +800,9 @@ export class FragmentCommandsModule implements CommandModule {
         "You may reveal hints about the world, the factions, or the other fragments, but always obliquely. " +
         "Keep responses under 200 words. Be mysterious, melancholic, and occasionally glitch mid-sentence.";
 
+      const { sanitizeForPrompt } = await import("../../utils/aiPromptSanitizer");
       const result = await aiService.generateResponse(
-        `A player says to you through a Key fragment: "${message}"`,
+        `A player says to you through a Key fragment:\n${sanitizeForPrompt(message)}`,
         systemPrompt,
       );
 

@@ -55,7 +55,7 @@
             socketService.reconnect();
 
             // Wait for authentication to complete on the server using acknowledgment pattern
-            const socket = (socketService as any).socket;
+            const socket = socketService.getSocket();
             if (socket) {
                 await new Promise<void>((resolve, reject) => {
                     const timeout = setTimeout(() => {
@@ -64,9 +64,21 @@
 
                     // Use acknowledgment pattern to avoid race condition
                     // This ensures we don't miss the authentication event
+                    // Handle connection errors with a targeted handler (don't strip SocketService's reconnect listener)
+                    const tempErrorHandler = (error: any) => {
+                        clearTimeout(timeout);
+                        reject(error);
+                    };
+                    socket.once("connect_error", tempErrorHandler);
+
                     socket.emit("authenticate:request", (response: any) => {
                         clearTimeout(timeout);
+                        socket.off("connect_error", tempErrorHandler);
                         if (response && response.success) {
+                            // Set userId for hack alert targeting
+                            if (response.userId) {
+                                socketService.setUserId(response.userId);
+                            }
                             resolve();
                         } else {
                             reject(
@@ -75,13 +87,6 @@
                                 ),
                             );
                         }
-                    });
-
-                    // Also handle connection errors (remove old listener first)
-                    socket.off("connect_error");
-                    socket.once("connect_error", (error: any) => {
-                        clearTimeout(timeout);
-                        reject(error);
                     });
                 });
             }

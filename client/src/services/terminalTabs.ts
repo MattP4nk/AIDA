@@ -37,7 +37,7 @@ const createTerminalTabsStore = () => {
     // Initialize tabs from server
     initialize: async () => {
       try {
-        const socket = (socketService as any).socket;
+        const socket = socketService.getSocket();
 
         // Wait for socket to be connected if it's not already
         if (!socket || !socket.connected) {
@@ -48,7 +48,7 @@ const createTerminalTabsStore = () => {
             }, 10000); // 10 second timeout
 
             const attemptInitialize = () => {
-              const currentSocket = (socketService as any).socket;
+              const currentSocket = socketService.getSocket();
 
               if (currentSocket && currentSocket.connected) {
                 clearTimeout(timeout);
@@ -144,7 +144,7 @@ const createTerminalTabsStore = () => {
     // Create new terminal tab
     createTab: async (label?: string) => {
       try {
-        const socket = (socketService as any).socket;
+        const socket = socketService.getSocket();
         if (socket && socket.connected) {
           socket.emit("terminal:create", { label });
 
@@ -169,7 +169,7 @@ const createTerminalTabsStore = () => {
     // Close terminal tab
     closeTab: async (terminalId: string) => {
       try {
-        const socket = (socketService as any).socket;
+        const socket = socketService.getSocket();
         if (socket && socket.connected) {
           socket.emit("terminal:close", { terminalId });
 
@@ -208,7 +208,7 @@ const createTerminalTabsStore = () => {
     // Switch active terminal
     switchTab: async (terminalId: string) => {
       try {
-        const socket = (socketService as any).socket;
+        const socket = socketService.getSocket();
         if (socket && socket.connected) {
           socket.emit("terminal:switch", { terminalId });
 
@@ -232,6 +232,7 @@ const createTerminalTabsStore = () => {
       text: string,
       type: OutputLine["type"],
     ) => {
+      const MAX_OUTPUT_LINES = 1000;
       update((state) => {
         const existing = state.outputLines.get(terminalId) || [];
         const newLines = [
@@ -243,30 +244,34 @@ const createTerminalTabsStore = () => {
             timestamp: new Date(),
           },
         ];
+        // Cap buffer to prevent unbounded memory growth
+        const cappedLines = newLines.length > MAX_OUTPUT_LINES
+          ? newLines.slice(-MAX_OUTPUT_LINES)
+          : newLines;
         const newOutputLines = new Map(state.outputLines);
-        newOutputLines.set(terminalId, newLines);
+        newOutputLines.set(terminalId, cappedLines);
         return { ...state, outputLines: newOutputLines };
       });
     },
 
-    // Add command to history
+    // Add command to history (immutable update)
     addToHistory: (terminalId: string, command: string) => {
       update((state) => {
         const history = state.commandHistories.get(terminalId) || [];
+        const newHistories = new Map(state.commandHistories);
         if (
           command.trim() &&
           (history.length === 0 || history[history.length - 1] !== command)
         ) {
-          history.push(command);
-          state.commandHistories.set(terminalId, history);
+          newHistories.set(terminalId, [...history, command]);
         }
-        // Reset history index
-        state.historyIndices.set(terminalId, -1);
-        return state;
+        const newIndices = new Map(state.historyIndices);
+        newIndices.set(terminalId, -1);
+        return { ...state, commandHistories: newHistories, historyIndices: newIndices };
       });
     },
 
-    // Navigate command history
+    // Navigate command history (immutable update)
     navigateHistory: (
       terminalId: string,
       direction: "up" | "down",
@@ -294,18 +299,20 @@ const createTerminalTabsStore = () => {
           }
         }
 
-        state.historyIndices.set(terminalId, index);
-        return state;
+        const newIndices = new Map(state.historyIndices);
+        newIndices.set(terminalId, index);
+        return { ...state, historyIndices: newIndices };
       });
 
       return result;
     },
 
-    // Clear output for specific terminal
+    // Clear output for specific terminal (immutable update)
     clearOutput: (terminalId: string) => {
       update((state) => {
-        state.outputLines.set(terminalId, []);
-        return state;
+        const newOutputLines = new Map(state.outputLines);
+        newOutputLines.set(terminalId, []);
+        return { ...state, outputLines: newOutputLines };
       });
     },
 
@@ -327,26 +334,25 @@ const createTerminalTabsStore = () => {
       return state.commandHistories.get(terminalId) || [];
     },
 
-    // Update terminal processing state (client-side mirror)
+    // Update terminal processing state (immutable update)
     updateProcessingState: (
       terminalId: string,
       isProcessing: boolean,
       command?: string,
     ) => {
       update((state) => {
-        const tab = state.tabs.find((t) => t.id === terminalId);
-        if (tab) {
-          tab.isProcessing = isProcessing;
-          tab.processingCommand = command;
-          tab.lastActivity = new Date();
-        }
-        return state;
+        const newTabs = state.tabs.map((t) =>
+          t.id === terminalId
+            ? { ...t, isProcessing, processingCommand: command, lastActivity: new Date() }
+            : t,
+        );
+        return { ...state, tabs: newTabs };
       });
     },
 
     // Cleanup all socket listeners (prevents memory leaks)
     cleanup: () => {
-      const socket = (socketService as any).socket;
+      const socket = socketService.getSocket();
       if (socket) {
         socket.off("terminal:list");
         socket.off("terminal:created");
@@ -358,7 +364,7 @@ const createTerminalTabsStore = () => {
     // Reset store (for logout, etc.)
     reset: () => {
       // Clean up listeners first
-      const socket = (socketService as any).socket;
+      const socket = socketService.getSocket();
       if (socket) {
         socket.off("terminal:list");
         socket.off("terminal:created");

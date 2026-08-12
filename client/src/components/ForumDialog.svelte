@@ -149,7 +149,10 @@
                 return;
             }
             // Step 2: got content, submit
-            await runCommand(`forum post ${nav.forumId} "${inputStash}" "${val}"`);
+            // Escape double quotes in user input to prevent command parsing breakage
+            const safeTitle = inputStash.replace(/"/g, '\\"');
+            const safeContent = val.replace(/"/g, '\\"');
+            await runCommand(`forum post ${nav.forumId} "${safeTitle}" "${safeContent}"`);
             await runCommand(`forum access ${nav.forumId}`);
             mode = "browse";
         } else if (inputAction === "search") {

@@ -876,6 +876,7 @@ class MissionService extends EventEmitter {
         where: { userId },
         data: {
           missionProgress: missionProgress as any,
+          missionsCompleted: { increment: 1 },
         },
       });
 

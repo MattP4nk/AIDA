@@ -104,6 +104,7 @@ class SocketService {
   private maxReconnectAttempts = 5;
   private reconnectDelay = 1000; // Start with 1 second
   private registeredEvents: string[] = []; // Track registered events for clean removal
+  private userId: string | null = null; // Set during authentication
 
   constructor() {
     this.connect();
@@ -120,6 +121,13 @@ class SocketService {
     if (!token) {
       console.warn("No auth token available for WebSocket connection");
       return;
+    }
+
+    // Clean up old socket to prevent listener leaks on reconnection
+    if (this.socket) {
+      this.socket.removeAllListeners();
+      this.socket.disconnect();
+      this.socket = null;
     }
 
     this.socket = io(SOCKET_URL, {
@@ -895,10 +903,18 @@ class SocketService {
     return this.socket?.connected || false;
   }
 
+  /** Typed access to the underlying Socket.IO instance (avoids `as any` casts). */
+  public getSocket(): Socket | null {
+    return this.socket;
+  }
+
   private getCurrentUserId(): string | null {
-    // This should be implemented to get the current user ID
-    // For now, return null - will be implemented when auth store is created
-    return null;
+    return this.userId;
+  }
+
+  /** Called by auth success handler to set the current user's ID for hack alerts. */
+  public setUserId(id: string | null): void {
+    this.userId = id;
   }
 
   private showNotification(_title: string, _message: string): void {

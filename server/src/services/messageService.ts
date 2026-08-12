@@ -302,6 +302,12 @@ export class MessageService {
         });
       }
 
+      // Increment messagesSent stat (fire-and-forget)
+      prisma.playerProgress.update({
+        where: { userId: senderId },
+        data: { messagesSent: { increment: 1 } },
+      }).catch(() => {});
+
       // Track for mission objectives
       if (this.missionIntegration) {
         await this.missionIntegration.onMessageSent(
@@ -319,6 +325,24 @@ export class MessageService {
           // Hook errors should not break message sending
         }
       }
+
+      // Async content moderation (non-blocking — message created first, hidden if flagged)
+      void (async () => {
+        try {
+          const { getService } = await import("../di/container");
+          const { AI_SERVICE } = await import("../di/tokens");
+          const aiService = getService<any>(AI_SERVICE);
+          const modResult = await aiService.moderate(filteredContent);
+          if (!modResult.safe) {
+            await prisma.message.update({ where: { id: message.id }, data: { isHidden: true } });
+            this.io?.to(`user:${senderId}`).emit("moderation:flagged", {
+              type: "message",
+              id: message.id,
+              reason: modResult.reason || "Content policy violation",
+            });
+          }
+        } catch { /* moderation unavailable — content stays visible */ }
+      })();
 
       return {
         success: true,
@@ -512,6 +536,7 @@ export class MessageService {
       const where: any = {
         recipientId: userId,
         subject: { not: { equals: "" } },
+        isHidden: false,
       };
 
       if (filter.type) {
@@ -545,6 +570,7 @@ export class MessageService {
         where: {
           recipientId: userId,
           isRead: false,
+          isHidden: false,
         },
       });
 
@@ -578,6 +604,7 @@ export class MessageService {
       const where: any = {
         senderId: userId,
         subject: { not: { equals: "" } },
+        isHidden: false,
       };
 
       if (filter.type) {
@@ -1353,13 +1380,15 @@ export class MessageService {
       })
       .join("\n");
 
-    // 3. Build prompt
+    // 3. Build prompt (sanitize user content to prevent prompt injection)
+    const { sanitizeForPrompt } = await import("../utils/aiPromptSanitizer");
     const prompt =
       `A player named ${playerUsername} has used a ${token.shopItemName} to contact you.\n` +
       (conversationLines
         ? `Recent conversation:\n${conversationLines}\n\n`
         : "") +
-      `Their latest message (subject: "${originalSubject}"):\n${originalContent}\n\n` +
+      `Their latest message subject: ${sanitizeForPrompt(originalSubject, 200)}\n` +
+      `Their latest message content:\n${sanitizeForPrompt(originalContent)}\n\n` +
       `Respond in character. Keep your reply concise (1-3 paragraphs).`;
 
     // 4. Generate response via AI (with fallback + retry)
@@ -1392,11 +1421,22 @@ export class MessageService {
       onError: () => { usedFallback = true; },
     })();
 
-    // Queue retry if AI failed — when it recovers, send the real reply as a follow-up
+    // Queue retry if AI failed — when it recovers, send the real reply as a follow-up.
+    // Capture IDs (not live references) so the callback is safe even if state changes.
     if (usedFallback) {
+      const capturedPersonaId = personaId;
+      const capturedPlayerId = playerId;
+      const capturedSubject = replySubjectForRetry;
+      const svc = this;
       aiService.queueForRetry(prompt, persona.systemPrompt, async (response) => {
-        if (response && response.trim().length > 0) {
-          await this.sendAIMessage(personaId, playerId, replySubjectForRetry, response).catch(() => {});
+        if (!response || response.trim().length === 0) return;
+        // Guard against stale state — verify both player and persona still exist
+        const [playerExists, personaExists] = await Promise.all([
+          prisma.user.findUnique({ where: { id: capturedPlayerId }, select: { id: true } }),
+          prisma.aIPersona.findUnique({ where: { id: capturedPersonaId }, select: { id: true } }),
+        ]);
+        if (playerExists && personaExists) {
+          await svc.sendAIMessage(capturedPersonaId, capturedPlayerId, capturedSubject, response).catch(() => {});
         }
       });
     }
@@ -1427,6 +1467,80 @@ export class MessageService {
         },
       });
     }
+  }
+
+  // ==================== MESSAGE REPORTS ====================
+
+  /** Report a message for content violations. Only the recipient can report. */
+  async reportMessage(
+    reporterId: string,
+    messageId: string,
+    reason: string,
+  ): Promise<{ success: boolean; message: string; report?: any }> {
+    const msg = await prisma.message.findUnique({ where: { id: messageId } });
+    if (!msg) {
+      return { success: false, message: "Message not found" };
+    }
+    if (msg.recipientId !== reporterId) {
+      return { success: false, message: "You can only report messages you received" };
+    }
+    const report = await prisma.messageReport.create({
+      data: { reporterId, messageId, reason },
+    });
+    this.io?.to(`user:${reporterId}`).emit("message:reported", { reportId: report.id, messageId });
+    this.logger.info({ reporterId, messageId, reportId: report.id }, "Message reported");
+    return { success: true, message: "Report submitted", report };
+  }
+
+  /** Get message reports (admin/moderator). */
+  async getMessageReports(
+    status: string = "pending",
+    page: number = 1,
+    limit: number = 30,
+  ): Promise<{ reports: any[]; total: number; hasMore: boolean }> {
+    const skip = (page - 1) * limit;
+    const [reports, total] = await Promise.all([
+      prisma.messageReport.findMany({
+        where: { status },
+        include: {
+          reporter: { select: { id: true, username: true } },
+          message: { select: { id: true, senderId: true, recipientId: true, subject: true, content: true, timestamp: true } },
+        },
+        orderBy: { createdAt: "desc" },
+        skip,
+        take: limit,
+      }),
+      prisma.messageReport.count({ where: { status } }),
+    ]);
+    return { reports, total, hasMore: skip + reports.length < total };
+  }
+
+  /** Resolve a message report. action="action" hides the message. */
+  async resolveMessageReport(
+    adminId: string,
+    reportId: string,
+    action: "dismiss" | "action",
+  ): Promise<{ success: boolean; message: string; report?: any }> {
+    const report = await prisma.messageReport.findUnique({ where: { id: reportId } });
+    if (!report) {
+      return { success: false, message: "Report not found" };
+    }
+    if (action === "action" && report.messageId) {
+      await prisma.message.update({
+        where: { id: report.messageId },
+        data: { isHidden: true },
+      });
+    }
+    const updated = await prisma.messageReport.update({
+      where: { id: reportId },
+      data: {
+        status: action === "action" ? "actioned" : "dismissed",
+        resolvedAt: new Date(),
+        resolvedBy: adminId,
+      },
+    });
+    this.logger.info({ adminId, reportId, action }, "Message report resolved");
+    return { success: true, message: `Report ${action === "action" ? "actioned — message hidden" : "dismissed"}`, report: updated };
   }
 
   public stop(): void {

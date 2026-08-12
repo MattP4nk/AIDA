@@ -369,6 +369,9 @@ export async function safeAI<TResult>(config: SafeAIConfig<TResult>): Promise<TR
       ? (config.fallback as () => TResult)()
       : config.fallback;
 
+  // Cache the resolved fallback once — avoids reference-equality bug when fallback is a function
+  const resolvedFallback = resolveFallback();
+
   const result = await safeExecute({
     fn: async () => {
       const aiResult = await config.aiService.generateOrThrow(
@@ -395,11 +398,11 @@ export async function safeAI<TResult>(config: SafeAIConfig<TResult>): Promise<TR
     context: config.context,
     logger: config.logger,
     silent: true, // AI failures are expected — debug level, not error
-    fallback: resolveFallback(),
+    fallback: resolvedFallback,
   })();
 
   // Queue for retry if AI failed and retry is enabled
-  if (result === resolveFallback() && config.retry && config.aiService.queueForRetry) {
+  if (result === resolvedFallback && config.retry && config.aiService.queueForRetry) {
     config.aiService.queueForRetry(
       config.prompt,
       config.systemPrompt,

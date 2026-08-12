@@ -296,7 +296,7 @@ class NotificationService {
       desktopNotif.onclick = () => {
         window.focus();
         if (notification.action) {
-          notification.action.handler();
+          notification.action.handler?.();
         }
         desktopNotif.close();
       };
