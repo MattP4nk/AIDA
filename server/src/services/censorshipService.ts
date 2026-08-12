@@ -25,6 +25,24 @@ export default class CensorshipService {
   }
 
   /**
+   * Test whether a regex pattern is safe from catastrophic backtracking.
+   * Runs the pattern against a small adversarial input and rejects if it takes too long.
+   */
+  private isSafeRegex(pattern: string): boolean {
+    try {
+      const re = new RegExp(pattern, "gi");
+      // Test against a small adversarial input to detect catastrophic backtracking
+      const testInput = "a".repeat(25);
+      const start = Date.now();
+      re.test(testInput);
+      // If a 25-char input takes >10ms, reject the pattern
+      return (Date.now() - start) < 10;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Load and compile censorship rules from the database.
    * Called on startup and can be called to refresh rules.
    */
@@ -36,6 +54,10 @@ export default class CensorshipService {
     this.compiledRules = [];
     for (const rule of this.rules) {
       try {
+        if (!this.isSafeRegex(rule.pattern)) {
+          this.logger.warn({ pattern: rule.pattern }, "Skipping potentially unsafe regex pattern");
+          continue;
+        }
         this.compiledRules.push({
           rule,
           regex: new RegExp(rule.pattern, "gi"),

@@ -84,6 +84,7 @@ router.post(
         serverId,
         undefined,
         terminalCols ? Number(terminalCols) : undefined,
+        req.user?.role,
       );
 
       // Determine exit code: use provided exitCode, or derive from success

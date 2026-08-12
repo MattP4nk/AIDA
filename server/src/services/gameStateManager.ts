@@ -1172,6 +1172,16 @@ Tips:
       }
     }
 
+    // Prune serverStates with no active player sessions
+    for (const [serverId] of this.serverStates) {
+      const hasActivePlayers = [...this.playerSessions.values()].some(
+        session => session.currentServerId === serverId
+      );
+      if (!hasActivePlayers) {
+        this.serverStates.delete(serverId);
+      }
+    }
+
     if (cleanedCount > 0) {
       this.emit("sessions:cleaned", { count: cleanedCount });
     }

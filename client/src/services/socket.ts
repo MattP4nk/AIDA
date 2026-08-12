@@ -70,33 +70,37 @@ export const activeFileChallenge = writable<{
 } | null>(null);
 
 // Lazy notification service reference (avoids circular import)
-let _notifService: any = null;
-// Kick off dynamic import so _notifService is populated asynchronously
-import("./notifications")
-  .then((mod) => {
-    _notifService = mod.notificationService;
-  })
-  .catch(() => {
-    /* ignore */
-  });
-function getNotifService() {
-  return _notifService;
+// Promises are stored so callers can await resolution — fire-and-forget
+// imports would silently drop events if they resolved after socket events arrived.
+const _notifServicePromise = import("./notifications")
+  .then((mod) => mod.notificationService)
+  .catch(() => null);
+
+let _notifServiceCache: any = null;
+async function getNotifService() {
+  if (!_notifServiceCache) {
+    _notifServiceCache = await _notifServicePromise;
+  }
+  return _notifServiceCache;
 }
 
 // Lazy gameState reference (avoids circular import: gameState → socket → gameState)
-let _addOutput:
+const _addOutputPromise = import("../stores/gameState")
+  .then((mod) => mod.addOutput)
+  .catch(() => null);
+
+let _addOutputCache:
   | ((
       text: string,
       type?: "info" | "error" | "warning" | "success" | "system",
     ) => void)
   | null = null;
-import("../stores/gameState")
-  .then((mod) => {
-    _addOutput = mod.addOutput;
-  })
-  .catch(() => {
-    /* ignore */
-  });
+async function getAddOutput() {
+  if (!_addOutputCache) {
+    _addOutputCache = await _addOutputPromise;
+  }
+  return _addOutputCache;
+}
 
 class SocketService {
   private socket: Socket | null = null;
@@ -365,12 +369,12 @@ class SocketService {
 
     // ==================== FRAGMENT / ENDGAME EVENTS ====================
 
-    this.on("story:key-fragment", (data: any) => {
+    this.on("story:key-fragment", async (data: any) => {
       this.showNotification(
         "Fragment Found",
         `${data.name} (${data.keyType})`,
       );
-      const ns = getNotifService();
+      const ns = await getNotifService();
       if (ns) {
         ns.add({
           type: "game",
@@ -381,12 +385,12 @@ class SocketService {
       }
     });
 
-    this.on("story:fragment-stolen", (data: any) => {
+    this.on("story:fragment-stolen", async (data: any) => {
       this.showNotification(
         "Fragment Stolen!",
         data.message || `Your fragment "${data.name}" has been stolen!`,
       );
-      const ns = getNotifService();
+      const ns = await getNotifService();
       if (ns) {
         ns.add({
           type: "game",
@@ -397,12 +401,12 @@ class SocketService {
       }
     });
 
-    this.on("story:fragment-transferred", (data: any) => {
+    this.on("story:fragment-transferred", async (data: any) => {
       this.showNotification(
         "Fragment Sent",
         data.message || `You transferred "${data.name}".`,
       );
-      const ns = getNotifService();
+      const ns = await getNotifService();
       if (ns) {
         ns.add({
           type: "game",
@@ -413,12 +417,12 @@ class SocketService {
       }
     });
 
-    this.on("story:endgame-unlocked", (data: any) => {
+    this.on("story:endgame-unlocked", async (data: any) => {
       this.showNotification(
         "ENDGAME UNLOCKED",
         data.message || "All fragments collected. The final choice awaits.",
       );
-      const ns = getNotifService();
+      const ns = await getNotifService();
       if (ns) {
         ns.add({
           type: "game",
@@ -429,12 +433,12 @@ class SocketService {
       }
     });
 
-    this.on("story:endgame-completed", (data: any) => {
+    this.on("story:endgame-completed", async (data: any) => {
       this.showNotification(
         "The Endgame",
         "A player has decided AIDA's fate. The net trembles.",
       );
-      const ns = getNotifService();
+      const ns = await getNotifService();
       if (ns) {
         ns.add({
           type: "game",
@@ -452,9 +456,9 @@ class SocketService {
       this.showNotification("System Announcement", data.message);
     });
 
-    this.on("mission:assigned", (data: any) => {
+    this.on("mission:assigned", async (data: any) => {
       sound.notification();
-      const ns = getNotifService();
+      const ns = await getNotifService();
       if (ns) {
         ns.add({
           type: "game",
@@ -467,8 +471,8 @@ class SocketService {
       }
     });
 
-    this.on("faction:event", (data: any) => {
-      const ns = getNotifService();
+    this.on("faction:event", async (data: any) => {
+      const ns = await getNotifService();
       if (ns) {
         ns.add({
           type: "game",
@@ -480,9 +484,9 @@ class SocketService {
       }
     });
 
-    this.on("discovery:made", (data: any) => {
+    this.on("discovery:made", async (data: any) => {
       this.showNotification("Discovery", `New discovery: ${data.title}`);
-      const ns = getNotifService();
+      const ns = await getNotifService();
       if (ns) {
         ns.add({
           type: "game",
@@ -500,7 +504,7 @@ class SocketService {
       activeProcesses.update((procs) => [...procs, data]);
     });
 
-    this.on("process:completed", (data: any) => {
+    this.on("process:completed", async (data: any) => {
       sound.processComplete();
       activeProcesses.update((procs) =>
         procs.filter((p) => p.pid !== data.pid),
@@ -515,12 +519,15 @@ class SocketService {
             data.output,
             data.success === false ? "error" : "output",
           );
-        } else if (_addOutput) {
-          _addOutput(data.output, data.success === false ? "error" : "info");
+        } else {
+          const addOutput = await getAddOutput();
+          if (addOutput) {
+            addOutput(data.output, data.success === false ? "error" : "info");
+          }
         }
       }
 
-      const ns = getNotifService();
+      const ns = await getNotifService();
       if (ns) {
         ns.add({
           type: "game",
@@ -546,11 +553,11 @@ class SocketService {
       );
     });
 
-    this.on("process:failed", (data: any) => {
+    this.on("process:failed", async (data: any) => {
       activeProcesses.update((procs) =>
         procs.filter((p) => p.pid !== data.pid),
       );
-      const ns = getNotifService();
+      const ns = await getNotifService();
       if (ns) {
         ns.add({
           type: "game",
@@ -564,8 +571,8 @@ class SocketService {
 
     // ==================== MISSION EVENTS ====================
 
-    this.on("mission:objective:updated", (data: any) => {
-      const ns = getNotifService();
+    this.on("mission:objective:updated", async (data: any) => {
+      const ns = await getNotifService();
       if (ns) {
         ns.add({
           type: "game",
@@ -577,8 +584,8 @@ class SocketService {
       }
     });
 
-    this.on("mission:completed", (data: any) => {
-      const ns = getNotifService();
+    this.on("mission:completed", async (data: any) => {
+      const ns = await getNotifService();
       if (ns) {
         ns.add({
           type: "game",
@@ -590,8 +597,8 @@ class SocketService {
       }
     });
 
-    this.on("mission:expired", (data: any) => {
-      const ns = getNotifService();
+    this.on("mission:expired", async (data: any) => {
+      const ns = await getNotifService();
       if (ns) {
         ns.add({
           type: "game",
@@ -603,8 +610,8 @@ class SocketService {
       }
     });
 
-    this.on("mission:updated", (data: any) => {
-      const ns = getNotifService();
+    this.on("mission:updated", async (data: any) => {
+      const ns = await getNotifService();
       if (ns) {
         ns.add({
           type: "game",
@@ -616,8 +623,8 @@ class SocketService {
       }
     });
 
-    this.on("game:state_update", (data: any) => {
-      const ns = getNotifService();
+    this.on("game:state_update", async (data: any) => {
+      const ns = await getNotifService();
       if (ns && data.message) {
         ns.add({
           type: "system",
@@ -631,9 +638,9 @@ class SocketService {
 
     // ==================== PLAYER PROGRESSION EVENTS ====================
 
-    this.on("player:levelup", (data: any) => {
+    this.on("player:levelup", async (data: any) => {
       sound.levelUp();
-      const ns = getNotifService();
+      const ns = await getNotifService();
       if (ns) {
         ns.add({
           type: "game",
@@ -653,8 +660,8 @@ class SocketService {
       // Silent — credit rewards shown in command output
     });
 
-    this.on("achievement:unlocked", (data: any) => {
-      const ns = getNotifService();
+    this.on("achievement:unlocked", async (data: any) => {
+      const ns = await getNotifService();
       if (ns) {
         ns.add({
           type: "game",
@@ -668,7 +675,7 @@ class SocketService {
 
     // ==================== SECURITY EVENTS ====================
 
-    this.on("command:result", (data: any) => {
+    this.on("command:result", async (data: any) => {
       console.log("[command:result] Received:", {
         hasOutput: !!data.output,
         outputLength: data.output?.length,
@@ -743,7 +750,7 @@ class SocketService {
       }
       // Play sound event from server if provided
       if (data.soundEvent) {
-        const sfn = (sound as any)[data.soundEvent];
+        const sfn = sound[data.soundEvent as keyof typeof sound];
         if (typeof sfn === "function") sfn();
       }
 
@@ -763,21 +770,24 @@ class SocketService {
             data.output,
             data.success ? "output" : "error",
           );
-        } else if (_addOutput) {
-          console.log("[command:result] Falling back to legacy addOutput");
-          _addOutput(data.output, data.success ? "info" : "error");
         } else {
-          console.warn(
-            "[command:result] No output channel available! Output lost:",
-            data.output.substring(0, 100),
-          );
+          const addOutput = await getAddOutput();
+          if (addOutput) {
+            console.log("[command:result] Falling back to legacy addOutput");
+            addOutput(data.output, data.success ? "info" : "error");
+          } else {
+            console.warn(
+              "[command:result] No output channel available! Output lost:",
+              data.output.substring(0, 100),
+            );
+          }
         }
       }
     });
 
-    this.on("notification", (data: any) => {
+    this.on("notification", async (data: any) => {
       // Generic server notification (used by bounty system, IDS, etc.)
-      const ns = getNotifService();
+      const ns = await getNotifService();
       if (ns) {
         ns.add({
           type: "game",

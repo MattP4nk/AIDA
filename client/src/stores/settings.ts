@@ -27,7 +27,20 @@ function loadSettings(): UserSettings {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
-      return { ...defaults, ...JSON.parse(raw) };
+      const parsed = JSON.parse(raw);
+      // Validate types to prevent corrupted localStorage values
+      const validated: Partial<UserSettings> = {};
+      if (["instant", "fast", "cinematic"].includes(parsed.typewriterSpeed))
+        validated.typewriterSpeed = parsed.typewriterSpeed;
+      if (typeof parsed.soundEnabled === "boolean")
+        validated.soundEnabled = parsed.soundEnabled;
+      if (typeof parsed.soundVolume === "number" && parsed.soundVolume >= 0 && parsed.soundVolume <= 1)
+        validated.soundVolume = parsed.soundVolume;
+      if (typeof parsed.crtEffects === "boolean")
+        validated.crtEffects = parsed.crtEffects;
+      if (typeof parsed.timestampsVisible === "boolean")
+        validated.timestampsVisible = parsed.timestampsVisible;
+      return { ...defaults, ...validated };
     }
   } catch {
     // ignore parse errors

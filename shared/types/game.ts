@@ -206,5 +206,6 @@ export type EpochStatus = (typeof EpochStatus)[keyof typeof EpochStatus];
 export const ReservedPID = {
   HACK_CHALLENGE: -1,
   CONNECTION_CHALLENGE: -2,
+  FILE_CHALLENGE: -3,
 } as const;
 export type ReservedPID = (typeof ReservedPID)[keyof typeof ReservedPID];

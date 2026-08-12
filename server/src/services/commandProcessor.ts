@@ -153,7 +153,7 @@ class CommandProcessor extends EventEmitter {
     return this.serviceCache.get(token);
   }
 
-  private async buildCommandContext(userId: string, terminalCols?: number): Promise<CommandContext> {
+  private async buildCommandContext(userId: string, terminalCols?: number, userRole?: string): Promise<CommandContext> {
     const fileService = this.getCachedService<FileService>(TOKENS.FILE_SERVICE)!;
     const shopService = this.getCachedService<ShopService>(TOKENS.SHOP_SERVICE)!;
     const missionService = this.getCachedService<MissionService>(
@@ -232,15 +232,9 @@ class CommandProcessor extends EventEmitter {
       TOKENS.MESSAGE_ENCRYPTION_SERVICE,
     );
 
-    // Fetch user role for command-level role gating
-    const user = await db.client.user.findUnique({
-      where: { id: userId },
-      select: { role: true },
-    });
-
     return {
       userId,
-      role: user?.role ?? "player",
+      role: userRole ?? "player",
       terminalWidth: terminalCols && terminalCols > 40 ? Math.min(terminalCols - 2, 200) : TERM_WIDTH,
       db,
       fileService,
@@ -538,6 +532,7 @@ class CommandProcessor extends EventEmitter {
     serverId?: string,
     terminalId?: string,
     terminalCols?: number,
+    userRole?: string,
   ): Promise<CommandResult> {
     const startTime = Date.now();
 
@@ -578,7 +573,7 @@ class CommandProcessor extends EventEmitter {
 
       if (this.commandMap.has(command.command)) {
         const module = this.commandMap.get(command.command)!;
-        const context = await this.buildCommandContext(userId, terminalCols);
+        const context = await this.buildCommandContext(userId, terminalCols, userRole);
         result = await module.execute(command, context);
       } else {
         result = {
@@ -605,7 +600,9 @@ class CommandProcessor extends EventEmitter {
       db.client.playerProgress.update({
         where: { userId },
         data: { commandsExecuted: { increment: 1 } },
-      }).catch(() => {});
+      }).catch((err) => {
+        this.logger.debug({ err, userId }, "Failed to increment commandsExecuted");
+      });
 
       // Log to database (async, don't wait)
       this.logCommandExecution(userId, command, result).catch((err) =>
@@ -717,6 +714,11 @@ class CommandProcessor extends EventEmitter {
     } else {
       this.rateLimitMap.clear();
     }
+  }
+
+  /** Stop the rate limit cleanup timer (called during shutdown) */
+  public stop(): void {
+    clearInterval(this.rateLimitCleanupTimer);
   }
 
   // ==================== PUBLIC QUERY METHODS ====================

@@ -214,7 +214,7 @@ export function setupErrorHandling(app: Application): void {
         error: formatted.message,
         code: formatted.code,
         // Include GameError details if present
-        ...(err instanceof GameError && err.details ? { details: err.details } : {}),
+        ...(err instanceof GameError && err.details && isDevelopment ? { details: err.details } : {}),
         timestamp: new Date().toISOString(),
       });
     },

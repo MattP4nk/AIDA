@@ -39,8 +39,9 @@ export class MessageEncryptionService {
       const keyLength = 16 + encryptionLevel * 2; // 16-36 bytes
       const key = crypto.randomBytes(keyLength).toString("hex");
 
+      const salt = crypto.randomBytes(16);
       const iv = crypto.randomBytes(16);
-      const keyBuffer = crypto.scryptSync(key, "salt", 32);
+      const keyBuffer = crypto.scryptSync(key, salt, 32);
       const cipher = crypto.createCipheriv(
         this.encryptionAlgorithm,
         keyBuffer,
@@ -50,7 +51,8 @@ export class MessageEncryptionService {
       let encrypted = cipher.update(content, "utf8", "hex");
       encrypted += cipher.final("hex");
 
-      const encryptedContent = iv.toString("hex") + ":" + encrypted;
+      // Format: salt:iv:encrypted (3 parts)
+      const encryptedContent = salt.toString("hex") + ":" + iv.toString("hex") + ":" + encrypted;
 
       return {
         encryptedContent,
@@ -133,7 +135,7 @@ export class MessageEncryptionService {
       }
 
       const parts = encryptedContent.split(":");
-      if (parts.length !== 2) {
+      if (parts.length !== 3) {
         return {
           success: false,
           message: "Invalid encrypted content format",
@@ -141,9 +143,11 @@ export class MessageEncryptionService {
         };
       }
 
-      const iv = Buffer.from(parts[0]!, "hex");
-      const encrypted = parts[1]!;
-      const keyBuffer = crypto.scryptSync(resolvedKey, "salt", 32);
+      const salt = Buffer.from(parts[0]!, "hex");
+      const iv = Buffer.from(parts[1]!, "hex");
+      const encrypted = parts[2]!;
+
+      const keyBuffer = crypto.scryptSync(resolvedKey, salt, 32);
       const decipher = crypto.createDecipheriv(
         this.encryptionAlgorithm,
         keyBuffer,

@@ -8,6 +8,7 @@ import {
   COMMAND_PROCESSOR,
   PLAYER_PRESENCE_SERVICE,
   MESSAGE_SERVICE,
+  TUTORIAL_SERVICE,
 } from "../di/tokens";
 
 import type GameStateManager from "../services/gameStateManager";
@@ -15,6 +16,7 @@ import type ProgressService from "../services/progressService";
 import type CommandProcessor from "../services/commandProcessor";
 import type PlayerPresenceService from "../services/playerPresenceService";
 import type MessageService from "../services/messageService";
+import { validateCommandInput, sanitizeSocketInput, validateMessageInput } from "../utils/inputValidation";
 
 /**
  * Socket handler context — resolved once from DI, shared across all connections.
@@ -202,6 +204,11 @@ export function setupSocketHandlers(io: SocketIOServer): void {
 
 function setupAuthMiddleware(socket: Socket): void {
   socket.use(async (_packet, next) => {
+    // Skip re-verification if already authenticated
+    if (socket.data.user) {
+      return next();
+    }
+
     try {
       const token = socket.handshake.auth.token;
       if (!token) {
@@ -270,10 +277,8 @@ async function handleAuthentication(
 
     // Check if new player needs tutorial
     try {
-      const { getService: getSvc } = await import("../di/container");
-      const { TUTORIAL_SERVICE } = await import("../di/tokens");
       const tutorialService =
-        getSvc<import("../services/tutorialService").TutorialService>(
+        getService<import("../services/tutorialService").TutorialService>(
           TUTORIAL_SERVICE,
         );
       const needsTutorial = await tutorialService.shouldStartTutorial(userId);
@@ -365,7 +370,6 @@ async function handleCommandExecute(
     const { command, args, serverId, terminalId, terminalCols } = data;
 
     // Validate command input (same rules as HTTP middleware)
-    const { validateCommandInput, sanitizeSocketInput } = await import("../utils/inputValidation");
     const sanitizedCommand = typeof command === "string" ? sanitizeSocketInput(command) : "";
     const validation = validateCommandInput(sanitizedCommand);
     if (!validation.valid) {
@@ -407,6 +411,7 @@ async function handleCommandExecute(
       serverId,
       terminalId,
       terminalCols ? Number(terminalCols) : undefined,
+      socket.data.user?.role,
     );
 
     // Send result
@@ -446,7 +451,6 @@ async function handleMessageSend(
     const { recipientId, subject, content, isEncrypted, encryptionLevel } =
       messageData;
 
-    const { validateMessageInput } = await import("../utils/inputValidation");
     const msgValidation = validateMessageInput({ recipientId, subject, content });
     if (!msgValidation.valid) {
       socket.emit("message:result", {

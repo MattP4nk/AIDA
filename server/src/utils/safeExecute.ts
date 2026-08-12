@@ -304,14 +304,12 @@ interface AIServiceLike {
   generateOrThrow(
     prompt: string,
     systemPrompt?: string,
-    context?: number[],
     expectedFormat?: string,
-  ): Promise<{ response: string; context?: number[] }>;
+  ): Promise<{ response: string }>;
   queueForRetry?(
     prompt: string,
     systemPrompt?: string,
     onSuccess?: (response: string) => void,
-    context?: number[],
     expectedFormat?: string,
   ): void;
 }
@@ -377,7 +375,6 @@ export async function safeAI<TResult>(config: SafeAIConfig<TResult>): Promise<TR
       const aiResult = await config.aiService.generateOrThrow(
         config.prompt,
         config.systemPrompt,
-        undefined,
         config.expectedFormat,
       );
 
@@ -414,7 +411,6 @@ export async function safeAI<TResult>(config: SafeAIConfig<TResult>): Promise<TR
             }
           }
         : undefined,
-      undefined,
       config.expectedFormat,
     );
   }

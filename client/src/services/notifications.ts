@@ -61,11 +61,8 @@ export const notificationsByType = derived(notifications, ($notifications) => {
 
 class NotificationService {
   private maxNotifications = 50;
-  private soundEnabled = true;
-  private desktopEnabled = false;
 
   constructor() {
-    this.requestDesktopPermission();
     this.setupMessageListener();
   }
 
@@ -254,77 +251,9 @@ class NotificationService {
     return `notif_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
   }
 
-  private playSound(): void {
-    if (!this.soundEnabled) return;
+  // Desktop notifications and legacy playSound removed —
+  // in-terminal toasts (TerminalToast.svelte) and sound service handle all notifications
 
-    try {
-      // Create a simple beep using Web Audio API
-      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
-      const oscillator = audioContext.createOscillator();
-      const gainNode = audioContext.createGain();
-
-      oscillator.connect(gainNode);
-      gainNode.connect(audioContext.destination);
-
-      oscillator.frequency.value = 800; // Frequency in Hz
-      oscillator.type = "sine";
-
-      gainNode.gain.setValueAtTime(0.1, audioContext.currentTime);
-      gainNode.gain.exponentialRampToValueAtTime(
-        0.01,
-        audioContext.currentTime + 0.1
-      );
-
-      oscillator.start(audioContext.currentTime);
-      oscillator.stop(audioContext.currentTime + 0.1);
-    } catch (error) {
-      console.warn("Could not play notification sound:", error);
-    }
-  }
-
-  private showDesktopNotification(notification: Notification): void {
-    if (!this.desktopEnabled || !("Notification" in window)) return;
-
-    try {
-      const desktopNotif = new Notification(notification.title, {
-        body: notification.message,
-        icon: "/favicon.ico",
-        tag: notification.id,
-        requireInteraction: notification.priority === "urgent",
-      });
-
-      desktopNotif.onclick = () => {
-        window.focus();
-        if (notification.action) {
-          notification.action.handler?.();
-        }
-        desktopNotif.close();
-      };
-    } catch (error) {
-      console.warn("Could not show desktop notification:", error);
-    }
-  }
-
-  // ==================== SETTINGS ====================
-
-  public setSoundEnabled(enabled: boolean): void {
-    this.soundEnabled = enabled;
-  }
-
-  public setDesktopEnabled(enabled: boolean): void {
-    this.desktopEnabled = enabled;
-    if (enabled) {
-      this.requestDesktopPermission();
-    }
-  }
-
-  public getSoundEnabled(): boolean {
-    return this.soundEnabled;
-  }
-
-  public getDesktopEnabled(): boolean {
-    return this.desktopEnabled;
-  }
 }
 
 // ==================== SINGLETON EXPORT ====================

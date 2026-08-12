@@ -43,8 +43,7 @@ export const validateUsername = (): ValidationChain =>
     .isLength({ min: 3, max: 20 })
     .withMessage("Username must be 3-20 characters")
     .matches(/^[a-zA-Z0-9_-]+$/)
-    .withMessage("Username can only contain letters, numbers, underscores, and hyphens")
-    .escape(); // Sanitize to prevent XSS
+    .withMessage("Username can only contain letters, numbers, underscores, and hyphens");
 
 /**
  * Email validation rules

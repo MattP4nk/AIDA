@@ -47,7 +47,6 @@ export function validateOrRetry<T>(
       retryContext.prompt,
       retryContext.systemPrompt,
       retryContext.onSuccess,
-      undefined,
       retryContext.expectedFormat,
     );
     logger.debug("AI output failed validation — queued for retry with format hint");
@@ -65,15 +64,28 @@ export function validateOrRetry<T>(
  * Handles both object `{...}` and array `[...]` patterns.
  */
 export function extractJSON(response: string, type: "object" | "array" = "object"): any | null {
-  const pattern = type === "array" ? /\[[\s\S]*\]/ : /\{[\s\S]*\}/;
-  const match = response.match(pattern);
-  if (!match) return null;
+  const startChar = type === "array" ? "[" : "{";
+  const endChar = type === "array" ? "]" : "}";
 
-  try {
-    return JSON.parse(match[0]);
-  } catch {
-    return null;
+  let startIdx = response.indexOf(startChar);
+  while (startIdx !== -1) {
+    // Try parsing from this position by tracking bracket depth
+    let depth = 0;
+    for (let i = startIdx; i < response.length; i++) {
+      if (response[i] === startChar) depth++;
+      else if (response[i] === endChar) depth--;
+
+      if (depth === 0) {
+        try {
+          return JSON.parse(response.substring(startIdx, i + 1));
+        } catch {
+          break; // This balanced block wasn't valid JSON, try next start position
+        }
+      }
+    }
+    startIdx = response.indexOf(startChar, startIdx + 1);
   }
+  return null;
 }
 
 function isNonEmptyString(val: unknown, minLen: number = 1, maxLen: number = Infinity): val is string {

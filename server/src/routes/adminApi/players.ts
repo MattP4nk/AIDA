@@ -5,7 +5,7 @@ import { NotFoundError, ValidationError } from "../../../../shared/types";
 
 const router = Router();
 
-const VALID_ROLES = ["player", "moderator", "admin"];
+const VALID_ROLES = ["player", "moderator", "admin", "npc"];
 
 // GET / — List players with search and pagination
 router.get("/", asyncHandler(async (req: any, res: any) => {

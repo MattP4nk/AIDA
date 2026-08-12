@@ -195,7 +195,6 @@ Respond ONLY with JSON: { "subject": "...", "content": "..." }`;
         const result = await this.aiService.generateResponse(
           prompt,
           aidaPersona.systemPrompt,
-          undefined,
           '{ "subject": "string", "content": "string (cryptic AIDA recruitment message)" }',
         );
         if (!result.success) {

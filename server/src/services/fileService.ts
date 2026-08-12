@@ -93,6 +93,9 @@ export class FileService {
   private missionIntegration: MissionIntegrationService | null = null;
   private factionKnowledge: FactionKnowledgeService | null = null;
   private networkTopology: NetworkTopologyService | null = null;
+  private accessKeyCache: { data: Array<{ id: string; name: string; accessKey: string }>; expiresAt: number } | null =
+    null;
+  private static readonly ACCESS_KEY_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
   constructor(
     @inject(LOGGER) private logger: Logger,
@@ -1379,8 +1382,9 @@ export class FileService {
    * Encrypt content using AES-256-CBC
    */
   private async encryptContent(content: string, key: string): Promise<string> {
+    const salt = crypto.randomBytes(16);
     const iv = crypto.randomBytes(16);
-    const keyBuffer = crypto.scryptSync(key, "salt", 32);
+    const keyBuffer = crypto.scryptSync(key, salt, 32);
     const cipher = crypto.createCipheriv(
       this.encryptionAlgorithm,
       keyBuffer,
@@ -1390,7 +1394,8 @@ export class FileService {
     let encrypted = cipher.update(content, "utf8", "hex");
     encrypted += cipher.final("hex");
 
-    return iv.toString("hex") + ":" + encrypted;
+    // Format: salt:iv:encrypted (3 parts)
+    return salt.toString("hex") + ":" + iv.toString("hex") + ":" + encrypted;
   }
 
   /**
@@ -1401,13 +1406,15 @@ export class FileService {
     key: string,
   ): Promise<string> {
     const parts = encryptedContent.split(":");
-    if (parts.length !== 2) {
+    if (parts.length !== 3) {
       throw new Error("Invalid encrypted content format");
     }
 
-    const iv = Buffer.from(parts[0]!, "hex");
-    const encrypted = parts[1]!;
-    const keyBuffer = crypto.scryptSync(key, "salt", 32);
+    const salt = Buffer.from(parts[0]!, "hex");
+    const iv = Buffer.from(parts[1]!, "hex");
+    const encrypted = parts[2]!;
+
+    const keyBuffer = crypto.scryptSync(key, salt, 32);
     const decipher = crypto.createDecipheriv(
       this.encryptionAlgorithm,
       keyBuffer,
@@ -1647,6 +1654,28 @@ export class FileService {
   // ==================== ACCESS KEY DETECTION ====================
 
   /**
+   * Returns servers with access keys, cached for 5 minutes to avoid
+   * unbounded queries on every file download.
+   */
+  private async getAccessKeyServers(excludeServerId: string) {
+    if (this.accessKeyCache && this.accessKeyCache.expiresAt > Date.now()) {
+      return this.accessKeyCache.data.filter((s) => s.id !== excludeServerId);
+    }
+
+    const servers = await prisma.gameServer.findMany({
+      where: { accessKey: { not: null } },
+      select: { id: true, name: true, accessKey: true },
+    });
+
+    this.accessKeyCache = {
+      data: servers as Array<{ id: string; name: string; accessKey: string }>,
+      expiresAt: Date.now() + FileService.ACCESS_KEY_CACHE_TTL,
+    };
+
+    return servers.filter((s) => s.id !== excludeServerId);
+  }
+
+  /**
    * Scan file content for access keys that match other servers' accessKey fields.
    * When found, automatically grants the player access to those servers.
    *
@@ -1664,14 +1693,8 @@ export class FileService {
   ): Promise<void> {
     if (!this.networkTopology) return;
 
-    // Find all servers that have an accessKey set
-    const serversWithKeys = await prisma.gameServer.findMany({
-      where: {
-        accessKey: { not: null },
-        id: { not: serverId }, // Don't match the server we're currently on
-      },
-      select: { id: true, name: true, accessKey: true },
-    });
+    // Find all servers that have an accessKey set (cached, 5-min TTL)
+    const serversWithKeys = await this.getAccessKeyServers(serverId);
 
     for (const server of serversWithKeys) {
       if (!server.accessKey) continue;

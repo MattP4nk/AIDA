@@ -36,8 +36,12 @@
         }
         // Prevent seenIds from growing forever
         if (seenIds.size > 200) {
-            const recentIds = new Set(allNotifs.slice(0, 100).map((n) => n.id));
-            seenIds = recentIds;
+            // Keep IDs from current toasts + recent notifications
+            const keepIds = new Set([
+                ...toasts.map(t => t.notification.id),
+                ...allNotifs.slice(0, 100).map((n) => n.id),
+            ]);
+            seenIds = keepIds;
         }
     });
 

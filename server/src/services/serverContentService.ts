@@ -2178,7 +2178,6 @@ export class ServerContentService {
         const directResult = await aiService.generateResponse(
           userPrompt,
           fullSystemPrompt,
-          undefined,
           '{ "directories": [{"path": "/..."}], "files": [{"path": "/...", "content": "string (100-3000 chars)", "isHidden": false}] }',
         );
         if (!directResult.success) {

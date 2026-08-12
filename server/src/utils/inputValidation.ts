@@ -34,7 +34,7 @@ export function validateCommandInput(
 
 export function sanitizeSocketInput(text: string): string {
   return text
-    .replace(/\0/g, "") // strip null bytes
+    .replace(/[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]/g, "") // strip null bytes and control chars
     .trim();
 }
 
@@ -47,6 +47,10 @@ export function validateMessageInput(data: {
 
   if (!recipientId || !subject || !content) {
     return { valid: false, reason: "recipientId, subject, and content are required" };
+  }
+
+  if (typeof recipientId !== "string" || recipientId.length < 1 || recipientId.length > 128) {
+    return { valid: false, reason: "Invalid recipientId format" };
   }
 
   if (typeof subject !== "string" || subject.length > MAX_SUBJECT_LENGTH) {

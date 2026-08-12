@@ -94,6 +94,10 @@
         if (unsubscribeMessages) unsubscribeMessages();
         if (unsubscribeOnline) unsubscribeOnline();
         if (typingTimeout) clearTimeout(typingTimeout);
+        // Stop typing indicator for remote user
+        if (isTyping && selectedContact) {
+            socketService.emitTypingStop(selectedContact.id);
+        }
     });
 
     // ==================== REALTIME LISTENERS ====================

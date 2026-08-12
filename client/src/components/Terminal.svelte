@@ -4,7 +4,7 @@
     import { terminalService } from "../services/terminal";
     import type { CommandResult } from "../../../shared/types";
     // Reserved PIDs for virtual UI processes (mirrored from shared/types.ts)
-    const ReservedPID = { HACK_CHALLENGE: -1, CONNECTION_CHALLENGE: -2 } as const;
+    const ReservedPID = { HACK_CHALLENGE: -1, CONNECTION_CHALLENGE: -2, FILE_CHALLENGE: -3 } as const;
     import { apiClient } from "../services/api";
     // New ASCII Dialog system
     import MailDialog from "./MailDialog.svelte";
@@ -321,55 +321,73 @@
 
     // ==================== CHALLENGE COUNTDOWN TIMERS ====================
 
-    let challengeCountdown = 0; // seconds remaining for active challenge
-    let challengeTimerInterval: ReturnType<typeof setInterval> | null = null;
+    let challengeCountdowns = new Map<string, number>(); // type -> remaining seconds
+    let challengeTimerIntervals = new Map<string, ReturnType<typeof setInterval>>();
 
-    function startChallengeTimer(timeLimit: number) {
-        stopChallengeTimer();
-        challengeCountdown = timeLimit;
-        challengeTimerInterval = setInterval(() => {
-            if (challengeCountdown > 0) {
-                challengeCountdown--;
-            } else {
-                stopChallengeTimer();
-                // Clear whichever panel is active when timer expires
-                if ($activeHackSession?.active) {
+    function startChallengeTimer(type: string, timeLimit: number) {
+        stopChallengeTimer(type);
+        challengeCountdowns.set(type, timeLimit);
+        challengeCountdowns = new Map(challengeCountdowns); // trigger reactivity
+        const interval = setInterval(() => {
+            const current = challengeCountdowns.get(type) ?? 0;
+            if (current <= 0) {
+                stopChallengeTimer(type);
+                // Clear the panel for this specific challenge type when timer expires
+                if (type === "hack" && $activeHackSession?.active) {
                     activeHackSession.set(null);
                     activeProcesses.update(procs => procs.filter((p: any) => p.pid !== ReservedPID.HACK_CHALLENGE));
                 }
-                if ($activeConnectionSession?.active) {
+                if (type === "connection" && $activeConnectionSession?.active) {
                     activeConnectionSession.set(null);
                     activeProcesses.update(procs => procs.filter((p: any) => p.pid !== ReservedPID.CONNECTION_CHALLENGE));
                 }
-                if ($activeFileChallenge?.active) {
+                if (type === "file" && $activeFileChallenge?.active) {
                     activeFileChallenge.set(null);
                     activeProcesses.update(procs => procs.filter((p: any) => p.pid !== ReservedPID.FILE_CHALLENGE));
                 }
+                return;
             }
+            challengeCountdowns.set(type, current - 1);
+            challengeCountdowns = new Map(challengeCountdowns); // trigger reactivity
         }, 1000);
+        challengeTimerIntervals.set(type, interval);
     }
 
-    function stopChallengeTimer() {
-        if (challengeTimerInterval) {
-            clearInterval(challengeTimerInterval);
-            challengeTimerInterval = null;
+    function stopChallengeTimer(type: string) {
+        const interval = challengeTimerIntervals.get(type);
+        if (interval) {
+            clearInterval(interval);
+            challengeTimerIntervals.delete(type);
         }
-        challengeCountdown = 0;
+        challengeCountdowns.delete(type);
+        challengeCountdowns = new Map(challengeCountdowns); // trigger reactivity
+    }
+
+    function stopAllChallengeTimers() {
+        for (const [type] of challengeTimerIntervals) {
+            stopChallengeTimer(type);
+        }
     }
 
     // Start timer when a challenge panel appears
     $: if ($activeHackSession?.active && $activeHackSession.challenge?.timeLimit) {
-        startChallengeTimer($activeHackSession.challenge.timeLimit);
+        startChallengeTimer("hack", $activeHackSession.challenge.timeLimit);
     }
     $: if ($activeConnectionSession?.active && $activeConnectionSession.challenge?.timeLimit) {
-        startChallengeTimer($activeConnectionSession.challenge.timeLimit);
+        startChallengeTimer("connection", $activeConnectionSession.challenge.timeLimit);
     }
     $: if ($activeFileChallenge?.active && $activeFileChallenge.challenge?.timeLimit) {
-        startChallengeTimer($activeFileChallenge.challenge.timeLimit);
+        startChallengeTimer("file", $activeFileChallenge.challenge.timeLimit);
     }
-    // Stop when all challenges are resolved
-    $: if (!$activeHackSession?.active && !$activeConnectionSession?.active && !$activeFileChallenge?.active) {
-        stopChallengeTimer();
+    // Stop individual timers when their challenge is resolved
+    $: if (!$activeHackSession?.active) {
+        stopChallengeTimer("hack");
+    }
+    $: if (!$activeConnectionSession?.active) {
+        stopChallengeTimer("connection");
+    }
+    $: if (!$activeFileChallenge?.active) {
+        stopChallengeTimer("file");
     }
     let glowEffect = true;
 
@@ -436,7 +454,7 @@
             clearInterval(clockInterval);
             unsubResources();
             resizeObserver?.disconnect();
-            stopChallengeTimer();
+            stopAllChallengeTimers();
         };
     });
 
@@ -1188,6 +1206,11 @@
         // Skip typewriter animation on any key
         if (typewriterActive) {
             typewriterCancel = true;
+            // Don't consume printable characters — let them reach the input
+            if (event.key.length === 1 && !event.ctrlKey && !event.altKey && !event.metaKey) {
+                return;
+            }
+            event.preventDefault();
             return;
         }
 
@@ -1674,9 +1697,9 @@
             <div class="challenge-header">
                 <span>HACK SESSION — {$activeHackSession.targetIp} — Layer {($activeHackSession.currentLayer ||
                     0) + 1}/{$activeHackSession.totalLayers || "?"}</span>
-                {#if challengeCountdown > 0}
-                    <span class="challenge-timer" class:warning={challengeCountdown <= ($activeHackSession.challenge.timeLimit || 60) * 0.25} class:urgent={challengeCountdown <= 5}>
-                        {challengeCountdown}s
+                {#if (challengeCountdowns.get("hack") ?? 0) > 0}
+                    <span class="challenge-timer" class:warning={(challengeCountdowns.get("hack") ?? 0) <= ($activeHackSession.challenge.timeLimit || 60) * 0.25} class:urgent={(challengeCountdowns.get("hack") ?? 0) <= 5}>
+                        {challengeCountdowns.get("hack")}s
                     </span>
                 {/if}
             </div>
@@ -1703,9 +1726,9 @@
                 {$activeConnectionSession.challenge.type === "handshake"
                     ? "TCP HANDSHAKE"
                     : "SIGNAL TRACE"}</span>
-                {#if challengeCountdown > 0}
-                    <span class="challenge-timer" class:warning={challengeCountdown <= ($activeConnectionSession.challenge.timeLimit || 60) * 0.25} class:urgent={challengeCountdown <= 5}>
-                        {challengeCountdown}s
+                {#if (challengeCountdowns.get("connection") ?? 0) > 0}
+                    <span class="challenge-timer" class:warning={(challengeCountdowns.get("connection") ?? 0) <= ($activeConnectionSession.challenge.timeLimit || 60) * 0.25} class:urgent={(challengeCountdowns.get("connection") ?? 0) <= 5}>
+                        {challengeCountdowns.get("connection")}s
                     </span>
                 {/if}
             </div>
@@ -1730,9 +1753,9 @@
             <div class="challenge-header file-access">
                 <span>{$activeFileChallenge.type === "sweep" ? "SWEEP" : $activeFileChallenge.type === "storm" ? "STORM" : "CRACK"} —
                 {$activeFileChallenge.targetDir || $activeFileChallenge.targetFile || "unknown"}</span>
-                {#if challengeCountdown > 0}
-                    <span class="challenge-timer" class:warning={challengeCountdown <= ($activeFileChallenge.challenge.timeLimit || 60) * 0.25} class:urgent={challengeCountdown <= 5}>
-                        {challengeCountdown}s
+                {#if (challengeCountdowns.get("file") ?? 0) > 0}
+                    <span class="challenge-timer" class:warning={(challengeCountdowns.get("file") ?? 0) <= ($activeFileChallenge.challenge.timeLimit || 60) * 0.25} class:urgent={(challengeCountdowns.get("file") ?? 0) <= 5}>
+                        {challengeCountdowns.get("file")}s
                     </span>
                 {/if}
             </div>

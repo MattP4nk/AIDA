@@ -183,9 +183,11 @@
             const safeRecipient = cleanRecipient.includes(" ")
                 ? `"${cleanRecipient}"`
                 : cleanRecipient;
-            const command = composeSubject.trim()
-                ? `mail ${safeRecipient} ${composeSubject} ${composeBody}${encryptFlag}`
-                : `msg ${safeRecipient} ${composeBody}${encryptFlag}`;
+            const safeSubject = composeSubject.trim().replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+            const safeBody = composeBody.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+            const command = safeSubject
+                ? `mail ${safeRecipient} "${safeSubject}" "${safeBody}"${encryptFlag}`
+                : `msg ${safeRecipient} "${safeBody}"${encryptFlag}`;
             const response = await terminalService.executeCommand(command);
 
             if (response.success) {

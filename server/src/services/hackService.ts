@@ -108,24 +108,33 @@ class HackService extends EventEmitter {
 
   // ==================== CACHED SERVICE GETTERS ====================
 
-  private _serverService?: any;
-  private async getServerService(): Promise<any> {
+  private _serverService?: unknown;
+  private async getServerService() {
     if (!this._serverService) {
       const { getService } = await import("../di/container");
       const { SERVER_SERVICE } = await import("../di/tokens");
       this._serverService = getService(SERVER_SERVICE);
     }
-    return this._serverService;
+    return this._serverService as { triggerSecurityAlert: (...args: unknown[]) => void };
   }
 
-  private _reputationEngine?: any;
-  private async getReputationEngine(): Promise<any> {
+  private _reputationEngine?: unknown;
+  private async getReputationEngine() {
     if (!this._reputationEngine) {
       const { getService } = await import("../di/container");
       const { REPUTATION_ENGINE } = await import("../di/tokens");
       this._reputationEngine = getService(REPUTATION_ENGINE);
     }
-    return this._reputationEngine;
+    return this._reputationEngine as { onServerHacked: (...args: unknown[]) => Promise<void> };
+  }
+
+  /** Clear all session timers (called during shutdown) */
+  public cleanup(): void {
+    for (const [, timer] of this.sessionTimers) {
+      clearTimeout(timer);
+    }
+    this.sessionTimers.clear();
+    this.logger.info("Hack session timers cleared");
   }
 
   // ==================== SESSION PERSISTENCE ====================

@@ -186,22 +186,6 @@ class ProgressService {
           });
         }
 
-        // Persist session directory to the latest UserSession so it survives
-        // reconnects. The active session's currentDirectory is stored here.
-        const activeSession = await db.client.userSession.findFirst({
-          where: { userId, isActive: true },
-          orderBy: { createdAt: "desc" },
-        });
-
-        if (activeSession) {
-          await db.client.userSession.update({
-            where: { id: activeSession.id },
-            data: {
-              lastServerId: activeSession.lastServerId,
-            },
-          });
-        }
-
         this.logger.debug({ userId, reason }, "Progress checkpoint saved");
         return true;
       },

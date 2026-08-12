@@ -388,6 +388,11 @@ async function provisionServerStaticContent(
 // ============================================================
 
 async function main() {
+  if (process.env.NODE_ENV === "production") {
+    console.error("ERROR: Cannot run seed in production environment!");
+    process.exit(1);
+  }
+
   console.log("========================================");
   console.log("  AIDA World Seed");
   console.log("  Comprehensive game-ready database");

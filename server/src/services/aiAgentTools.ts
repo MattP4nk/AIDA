@@ -693,7 +693,6 @@ export async function runAgentLoop(
 
   // Build conversation as a growing prompt (since Ollama doesn't support multi-turn natively in single API)
   let conversationHistory = userPrompt;
-  let context: number[] | undefined;
 
   for (let round = 0; round < maxRounds; round++) {
     const result = await safeExecute({
@@ -701,7 +700,6 @@ export async function runAgentLoop(
         const aiResult = await aiService.generateOrThrow(
           conversationHistory,
           fullSystemPrompt,
-          context,
         );
         return aiResult;
       },
@@ -711,8 +709,6 @@ export async function runAgentLoop(
     })();
 
     if (!result) return null;
-
-    context = result.context as number[] | undefined; // Preserve context for multi-turn
 
     // Parse response
     const response = result.response.trim();

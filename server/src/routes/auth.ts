@@ -198,8 +198,9 @@ router.post(
       try {
         const factionService = getService<FactionService>(FACTION_SERVICE);
         await factionService.initializeStandings(result.user.id);
-      } catch {
+      } catch (factionErr) {
         // Non-critical: standings will be created on first interaction
+        logger.warn({ err: factionErr, userId: result.user.id }, "Failed to initialize faction standings");
       }
 
       // Link home server to Internet Exchange (using ID from transaction, no re-query)
@@ -265,6 +266,7 @@ router.post(
 // Per-account lockout after repeated failed login attempts
 const LOGIN_ATTEMPT_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
 const MAX_LOGIN_ATTEMPTS = 10;
+const MAX_IP_LOGIN_ATTEMPTS = 30; // Per-IP limit across all usernames
 const loginAttempts = new Map<string, { count: number; firstAttempt: number }>();
 
 // Periodic cleanup of expired lockout entries (every 5 minutes)
@@ -286,8 +288,27 @@ router.post(
   asyncHandler(async (req: any, res: any) => {
     const { username, password }: AuthRequest = req.body;
 
-      // Check account lockout
-      const lockoutKey = username.toLowerCase();
+      const ip = req.ip || req.socket.remoteAddress || "unknown";
+
+      // Check per-IP lockout (blocks entire IP after too many failed attempts across all usernames)
+      const ipLockoutKey = `ip:${ip}`;
+      const ipAttempts = loginAttempts.get(ipLockoutKey);
+      if (ipAttempts) {
+        if (Date.now() - ipAttempts.firstAttempt > LOGIN_ATTEMPT_WINDOW_MS) {
+          loginAttempts.delete(ipLockoutKey);
+        } else if (ipAttempts.count >= MAX_IP_LOGIN_ATTEMPTS) {
+          const remainingMs = LOGIN_ATTEMPT_WINDOW_MS - (Date.now() - ipAttempts.firstAttempt);
+          const remainingMin = Math.ceil(remainingMs / 60000);
+          throw new GameError(
+            `Too many failed attempts from this IP. Try again in ${remainingMin} minute${remainingMin > 1 ? "s" : ""}.`,
+            "IP_LOCKED",
+            429,
+          );
+        }
+      }
+
+      // Check per-account lockout (keyed by IP + username to prevent cross-user lockout attacks)
+      const lockoutKey = `${ip}:${username.toLowerCase()}`;
       const attempts = loginAttempts.get(lockoutKey);
       if (attempts) {
         if (Date.now() - attempts.firstAttempt > LOGIN_ATTEMPT_WINDOW_MS) {
@@ -327,18 +348,22 @@ router.post(
       });
 
       if (!user) {
-        // Record failed attempt
+        // Record failed attempt (per IP+username and per IP)
         const prev = loginAttempts.get(lockoutKey);
         if (prev) { prev.count++; } else { loginAttempts.set(lockoutKey, { count: 1, firstAttempt: Date.now() }); }
+        const ipPrev = loginAttempts.get(ipLockoutKey);
+        if (ipPrev) { ipPrev.count++; } else { loginAttempts.set(ipLockoutKey, { count: 1, firstAttempt: Date.now() }); }
         throw new GameError("Invalid username or password", "AUTH_FAILED", 401);
       }
 
       // Verify password
       const validPassword = await bcrypt.compare(password, user.password);
       if (!validPassword) {
-        // Record failed attempt
+        // Record failed attempt (per IP+username and per IP)
         const prev = loginAttempts.get(lockoutKey);
         if (prev) { prev.count++; } else { loginAttempts.set(lockoutKey, { count: 1, firstAttempt: Date.now() }); }
+        const ipPrev = loginAttempts.get(ipLockoutKey);
+        if (ipPrev) { ipPrev.count++; } else { loginAttempts.set(ipLockoutKey, { count: 1, firstAttempt: Date.now() }); }
         throw new GameError("Invalid username or password", "AUTH_FAILED", 401);
       }
 

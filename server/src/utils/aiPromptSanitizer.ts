@@ -8,7 +8,7 @@ export function sanitizeForPrompt(
   maxLength = 2000,
 ): string {
   const sanitized = input
-    .replace(/<\/?user_message>/gi, "") // prevent boundary-tag injection
+    .replace(/<\/?user_message[^>]*>/gi, "") // prevent boundary-tag injection
     .slice(0, maxLength);
   return `<user_message>\n${sanitized}\n</user_message>`;
 }

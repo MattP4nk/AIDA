@@ -269,6 +269,9 @@ model FileSystemNode {
   parent   FileSystemNode?  @relation("FileHierarchy", fields: [parentId], references: [id], onDelete: Cascade)
   children FileSystemNode[] @relation("FileHierarchy")
 
+  @@index([serverId, parentId])
+  @@index([serverId, name])
+  @@index([createdBy])
   @@map("file_system_nodes")
 }
 
@@ -285,6 +288,8 @@ model ServerConnection {
 
   server GameServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
 
+  @@index([userId, serverId])
+  @@index([userId, isActive])
   @@map("server_connections")
 }
 
@@ -310,6 +315,8 @@ model Message {
   recipient User            @relation("MessageRecipient", fields: [recipientId], references: [id], onDelete: Cascade)
   reports   MessageReport[]
 
+  @@index([recipientId, isRead])
+  @@index([senderId])
   @@map("messages")
 }
 
@@ -776,6 +783,9 @@ model HackLog {
   target   User       @relation("HackTarget", fields: [targetId], references: [id])
   server   GameServer @relation(fields: [targetServerId], references: [id])
 
+  @@index([attackerId])
+  @@index([targetServerId])
+  @@index([timestamp])
   @@map("hack_logs")
 }
 
@@ -796,6 +806,9 @@ model AuditLog {
 
   user User? @relation(fields: [userId], references: [id])
 
+  @@index([userId])
+  @@index([action])
+  @@index([timestamp])
   @@map("audit_logs")
 }
 

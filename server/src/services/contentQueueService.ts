@@ -231,11 +231,16 @@ export class ContentQueueService {
       select: { id: true },
     });
 
+    const fileCounts = await this.prisma.fileSystemNode.groupBy({
+      by: ["serverId"],
+      where: { type: "file" },
+      _count: { _all: true },
+    });
+    const fileCountMap = new Map(fileCounts.map(fc => [fc.serverId, fc._count._all]));
+
     let enqueued = 0;
     for (const server of servers) {
-      const fileCount = await this.prisma.fileSystemNode.count({
-        where: { serverId: server.id, type: "file" },
-      });
+      const fileCount = fileCountMap.get(server.id) ?? 0;
       if (fileCount <= 8) {
         await this.enqueue(server.id, ContentJobPriority.LOW, { skipAI: true });
         enqueued++;

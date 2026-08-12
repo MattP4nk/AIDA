@@ -35,9 +35,8 @@ interface QueuedRequest {
   id: string;
   prompt: string;
   systemPrompt?: string | undefined;
-  context?: number[] | undefined;
   expectedFormat?: string | undefined;
-  onSuccess: (response: string) => void;
+  onSuccess: (response: string) => void | Promise<void>;
   attempts: number;
   createdAt: number;
 }
@@ -124,9 +123,8 @@ export class AIService {
     return headers;
   }
 
-  private getCacheKey(prompt: string, systemPrompt?: string, context?: number[]): string {
-    const contextStr = context ? context.join(",") : "";
-    const data = `${prompt}|${systemPrompt || ""}|${this.defaultModel}|${contextStr}`;
+  private getCacheKey(prompt: string, systemPrompt?: string): string {
+    const data = `${prompt}|${systemPrompt || ""}|${this.defaultModel}`;
     return `ai:${crypto.createHash("md5").update(data).digest("hex")}`;
   }
 
@@ -191,15 +189,13 @@ export class AIService {
    * Generate an AI response.
    * @param prompt - The user prompt
    * @param systemPrompt - Optional system prompt
-   * @param context - Optional conversation context
    * @param expectedFormat - Optional JSON format hint appended to prompt (improves structured output accuracy)
    */
   public async generateResponse(
     prompt: string,
     systemPrompt?: string,
-    context?: number[],
     expectedFormat?: string,
-  ): Promise<{ success: boolean; response: string; context?: number[]; error?: string }> {
+  ): Promise<{ success: boolean; response: string; error?: string }> {
     this.metrics.totalRequests++;
 
     // Append format instruction to prompt if provided
@@ -207,11 +203,10 @@ export class AIService {
       ? `${prompt}\n\nRespond ONLY with valid JSON in this exact format:\n${expectedFormat}`
       : prompt;
 
-    const cacheKey = this.getCacheKey(fullPrompt, systemPrompt, context);
+    const cacheKey = this.getCacheKey(fullPrompt, systemPrompt);
     const cached = this.cacheService.get<{
       success: boolean;
       response: string;
-      context?: number[];
     }>(cacheKey);
     if (cached) {
       this.metrics.cacheHits++;
@@ -308,14 +303,13 @@ export class AIService {
   public async generateOrThrow(
     prompt: string,
     systemPrompt?: string,
-    context?: number[],
     expectedFormat?: string,
-  ): Promise<{ response: string; context?: number[] }> {
-    const result = await this.generateResponse(prompt, systemPrompt, context, expectedFormat);
+  ): Promise<{ response: string }> {
+    const result = await this.generateResponse(prompt, systemPrompt, expectedFormat);
     if (!result.success) {
       throw new Error(result.error || "AI generation failed");
     }
-    return { response: result.response, ...(result.context ? { context: result.context } : {}) };
+    return { response: result.response };
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -335,8 +329,7 @@ export class AIService {
   public queueForRetry(
     prompt: string,
     systemPrompt: string | undefined,
-    onSuccess: (response: string) => void,
-    context?: number[],
+    onSuccess: (response: string) => void | Promise<void>,
     expectedFormat?: string,
   ): void {
     // Don't exceed max queue size
@@ -350,7 +343,6 @@ export class AIService {
       id,
       prompt,
       systemPrompt,
-      context,
       expectedFormat,
       onSuccess,
       attempts: 0,
@@ -386,7 +378,7 @@ export class AIService {
       : (req.attempts > 1 ? "Respond ONLY with valid JSON. No markdown, no explanation." : undefined);
 
     try {
-      const result = await this.generateResponse(req.prompt, req.systemPrompt, req.context, retryFormat);
+      const result = await this.generateResponse(req.prompt, req.systemPrompt, retryFormat);
 
       if (result.success) {
         // Success — remove from queue and call the callback
@@ -397,7 +389,7 @@ export class AIService {
         this.logger.info({ id: req.id, attempts: req.attempts }, "Retry queue: AI request succeeded");
 
         try {
-          req.onSuccess(result.response);
+          await req.onSuccess(result.response);
         } catch (cbErr) {
           this.logger.warn({ err: cbErr, id: req.id }, "Retry queue: onSuccess callback failed");
         }
@@ -443,7 +435,7 @@ export class AIService {
 
     return (await safeExecute({
       fn: async () => {
-        const result = await this.generateResponse(content, systemPrompt, undefined, '{ "safe": true|false, "reason": "string|null" }');
+        const result = await this.generateResponse(content, systemPrompt, '{ "safe": true|false, "reason": "string|null" }');
         if (!result.success) {
           return { safe: true, reason: "Moderation service unavailable" };
         }

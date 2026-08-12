@@ -315,6 +315,9 @@ const ROLE_HIERARCHY: Record<string, number> = {
 
 // Role-based access control middleware
 export const requireRole = (minimumRole: string) => {
+  if (!(minimumRole in ROLE_HIERARCHY)) {
+    throw new Error(`requireRole: unknown role "${minimumRole}"`);
+  }
   return (req: Request, res: Response, next: NextFunction): void => {
     if (!req.user) {
       res.status(401).json({
