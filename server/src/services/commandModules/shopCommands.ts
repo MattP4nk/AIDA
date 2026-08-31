@@ -1,6 +1,31 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
 import { successResult, errorResult } from "./helpers";
+
+/** Upper bound on a single transaction — a sanity cap, not a stack limit. */
+const MAX_TRANSACTION_QUANTITY = 1000;
+
+/**
+ * Parse a buy/sell quantity. Returns null when the input is not a usable count.
+ *
+ * The previous `parseInt(args[1] || "1")` had no validation whatsoever, and a
+ * negative quantity flowed all the way into
+ * `credits: { decrement: totalCost }` with a negative totalCost — which
+ * *increments*. `buy quantum_charge -1000000` minted 7.5 billion credits.
+ * Every guard above it compared with `<`, and both negatives and NaN defeat
+ * `<` comparisons.
+ *
+ * Currently that exploit is masked because the shop is entirely broken on a
+ * foreign-key mismatch (G3) — the transaction always rolls back. Fixing G3
+ * ARMS it, which is exactly why this guard ships in the same commit.
+ */
+function parseQuantity(raw: string | undefined): number | null {
+  if (raw === undefined || raw === "") return 1;
+  const n = Number(raw);
+  if (!Number.isInteger(n)) return null;
+  if (n < 1 || n > MAX_TRANSACTION_QUANTITY) return null;
+  return n;
+}
 import type { ShopItem } from "../shopService";
 import type { InventoryItem } from "../shopService";
 import {
@@ -317,7 +342,12 @@ export class ShopCommandsModule implements CommandModule {
       return errorResult("Usage: buy <item_id> [quantity]");
     }
 
-    const quantity = parseInt(command.args?.[1] || "1");
+    const quantity = parseQuantity(command.args?.[1]);
+    if (quantity === null) {
+      return errorResult(
+        "Quantity must be a whole number of at least 1.\nUsage: buy <item_id> [quantity]",
+      );
+    }
 
     const shopService = context.services.shopService;
     const result = await shopService.purchaseItem(
@@ -344,7 +374,12 @@ export class ShopCommandsModule implements CommandModule {
       return errorResult("Usage: sell <item_id> [quantity]");
     }
 
-    const quantity = parseInt(command.args?.[1] || "1");
+    const quantity = parseQuantity(command.args?.[1]);
+    if (quantity === null) {
+      return errorResult(
+        "Quantity must be a whole number of at least 1.\nUsage: sell <item_id> [quantity]",
+      );
+    }
 
     const shopService = context.services.shopService;
     const result = await shopService.sellItem(context.userId, itemId, quantity);

@@ -7,6 +7,46 @@ import type { FactionKnowledgeService } from "./factionKnowledgeService";
 import { safeExecute } from "../utils/safeExecute";
 
 /**
+ * Does this objective refer to the entity that just changed?
+ *
+ * Templates in missionTemplatePool set `target: true` as a placeholder — the
+ * real entity id is backfilled into `metadata` by
+ * `serverContentService.provisionMissionInfrastructure()` (`metadata.serverId`,
+ * `metadata.fileId`, …). Seven call sites here compared `objective.target`
+ * directly against an id, i.e. `true === "cmx…"`, which is always false — so
+ * those objectives could never record progress and their missions were
+ * unwinnable, occupying a slot until they expired.
+ *
+ * Semantics:
+ *   - **Bound** (metadata holds an id, or `target` is a string): require an
+ *     exact match. This is the case for provisioned missions.
+ *   - **Unbound** (no id anywhere): match anything. Social objectives such as
+ *     `contact_player` and `forum_reply` never get provisioned at all — the
+ *     provisioner returns early when a mission needs no server — so "any
+ *     recipient" / "any thread" is their only workable reading. This also
+ *     matches the convention already used by `install_backdoor`
+ *     (`!objective.target || objective.target === targetId`), and it keeps a
+ *     mission completable if provisioning failed rather than permanently stuck.
+ */
+function matchesEntity(
+  objective: { target?: unknown; metadata?: Record<string, unknown> },
+  actualId: string | undefined,
+  ...metadataKeys: string[]
+): boolean {
+  for (const key of metadataKeys) {
+    const bound = objective.metadata?.[key];
+    if (typeof bound === "string" && bound.length > 0) {
+      return bound === actualId;
+    }
+  }
+  // Legacy/hand-authored objectives may put the id directly in `target`.
+  if (typeof objective.target === "string" && objective.target.length > 0) {
+    return objective.target === actualId;
+  }
+  return true; // unbound
+}
+
+/**
  * MissionIntegration Service
  *
  * Connects game actions to mission objectives and automatically validates progress.
@@ -170,7 +210,7 @@ export class MissionIntegrationService {
                 shouldUpdate = true;
               }
             } else if (objType === "hack_target") {
-              if (success && objective.target === targetId) {
+              if (success && matchesEntity(objective, targetId, "serverId")) {
                 newProgress = true;
                 shouldUpdate = true;
               }
@@ -196,7 +236,7 @@ export class MissionIntegrationService {
               if (
                 success &&
                 (method === "backdoor" || method === "rootkit") &&
-                (!objective.target || objective.target === targetId)
+                matchesEntity(objective, targetId, "serverId")
               ) {
                 newProgress = true;
                 shouldUpdate = true;
@@ -246,7 +286,10 @@ export class MissionIntegrationService {
             const objType = objective.type as string;
 
             if (objType === "steal") {
-              if (operation === "download" && objective.target === fileId) {
+              if (
+                operation === "download" &&
+                matchesEntity(objective, fileId, "fileId")
+              ) {
                 newProgress = true;
                 shouldUpdate = true;
               }
@@ -264,7 +307,10 @@ export class MissionIntegrationService {
                 shouldUpdate = true;
               }
             } else if (objType === "delete_file") {
-              if (operation === "delete" && objective.target === fileId) {
+              if (
+                operation === "delete" &&
+                matchesEntity(objective, fileId, "fileId")
+              ) {
                 newProgress = true;
                 shouldUpdate = true;
               }
@@ -330,7 +376,7 @@ export class MissionIntegrationService {
               newProgress = (objective.current as number) + 1;
               shouldUpdate = true;
             } else if (objType === "contact_player") {
-              if (objective.target === recipientId) {
+              if (matchesEntity(objective, recipientId, "recipientId", "userId")) {
                 newProgress = true;
                 shouldUpdate = true;
               }
@@ -381,7 +427,7 @@ export class MissionIntegrationService {
               newProgress = (objective.current as number) + 1;
               shouldUpdate = true;
             } else if (objType === "connect_server") {
-              if (objective.target === serverId) {
+              if (matchesEntity(objective, serverId, "serverId")) {
                 newProgress = true;
                 shouldUpdate = true;
               }
@@ -457,7 +503,10 @@ export class MissionIntegrationService {
                 shouldUpdate = true;
               }
             } else if (objType === "forum_reply") {
-              if (activityType === "reply" && objective.target === threadId) {
+              if (
+                activityType === "reply" &&
+                matchesEntity(objective, threadId, "threadId", "postId")
+              ) {
                 newProgress = true;
                 shouldUpdate = true;
               }

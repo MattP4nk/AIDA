@@ -1,5 +1,5 @@
 {
-  "dependencies": {
-    "sweetalert2": "^11.26.25"
-  }
+  "name": "aida",
+  "private": true,
+  "description": "AIDA monorepo root. Real code lives in server/ and client/, which are installed independently. This manifest previously carried a single unused sweetalert2 dependency left over from another project."
 }

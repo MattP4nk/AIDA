@@ -169,15 +169,18 @@ const TUTORIAL_STEPS: TutorialStepDefinition[] = [
     description: "Learn to breach secured systems by hacking a training server.",
     objective: { type: "hack", description: "Hack a server", target: 1 },
     reward: { xp: 100, credits: 200 },
-    hint: "Connect to the Training Gateway (10.10.10.1) and scan to find the Training Firewall (10.10.10.30). Use 'hack 10.10.10.30' to breach it. After hacking, try 'backdoor install' for persistent access.",
+    hint: "Connect to the Training Gateway (10.10.10.1) and find the Training Firewall (10.10.10.30). You can breach it with 'hack 10.10.10.30' — or look for hidden credential files on the Gateway (try 'ls -a') and download them for an alternative way in.",
     architectMail: {
       subject: "Training Assignment: Breach Protocol",
       content:
         "You've been gathering intel. Now it's time to learn how to take what isn't given.\n\n" +
-        "Not every server welcomes visitors. Some require force. Hacking is how you open locked doors in this world.\n\n" +
-        "OBJECTIVE: Hack a server.\n\n" +
-        "There's a Training Firewall at 10.10.10.30 — it's set up for practice. Use 'hack 10.10.10.30' to breach its defenses.\n\n" +
-        "After you're in, consider using 'backdoor install' — it'll let you bypass security challenges on return visits. Useful trick for high-security targets.\n\n" +
+        "Not every server welcomes visitors. Some require force — or the right key.\n\n" +
+        "OBJECTIVE: Breach the Training Firewall (10.10.10.30).\n\n" +
+        "Two approaches:\n" +
+        "  1. BRUTE FORCE — Use 'hack 10.10.10.30' to crack through its defenses.\n" +
+        "  2. SOCIAL ENGINEERING — Explore the Training Gateway. Sysadmins leave credentials in config files. Hidden files won't show in a normal 'ls' — try 'ls -a' to see everything. Download what you find.\n\n" +
+        "After you're in, consider using 'backdoor install' — it'll let you bypass security on return visits.\n\n" +
+        "The best hackers use every tool available.\n\n" +
         "— The Architect",
     },
   },

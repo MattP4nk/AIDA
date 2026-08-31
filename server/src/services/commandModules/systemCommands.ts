@@ -1,6 +1,7 @@
 import { Command, CommandResult } from "../../../../shared/types";
+import { parseArgs, hasFlag } from "../../../../shared/shell";
 import { CommandModule, CommandContext } from "./interface";
-import { table, list, render, Column } from "./asciiBox";
+import { table, render, columns, Column } from "./asciiBox";
 import {
   resolvePath,
   getSession,
@@ -9,6 +10,7 @@ import {
   errorResult,
 } from "./helpers";
 import { VAULT_PAYLOAD_FILENAME, AIDA_FILE_PREFIX } from "../../config/gameBalance";
+import { redactSensitiveContent } from "../../utils/contentRedaction";
 
 export class SystemCommandsModule implements CommandModule {
   public category = "system";
@@ -182,10 +184,14 @@ export class SystemCommandsModule implements CommandModule {
       const session = getSession(context);
       const currentDir = session?.currentDirectory || "/";
 
-      // Resolve path (absolute or relative)
-      const path = resolvePath(command.args[0] || currentDir, currentDir);
+      // Flags must be separated from positionals BEFORE resolving the path.
+      // Previously `args[0]` was taken as the path unconditionally, so `ls -l`
+      // resolved "/-l" and failed with "Directory not found" — only a bare `ls`
+      // ever worked. (Plan item G8.)
+      const parsed = parseArgs(command.args);
+      const path = resolvePath(parsed.positionals[0] || currentDir, currentDir);
 
-      const showHidden = command.args.includes("-a");
+      const showHidden = hasFlag(parsed, "a", "all");
       const gameSession = context.gameStateManager.getSession(context.userId);
       const revealedFileIds = (gameSession as any)?.revealedFileIds as string[] || [];
       const result = await context.fileService.listDirectory(
@@ -204,7 +210,7 @@ export class SystemCommandsModule implements CommandModule {
       const entries = result.data?.entries || [];
       let output = "";
 
-      if (command.args.includes("-l")) {
+      if (hasFlag(parsed, "l", "long")) {
         // Long format — table with box-drawing borders
         const columns: Column[] = [
           { header: "TYPE", width: 4 },
@@ -231,23 +237,36 @@ export class SystemCommandsModule implements CommandModule {
         });
         output = render(table(columns, rows, undefined, context.terminalWidth));
       } else {
-        // Short format — bordered list with item counts for directories
+        // Short format — dense, multi-column, like a real `ls`. Suffix markers
+        // follow `ls -F` convention so they cost one character instead of a
+        // bracketed tag that would inflate every column. (N7.)
         const items = entries.map((entry: any) => {
-          if (entry.type === "directory") {
-            const count = entry.childCount ?? 0;
-            return count > 0 ? `${entry.name}/ (${count})` : `${entry.name}/`;
-          }
-          const encrypted = entry.isEncrypted ? " [ENC]" : "";
-          return `${entry.name}${encrypted}`;
+          let suffix = "";
+          if (entry.type === "directory") suffix += "/";
+          if (entry.isEncrypted) suffix += "*";
+          if (entry.isProtected) suffix += "+";
+          return `${entry.name}${suffix}`;
         });
-        output = render(list(path, items));
+
+        const lines: string[] = [];
+        // The prompt already shows the cwd, so only name the path when the
+        // player asked for a different one.
+        if (parsed.positionals[0]) lines.push(`${path}:`);
+        lines.push(...columns(items, context.terminalWidth || undefined));
+        output = lines.join("\n");
       }
 
-      // Summary line
+      // Summary line, plus a legend only when a marker actually appears.
       const dirCount = entries.filter((e: any) => e.type === "directory").length;
       const fileCount = entries.filter((e: any) => e.type === "file").length;
       if (entries.length > 0) {
-        output += `\n  ${dirCount} director${dirCount !== 1 ? "ies" : "y"}, ${fileCount} file${fileCount !== 1 ? "s" : ""}`;
+        const legend: string[] = [];
+        if (entries.some((e: any) => e.isEncrypted)) legend.push("* encrypted");
+        if (entries.some((e: any) => e.isProtected)) legend.push("+ protected");
+        const legendText = legend.length > 0 ? `  (${legend.join(", ")})` : "";
+        output += `\n\n${dirCount} director${dirCount !== 1 ? "ies" : "y"}, ${fileCount} file${fileCount !== 1 ? "s" : ""}${legendText}`;
+      } else {
+        output = output || "(empty)";
       }
 
       return successResult(output);
@@ -268,19 +287,48 @@ export class SystemCommandsModule implements CommandModule {
 
       const session = getSession(context);
       const currentDir = session?.currentDirectory || "/";
-      let targetDir = command.args[0] || "/";
+      const parsed = parseArgs(command.args);
 
-      // Handle ~ as home directory
-      if (targetDir === "~" || targetDir.startsWith("~/")) {
-        const homeDir = `/home/${session?.userId || "user"}`;
-        targetDir =
-          targetDir === "~" ? homeDir : targetDir.replace("~", homeDir);
+      // Bare `cd` goes home, like every shell on earth — not to `/`. (N5.)
+      let targetDir = parsed.positionals[0] ?? "~";
+
+      if (targetDir === "-") {
+        // `cd -` returns to the previous directory. (N9.)
+        const prev = session?.previousDirectory;
+        if (!prev) return errorResult("cd: no previous directory");
+        targetDir = prev;
+      } else if (targetDir === "~" || targetDir.startsWith("~/")) {
+        // `~` means the player's home directory ON THEIR OWN HOME SERVER. On a
+        // remote box you have no account, so it has no meaning there — refusing
+        // is both correct shell behaviour and good fiction.
+        //
+        // Previously this expanded to `/home/${session.userId}` (a cuid) while
+        // real home dirs are `/home/{username}`, so `cd ~` could never resolve.
+        // A third, conflicting expansion (`~` → `/`) also lives in
+        // helpers.resolvePath. (N3/N4.)
+        const isHomeServer =
+          !!session?.homeServerId && serverId === session.homeServerId;
+        if (!isHomeServer) {
+          return errorResult("cd: no home directory on this host");
+        }
+        const user = await context.db.client.user.findUnique({
+          where: { id: context.userId },
+          select: { username: true },
+        });
+        if (!user?.username) {
+          return errorResult("cd: could not resolve home directory");
+        }
+        const homeDir = `/home/${user.username}`;
+        targetDir = targetDir === "~" ? homeDir : homeDir + targetDir.slice(1);
       }
 
       // Resolve relative path and sanitize
       targetDir = resolvePath(targetDir, currentDir);
 
-      const result = await context.fileService.listDirectory(
+      // Cheap stat instead of a full listing. Validating with listDirectory
+      // cost one query per file in the target directory, so entering a large
+      // directory was slow in proportion to how interesting it was. (N2.)
+      const result = await context.fileService.statPath(
         serverId,
         context.userId,
         targetDir,
@@ -290,12 +338,21 @@ export class SystemCommandsModule implements CommandModule {
         return errorResult(`cd: ${result.message}`);
       }
 
-      // Update session
-      if (session) {
-        session.currentDirectory = result.data.path; // Use resolved path from service
+      if (!result.data.isDirectory) {
+        return errorResult(`cd: not a directory: ${targetDir}`);
       }
 
-      return successResult(`Changed directory to ${result.data.path}`, { currentDirectory: result.data.path });
+      // Update session, remembering where we came from for `cd -`.
+      if (session) {
+        session.previousDirectory = session.currentDirectory;
+        session.currentDirectory = result.data.path; // resolved path from service
+      }
+
+      // Silent on success. Real shells print nothing, and with the typewriter
+      // effect every navigation was costing a line of scrollback and a beat of
+      // time. The prompt already shows the cwd, so the confirmation was pure
+      // noise. (N6.) The path still rides along in `data` for the client.
+      return successResult("", { currentDirectory: result.data.path });
     } catch (error) {
       return errorResult("Failed to change directory", error instanceof Error ? error.message : "Unknown error");
     }
@@ -341,6 +398,30 @@ export class SystemCommandsModule implements CommandModule {
       }
 
       let output = result.data?.content || "";
+
+      // ── Content redaction: garble AIDA mentions, emails, classified terms ──
+      // Skip redaction on the player's home server (downloaded/decrypted copies are clean)
+      {
+      const currentSession = getSession(context);
+      const isHomeServer = serverId === currentSession?.homeServerId;
+
+      if (!isHomeServer) {
+        // Get player's crypto skill for partial reveals
+        let cryptoSkill = 0;
+        try {
+          const progress = await context.db.client.playerProgress.findUnique({
+            where: { userId: context.userId },
+            select: { cryptography: true },
+          });
+          cryptoSkill = progress?.cryptography ?? 0;
+        } catch { /* non-critical */ }
+
+        output = redactSensitiveContent(output, {
+          skipRedaction: false,
+          cryptoSkill,
+        });
+      }
+      } // end redaction block
 
       // DarkNet vault conquest: reading vault payload triggers reward
       if (filename === VAULT_PAYLOAD_FILENAME) {
@@ -422,6 +503,30 @@ export class SystemCommandsModule implements CommandModule {
         }
       } catch {
         /* Key fragment service not available */
+      }
+
+      // Access key hint: tell the player this file contains credentials
+      try {
+        const keyServers = await context.fileService.scanForAccessKeys(
+          result.data?.content || "",
+          serverId,
+        );
+        if (keyServers.length > 0) {
+          const serverList = keyServers.join(", ");
+          output +=
+            "\n\n" +
+            "┌──────────────────────────────────────────┐\n" +
+            "│  [!] CREDENTIALS DETECTED                │\n" +
+            "│                                          │\n" +
+            `│  This file contains access keys for:     │\n` +
+            `│    ${serverList.padEnd(38)}│\n` +
+            "│                                          │\n" +
+            "│  Use 'download " + filename.split("/").pop()?.padEnd(25, " ") + "' │\n" +
+            "│  to save and unlock access.              │\n" +
+            "└──────────────────────────────────────────┘";
+        }
+      } catch {
+        /* Access key scan not available */
       }
 
       // Apply censorship filtering to file content on faction-owned servers
@@ -522,13 +627,15 @@ export class SystemCommandsModule implements CommandModule {
     context: CommandContext,
   ): Promise<CommandResult> {
     try {
-      if (command.args.length === 0) {
+      // Flags separated before the path — `rm -r dir` previously took "-r" as
+      // the filename. (G8.)
+      const parsed = parseArgs(command.args);
+      const fileName = parsed.positionals[0];
+      if (!fileName) {
         return errorResult("rm: missing file name");
       }
 
-      const fileName = command.args[0]!;
-      const recursive =
-        command.args.includes("-r") || command.args.includes("-R");
+      const recursive = hasFlag(parsed, "r", "R", "recursive");
       const serverId = getServerId(context);
       if (!serverId) {
         return errorResult("No file system context available");
@@ -560,12 +667,13 @@ export class SystemCommandsModule implements CommandModule {
     context: CommandContext,
   ): Promise<CommandResult> {
     try {
-      if (command.args.length < 2) {
+      // `cp -r a b` previously took "-r" as the source. (G8.)
+      const parsed = parseArgs(command.args);
+      const source = parsed.positionals[0];
+      const dest = parsed.positionals[1];
+      if (!source || !dest) {
         return errorResult("cp: missing source or destination");
       }
-
-      const source = command.args[0]!;
-      const dest = command.args[1]!;
       const serverId = getServerId(context);
       if (!serverId) {
         return errorResult("No file system context available");
@@ -598,12 +706,13 @@ export class SystemCommandsModule implements CommandModule {
     context: CommandContext,
   ): Promise<CommandResult> {
     try {
-      if (command.args.length < 2) {
+      // `mv -f a b` previously took "-f" as the source. (G8.)
+      const parsed = parseArgs(command.args);
+      const source = parsed.positionals[0];
+      const dest = parsed.positionals[1];
+      if (!source || !dest) {
         return errorResult("mv: missing source or destination");
       }
-
-      const source = command.args[0]!;
-      const dest = command.args[1]!;
       const serverId = getServerId(context);
       if (!serverId) {
         return errorResult("No file system context available");

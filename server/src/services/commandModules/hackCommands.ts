@@ -7,6 +7,7 @@ import {
   validateStormAnswer,
 } from "../fileAccessMinigameGenerator";
 import { CommandModule, CommandContext } from "./interface";
+import { HACK_TOOL_ITEMS } from "../../config/gameBalance";
 import {
   boxTop,
   boxBottom,
@@ -343,8 +344,28 @@ export class HackCommandsModule implements CommandModule {
 
     const { serverId, ownerId } = targetResolution;
     const method = this.parseHackMethod(command.args);
-    const tools = this.parseTools(command.args);
+    const requestedTools = this.parseTools(command.args);
+    const toolCheck = await this.filterOwnedTools(context, requestedTools);
+    const tools = toolCheck.owned;
     const hackService = context.services.hackService;
+
+    // Tell the player which tools were ignored. Silently dropping them would
+    // look like the bonus applied, and "why did my tool do nothing" is exactly
+    // the kind of invisible failure that makes balance feel broken.
+    if (toolCheck.unknown.length > 0 || toolCheck.unowned.length > 0) {
+      const notes: string[] = [];
+      if (toolCheck.unowned.length > 0) {
+        notes.push(`not owned: ${toolCheck.unowned.join(", ")}`);
+      }
+      if (toolCheck.unknown.length > 0) {
+        notes.push(`unrecognized: ${toolCheck.unknown.join(", ")}`);
+      }
+      return errorResult(
+        `Cannot use those tools — ${notes.join("; ")}.\n` +
+          `Buy tools from the shop before using --tools. ` +
+          `Run 'scripts' to see what you own.`,
+      );
+    }
     const memoryService = context.services.memoryService;
 
     // ── Resource check: can we afford the hack prep process? ──
@@ -783,10 +804,49 @@ export class HackCommandsModule implements CommandModule {
     const toolsArg = args[toolsIndex + 1];
     if (!toolsArg) return [];
 
-    return toolsArg
-      .split(",")
-      .map((tool) => tool.trim().toLowerCase())
-      .filter(Boolean);
+    // De-duplicate. `calculateToolBonus` accumulates per array entry, so
+    // `--tools advanced_stealth,advanced_stealth,advanced_stealth` used to
+    // stack the same bonus three times.
+    const seen = new Set<string>();
+    for (const raw of toolsArg.split(",")) {
+      const tool = raw.trim().toLowerCase();
+      if (tool) seen.add(tool);
+    }
+    return [...seen];
+  }
+
+  /**
+   * Reduce requested tools to the ones the player actually owns.
+   *
+   * Returns the usable tools plus the rejects, so the caller can tell the
+   * player *why* a tool did nothing rather than silently dropping it.
+   */
+  private async filterOwnedTools(
+    context: CommandContext,
+    tools: string[],
+  ): Promise<{ owned: string[]; unknown: string[]; unowned: string[] }> {
+    const owned: string[] = [];
+    const unknown: string[] = [];
+    const unowned: string[] = [];
+
+    const shopService = context.services.shopService;
+
+    for (const tool of tools) {
+      const itemId = HACK_TOOL_ITEMS[tool];
+      if (!itemId) {
+        unknown.push(tool);
+        continue;
+      }
+      // Fail closed if the shop service is unavailable — an outage must not
+      // hand out free tool bonuses.
+      if (!shopService || !(await shopService.hasItem(context.userId, itemId))) {
+        unowned.push(tool);
+        continue;
+      }
+      owned.push(tool);
+    }
+
+    return { owned, unknown, unowned };
   }
 
   private async handleCrack(

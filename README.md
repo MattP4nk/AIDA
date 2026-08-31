@@ -141,7 +141,7 @@ AI_MODEL=gpt-oss:120b
 AI_API_KEY=your_api_key_here
 ```
 
-> **Note:** Cloud mode uses a 60s request timeout (vs 120s for local CPU inference). The `AI_*` env vars take precedence over legacy `OLLAMA_*` vars.
+> **Note:** The AI request timeout is 120s for both cloud and local inference (`aiService.ts`). The `AI_*` env vars take precedence over legacy `OLLAMA_*` vars.
 
 ---
 

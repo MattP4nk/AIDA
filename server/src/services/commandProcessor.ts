@@ -12,8 +12,34 @@ import { createAllModules } from "./commandModules/registry";
 import { checkSkillRequirement } from "./commandModules/skillRequirements";
 import { TERM_WIDTH } from "./commandModules/asciiBox";
 import { formatCommandOutput } from "./commandModules/outputFormatter";
+import {
+  tokenize,
+  parse,
+  isSimpleCommand,
+  wordText,
+} from "../../../shared/shell";
 import { injectable, inject } from "tsyringe";
 import type { Logger } from "pino";
+
+/**
+ * Tokenize with the shell lexer, returning null when the input is anything the
+ * current executor can't handle cleanly (so the caller falls back to the legacy
+ * whitespace split). Never throws.
+ */
+function tryShellParse(
+  trimmed: string,
+): { command: string; args: string[] } | null {
+  try {
+    const ast = parse(tokenize(trimmed));
+    if (!isSimpleCommand(ast)) return null;
+    const argv = ast.words.map(wordText);
+    const name = argv[0];
+    if (!name) return null;
+    return { command: name.toLowerCase(), args: argv.slice(1) };
+  } catch {
+    return null;
+  }
+}
 import {
   LOGGER,
   SOCKET_IO,
@@ -307,10 +333,32 @@ class CommandProcessor extends EventEmitter {
       };
     }
 
-    // Split command and arguments
-    const parts = trimmed.split(/\s+/);
-    const command = parts[0]?.toLowerCase() || "";
-    const args = parts.slice(1);
+    // ── Tokenize ──────────────────────────────────────────────────────────
+    // Prefer the shell lexer (quoting, escaping, correct flag/word splitting).
+    // Fall back to the legacy whitespace split whenever the shell can't handle
+    // the input *cleanly*, so this change can never make an existing input
+    // worse. See SHELL_DESIGN.md §11.
+    //
+    // Fallback cases, both deliberate:
+    //   1. Non-simple AST (pipe / redirect / && / ; / &). The executor for
+    //      those doesn't exist yet, so we keep today's behaviour of passing the
+    //      metacharacter through as a plain argument rather than erroring.
+    //   2. ShellParseError. Overwhelmingly this is an apostrophe in free text —
+    //      `msg alice it's fine` — which players type constantly. Erroring on
+    //      that would be a severe regression, so we degrade to the old split.
+    //      Once pipes land and quoting is expected, this becomes a real error.
+    let command: string;
+    let args: string[];
+
+    const shellParsed = tryShellParse(trimmed);
+    if (shellParsed) {
+      command = shellParsed.command;
+      args = shellParsed.args;
+    } else {
+      const parts = trimmed.split(/\s+/);
+      command = parts[0]?.toLowerCase() || "";
+      args = parts.slice(1);
+    }
 
     // Validate command exists
     if (!command) {

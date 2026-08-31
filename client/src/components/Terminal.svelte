@@ -3,8 +3,7 @@
     import { get } from "svelte/store";
     import { terminalService } from "../services/terminal";
     import type { CommandResult } from "../../../shared/types";
-    // Reserved PIDs for virtual UI processes (mirrored from shared/types.ts)
-    const ReservedPID = { HACK_CHALLENGE: -1, CONNECTION_CHALLENGE: -2, FILE_CHALLENGE: -3 } as const;
+    import { ReservedPID } from "../../../shared/types";
     import { apiClient } from "../services/api";
     // New ASCII Dialog system
     import MailDialog from "./MailDialog.svelte";
@@ -1056,7 +1055,7 @@
         }
 
         if (data.server) {
-            currentServer = data.server.name || data.server.id || currentServer;
+            currentServer = data.server.ip || data.server.name || currentServer;
         }
 
         if (data.directory) {

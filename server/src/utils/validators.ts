@@ -317,7 +317,9 @@ export function sanitizeMessageContent(content: string): string {
   // Remove null bytes
   let sanitized = content.replace(/\0/g, "");
 
-  // Remove control characters except newline and tab
+  // Remove control characters except newline and tab. Suppressed deliberately —
+  // matching control characters is exactly what this line is for.
+  // eslint-disable-next-line no-control-regex
   sanitized = sanitized.replace(/[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]/g, "");
 
   // Limit length

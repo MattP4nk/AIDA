@@ -29,7 +29,12 @@ export type GameProcessType =
   | "traceroute"
   | "trace_evade"
   | "sweep"
-  | "crack_file";
+  | "crack_file"
+  | "probe"
+  | "analyze"
+  | "upload"
+  | "whois"
+  | "nslookup";
 
 export interface GameProcess {
   pid: number;
@@ -102,6 +107,11 @@ export const PROCESS_COSTS: Record<GameProcessType, ProcessCostConfig> = {
   trace_evade:      { cpuCost: 70,  ramCost: 64,  bwCost: 30, baseDuration: 30000,  minDuration: 6000,  skillName: "stealth",       skillScaleFactor: 800  },
   sweep:            { cpuCost: 60,  ramCost: 64,  bwCost: 20, baseDuration: 20000,  minDuration: 5000,  skillName: "forensics",     skillScaleFactor: 800  },
   crack_file:       { cpuCost: 90,  ramCost: 96,  bwCost: 10, baseDuration: 40000,  minDuration: 8000,  skillName: "cryptography",  skillScaleFactor: 1200 },
+  probe:            { cpuCost: 50,  ramCost: 48,  bwCost: 60, baseDuration: 20000,  minDuration: 4000,  skillName: "networking",    skillScaleFactor: 600  },
+  analyze:          { cpuCost: 70,  ramCost: 64,  bwCost: 10, baseDuration: 25000,  minDuration: 5000,  skillName: "forensics",     skillScaleFactor: 800  },
+  upload:           { cpuCost: 10,  ramCost: 32,  bwCost: 50, baseDuration: 8000,   minDuration: 2000,  skillName: "networking",    skillScaleFactor: 250  },
+  whois:            { cpuCost: 15,  ramCost: 16,  bwCost: 30, baseDuration: 6000,   minDuration: 1500,  skillName: "networking",    skillScaleFactor: 200  },
+  nslookup:         { cpuCost: 10,  ramCost: 16,  bwCost: 20, baseDuration: 5000,   minDuration: 1000,  skillName: "networking",    skillScaleFactor: 200  },
 };
 
 /** Passive consumer costs */

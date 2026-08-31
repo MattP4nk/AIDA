@@ -15,6 +15,46 @@
 // Hacking
 // ═══════════════════════════════════════════════════════════════════
 
+/**
+ * Which shop item grants each `--tools` keyword.
+ *
+ * `hack --tools X` previously accepted arbitrary free text with no ownership
+ * check and no de-duplication, and `calculateToolBonus` added a bonus per array
+ * entry. Repeating one name five times pinned successRate to its 0.95 ceiling
+ * and detectionRate to its 0.05 floor — free undetected root while owning
+ * nothing. De-duplication alone does NOT close this: the 15 distinct tool
+ * keywords sum to roughly +2.0 success bonus, which still maxes the clamp.
+ * Ownership is the load-bearing check.
+ *
+ * Keys are `TOOL_EFFECTIVENESS` entries in hackService; values are
+ * `SHOP_CATALOG` ids in shopService. The two vocabularies were never aligned
+ * (`passwordcracker` vs `password_cracker`, `zero_day` vs `zero_day_exploit`),
+ * which is why a naive name-based lookup would reject even legitimately owned
+ * tools.
+ *
+ * Four tool keywords — `keylogger`, `vpn`, `custom_backdoor`, `anonymizer` —
+ * have NO catalog item, so they are deliberately absent and grant no bonus:
+ * a tool you cannot buy is a tool you cannot use. Add a catalog item and map it
+ * here to bring one into play.
+ */
+export const HACK_TOOL_ITEMS: Readonly<Record<string, string>> = {
+  scanner: "basic_scanner",
+  portscanner: "basic_scanner",
+  passwordcracker: "password_cracker",
+  exploitkit: "exploit_framework",
+  rootkit: "rootkit",
+  proxychains: "proxy_chains",
+  zero_day: "zero_day_exploit",
+  advanced_stealth: "stealth_boost",
+  encryption_breaker: "quantum_decryptor",
+  trace_remover: "trace_scrambler",
+  log_cleaner: "log_cleaner",
+};
+
+/** Ceilings on aggregate `--tools` bonuses, applied after summing. */
+export const MAX_TOOL_SUCCESS_BONUS = 0.3;
+export const MAX_TOOL_STEALTH_BONUS = 0.3;
+
 /** Cooldown between hack attempts (seconds). Decreases with hacking skill. */
 export const HACK_COOLDOWN_BASE_S = 30;
 export const HACK_COOLDOWN_MIN_S = 10;

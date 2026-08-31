@@ -12,18 +12,23 @@ import { Server as SocketIOServer } from "socket.io";
  */
 interface MissionObjective {
   id: string;
-  type:
-    | "hack"
-    | "steal"
-    | "defend"
-    | "explore"
-    | "message"
-    | "count"
-    | "boolean";
+  /**
+   * Semantic objective type, e.g. "hack_stealth", "earn_credits",
+   * "connect_server". Deliberately a free string: missionTemplatePool defines
+   * ~30 distinct types and the AI mission generator can emit more.
+   *
+   * Progress semantics are driven by the runtime type of `target`, NOT by this
+   * field — a number means "count up to N", a boolean means "did it happen".
+   * The previous union listed "count" | "boolean", which no template ever used,
+   * so every objective silently took the wrong branch. See updateObjective().
+   */
+  type: string;
   description: string;
   target: number | string | boolean;
   current: number | string | boolean;
   completed: boolean;
+  /** Entity ids for target matching live here, not in `target`. See G6. */
+  metadata?: Record<string, unknown>;
 }
 
 /**
@@ -525,8 +530,30 @@ class MissionService extends EventEmitter {
         throw new Error("Mission not assigned to player");
       }
 
-      if (playerMission.status !== "assigned") {
-        throw new Error("Mission cannot be accepted in current state");
+      // Accepting an already-active mission is a no-op, not an error — a
+      // double-click or a retried socket event shouldn't fail.
+      if (playerMission.status === "active") {
+        return;
+      }
+
+      // The mission lifecycle is: available → active → completed/failed/expired.
+      //
+      // This previously required "assigned", which NOTHING ever writes:
+      // missionGenerator.ts:181 writes "available", while the tutorial and story
+      // paths write "active" directly and skip accept altogether. The only
+      // producer of "assigned" would be assignMission(), which has zero callers.
+      // Net effect: every generated mission threw "Mission cannot be accepted in
+      // current state", so no non-tutorial mission in the game could be started.
+      //
+      // "assigned" is still honoured so that wiring assignMission() back up
+      // later doesn't reintroduce the same mismatch.
+      if (
+        playerMission.status !== "available" &&
+        playerMission.status !== "assigned"
+      ) {
+        throw new Error(
+          `Mission cannot be accepted in current state (${playerMission.status})`,
+        );
       }
 
       // Update status
@@ -699,19 +726,35 @@ class MissionService extends EventEmitter {
         throw new Error("Objective not found");
       }
 
-      // Update progress based on type
-      if (objective.type === "count") {
-        objective.current = Math.min(
-          objective.target as number,
-          (objective.current as number) + (progress as number),
-        );
-        objective.completed = objective.current >= objective.target;
-      } else if (objective.type === "boolean") {
+      // Update progress.
+      //
+      // Semantics are derived from the TARGET's runtime type, not from
+      // `objective.type`. The declared union here (…|"count"|"boolean") matches
+      // ZERO of the 200+ entries in missionTemplatePool — they all use semantic
+      // types like "hack_stealth", "earn_credits", "steal_count". So every
+      // objective fell through to the old `else`, which set completed = true
+      // unconditionally: "Earn 5,000 credits" completed on the first credit.
+      // Targets in the pool are only ever numbers (75) or booleans (59), and
+      // switching on the target's type covers both plus any future type string.
+      //
+      // NOTE: callers pass an ABSOLUTE value, not a delta — they compute
+      // `objective.current + amount` themselves (missionIntegration.ts:255,565,570)
+      // — so this must not add anything on top.
+      const target = objective.target;
+
+      if (typeof target === "number") {
+        const value = Number(progress);
+        objective.current = Number.isFinite(value) ? value : 0;
+        objective.completed =
+          objective.completed || (objective.current as number) >= target;
+      } else if (typeof target === "boolean") {
         objective.current = progress;
-        objective.completed = progress === true;
+        objective.completed = objective.completed || progress === true;
       } else {
+        // Defensive: no string targets exist in the pool today.
         objective.current = progress;
-        objective.completed = true;
+        objective.completed =
+          objective.completed || String(progress) === String(target);
       }
 
       missionProgress[missionId] = playerMission;

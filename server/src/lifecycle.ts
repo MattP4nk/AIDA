@@ -15,6 +15,12 @@ let isShuttingDown = false;
 /**
  * Perform a graceful shutdown: save state, close connections, exit.
  */
+/**
+ * Shutdown triggers that represent a crash rather than an orderly stop.
+ * These must exit non-zero so process supervisors restart the server.
+ */
+const FAULT_SIGNALS = new Set(["uncaughtException", "unhandledRejection"]);
+
 export async function gracefulShutdown(
   signal: string,
   server: HttpServer,
@@ -118,7 +124,11 @@ export async function gracefulShutdown(
     await db.disconnect();
 
     logger.info("Graceful shutdown completed");
-    process.exit(0);
+    // A fault-triggered shutdown must NOT report success. systemd's
+    // Restart=on-failure, Docker's --restart on-failure, and Kubernetes all read
+    // exit 0 as "this process finished its job" and will not restart it — which
+    // turned any uncaught error into a silent, permanent outage.
+    process.exit(FAULT_SIGNALS.has(signal) ? 1 : 0);
   } catch (error) {
     logger.error({ err: error }, "Error during shutdown");
     process.exit(1);

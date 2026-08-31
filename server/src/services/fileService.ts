@@ -15,6 +15,7 @@ import { Logger } from "pino";
 import { prisma, Prisma } from "../database/client";
 import { Server as SocketIOServer } from "socket.io";
 import crypto from "crypto";
+import { sanitizePath } from "../utils/pathSanitizer";
 import { injectable, inject } from "tsyringe";
 import {
   LOGGER,
@@ -190,7 +191,16 @@ export class FileService {
 
       for (const child of children) {
         const permissions = child.permissions as unknown as FilePermissions;
-        if (await this.canRead(userId, child.id, accessLevel)) {
+        // Pass the already-loaded row, not its id. canRead() re-fetches when
+        // given a string, which made every `ls` cost one extra findUnique per
+        // entry — the N+1 that made listing (and therefore `cd`) slow.
+        if (
+          await this.canRead(
+            userId,
+            child as unknown as FileNode,
+            accessLevel,
+          )
+        ) {
           visibleEntries.push({
             name: child.name,
             type: child.type as "file" | "directory",
@@ -219,6 +229,83 @@ export class FileService {
       return {
         success: false,
         message: "Failed to list directory",
+        error: error.message,
+      };
+    }
+  }
+
+  /**
+   * Cheap existence + type + readability check for a single path.
+   *
+   * `cd` used to validate its target by calling listDirectory(), which fetches
+   * every child, batch-counts grandchildren, and permission-checks each entry —
+   * all to answer "does this directory exist and may I enter it?". That made
+   * navigation cost scale with the size of the directory being entered, which
+   * is exactly backwards. This does the same job in O(path depth).
+   */
+  async statPath(
+    serverId: string,
+    userId: string,
+    path: string,
+  ): Promise<FileOperationResult> {
+    try {
+      if (!isPathSafe(path)) {
+        return {
+          success: false,
+          message: `Invalid path: ${path}`,
+          error: "INVALID_PATH",
+        };
+      }
+
+      const resolution = await this.resolvePath(serverId, path);
+      if (!resolution.exists || !resolution.nodeId) {
+        return {
+          success: false,
+          message: `Directory not found: ${path}`,
+          error: "NOT_FOUND",
+        };
+      }
+
+      // resolvePath already carries the node on the common path; only fetch if
+      // it didn't, so the usual case stays at zero extra queries.
+      let node = resolution.node;
+      if (!node) {
+        const fetched = await prisma.fileSystemNode.findUnique({
+          where: { id: resolution.nodeId },
+        });
+        if (!fetched) {
+          return {
+            success: false,
+            message: `Directory not found: ${path}`,
+            error: "NOT_FOUND",
+          };
+        }
+        node = fetched as unknown as FileNode;
+      }
+
+      const accessLevel = await this.getUserAccessLevel(userId, serverId);
+      if (!(await this.canRead(userId, node, accessLevel))) {
+        return {
+          success: false,
+          message: `Permission denied: ${path}`,
+          error: "PERMISSION_DENIED",
+        };
+      }
+
+      return {
+        success: true,
+        message: "OK",
+        data: {
+          path: resolution.path,
+          isDirectory: resolution.isDirectory,
+          nodeId: resolution.nodeId,
+        },
+      };
+    } catch (error: any) {
+      this.logger.error({ err: error }, "Stat path error");
+      return {
+        success: false,
+        message: "Failed to stat path",
         error: error.message,
       };
     }
@@ -1351,8 +1438,9 @@ export class FileService {
    * Normalize a path (remove .., ., multiple slashes)
    */
   private normalizePath(path: string): string {
-    // Use the central path sanitizer for security
-    const { sanitizePath } = require("../utils/pathSanitizer");
+    // Use the central path sanitizer for security. Statically imported —
+    // pathSanitizer is a dependency-free leaf module, so there is no cycle to
+    // break, and this sits in the hot path for every file operation.
     return sanitizePath(path);
   }
 
@@ -1684,22 +1772,49 @@ export class FileService {
    * - PASS=XYZ or password: XYZ in context of a server IP
    * - Explicit key tokens like GRN-*, FW-*, CL-* (Garrison), or vault keys
    */
+  /**
+   * Scan file content for access keys without granting them.
+   * Returns server names whose keys appear in the content.
+   * Used by `cat` to show a hint that downloading would grant access.
+   */
+  async scanForAccessKeys(
+    content: string,
+    serverId: string,
+  ): Promise<string[]> {
+    if (!this.networkTopology) return [];
+
+    const serversWithKeys = await this.getAccessKeyServers(serverId);
+    const found: string[] = [];
+
+    for (const server of serversWithKeys) {
+      if (!server.accessKey) continue;
+      if (content.includes(server.accessKey)) {
+        found.push(server.name);
+      }
+    }
+
+    return found;
+  }
+
+  /**
+   * Scan file content for access keys and grant access when found.
+   * Returns names of servers whose keys were newly granted.
+   */
   async detectAndGrantAccessKeys(
     userId: string,
     content: string,
     serverId: string,
     filePath: string,
     sourceFileId?: string,
-  ): Promise<void> {
-    if (!this.networkTopology) return;
+  ): Promise<string[]> {
+    if (!this.networkTopology) return [];
 
-    // Find all servers that have an accessKey set (cached, 5-min TTL)
     const serversWithKeys = await this.getAccessKeyServers(serverId);
+    const granted: string[] = [];
 
     for (const server of serversWithKeys) {
       if (!server.accessKey) continue;
 
-      // Check if the file content contains this server's access key
       if (content.includes(server.accessKey)) {
         const alreadyHas = await this.networkTopology.playerHasAccessKey(userId, server.id);
         if (!alreadyHas) {
@@ -1712,6 +1827,8 @@ export class FileService {
             sourceFileId,
           );
 
+          granted.push(server.name);
+
           this.logger.info(
             { userId, serverId: server.id, serverName: server.name, sourceFile: filePath, sourceFileId },
             "Access key auto-discovered from downloaded file",
@@ -1719,6 +1836,8 @@ export class FileService {
         }
       }
     }
+
+    return granted;
   }
 }
 

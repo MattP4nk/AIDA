@@ -31,14 +31,28 @@ pids/
 .claude/
 
 # Scripts (dev-only utilities, not production code)
+# NOTE: 5 files here are already tracked; gitignore does not apply to tracked
+# files, so this rule only affects new additions. See PLAN.md (O8).
 server/scripts/
 
-# Documentation / notes (not source code)
-*.md
-*.toon
+# Documentation / notes
+# Previously this blanket-ignored *.md and *.toon, which meant a fresh clone got
+# exactly one doc (README.md) and PROJECT_KNOWLEDGE.toon — the de-facto
+# architecture reference — could not be committed at all. Docs are now tracked.
 
-# SQL dumps
+# SQL dumps — but NOT Prisma migrations, which are source, not dumps.
+# The blanket *.sql rule was swallowing server/prisma/migrations/**, so a fresh
+# clone could not provision a database at all. See PLAN.md (D1).
 *.sql
+!server/prisma/migrations/**/*.sql
+
+# Compiled output committed by mistake — shared/ is TypeScript source only.
+# A stale shared/types.js was shadowing shared/types.ts under Vite's default
+# .js-before-.ts resolution. See PLAN.md (A1).
+shared/**/*.js
+shared/**/*.js.map
+shared/**/*.d.ts
+shared/**/*.d.ts.map
 
 # OS
 .DS_Store

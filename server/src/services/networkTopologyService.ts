@@ -710,8 +710,16 @@ export class NetworkTopologyService {
       return { allowed: false, reason: "Server not found.", requiresHack: false, requiresKey: false };
     }
 
-    // Owner and home servers — always accessible
-    if (server.isPlayerHome || server.ownerId === userId) {
+    // Owner access only.
+    //
+    // This was `server.isPlayerHome || server.ownerId === userId`. The left
+    // operand matches ANY player's home server, not the caller's — so every
+    // player home in the game was freely readable by everyone, with no hack, no
+    // access key and no challenge. This is the only access gate in the `connect`
+    // path (networkCommands.ts:706), so it also bypassed the entire home-defence
+    // feature set (homeFirewall / homeVault / homeIds) and the honeypot logic in
+    // fileService, which assumes an attacker had to break in.
+    if (server.ownerId === userId) {
       return { allowed: true, reason: "Owner access.", requiresHack: false, requiresKey: false };
     }
 

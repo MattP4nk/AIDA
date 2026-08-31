@@ -2,6 +2,7 @@ import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
 import logger from "../../logger";
 import { spawnBackgroundProcess, successResult, errorResult } from "./helpers";
+import { redactSensitiveContent } from "../../utils/contentRedaction";
 import {
   validateIPAddress,
   validateServerId,
@@ -479,7 +480,7 @@ export class NetworkCommandsModule implements CommandModule {
     const lines = [`Subnet Scan: ${subnet} (Level ${scanLevel})`, ""];
     lines.push(...table(columns, rows, footer));
 
-    return successResult(render(lines));
+    return successResult(redactSensitiveContent(render(lines)));
   }
 
   // ==================== SERVERS ====================
@@ -605,7 +606,7 @@ export class NetworkCommandsModule implements CommandModule {
       lines.push(boxRow("  'netmap' to see network topology", W));
       lines.push(boxBottom(W));
 
-      return successResult(render(lines));
+      return successResult(redactSensitiveContent(render(lines)));
     } catch (error) {
       return errorResult(error instanceof Error ? error.message : "Failed to list servers");
     }
@@ -875,7 +876,7 @@ export class NetworkCommandsModule implements CommandModule {
         output: render(lines),
         data: {
           connectionResolved: true,
-          server: { name: targetServer.ipAddress, id: targetServer.id },
+          server: { name: targetServer.name, ip: targetServer.ipAddress },
           directory: { path: "/" },
         },
         soundEvent: "connected" as const,
@@ -943,6 +944,137 @@ export class NetworkCommandsModule implements CommandModule {
 
     const target = args[0]!;
 
+    // ── Resource check: spawn probe as a background process ──
+    const memoryService = context.services.memoryService;
+    if (memoryService) {
+      const spawn = await spawnBackgroundProcess({
+        context,
+        processType: "probe",
+        skillKey: "networking",
+        label: `probe ${target}`,
+        onComplete: async () => {
+          try {
+            let server = await context.services.serverService.getServer(target);
+            if (!server) {
+              server = await context.services.serverService.getServerByIp(target);
+            }
+            if (!server) {
+              if (context.io) {
+                context.io.to(`player:${context.userId}`).emit("command:result", {
+                  success: false,
+                  output: `Server not found: ${target}`,
+                  terminalId: command.terminalId,
+                  timestamp: new Date(),
+                });
+              }
+              return;
+            }
+
+            const accessCheck = await context.services.serverService.canAccessServer(
+              context.userId,
+              server.id,
+            );
+            const topoService = context.services.networkTopologyService;
+
+            const probeRows: Array<{ label: string; value: string }> = [
+              { label: "IP Address:  ", value: server.ipAddress },
+              { label: "Name:        ", value: server.name },
+              { label: "Type:        ", value: server.type },
+              { label: "Role:        ", value: (server as any).role || "general" },
+              { label: "Security:    ", value: `Level ${server.securityLevel}` },
+              { label: "Firewall:    ", value: `Level ${server.firewallLevel}` },
+              { label: "Encryption:  ", value: `Level ${server.encryptionLevel}` },
+              {
+                label: "Status:      ",
+                value: server.isOnline ? "ONLINE" : "OFFLINE",
+              },
+              {
+                label: "Connections: ",
+                value: `${server.currentConnections}/${server.maxConnections}`,
+              },
+              {
+                label: "Access:      ",
+                value: accessCheck.canAccess
+                  ? `Granted (Level ${accessCheck.accessLevel})`
+                  : "Denied",
+              },
+            ];
+
+            if (!accessCheck.canAccess && accessCheck.reason) {
+              probeRows.push({ label: "Reason:      ", value: accessCheck.reason });
+            }
+
+            // Network info
+            if (server.networkId) {
+              const network = await context.db.client.network.findUnique({
+                where: { id: server.networkId },
+                select: { name: true, zone: true },
+              });
+              if (network) {
+                probeRows.push({ label: "Network:     ", value: network.name });
+                probeRows.push({ label: "Zone:        ", value: network.zone });
+              }
+            }
+
+            // Topology info — show linked servers if adjacent and skilled
+            if (topoService) {
+              const adjacent = await topoService.getAdjacentServers(server.id);
+              probeRows.push({
+                label: "Links:       ",
+                value: `${adjacent.length} connections`,
+              });
+
+              const progress = await context.db.client.playerProgress.findUnique({
+                where: { userId: context.userId },
+                select: { networking: true },
+              });
+
+              // Show linked server names if networking >= 30
+              if ((progress?.networking ?? 0) >= 30 && adjacent.length > 0) {
+                probeRows.push({ label: "", value: "─── Linked Servers ───" });
+                for (const adj of adjacent.slice(0, 6)) {
+                  probeRows.push({
+                    label: `  ${adj.link.linkType}: `,
+                    value: `${adj.serverIp} (${adj.serverRole})`,
+                  });
+                }
+                if (adjacent.length > 6) {
+                  probeRows.push({
+                    label: "",
+                    value: `  ... +${adjacent.length - 6} more`,
+                  });
+                }
+              }
+            }
+
+            const lines = panel(`Probe: ${server.name}`, probeRows, context.terminalWidth);
+            const outputString = redactSensitiveContent(render(lines));
+            if (context.io) {
+              context.io.to(`player:${context.userId}`).emit("command:result", {
+                success: true,
+                output: outputString,
+                terminalId: command.terminalId,
+                timestamp: new Date(),
+              });
+            }
+          } catch (err) {
+            logger.error({ err }, "Probe background process error");
+            if (context.io) {
+              context.io.to(`player:${context.userId}`).emit("command:result", {
+                success: false,
+                output: "Probe failed",
+                terminalId: command.terminalId,
+                timestamp: new Date(),
+              });
+            }
+          }
+        },
+      });
+
+      if (spawn) return spawn.result;
+    }
+
+    // ── Fallback: no resource system — instant probe ──
     try {
       let server = await context.services.serverService.getServer(target);
       if (!server) {
@@ -1030,7 +1162,7 @@ export class NetworkCommandsModule implements CommandModule {
       }
 
       const lines = panel(`Probe: ${server.name}`, probeRows, context.terminalWidth);
-      return successResult(render(lines));
+      return successResult(redactSensitiveContent(render(lines)));
     } catch (error) {
       return errorResult(error instanceof Error ? error.message : "Probe failed");
     }
@@ -1229,7 +1361,7 @@ export class NetworkCommandsModule implements CommandModule {
     const lines = [`Traceroute to ${target}`, ""];
     lines.push(...table(columns, rows));
 
-    return successResult(render(lines));
+    return successResult(redactSensitiveContent(render(lines)));
   }
 
   // ==================== NETMAP ====================
@@ -1354,7 +1486,7 @@ export class NetworkCommandsModule implements CommandModule {
     );
     lines.push(boxBottom(W));
 
-    return successResult(render(lines));
+    return successResult(redactSensitiveContent(render(lines)));
   }
 
   // ==================== CONNECTION CHALLENGE HANDLERS ====================

@@ -441,6 +441,58 @@ export class StoryMissionService {
       },
     });
 
+    // Register the mission in the player's missionProgress blob.
+    //
+    // Creating the Mission row is not enough: getPlayerMissions()
+    // (missionService.ts:436) reads ONLY playerProgress.missionProgress, and
+    // every missionIntegration progress hook filters that same blob. Both the
+    // tutorial (tutorialService.ts:957) and the generator write it; story was
+    // the sole outlier, which is why story missions never appeared in `missions`
+    // and `accept <id>` reported "Mission not assigned to player" — the whole
+    // story-arc feature was unreachable even when generation succeeded.
+    //
+    // Written as "active" to match the tutorial path: a story step is pushed at
+    // the player by the narrative, not browsed and accepted from a board.
+    if (arc.assignedTo) {
+      const progress = await db.client.playerProgress.findUnique({
+        where: { userId: arc.assignedTo },
+        select: { missionProgress: true },
+      });
+
+      if (progress) {
+        const missionProgress =
+          (progress.missionProgress as Record<string, unknown>) || {};
+
+        missionProgress[mission.id] = {
+          missionId: mission.id,
+          userId: arc.assignedTo,
+          status: "active",
+          objectives: (objectives as Array<Record<string, unknown>>).map(
+            (obj) => ({
+              ...obj,
+              current: typeof obj.target === "number" ? 0 : false,
+              completed: false,
+            }),
+          ),
+          startedAt: new Date().toISOString(),
+          completedAt: null,
+          expiresAt: mission.expiresAt?.toISOString() ?? null,
+          storyArcId: arcId,
+          storyStep: stepNumber,
+        };
+
+        await db.client.playerProgress.update({
+          where: { userId: arc.assignedTo },
+          data: { missionProgress: missionProgress as any },
+        });
+      } else {
+        this.logger.warn(
+          { arcId, missionId: mission.id, userId: arc.assignedTo },
+          "No playerProgress row — story mission created but not registered",
+        );
+      }
+    }
+
     // Mark step as active and record mission ID
     step.status = "active";
     step.missionId = mission.id;
@@ -533,7 +585,11 @@ For failureBranch: use a step number to skip ahead, "adapt" to create an alterna
       aiService: this.aiService,
       prompt,
       systemPrompt: enrichedSystemPrompt,
-      expectedFormat: '{ "premise": "string", "steps": [{"title": "string", "description": "string", "objectiveType": "string", "successBranch": "next|complete", "failureBranch": "next|fail|adapt"}] }',
+      // Must mirror the prompt above. This previously advertised
+      // `"description"` for steps while the prompt asked for `narrativeBrief`,
+      // so every retry hint pushed the model toward the *wrong* shape.
+      expectedFormat:
+        '{ "title": "string", "description": "string", "steps": [{"stepNumber": 0, "templateId": "string", "title": "string", "narrativeBrief": "string", "successBranch": "step number or \\"complete\\"", "failureBranch": "step number, \\"adapt\\" or \\"fail\\""}] }',
       validate: arcPlanValidator,
       fallback: null,
       context: "AI arc plan generation",

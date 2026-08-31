@@ -871,8 +871,8 @@ expand CyberCorp's market dominance and acquire valuable data.`,
       type: "tutorial",
       role: "firewall",
       networkId: trainingNetwork.id,
-      securityLevel: 2,
-      firewallLevel: 2,
+      securityLevel: 1,
+      firewallLevel: 1,
       encryptionLevel: 0,
       discoveryLevel: 0,
       isOnline: true,
@@ -1397,7 +1397,7 @@ expand CyberCorp's market dominance and acquire valuable data.`,
     where: { ipAddress: "203.0.113.1" },
     update: {},
     create: {
-      name: "[AIDA] Primary Node",
+      name: "Unknown Signal Source",
       ipAddress: "203.0.113.1",
       type: "underground",
       role: "gateway",
@@ -1416,7 +1416,7 @@ expand CyberCorp's market dominance and acquire valuable data.`,
     where: { ipAddress: "203.0.113.10" },
     update: {},
     create: {
-      name: "[AIDA] Archive",
+      name: "Phantom Archive",
       ipAddress: "203.0.113.10",
       type: "underground",
       role: "database",
@@ -1434,7 +1434,7 @@ expand CyberCorp's market dominance and acquire valuable data.`,
     where: { ipAddress: "203.0.113.2" },
     update: {},
     create: {
-      name: "[AIDA] Mesh Router",
+      name: "Ghost Relay",
       ipAddress: "203.0.113.2",
       type: "underground",
       role: "router",
@@ -1584,6 +1584,7 @@ expand CyberCorp's market dominance and acquire valuable data.`,
   const cybercorpDmzKey = genKey("CC-DMZ");
   const dhDropsKey = genKey("DH-DRP");
   const aidaNodeKey = genKey("AIDA");
+  const trainingFwKey = genKey("TRN-FW");
 
   // Public + open servers (visible on scan, no hack needed)
   const publicOpenServers = [
@@ -1596,7 +1597,6 @@ expand CyberCorp's market dominance and acquire valuable data.`,
 
   // Public + hackable servers (visible on scan, hackable)
   const publicHackableServers = [
-    trainingFirewall.id,
     garrisonGw.id,
     cybercorpGw.id,
     dhRelay.id,
@@ -1714,8 +1714,18 @@ expand CyberCorp's market dominance and acquire valuable data.`,
     });
   }
 
+  // Training Firewall: public + hack_or_key (players can hack OR find the key)
+  await prisma.gameServer.update({
+    where: { id: trainingFirewall.id },
+    data: {
+      isPublic: true,
+      accessMethod: "hack_or_key",
+      accessKey: trainingFwKey,
+    },
+  });
+
   console.log(
-    `  [OK] Public: ${publicOpenServers.length + publicHackableServers.length}, Private: ${privateServers.length}`,
+    `  [OK] Public: ${publicOpenServers.length + publicHackableServers.length + 1}, Private: ${privateServers.length}`,
   );
   console.log(
     "  [OK] Access keys generated (will be planted during content provisioning)",
@@ -2030,6 +2040,40 @@ All operatives are advised to report findings.
     console.log("  [OK] Classified file added to Training Archive");
   } else {
     console.log("  [WARN] Could not find /data directory on Training Archive");
+  }
+
+  // --- Training Gateway: credentials file for Training Firewall ---
+  console.log("\nAdding firewall credentials to Training Gateway...");
+  const gwEtcDir = await prisma.fileSystemNode.findFirst({
+    where: { serverId: trainingGateway.id, name: "etc", type: "directory" },
+  });
+  const credParent = gwEtcDir;
+
+  if (credParent) {
+    await prisma.fileSystemNode.create({
+      data: {
+        serverId: trainingGateway.id,
+        parentId: credParent.id,
+        name: ".fw_maintenance.key",
+        type: "file",
+        size: 320,
+        isHidden: true,
+        permissions: DEFAULT_PERMISSIONS,
+        content: `# Firewall Maintenance Access — DO NOT DISTRIBUTE
+# Auto-generated during last maintenance cycle
+# Target: Training Firewall (10.10.10.30)
+# Valid until: 2027-01-01
+
+SERVICE_ACCOUNT=fw_maint
+ACCESS_KEY=${trainingFwKey}
+PERMISSION_LEVEL=admin
+NOTES=Use for emergency bypass when firewall is unresponsive.
+       Contact sysadmin before use in production.`,
+      },
+    });
+    console.log("  [OK] Firewall credentials planted on Training Gateway");
+  } else {
+    console.log("  [WARN] Could not find config directory on Training Gateway");
   }
 
   // --- Silver Tower: DNS pointer on CyberCorp DNS ---

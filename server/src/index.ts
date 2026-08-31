@@ -12,6 +12,7 @@ import {
   PROGRESS_SERVICE,
   IP_SERVICE,
   EVENT_SERVICE,
+  SHOP_SERVICE,
   PERSONA_SERVICE,
   AI_SCHEDULER_SERVICE,
   HACK_SERVICE,
@@ -36,6 +37,7 @@ import type GameStateManager from "./services/gameStateManager";
 import type ProgressService from "./services/progressService";
 import type IPService from "./services/ipService";
 import type EventService from "./services/eventService";
+import type ShopService from "./services/shopService";
 import type { PersonaService } from "./services/personaService";
 import type AISchedulerService from "./services/aiSchedulerService";
 import type HackService from "./services/hackService";
@@ -102,6 +104,13 @@ async function initialize(): Promise<void> {
   const eventService = getService<EventService>(EVENT_SERVICE);
   await eventService.loadSubscriptionsFromDatabase();
   logger.info("✅ Event subscriptions loaded");
+
+  // Shop catalog must exist as ShopItem rows before any purchase — InventoryItem
+  // has a required FK to it. Idempotent upsert, so adding a catalog entry can
+  // never again produce an item that lists but cannot be bought.
+  const shopService = getService<ShopService>(SHOP_SERVICE);
+  await shopService.syncCatalogToDatabase();
+  logger.info("✅ Shop catalog synced");
 
   // GameStateManager is resolved to trigger its constructor/cleanup timer
   getService<GameStateManager>(GAME_STATE_MANAGER);

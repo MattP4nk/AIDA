@@ -3,8 +3,7 @@ import { writable, get, type Writable } from "svelte/store";
 import { apiClient } from "./api";
 import { terminalTabsStore } from "./terminalTabs";
 import { sound } from "./sound";
-// Reserved PIDs for virtual UI processes (mirrored from shared/types.ts)
-const ReservedPID = { HACK_CHALLENGE: -1, CONNECTION_CHALLENGE: -2, FILE_CHALLENGE: -3 } as const;
+import { ReservedPID } from "../../../shared/types";
 
 // Socket connection configuration — override via VITE_SOCKET_URL env var
 const SOCKET_URL =

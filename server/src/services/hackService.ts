@@ -27,7 +27,11 @@ import {
   validateAnswer,
 } from "./hackMinigameGenerator";
 import type { LayerResult } from "../types/game";
-import { HACK_COOLDOWN_BASE_S } from "../config/gameBalance";
+import {
+  HACK_COOLDOWN_BASE_S,
+  MAX_TOOL_SUCCESS_BONUS,
+  MAX_TOOL_STEALTH_BONUS,
+} from "../config/gameBalance";
 
 /**
  * Enhanced HackService - Complete PvP hacking mechanics
@@ -1623,7 +1627,12 @@ class HackService extends EventEmitter {
     let successBonus = 0;
     let stealthBonus = 0;
 
-    for (const tool of tools) {
+    // De-duplicate here too. The command layer already does, but this method is
+    // the one that actually accumulates, and it must not depend on its callers
+    // behaving.
+    const uniqueTools = [...new Set(tools.map((t) => t.toLowerCase()))];
+
+    for (const tool of uniqueTools) {
       const effectiveness = this.TOOL_EFFECTIVENESS[tool.toLowerCase()] || 0;
       successBonus += effectiveness * 0.5; // Tools help success
 
@@ -1638,7 +1647,14 @@ class HackService extends EventEmitter {
       }
     }
 
-    return { successBonus, stealthBonus };
+    // Ceiling on the aggregate. Ownership filtering (gameBalance.HACK_TOOL_ITEMS)
+    // is the primary control, but a player who legitimately owns every tool
+    // should not be able to pin successRate to its 0.95 clamp on tool bonuses
+    // alone — skill has to keep mattering.
+    return {
+      successBonus: Math.min(successBonus, MAX_TOOL_SUCCESS_BONUS),
+      stealthBonus: Math.min(stealthBonus, MAX_TOOL_STEALTH_BONUS),
+    };
   }
 
   /**

@@ -337,14 +337,37 @@ export function validateStoryArcPlan(parsed: any): ValidatedStoryArcPlan | null 
     return null;
   }
 
+  // The prompt (storyMissionService.ts) asks the model for `narrativeBrief`,
+  // but this filtered on `description` — a field the model was never asked to
+  // produce. Every step was therefore dropped, `steps.length < 2` tripped, and
+  // arc creation returned null with "AI failed to generate story arc"
+  // REGARDLESS of how good the response was. Accept either spelling: field-name
+  // contracts between prompt and validator are untyped, and models drift.
+  const stepBody = (s: any): string | null => {
+    for (const key of ["description", "narrativeBrief", "brief", "summary"]) {
+      if (isNonEmptyString(s?.[key], 10)) return s[key];
+    }
+    return null;
+  };
+
+  // Branches are legitimately either a step number (jump to step N) or a
+  // keyword ("complete" / "adapt" / "fail"). Requiring `typeof === "string"`
+  // silently discarded every numeric branch, so all branching degraded to a
+  // fixed linear chain.
+  const branch = (v: unknown): string | undefined => {
+    if (typeof v === "string" && v.trim().length > 0) return v.trim();
+    if (typeof v === "number" && Number.isFinite(v)) return String(v);
+    return undefined;
+  };
+
   const steps = parsed.steps
-    .filter((s: any) => isNonEmptyString(s.title, 3) && isNonEmptyString(s.description, 10))
+    .filter((s: any) => isNonEmptyString(s?.title, 3) && stepBody(s) !== null)
     .map((s: any) => ({
       title: s.title.trim().slice(0, 80),
-      description: s.description.trim().slice(0, 500),
+      description: stepBody(s)!.trim().slice(0, 500),
       objectiveType: typeof s.objectiveType === "string" ? s.objectiveType : undefined,
-      successBranch: typeof s.successBranch === "string" ? s.successBranch : undefined,
-      failureBranch: typeof s.failureBranch === "string" ? s.failureBranch : undefined,
+      successBranch: branch(s.successBranch),
+      failureBranch: branch(s.failureBranch),
     }));
 
   if (steps.length < 2) {

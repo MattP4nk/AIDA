@@ -416,6 +416,60 @@ class ShopService extends EventEmitter {
     });
   }
 
+  /**
+   * Ensure every catalog item exists as a ShopItem row.
+   *
+   * `InventoryItem.shopItemId` is a REQUIRED foreign key to ShopItem. The shop
+   * lists from this in-memory catalog (ids like "basic_scanner"), but the only
+   * rows in the table were seeded with `seed_${name}` ids — a completely
+   * disjoint set. So every purchase passed all its guards, decremented credits,
+   * then died on a P2003 foreign-key violation and rolled back, surfacing as a
+   * generic "Purchase failed due to server error". No item in the game could be
+   * bought.
+   *
+   * Syncing at boot (rather than only fixing the seed) is the durable fix: the
+   * catalog is code, so adding an item there can never again silently produce an
+   * unbuyable entry.
+   *
+   * Idempotent — safe to run on every start.
+   */
+  public async syncCatalogToDatabase(): Promise<void> {
+    let synced = 0;
+    for (const item of SHOP_CATALOG) {
+      const effects = item.effects ?? {};
+      const row = {
+        name: item.name,
+        description: item.description,
+        itemType: item.category.toLowerCase(),
+        category: item.category.toLowerCase(),
+        price: item.price,
+        level: item.requiredLevel,
+        hackingBonus: effects.hackingBonus ?? 0,
+        stealthBonus: effects.stealthBonus ?? 0,
+        // The ShopItem table has cryptographyBonus/networkingBonus columns that
+        // the in-memory ItemEffects interface doesn't model at all (it has
+        // speed/detection/successRate/xp/credits multipliers instead). Neither
+        // shape is a superset of the other. Defaulting to 0 here is lossless for
+        // the catalog as written; reconciling the two belongs with Phase 8,
+        // where item effects get wired up for the first time.
+        cryptographyBonus: 0,
+        networkingBonus: 0,
+        isConsumable: item.isConsumable,
+        isStackable: item.maxStack > 1,
+        maxStack: item.maxStack,
+        rarity: item.rarity.toLowerCase(),
+        isActive: true,
+      };
+      await prisma.shopItem.upsert({
+        where: { id: item.id },
+        update: row,
+        create: { id: item.id, ...row },
+      });
+      synced++;
+    }
+    this.logger.info({ synced }, "Shop catalog synced to database");
+  }
+
   // ==================== SHOP BROWSING ====================
 
   /**
@@ -485,16 +539,77 @@ class ShopService extends EventEmitter {
 
     return dbItems
       .map((row) => {
-        const catalogItem = this.catalog.get(row.shopItemId);
-        if (!catalogItem) return null;
+        // Fall back to the joined DB row when the item isn't in the in-memory
+        // catalog. Previously this returned null and the entry was filtered
+        // out, so anything granted from outside SHOP_CATALOG was INVISIBLE and
+        // unusable — including the six faction/story tokens that
+        // missionService.ts:1297-1321 and missionTemplatePool.ts:1052 actively
+        // award today. The player completed the mission, the grant succeeded,
+        // and the reward silently vanished.
+        const item =
+          this.catalog.get(row.shopItemId) ??
+          (row.shopItem ? this.fromDbRow(row.shopItem) : null);
+        if (!item) return null;
         return {
           itemId: row.shopItemId,
-          item: catalogItem,
+          item,
           quantity: row.quantity,
           acquiredAt: row.acquiredAt,
         };
       })
       .filter((x): x is InventoryItem => x !== null);
+  }
+
+  /**
+   * Adapt a persisted ShopItem row to the in-memory catalog shape.
+   *
+   * The two shapes are not equivalent: the table has
+   * cryptographyBonus/networkingBonus columns that ItemEffects doesn't model,
+   * and ItemEffects has speed/detection/xp/credits multipliers the table
+   * doesn't. This maps what overlaps and is deliberately lossy — see the G3
+   * follow-up in PLAN.md for reconciling the two.
+   */
+  private fromDbRow(row: {
+    id: string;
+    name: string;
+    description: string;
+    category: string;
+    price: number;
+    level: number;
+    hackingBonus: number;
+    stealthBonus: number;
+    isConsumable: boolean;
+    maxStack: number;
+    rarity: string;
+  }): ShopItem {
+    const category = (Object.values(ItemCategory) as string[]).includes(
+      row.category.toUpperCase(),
+    )
+      ? (row.category.toUpperCase() as ItemCategory)
+      : ItemCategory.MISC;
+
+    const rarity = (Object.values(ItemRarity) as string[]).includes(
+      row.rarity.toUpperCase(),
+    )
+      ? (row.rarity.toUpperCase() as ItemRarity)
+      : ItemRarity.COMMON;
+
+    const effects: ItemEffects = {};
+    if (row.hackingBonus) effects.hackingBonus = row.hackingBonus;
+    if (row.stealthBonus) effects.stealthBonus = row.stealthBonus;
+
+    return {
+      id: row.id,
+      name: row.name,
+      description: row.description,
+      category,
+      price: row.price,
+      requiredLevel: row.level,
+      effects,
+      rarity,
+      isConsumable: row.isConsumable,
+      maxStack: row.maxStack,
+    };
   }
 
   /**
@@ -604,6 +719,18 @@ class ShopService extends EventEmitter {
     quantity: number = 1,
   ): Promise<PurchaseResult> {
     try {
+      // Defence in depth. The command layer validates too, but this is the
+      // security boundary: a negative quantity makes totalCost negative, which
+      // turns `credits: { decrement: totalCost }` into an increment, and every
+      // guard between here and there compares with `<` — which both negatives
+      // and NaN silently defeat.
+      if (!Number.isInteger(quantity) || quantity < 1) {
+        return {
+          success: false,
+          message: "Quantity must be a whole number of at least 1",
+        };
+      }
+
       // Get item from catalog
       const item = this.catalog.get(itemId);
       if (!item) {
@@ -774,6 +901,15 @@ class ShopService extends EventEmitter {
     quantity: number = 1,
   ): Promise<PurchaseResult> {
     try {
+      // Mirror of the purchase guard — a negative sell quantity would
+      // decrement inventory upward and credit the player twice over.
+      if (!Number.isInteger(quantity) || quantity < 1) {
+        return {
+          success: false,
+          message: "Quantity must be a whole number of at least 1",
+        };
+      }
+
       const item = this.catalog.get(itemId);
       if (!item) {
         return {

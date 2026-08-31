@@ -14,6 +14,23 @@ import type MissionIntegrationService from "./missionIntegration";
 import type { FactionKnowledgeService } from "./factionKnowledgeService";
 import { safeExecute } from "../utils/safeExecute";
 
+// ==================== ACCESS BALANCE ====================
+// Grounded in the shipped data: GameServer.encryptionLevel spans 0..5 across
+// all 44 servers, ServerLink.requiredAccess gates on 0 / 2 / 3 / 5, and a new
+// player starts at level 1 with hacking 10 (schema defaults).
+
+/** Player levels required per point of server encryption. enc 0→1, 3→6, 5→10. */
+const LEVEL_PER_ENCRYPTION = 2;
+
+/** Hacking skill needed per point of access level, before encryption is subtracted. */
+const HACKING_PER_ACCESS_LEVEL = 10;
+
+/** Upper bound on access level. Matches the `Math.min(10, …)` this replaces. */
+const MAX_ACCESS_LEVEL = 10;
+
+const clamp = (n: number, lo: number, hi: number): number =>
+  Math.min(hi, Math.max(lo, n));
+
 /**
  * Server state interface
  */
@@ -932,6 +949,21 @@ class ServerService {
           };
         }
 
+        // You always have full access to your own machine.
+        //
+        // This bypass is REQUIRED now that encryption actually gates access:
+        // registration creates the home server with encryptionLevel 1
+        // (routes/auth.ts:116) while the player starts at level 1, so without
+        // it the level check below would lock every new player out of their own
+        // home server on their first connect.
+        if (server.ownerId === userId) {
+          return {
+            canAccess: true,
+            accessLevel: MAX_ACCESS_LEVEL,
+            reason: "Owner access",
+          };
+        }
+
         // Get player's skills
         const progress = await this.prisma.playerProgress.findUnique({
           where: { userId },
@@ -945,11 +977,17 @@ class ServerService {
           };
         }
 
-        // Check if player's level is sufficient
+        // Check if player's level is sufficient.
+        //
+        // Was `Math.floor(encryptionLevel / 20)`. encryptionLevel is a small
+        // int — 0..5 across every server currently in the game — so the
+        // division always yielded 0 and `Math.max(1, 0)` pinned the requirement
+        // at 1 for every server in existence. Encryption had no gating effect
+        // whatsoever.
         const playerLevel = progress.level;
         const requiredLevel = Math.max(
           1,
-          Math.floor(server.encryptionLevel / 20),
+          server.encryptionLevel * LEVEL_PER_ENCRYPTION,
         );
 
         if (playerLevel < requiredLevel) {
@@ -961,15 +999,20 @@ class ServerService {
           };
         }
 
-        // Calculate access level based on hacking skill and server encryption
+        // Calculate access level from hacking skill *relative to* encryption.
+        //
+        // Was `hacking / Math.max(1, encryptionLevel / 10) * 5`. With
+        // encryptionLevel ≤ 10 the divisor `max(1, ≤1)` was always exactly 1,
+        // so this reduced to `hacking * 5` — a starting player (hacking 10)
+        // scored 50, clamped to the maximum 10, on *every* server including the
+        // most encrypted one. Encryption was subtracted from nothing.
         const hackingSkill = progress.hacking || 0;
-        const baseAccess = Math.max(
-          1,
-          Math.floor(
-            (hackingSkill / Math.max(1, server.encryptionLevel / 10)) * 5,
-          ),
+        const accessLevel = clamp(
+          Math.floor(hackingSkill / HACKING_PER_ACCESS_LEVEL) -
+            server.encryptionLevel,
+          0,
+          MAX_ACCESS_LEVEL,
         );
-        const accessLevel = Math.min(10, baseAccess);
 
         return {
           canAccess: true,

@@ -33,9 +33,14 @@ export function validateCommandInput(
 }
 
 export function sanitizeSocketInput(text: string): string {
-  return text
-    .replace(/[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]/g, "") // strip null bytes and control chars
-    .trim();
+  return (
+    text
+      // Stripping control characters is the purpose of this function, so the
+      // control-char lint rule is suppressed deliberately.
+      // eslint-disable-next-line no-control-regex
+      .replace(/[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]/g, "")
+      .trim()
+  );
 }
 
 export function validateMessageInput(data: {

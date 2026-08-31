@@ -58,7 +58,20 @@ const getEnvNumber = (key: string, defaultValue?: number): number => {
   if (!value && defaultValue === undefined) {
     throw new Error(`Environment variable ${key} is required`);
   }
-  return value ? parseInt(value, 10) : defaultValue!;
+  if (!value) return defaultValue!;
+
+  // parseInt returns NaN on garbage, and every `<` / `>` comparison against NaN
+  // is false — so a typo'd value silently defeated every range check in
+  // validateConfig(). Concretely: MAX_FILE_SIZE_MB=NaN produced a body limit of
+  // "NaNmb", which bytes() parses as null, which disables request size
+  // enforcement entirely (GHSA-v422-hmwv-36x6). Fail loudly at boot instead.
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(
+      `Environment variable ${key} must be a finite number, got "${value}"`,
+    );
+  }
+  return Math.trunc(parsed);
 };
 
 export const config: EnvironmentConfig = {

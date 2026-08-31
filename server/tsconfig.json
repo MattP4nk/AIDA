@@ -4,6 +4,12 @@
     "module": "CommonJS",
     "lib": ["ES2022"],
     "outDir": "./dist",
+    // Explicit so the emit layout is declared rather than inferred. Without it,
+    // tsc derives the common root from `include` (src/** + ../shared/**), which
+    // happens to be the repo root — making `dist/server/src/index.js` an
+    // emergent property. Dropping ../shared from include would silently
+    // collapse it to dist/index.js and break `npm start` with no build error.
+    "rootDir": "..",
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,

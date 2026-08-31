@@ -105,6 +105,49 @@ export class FileCommandsModule implements CommandModule {
 
     const path = resolvePath(filename, getSession(context)?.currentDirectory || "/");
 
+    // ── Spawn upload as a background process ──
+    const memoryService = context.services.memoryService;
+    if (memoryService) {
+      const spawn = await spawnBackgroundProcess({
+        context,
+        processType: "upload",
+        skillKey: "networking",
+        label: filename,
+        targetServerId: serverId,
+        onComplete: async () => {
+          try {
+            const result = await context.fileService.createFile(
+              serverId,
+              context.userId,
+              path,
+              content,
+              false,
+            );
+
+            if (context.io) {
+              context.io.to(`player:${context.userId}`).emit("command:result", {
+                success: result.success,
+                output: result.success
+                  ? `File uploaded: ${filename}`
+                  : `Upload failed: ${result.message}`,
+                timestamp: new Date(),
+              });
+            }
+          } catch (err) {
+            if (context.io) {
+              context.io.to(`player:${context.userId}`).emit("command:result", {
+                success: false,
+                output: "Upload failed",
+                timestamp: new Date(),
+              });
+            }
+          }
+        },
+      });
+      if (spawn) return spawn.result;
+    }
+
+    // Fallback: instant operation (no resource system)
     try {
       const result = await context.fileService.createFile(
         serverId,
@@ -174,6 +217,7 @@ export class FileCommandsModule implements CommandModule {
         targetServerId: sourceServerId,
         onComplete: async () => {
           // ── On completion: copy file to home server ──
+          const accessKeysGranted: string[] = [];
           try {
             // Track download for mission objectives FIRST (before file copy which can fail)
             const missionIntegration = context.services.missionIntegrationService;
@@ -225,22 +269,40 @@ export class FileCommandsModule implements CommandModule {
 
               // ── Access key detection happens HERE (on download, not on cat) ──
               if (context.services.networkTopologyService && fileContent) {
-                await context.fileService.detectAndGrantAccessKeys(
+                const granted = await context.fileService.detectAndGrantAccessKeys(
                   userId,
                   fileContent,
                   sourceServerId,
                   path,
                   node?.id,
                 );
+                if (granted.length > 0) accessKeysGranted.push(...granted);
               }
 
             }
 
             // Push result to player
             if (context.io) {
+              let downloadOutput = `Downloaded ${filename} → ${downloadDir}/\n${fileIsEncrypted ? "[ENCRYPTED] " : ""}File saved to home server.`;
+
+              if (accessKeysGranted.length > 0) {
+                downloadOutput += "\n\n" +
+                  "╔══════════════════════════════════════════╗\n" +
+                  "║     [!] ACCESS KEY DISCOVERED            ║\n" +
+                  "╠══════════════════════════════════════════╣\n";
+                for (const name of accessKeysGranted) {
+                  downloadOutput += `║  ► ${name.padEnd(37)}║\n`;
+                }
+                downloadOutput +=
+                  "║                                          ║\n" +
+                  "║  Access granted. Use 'connect' to enter. ║\n" +
+                  "╚══════════════════════════════════════════╝";
+              }
+
               context.io.to(`player:${userId}`).emit("command:result", {
                 success: true,
-                output: `Downloaded ${filename} → ${downloadDir}/\n${fileIsEncrypted ? "[ENCRYPTED] " : ""}File saved to home server.`,
+                output: downloadOutput,
+                soundEvent: accessKeysGranted.length > 0 ? "success" : undefined,
                 timestamp: new Date(),
               });
             }
@@ -309,8 +371,9 @@ export class FileCommandsModule implements CommandModule {
       }
 
       // Access key detection on download
+      let grantedServers: string[] = [];
       if (context.services.networkTopologyService && fileContent) {
-        await context.fileService.detectAndGrantAccessKeys(
+        grantedServers = await context.fileService.detectAndGrantAccessKeys(
           context.userId,
           fileContent,
           serverId,
@@ -319,7 +382,22 @@ export class FileCommandsModule implements CommandModule {
         );
       }
 
-      return successResult(`Downloaded ${filename} → ~/downloads/\n${fileIsEncrypted ? "[ENCRYPTED] " : ""}File saved to home server.`);
+      let downloadOutput = `Downloaded ${filename} → ~/downloads/\n${fileIsEncrypted ? "[ENCRYPTED] " : ""}File saved to home server.`;
+      if (grantedServers.length > 0) {
+        downloadOutput += "\n\n" +
+          "╔══════════════════════════════════════════╗\n" +
+          "║     [!] ACCESS KEY DISCOVERED            ║\n" +
+          "╠══════════════════════════════════════════╣\n";
+        for (const name of grantedServers) {
+          downloadOutput += `║  ► ${name.padEnd(37)}║\n`;
+        }
+        downloadOutput +=
+          "║                                          ║\n" +
+          "║  Access granted. Use 'connect' to enter. ║\n" +
+          "╚══════════════════════════════════════════╝";
+      }
+
+      return successResult(downloadOutput);
     } catch (error) {
       return errorResult("Download failed", error instanceof Error ? error.message : "Unknown error");
     }
@@ -522,6 +600,98 @@ export class FileCommandsModule implements CommandModule {
 
     const path = resolvePath(filename, getSession(context)?.currentDirectory || "/");
 
+    // ── Spawn analyze as a background process ──
+    const memoryService = context.services.memoryService;
+    if (memoryService) {
+      const spawn = await spawnBackgroundProcess({
+        context,
+        processType: "analyze",
+        skillKey: "forensics",
+        label: filename,
+        targetServerId: serverId,
+        onComplete: async () => {
+          try {
+            // Use listDirectory to find the node without reading content
+            const dir = path.substring(0, path.lastIndexOf("/")) || "/";
+            const name = path.substring(path.lastIndexOf("/") + 1);
+
+            const listResult = await context.fileService.listDirectory(
+              serverId,
+              context.userId,
+              dir,
+              true, // show hidden
+            );
+
+            if (!listResult.success || !listResult.data) {
+              if (context.io) {
+                context.io.to(`player:${context.userId}`).emit("command:result", {
+                  success: false,
+                  output: `Analyze failed: ${listResult.message}`,
+                  timestamp: new Date(),
+                });
+              }
+              return;
+            }
+
+            const entry = listResult.data.entries.find((e: any) => e.name === name);
+
+            if (!entry) {
+              if (context.io) {
+                context.io.to(`player:${context.userId}`).emit("command:result", {
+                  success: false,
+                  output: `File not found: ${filename}`,
+                  timestamp: new Date(),
+                });
+              }
+              return;
+            }
+
+            const labelWidth = 14;
+            const resultOutput = render(
+              infoBox(
+                `ANALYSIS REPORT: ${filename}`,
+                [
+                  { label: "Type:".padEnd(labelWidth), value: entry.type },
+                  { label: "Size:".padEnd(labelWidth), value: `${entry.size} bytes` },
+                  {
+                    label: "Encrypted:".padEnd(labelWidth),
+                    value: entry.isEncrypted ? "Yes" : "No",
+                  },
+                  {
+                    label: "Permissions:".padEnd(labelWidth),
+                    value: entry.permissions || "N/A",
+                  },
+                  {
+                    label: "Modified:".padEnd(labelWidth),
+                    value: new Date(entry.modified).toLocaleString(),
+                  },
+                ],
+                40,
+              ),
+            );
+
+            if (context.io) {
+              context.io.to(`player:${context.userId}`).emit("command:result", {
+                success: true,
+                output: resultOutput,
+                timestamp: new Date(),
+              });
+            }
+          } catch (err) {
+            if (context.io) {
+              context.io.to(`player:${context.userId}`).emit("command:result", {
+                success: false,
+                output: "Analysis failed",
+                timestamp: new Date(),
+              });
+            }
+          }
+        },
+      });
+      if (spawn) return spawn.result;
+    }
+
+    // Fallback: instant operation (no resource system)
     try {
       // Use listDirectory to find the node without reading content
       const dir = path.substring(0, path.lastIndexOf("/")) || "/";

@@ -73,8 +73,8 @@ export function isPathSafe(path: string): boolean {
 
   // Check for suspicious patterns
   const dangerous = [
-    /\.\.[\/\\]/,  // Parent directory traversal
-    /[\/\\]\.\./,  // Parent directory traversal
+    /\.\.[/\\]/,   // Parent directory traversal
+    /[/\\]\.\./,   // Parent directory traversal
     /^\.\.$/,      // Just ".."
     /\0/,          // Null bytes
   ];
@@ -140,7 +140,9 @@ export function isValidFilename(filename: string): boolean {
     return false;
   }
 
-  // Check for control characters
+  // Check for control characters. The control-char class is the entire point of
+  // this check, so the lint rule is suppressed deliberately rather than "fixed".
+  // eslint-disable-next-line no-control-regex
   if (/[\x00-\x1f\x7f]/.test(filename)) {
     return false;
   }

@@ -368,6 +368,7 @@ export interface NetworkContext {
   allNetworkServers: Array<{ name: string; ip: string; role: string }>;
   employeeRoster: string[];
   secrets: FactionSecret[];
+  existingDirs: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -557,7 +558,7 @@ const STATIC_CONTENT: Record<string, ServerContentPlan> = {
       {
         path: "/tutorial/lessons/03_hacking.txt",
         content:
-          "LESSON 3: HACKING (coming soon)\n\nOnce your hacking skill reaches level 20, you can attempt to\nhack into secured servers. The 'hack' command will initiate a\nmulti-stage minigame.\n\nFor now, focus on exploring and leveling up your skills.\n",
+          "LESSON 3: HACKING\n\nTime to learn how to breach secured servers.\n\n  hack <ip>         — Start a hack attempt against a server\n  hack.status       — Check your active hack session\n  hack.abort        — Abort the current hack\n\nHow it works:\n  1. Use 'scan' to find servers on your network\n  2. Use 'hack <ip>' to initiate a breach\n  3. Solve the minigame challenges (cipher, port sequence, memory trace)\n  4. Each server has layers — harder servers have more layers\n\nAfter a successful hack:\n  backdoor install  — Install persistent access (skip security next time)\n  trace.status      — Check if anyone is tracing you\n  trace.evade       — Attempt to evade an active trace\n\nTip: The Training Firewall (10.10.10.30) is a good first target.\nYour hacking skill improves with every attempt.\n",
       },
       {
         path: "/practice/sandbox/test_file.txt",
@@ -1061,7 +1062,9 @@ CRITICAL RULES:
 - When inventing an IP, use the correct range for the zone (see topology context)
 - Directory names: lowercase, no spaces
 - File paths: absolute (start with /)
-- Cross-reference other servers in the network by their real IPs and names`;
+- Cross-reference other servers in the network by their real IPs and names
+- DIRECTORY NESTING: Place new files INSIDE existing directories when appropriate. If the server already has /logs/, /data/, /etc/ — put your files there instead of creating duplicate top-level dirs. New subdirectories under existing ones are encouraged (e.g. /logs/incident_2026/ or /data/exports/).
+- Do NOT create directories that duplicate existing ones — check the EXISTING DIRECTORIES list in the prompt`;
 
 // ---------------------------------------------------------------------------
 // Process 2 — Ambient content (all servers)
@@ -1087,7 +1090,8 @@ CRITICAL RULES:
 - Directory names: lowercase, no spaces
 - File paths: absolute (start with /)
 - Cross-reference other servers in the network by their real IPs and names
-- Do NOT reference AIDA, The Emperor, factions, or world lore — this content exists independently of the main narrative`;
+- You MAY reference AIDA, The Emperor, or factions RARELY — treat them as rumors, corrupted log entries, or half-remembered whispers. Never explain what AIDA is directly. Use fragmented, cryptic, or corrupted references: "A___A", "the entity", "project ████", "signal origin: [CLASSIFIED]", "the one who shattered". These references will be automatically encrypted on the player's screen — the more broken and mysterious, the better.
+- DIRECTORY NESTING: Place new files INSIDE existing directories when appropriate. If the server already has /logs/, /data/, /etc/ — put your files there. New subdirectories under existing ones are encouraged (e.g. /data/reports/ or /logs/weekly/). Do NOT create directories that duplicate existing ones.`;
 
 /** Pick a random cryptic lore quote to embed in server content */
 function pickLoreQuote(): string {
@@ -1207,6 +1211,11 @@ SERVER:
 NETWORK: ${network.name} (zone: ${network.zone})
 Faction: ${network.factionName}`;
 
+  // Show existing directory structure so AI nests files properly
+  if (ctx.existingDirs.length > 0) {
+    prompt += `\n\nEXISTING DIRECTORIES (place files inside these — do NOT create duplicates):\n${ctx.existingDirs.map(d => `  ${d}`).join("\n")}`;
+  }
+
   // Inject faction lore — the WHAT (motivation, history, goals)
   if (FACTION_LORE[factionKey]) {
     prompt += `\n\nFACTION CONTEXT (what this faction cares about — reference but do NOT copy verbatim):\n${FACTION_LORE[factionKey]}`;
@@ -1310,6 +1319,11 @@ SERVER:
   Type: ${server.type}
   Role: ${server.role}
   Security: Level ${server.securityLevel}`;
+
+  // Show existing directory structure so AI nests files properly
+  if (ctx.existingDirs.length > 0) {
+    prompt += `\n\nEXISTING DIRECTORIES (place files inside these — do NOT create duplicates):\n${ctx.existingDirs.map(d => `  ${d}`).join("\n")}`;
+  }
 
   if (network) {
     prompt += `\n\nNETWORK: ${network.name} (zone: ${network.zone})`;
@@ -1804,6 +1818,28 @@ export class ServerContentService {
         allNetworkServers,
       );
 
+      // Get existing directory structure so AI can nest files properly
+      const existingNodes = await this.prisma.fileSystemNode.findMany({
+        where: { serverId: server.id, type: "directory" },
+        select: { id: true, name: true, parentId: true },
+      });
+      const nameMap = new Map(existingNodes.map(n => [n.id, n.name]));
+      const parentMap = new Map(existingNodes.map(n => [n.id, n.parentId]));
+      const getPath = (id: string): string => {
+        const parts: string[] = [];
+        let cur: string | null | undefined = id;
+        while (cur && nameMap.has(cur)) {
+          const name = nameMap.get(cur)!;
+          if (name !== "/") parts.unshift(name);
+          cur = parentMap.get(cur);
+        }
+        return "/" + parts.join("/");
+      };
+      const existingDirs = existingNodes
+        .map(n => getPath(n.id))
+        .filter(p => p !== "/")
+        .sort();
+
       return {
         server: {
           name: server.name,
@@ -1817,6 +1853,7 @@ export class ServerContentService {
         allNetworkServers,
         employeeRoster,
         secrets,
+        existingDirs,
       };
     } catch (error) {
       this.logger.debug(
@@ -2236,7 +2273,11 @@ export class ServerContentService {
     await this.applyContentPlanViaPrisma(serverId, ownerId, plan);
   }
 
-  // @ts-ignore kept for potential future use when FileService permission model supports system callers
+  // Unreferenced today: applyContentPlan always takes the Prisma-direct path,
+  // because FileService's permission checks reject system provisioning. Kept for
+  // when that model supports system callers. Audit A9 tracks collapsing these two
+  // implementations into one.
+  // @ts-expect-error TS6133 — intentionally unused, see above
   private async applyContentPlanViaFileService(
     serverId: string,
     ownerId: string,

@@ -433,7 +433,7 @@ export class MessageService {
     content: string,
   ): Promise<MessageOperationResult> {
     try {
-      // Check daily AI message limit (5 total across all personas)
+      // Check daily AI message limit (20 total across all personas)
       const today = new Date();
       today.setHours(0, 0, 0, 0);
 
@@ -447,10 +447,10 @@ export class MessageService {
         },
       });
 
-      if (todayCount >= 5) {
+      if (todayCount >= 20) {
         return {
           success: false,
-          message: "Daily AI message limit reached (5/day total)",
+          message: "Daily AI message limit reached (20/day total)",
         };
       }
 
@@ -1427,7 +1427,8 @@ export class MessageService {
       const capturedPersonaId = personaId;
       const capturedPlayerId = playerId;
       const capturedSubject = replySubjectForRetry;
-      const svc = this;
+      // No `this` alias needed — the callback below is an arrow function, so
+      // `this` is already lexically bound to this method's receiver.
       aiService.queueForRetry(prompt, persona.systemPrompt, async (response) => {
         if (!response || response.trim().length === 0) return;
         // Guard against stale state — verify both player and persona still exist
@@ -1436,7 +1437,7 @@ export class MessageService {
           prisma.aIPersona.findUnique({ where: { id: capturedPersonaId }, select: { id: true } }),
         ]);
         if (playerExists && personaExists) {
-          await svc.sendAIMessage(capturedPersonaId, capturedPlayerId, capturedSubject, response).catch(() => {});
+          await this.sendAIMessage(capturedPersonaId, capturedPlayerId, capturedSubject, response).catch(() => {});
         }
       });
     }

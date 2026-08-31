@@ -410,6 +410,48 @@ export function helpPanelSections(
  *   │  • bob (offline)             │
  *   └──────────────────────────────┘
  */
+/**
+ * Pack items into width-aware columns, filled column-major like a real `ls`.
+ *
+ * Boxes are right for output you read once (reports); they are wrong for output
+ * you read hundreds of times a session. A 30-entry directory rendered one
+ * bullet per line is 30+ lines of scrollback where a real shell gives you four
+ * dense columns — see SHELL_DESIGN.md §10a.
+ */
+export function columns(
+  items: string[],
+  termWidth = TERM_WIDTH,
+  gutter = 2,
+): string[] {
+  if (items.length === 0) return [];
+
+  const maxLen = items.reduce((m, s) => Math.max(m, s.length), 0);
+  const colWidth = maxLen + gutter;
+
+  // At least one column, even if a single name is wider than the terminal.
+  const cols = Math.max(1, Math.floor(termWidth / colWidth));
+  if (cols === 1) return items.slice();
+
+  const rows = Math.ceil(items.length / cols);
+  const lines: string[] = [];
+
+  // Column-major fill: reading *down* each column is alphabetical, which is
+  // what `ls` does and what people's eyes expect.
+  for (let r = 0; r < rows; r++) {
+    let line = "";
+    for (let c = 0; c < cols; c++) {
+      const idx = c * rows + r;
+      if (idx >= items.length) continue;
+      const item = items[idx]!;
+      const isLastInRow = idx + rows >= items.length;
+      line += isLastInRow ? item : item.padEnd(colWidth);
+    }
+    lines.push(line.trimEnd());
+  }
+
+  return lines;
+}
+
 export function list(
   title: string,
   items: string[],

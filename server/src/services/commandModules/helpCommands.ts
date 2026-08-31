@@ -420,10 +420,6 @@ export class HelpCommandsModule implements CommandModule {
     sections.push({
       rows: [
         { label: "Total Commands:  ", value: String(totalCommands) },
-        {
-          label: "Success Rate:    ",
-          value: "100% (Tracking not implemented)",
-        },
       ],
     });
 

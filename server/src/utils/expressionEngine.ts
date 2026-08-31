@@ -302,7 +302,7 @@ export class ExpressionEngine {
    */
   private safeMathEval(expression: string): number {
     // Replace mathematical functions
-    let safeExpr = expression
+    const safeExpr = expression
       .replace(/\bsin\b/g, "Math.sin")
       .replace(/\bcos\b/g, "Math.cos")
       .replace(/\btan\b/g, "Math.tan")

@@ -52,6 +52,8 @@ export interface PlayerSession {
   currentServerId?: string;
   homeServerId?: string;
   currentDirectory: string;
+  /** Previous working directory, for `cd -`. Undefined until the first `cd`. */
+  previousDirectory?: string;
   isActive: boolean;
   ipAddress: string;
   commandQueue: Command[];

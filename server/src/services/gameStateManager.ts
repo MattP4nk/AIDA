@@ -977,12 +977,10 @@ Tips:
         }
 
         return {
-          id: server.id,
           name: server.name,
           ip: server.ipAddress,
           type: server.type,
           accessLevel,
-          ownerId: server.ownerId,
           encryptionLevel: server.encryptionLevel,
         };
       },
