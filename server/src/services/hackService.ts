@@ -31,6 +31,8 @@ import {
   HACK_COOLDOWN_BASE_S,
   MAX_TOOL_SUCCESS_BONUS,
   MAX_TOOL_STEALTH_BONUS,
+  SKILL_PENALTY,
+  SKILL_SOFT_BAND,
 } from "../config/gameBalance";
 
 /**
@@ -450,6 +452,13 @@ class HackService extends EventEmitter {
     method: HackMethod,
     tools: string[],
     detectionModifier: number = 0,
+    /**
+     * Skill shortfall severity (0..1) when the player is attempting this below
+     * the command's baseline skill. Computed by the command layer, which is the
+     * only place that knows WHICH command was typed (hack/crack/exploit/… each
+     * have a different baseline).
+     */
+    skillPenaltySeverity: number = 0,
   ): Promise<{
     success: boolean;
     session?: HackSessionInfo;
@@ -591,6 +600,7 @@ class HackService extends EventEmitter {
       startedAt: now,
       expiresAt: now + totalTimeLimit * 1000,
       layerStartedAt: now,
+      skillPenaltySeverity,
     };
 
     this.activeHacks.set(attackerId, session);
@@ -1044,6 +1054,7 @@ class HackService extends EventEmitter {
       server,
       session.method,
       session.tools,
+      session.skillPenaltySeverity ?? 0,
     );
 
     // Adjust access level by layers solved
@@ -1498,11 +1509,17 @@ class HackService extends EventEmitter {
           return { valid: false, error: "Attacker not found" };
         }
 
-        // Check minimum skill requirement
-        if (attacker.progress.hacking < 10) {
+        // Absolute floor, as defence-in-depth for callers that bypass the
+        // command layer. The COMMAND layer owns skill policy now (soft gates),
+        // and the lowest baseline it permits is `hack`'s 20 minus
+        // SKILL_SOFT_BAND — so anything below that is a bug, not a choice.
+        // This used to read `< 10`, which silently contradicted the soft band by
+        // refusing the Hacking 5-9 attempts the gate had just allowed.
+        const absoluteFloor = 20 - SKILL_SOFT_BAND;
+        if (attacker.progress.hacking < absoluteFloor) {
           return {
             valid: false,
-            error: "Insufficient hacking skill (minimum: 10)",
+            error: `Insufficient hacking skill (minimum: ${absoluteFloor})`,
           };
         }
 
@@ -1550,6 +1567,12 @@ class HackService extends EventEmitter {
     targetServer: any,
     method: HackMethod,
     tools: string[],
+    /**
+     * Skill shortfall severity (0..1) for an under-skilled attempt. See the Soft
+     * Skill Gates section of gameBalance.ts: requirements are a baseline, and
+     * falling short costs success rate and stealth rather than blocking outright.
+     */
+    skillPenaltySeverity: number = 0,
   ): Promise<HackCalculation> {
     // 1. Get base rates
     let successRate = this.BASE_SUCCESS_RATE;
@@ -1587,6 +1610,16 @@ class HackService extends EventEmitter {
     // 7. Apply encryption factor
     const encryptionLevel = targetServer.encryptionLevel || 0;
     successRate -= encryptionLevel * 0.05;
+
+    // 7b. Apply the soft-gate penalty for attempting this under-skilled.
+    // Multiplicative on success (a shortfall scales down whatever edge you had,
+    // rather than subtracting a flat amount that could invert a strong build)
+    // and additive on detection (fumbling is loud in absolute terms).
+    const severity = Math.max(0, Math.min(1, skillPenaltySeverity));
+    if (severity > 0) {
+      successRate *= 1 - severity * SKILL_PENALTY.maxSuccessPenalty;
+      detectionRate += severity * SKILL_PENALTY.maxDetectionPenalty;
+    }
 
     // 8. Calculate access level (how deep into system)
     // Clamp successRate to 0-1 before combining with hackingSkill (also 0-1)
@@ -1840,6 +1873,14 @@ class HackService extends EventEmitter {
         if (server.factionId && attackerId) {
           await this.applyDetectionReputationPenalty(attackerId, server.factionId, evidenceLevel);
         }
+
+        // The owner notices and says so. Not gated on factionId: neutral and
+        // training infrastructure has a sysadmin with a voice too, and that is
+        // the first feedback a new player gets about being noisy.
+        if (attackerId) {
+          const reacted = await this.triggerNpcReaction(serverId, server.name, attackerId, evidenceLevel);
+          if (reacted) counterMeasures.push("owner_contacted");
+        }
       }
 
       // ── Critical evidence (81-100): Lockdown + trace + access revocation ──
@@ -1874,6 +1915,12 @@ class HackService extends EventEmitter {
         // Heavy reputation penalty
         if (server.factionId && attackerId) {
           await this.applyDetectionReputationPenalty(attackerId, server.factionId, evidenceLevel);
+        }
+
+        // Owner reaction, escalated tone at this evidence level.
+        if (attackerId) {
+          const reacted = await this.triggerNpcReaction(serverId, server.name, attackerId, evidenceLevel);
+          if (reacted) counterMeasures.push("owner_contacted");
         }
 
         // Revoke attacker's access key for this server (if they had one)
@@ -1958,6 +2005,38 @@ class HackService extends EventEmitter {
    * Alert the faction AI leader about a detected intrusion on their server.
    * The AI can then generate counter-missions or post warnings.
    */
+  /**
+   * Let an NPC server owner respond to being breached, in character.
+   *
+   * Resolved lazily through the container so hackService keeps no hard
+   * dependency on the reaction service, and returns false rather than throwing:
+   * NPC flavour must never be able to break the hack pipeline.
+   */
+  private async triggerNpcReaction(
+    serverId: string,
+    serverName: string,
+    attackerId: string,
+    evidenceLevel: number,
+  ): Promise<boolean> {
+    try {
+      const { getService } = await import("../di/container");
+      const { NPC_REACTION_SERVICE } = await import("../di/tokens");
+      const reactionService =
+        getService<import("./npcReactionService").NpcReactionService>(
+          NPC_REACTION_SERVICE,
+        );
+      return await reactionService.onIntrusionDetected({
+        serverId,
+        serverName,
+        attackerId,
+        evidenceLevel,
+      });
+    } catch (err) {
+      this.logger.debug({ err, serverId }, "NPC reaction service unavailable");
+      return false;
+    }
+  }
+
   private async alertFactionAI(
     factionId: string,
     serverId: string,
@@ -1968,7 +2047,13 @@ class HackService extends EventEmitter {
     try {
       const { getService } = await import("../di/container");
       const { PERSONA_SERVICE } = await import("../di/tokens");
-      const personaService = getService<any>(PERSONA_SERVICE);
+      // Typed, NOT `getService<any>`. The `any` here is what let the arity bug
+      // below survive: this call passed a single object to a 4-positional
+      // method, so `serverFactionId`/`attackerUserId`/`detected` were all
+      // undefined and the lookup threw — meaning the faction AI never actually
+      // learned about a high-evidence intrusion.
+      const personaService =
+        getService<import("./personaService").PersonaService>(PERSONA_SERVICE);
 
       // Feed knowledge to faction — they now know about the attacker
       const { FACTION_KNOWLEDGE_SERVICE } = await import("../di/tokens");
@@ -1989,14 +2074,12 @@ class HackService extends EventEmitter {
       });
 
       // Notify the faction's AI leader — this can trigger a reactive mission
-      await personaService.onFactionServerHacked({
+      await personaService.onFactionServerHacked(
         serverId,
-        serverName,
         factionId,
         attackerId,
-        evidenceLevel,
-        detected: true,
-      });
+        true,
+      );
 
       this.logger.info({ factionId, serverId, attackerId, evidenceLevel }, "Faction AI alerted about intrusion");
     } catch (err) {

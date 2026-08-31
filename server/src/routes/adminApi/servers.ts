@@ -2,6 +2,7 @@ import { Router } from "express";
 import { prisma } from "../../database/client";
 import { asyncHandler } from "../../middleware/setup";
 import { NotFoundError, ValidationError, GameError } from "../../../../shared/types";
+import { resolveNpcOwnerId } from "../../../prisma/npcOwnership";
 
 const router = Router();
 
@@ -115,6 +116,14 @@ router.post("/", asyncHandler(async (req: any, res: any) => {
     throw new GameError(`IP address '${ipAddress}' is already in use`, "CONFLICT", 409);
   }
 
+  // Default to the appropriate NPC owner. An ownerless server cannot be hacked
+  // at all (resolveHackTarget refuses them), so creating one from the admin
+  // panel would quietly produce a dead server.
+  const adminOwnerId = await resolveNpcOwnerId(prisma, {
+    factionId: factionId ?? null,
+    type,
+  });
+
   const server = await prisma.gameServer.create({
     data: {
       name,
@@ -123,6 +132,7 @@ router.post("/", asyncHandler(async (req: any, res: any) => {
       role: role ?? "general",
       networkId: networkId ?? undefined,
       factionId: factionId ?? undefined,
+      ownerId: adminOwnerId,
       securityLevel: securityLevel ?? 1,
       firewallLevel: firewallLevel ?? 1,
       encryptionLevel: encryptionLevel ?? 0,

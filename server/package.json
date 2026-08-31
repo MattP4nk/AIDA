@@ -11,6 +11,8 @@
     "db:generate": "npx prisma generate",
     "db:studio": "npx prisma studio",
     "db:seed": "tsx prisma/seed.ts",
+    "db:push": "npx prisma db push",
+    "db:reset": "npx prisma db push --force-reset && tsx prisma/seed.ts",
     "migrate:home-dirs": "tsx scripts/migrate-home-directories.ts",
     "migrate:home-dirs:dry-run": "tsx scripts/migrate-home-directories.ts --dry-run",
     "test": "jest",

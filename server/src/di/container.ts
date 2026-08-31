@@ -35,6 +35,8 @@ import { FactionService } from "../services/factionService";
 import { ReputationEngine } from "../services/reputationEngine";
 import { AIService } from "../services/aiService";
 import { PersonaService } from "../services/personaService";
+import { NpcReactionService } from "../services/npcReactionService";
+import { PersonaMailQueueService } from "../services/personaMailQueueService";
 import { PersonaMissionGenService } from "../services/personaMissionGenService";
 import { PersonaActionService } from "../services/personaActionService";
 import AISchedulerService from "../services/aiSchedulerService";
@@ -128,6 +130,8 @@ export function setupContainer(
   container.registerSingleton(TOKENS.PERSONA_MISSION_GEN_SERVICE, PersonaMissionGenService);
   container.registerSingleton(TOKENS.PERSONA_ACTION_SERVICE, PersonaActionService);
   container.registerSingleton(TOKENS.PERSONA_SERVICE, PersonaService);
+  container.registerSingleton(TOKENS.NPC_REACTION_SERVICE, NpcReactionService);
+  container.registerSingleton(TOKENS.PERSONA_MAIL_QUEUE_SERVICE, PersonaMailQueueService);
   container.registerSingleton(TOKENS.AI_SCHEDULER_SERVICE, AISchedulerService);
 
   // Territory & Resources (Phase 3)

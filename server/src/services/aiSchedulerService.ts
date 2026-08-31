@@ -283,7 +283,22 @@ export class AISchedulerService {
   }
 
   /**
-   * Check if persona can take a scheduled action (enforces daily limit)
+   * Check if persona can take a scheduled action (enforces daily limit).
+   *
+   * SCOPE — this budget covers AUTONOMOUS activity only.
+   *
+   * `AI_MAX_ACTIONS_PER_DAY` exists to stop personas generating unprompted
+   * content all day. It must NEVER gate work a player asked for: if a player
+   * writes to a persona, they get an answer, however many actions that persona
+   * has already taken today. A player waiting on a reply that silently never
+   * comes because an unrelated scheduler budget was spent is indistinguishable
+   * from the game being broken.
+   *
+   * Reactive generation therefore runs outside this counter — see
+   * `personaMailQueueService`, which calls the AI service directly and is bounded
+   * instead by (a) one pending reply per sender→player, (b) the per-recipient
+   * flood limit in `messageService`, and (c) the concurrency throttle. Keep it
+   * that way: do not route reply generation through here.
    */
   private async canTakeAction(personaId: string): Promise<boolean> {
     const persona = await this.prisma.aIPersona.findUnique({

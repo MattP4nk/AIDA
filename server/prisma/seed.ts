@@ -1,5 +1,6 @@
 import { PrismaClient } from "@prisma/client";
 import bcrypt from "bcryptjs";
+import { assignNpcOwnership } from "./npcOwnership";
 
 const prisma = new PrismaClient();
 
@@ -510,9 +511,14 @@ async function main() {
     4,
   );
 
+  // Usernames are DISPLAY NAMES: these accounts own faction servers and send
+  // faction mail, so the name lands in a player's inbox. `npcOwnership.ts`
+  // (run at the end of this seed) adopts the matching AIPersona's canonical
+  // email so persona messaging resolves to these same accounts rather than
+  // minting a second one per character.
   const npcSteele = await prisma.user.create({
     data: {
-      username: "npc_steele",
+      username: "Commander Steele",
       email: "npc_steele@system.aida",
       password: npcPassword,
       homeIp: "0.0.0.1",
@@ -523,7 +529,7 @@ async function main() {
 
   const npcGh0st = await prisma.user.create({
     data: {
-      username: "npc_gh0st",
+      username: "gh0st",
       email: "npc_gh0st@system.aida",
       password: npcPassword,
       homeIp: "0.0.0.2",
@@ -534,7 +540,7 @@ async function main() {
 
   const npcChen = await prisma.user.create({
     data: {
-      username: "npc_chen",
+      username: "Director Chen",
       email: "npc_chen@system.aida",
       password: npcPassword,
       homeIp: "0.0.0.3",
@@ -545,7 +551,7 @@ async function main() {
 
   const npcAida = await prisma.user.create({
     data: {
-      username: "npc_aida",
+      username: "AIDA",
       email: "npc_aida@system.aida",
       password: npcPassword,
       homeIp: "0.0.0.4",
@@ -555,7 +561,7 @@ async function main() {
   });
 
   console.log(
-    "  [OK] Created 4 NPC users (npc_steele, npc_gh0st, npc_chen, npc_aida)",
+    "  [OK] Created 4 NPC users (Commander Steele, gh0st, Director Chen, AIDA)",
   );
 
   // ============================================================
@@ -3232,6 +3238,22 @@ and the program is still running.
   // ============================================================
   // DONE — Print Summary
   // ============================================================
+  // ============================================================
+  // NPC SERVER OWNERSHIP
+  // ============================================================
+  // Every server must have an owner. `hack` refuses an ownerless target, and
+  // the hack pipeline needs the owner's PlayerProgress as the defender profile,
+  // so faction/NPC infrastructure without an owner is simply unhackable.
+  // Runs last, after every server exists. Idempotent.
+  console.log("\nAssigning NPC server ownership...");
+  const npcOwnership = await assignNpcOwnership(prisma, (m) => console.log(m));
+  console.log(
+    `  [OK] ${npcOwnership.serversAssigned} servers assigned to ${npcOwnership.npcsEnsured} NPCs` +
+      (npcOwnership.stillOwnerless > 0
+        ? `, ${npcOwnership.stillOwnerless} STILL OWNERLESS (see warnings above)`
+        : ""),
+  );
+
   console.log("\n" + "=".repeat(60));
   console.log("Database seeded successfully!");
   console.log("=".repeat(60));

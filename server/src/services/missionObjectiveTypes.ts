@@ -126,6 +126,27 @@ export const OBJECTIVE_TYPES: Map<string, ObjectiveTypeDefinition> = new Map<
     },
   ],
   [
+    // "Get in, however you can." Distinct from both `hack` (requires the act of
+    // hacking) and `gain_access` (requires reaching a minimum access LEVEL).
+    // Needed because a scraped "minimal" breach reports success with
+    // accessLevel 0 — see hackService's accessLevelFactor of 0.1 — so a
+    // gain_access objective is unwinnable for a low-skill player even when they
+    // did break in. Credited by onHackComplete and by onAccessGranted.
+    "breach_server",
+    {
+      type: "breach_server",
+      description: "Get access to a secured server by any means",
+      progressType: "boolean",
+      // Credited by TWO hooks — the whole point of this type. The field holds
+      // one string, so it names both rather than silently under-reporting the
+      // non-hack route.
+      trackedBy: "onHackComplete + onAccessGranted",
+      requiredMetadata: [],
+      optionalMetadata: ["serverId"],
+      exampleTarget: true,
+    },
+  ],
+  [
     "install_backdoor",
     {
       type: "install_backdoor",
@@ -542,7 +563,7 @@ export const MISSION_CATEGORIES: Map<string, string[]> = new Map<
   string,
   string[]
 >([
-  ["action", ["hack", "hack_target", "hack_stealth", "hack_method", "gain_access", "install_backdoor"]],
+  ["action", ["hack", "hack_target", "hack_stealth", "hack_method", "gain_access", "breach_server", "install_backdoor"]],
   ["file", ["steal", "steal_count", "upload_file", "delete_file"]],
   ["social", ["message", "contact_player"]],
   ["forum", ["forum_post", "forum_reply", "forum_interaction"]],
@@ -661,6 +682,8 @@ const OBJECTIVE_HINTS: Record<string, string> = {
     "Use the specified hacking method (e.g. 'hack <server> --method brute')",
   gain_access:
     "Hack and escalate privileges on the target server to reach the required access level",
+  breach_server:
+    "Get into a secured server — crack it with 'hack <server>', or find an access key in another server's files and 'download' it",
 
   // File
   steal: "Use 'read <filename>' on a target server to access files",

@@ -482,6 +482,20 @@ async function initialize(): Promise<void> {
     logger.warn({ err }, "Content queue initialization failed (non-critical)");
   }
 
+  // Deferred persona mail — replies arrive after a human-plausible delay, and
+  // generation happens when an item comes due so bursts spread over time.
+  try {
+    const { PERSONA_MAIL_QUEUE_SERVICE } = await import("./di/tokens");
+    const mailQueue =
+      getService<import("./services/personaMailQueueService").PersonaMailQueueService>(
+        PERSONA_MAIL_QUEUE_SERVICE,
+      );
+    mailQueue.start();
+    logger.info("✅ Persona mail queue started");
+  } catch (err) {
+    logger.warn({ err }, "Persona mail queue initialization failed (non-critical)");
+  }
+
   const resourceService =
     getService<import("./services/resourceService").default>(RESOURCE_SERVICE);
   resourceService.startResourceGeneration();

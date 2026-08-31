@@ -204,12 +204,28 @@ export class ConnectionChallengeService {
       const { MESSAGE_SERVICE } = await import("../di/tokens");
       const messageService = getService<any>(MESSAGE_SERVICE);
 
-      await messageService.sendAIMessage(
+      const result = await messageService.sendAIMessage(
         architect.id,
         userId,
         CONNECTION_BRIEFING_SUBJECT,
         CONNECTION_BRIEFING_CONTENT,
       );
+
+      // This return value used to be ignored, so any rejection dropped the
+      // briefing silently — and this is the mail that explains the MANDATORY
+      // first-visit connection challenge. A player who loses it faces the
+      // handshake puzzle with no idea what it wants.
+      if (!result?.success) {
+        this.logger.warn(
+          { userId, reason: result?.message },
+          "Briefing via persona failed — falling back to system message",
+        );
+        await messageService.sendSystemMessage(
+          userId,
+          CONNECTION_BRIEFING_SUBJECT,
+          CONNECTION_BRIEFING_CONTENT,
+        );
+      }
 
       this.logger.info({ userId }, "Connection challenge briefing mail sent");
     } catch (err) {

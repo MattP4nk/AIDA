@@ -8,6 +8,7 @@ import {
 } from "../fileAccessMinigameGenerator";
 import { CommandModule, CommandContext } from "./interface";
 import { HACK_TOOL_ITEMS } from "../../config/gameBalance";
+import { getSkillShortfall } from "./skillRequirements";
 import {
   boxTop,
   boxBottom,
@@ -231,7 +232,7 @@ export class HackCommandsModule implements CommandModule {
         command: "backdoor.list",
         category: "hack",
         description:
-          "[Hacking 15] List your installed backdoors on remote servers",
+          "List your installed backdoors on remote servers",
         usage: "backdoor.list",
       },
       {
@@ -368,15 +369,27 @@ export class HackCommandsModule implements CommandModule {
     }
     const memoryService = context.services.memoryService;
 
+    // Get player's hacking skill (duration scaling) and the soft-gate shortfall.
+    // Hoisted above the resource branch because BOTH the process path and the
+    // legacy direct path below need to pass the penalty into the hack session.
+    const progress = await context.db.client.playerProgress.findUnique({
+      where: { userId: context.userId },
+      select: { hacking: true, level: true },
+    });
+    const hackingSkill = progress?.hacking ?? 1;
+
+    // Soft skill gate: `hack` has a baseline of Hacking 20, but a player within
+    // SKILL_SOFT_BAND of it may attempt anyway at a penalty. Computed here
+    // because the command layer is the only place that knows which command was
+    // typed — hack/crack/exploit/backdoor/rootkit each have a different baseline.
+    const shortfall = getSkillShortfall(
+      command.command,
+      command.args,
+      (progress ?? {}) as unknown as Record<string, unknown>,
+    );
+
     // ── Resource check: can we afford the hack prep process? ──
     if (memoryService) {
-      // Get player's hacking skill for duration scaling
-      const progress = await context.db.client.playerProgress.findUnique({
-        where: { userId: context.userId },
-        select: { hacking: true, level: true },
-      });
-      const hackingSkill = progress?.hacking ?? 1;
-
       // Ensure computer spec is initialized
       memoryService.initComputerSpec(context.userId, progress?.level ?? 1);
 
@@ -423,6 +436,7 @@ export class HackCommandsModule implements CommandModule {
               method,
               tools,
               detMod,
+              shortfall?.severity ?? 0,
             );
 
             // Push minigame start to player via Socket.IO
@@ -512,6 +526,15 @@ export class HackCommandsModule implements CommandModule {
       lines.push(boxRow(` PID:     ${proc.pid}`, W));
       lines.push(boxDivider(W));
       lines.push(boxRow(` CPU: ${spec.cpuUsed}/${spec.cpuTotal}  RAM: ${spec.ramUsed}/${spec.ramTotal}MB  BW: ${spec.bwUsed}/${spec.bwTotal}`, W));
+      // State the penalty up front. An unexplained low success rate is exactly
+      // the kind of invisible modifier that reads as broken balance rather than
+      // as a deliberate cost (same reasoning as the ignored-tools notice above).
+      if (shortfall) {
+        lines.push(boxDivider(W));
+        lines.push(boxRow(` [!] UNDER-SKILLED: ${shortfall.skillName} ${shortfall.currentSkill}/${shortfall.requiredSkill}`, W));
+        lines.push(boxRow(`     Success reduced, detection raised. You will`, W));
+        lines.push(boxRow(`     still learn from the attempt.`, W));
+      }
       lines.push(boxDivider(W));
       lines.push(boxRow(" Process running in background.", W));
       lines.push(boxRow(" Use 'ps' to monitor, 'kill " + proc.pid + "' to abort.", W));
@@ -527,6 +550,8 @@ export class HackCommandsModule implements CommandModule {
       serverId!,
       method,
       tools,
+      0,
+      shortfall?.severity ?? 0,
     );
 
     if (!result.success) {

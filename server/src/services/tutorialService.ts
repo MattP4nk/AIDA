@@ -33,12 +33,11 @@ import { PrismaClient, Mission } from "@prisma/client";
 import { Logger } from "pino";
 import MissionService from "./missionService";
 import MessageService from "./messageService";
-import { AIService } from "./aiService";
+import { resolveAiPersonaUserId } from "../utils/aiUserIdentity";
 import {
   PRISMA_CLIENT,
   MISSION_SERVICE,
   MESSAGE_SERVICE,
-  AI_SERVICE,
   LOGGER,
 } from "../di/tokens";
 
@@ -83,7 +82,11 @@ const TUTORIAL_STEPS: TutorialStepDefinition[] = [
     description: "Learn to navigate the network by connecting to remote servers.",
     objective: { type: "explore", description: "Connect to 3 different servers", target: 3 },
     reward: { xp: 50, credits: 100 },
-    hint: "Type 'scan' to discover nearby servers. Use 'connect 10.10.10.1' to visit the Training Gateway. From there, 'scan' again to find more training servers. 'disconnect' returns you home.",
+    // `connect` requires a DIRECT link (networkTopologyService.canTraverse), and
+    // a new player's home server links only to the Internet Exchange. The old
+    // hint sent them straight at 10.10.10.1 and they hit "CONNECTION BLOCKED"
+    // on the very first instruction the game gives them.
+    hint: "Type 'scan' to see what your home terminal can reach — the Internet Exchange at 10.0.0.1. 'connect 10.0.0.1', then 'scan' again to see the gateways beyond it, and 'connect 10.10.10.1' for the Training Gateway. You can only connect to servers linked to the one you're on. 'disconnect' returns you home.",
     architectMail: {
       subject: "Your Training Begins",
       content:
@@ -104,7 +107,7 @@ const TUTORIAL_STEPS: TutorialStepDefinition[] = [
     description: "Learn to extract classified files from remote servers.",
     objective: { type: "download_file", description: "Download a file from any server", target: true },
     reward: { xp: 75, credits: 150 },
-    hint: "Connect to the Training Archive at 10.10.10.20. Browse with 'ls' and 'cd', then 'download <filename>' to save a file to your ~/downloads/ directory. Look in /data/classified/ for intel.",
+    hint: "Route to the Training Archive at 10.10.10.20 via the Training Gateway (10.0.0.1 → 10.10.10.1 → 10.10.10.20). Browse with 'ls' and 'cd', then 'download <filename>' to save a file to your ~/downloads/ directory. Look in /data/classified/ for intel.",
     architectMail: {
       subject: "Training Assignment: Data Recovery",
       content:
@@ -166,10 +169,24 @@ const TUTORIAL_STEPS: TutorialStepDefinition[] = [
   // ── Step 5: Breach Protocol ──────────────────────────────────────
   {
     title: "Breach Protocol",
-    description: "Learn to breach secured systems by hacking a training server.",
-    objective: { type: "hack", description: "Hack a server", target: 1 },
+    description: "Learn to breach a secured system — by force or by finding the key.",
+    // `breach_server`, not `hack`: this step deliberately offers two routes
+    // (brute force or a found key) and the objective has to accept both. `hack`
+    // is only ever credited by hackService, so the key route used to grant
+    // access and then leave the step permanently incomplete. `gain_access` is
+    // also wrong here — it requires accessLevel >= 1, which a scraped "minimal"
+    // breach does not produce.
+    objective: {
+      type: "breach_server",
+      description: "Get access to a secured server",
+      target: true,
+    },
     reward: { xp: 100, credits: 200 },
-    hint: "Connect to the Training Gateway (10.10.10.1) and find the Training Firewall (10.10.10.30). You can breach it with 'hack 10.10.10.30' — or look for hidden credential files on the Gateway (try 'ls -a') and download them for an alternative way in.",
+    // Credentials are listed FIRST, and the `hack` route carries its skill
+    // requirement, because `hack` is gated at Hacking 20 and players arrive here
+    // with the starting 10. Leading with brute force sent every new player into
+    // a hard "Insufficient Hacking skill" wall on the step's headline advice.
+    hint: "From home, 'connect 10.0.0.1' to reach the Internet Exchange, then 'connect 10.10.10.1' for the Training Gateway. Look for hidden credential files there ('ls -a' in /etc) and 'download' what you find — that key opens the Training Firewall. Once your Hacking skill reaches 20 you can also force it with 'hack 10.10.10.30'.",
     architectMail: {
       subject: "Training Assignment: Breach Protocol",
       content:
@@ -177,10 +194,9 @@ const TUTORIAL_STEPS: TutorialStepDefinition[] = [
         "Not every server welcomes visitors. Some require force — or the right key.\n\n" +
         "OBJECTIVE: Breach the Training Firewall (10.10.10.30).\n\n" +
         "Two approaches:\n" +
-        "  1. BRUTE FORCE — Use 'hack 10.10.10.30' to crack through its defenses.\n" +
-        "  2. SOCIAL ENGINEERING — Explore the Training Gateway. Sysadmins leave credentials in config files. Hidden files won't show in a normal 'ls' — try 'ls -a' to see everything. Download what you find.\n\n" +
-        "After you're in, consider using 'backdoor install' — it'll let you bypass security on return visits.\n\n" +
-        "The best hackers use every tool available.\n\n" +
+        "  1. CREDENTIALS — Explore the Training Gateway. Sysadmins leave keys in config files. Hidden files won't show in a normal 'ls' — try 'ls -a' inside /etc to see everything, then 'download' what you find. Start here: it needs no skill you don't already have.\n" +
+        "  2. BRUTE FORCE — 'hack 10.10.10.30' cracks straight through, but the tooling needs Hacking 20 and you're starting at 10. Check 'skills' to see where you stand.\n\n" +
+        "Either way in counts. The best hackers use whichever door is open.\n\n" +
         "— The Architect",
     },
   },
@@ -272,7 +288,8 @@ export class TutorialService {
     @inject(PRISMA_CLIENT) private prisma: PrismaClient,
     @inject(MISSION_SERVICE) private missionService: MissionService,
     @inject(MESSAGE_SERVICE) private messageService: MessageService,
-    @inject(AI_SERVICE) private aiService: AIService,
+    // No AI_SERVICE dependency any more: generation moved to
+    // PersonaMailQueueService, which owns both the delay and the retry policy.
     @inject(LOGGER) private logger: Logger,
   ) {}
 
@@ -598,50 +615,47 @@ export class TutorialService {
         `The correct hint is: ${step.hint}. ` +
         `The recruit asks:\n${sanitizeForPrompt(messageContent)}`;
 
-      const { safeExecute } = await import("../utils/safeExecute");
+      // ── 7. QUEUE the reply rather than answering instantly ─────
+      //
+      // Previously this generated inline and sent immediately, which had three
+      // problems: The Architect replied the same second the player wrote (a
+      // person does not), the player's `msg` command blocked on the model, and a
+      // burst of messages contended for the AI service's two slots. Now the
+      // prompt is stored and generated when the item comes due — and if the AI
+      // is busy at that moment the queue slides delivery later, which reads as
+      // the character being occupied instead of as a failure.
+      //
+      // The static hint is the queued fallback, so a reply always arrives
+      // eventually. It no longer carries the "[AI response unavailable]" tell,
+      // which leaked implementation detail into the fiction.
+      const staticHint = `${step.hint}\n\n— The Architect`;
 
-      const staticHint =
-        `${step.hint}\n\n` +
-        "— The Architect\n\n" +
-        "[AI response unavailable — static hint provided]";
-      const architectId = architectPersona.id;
-      const msgSvc = this.messageService;
-      const replySubjectForRetry = `Re: ${step.architectMail.subject}`;
-      let usedFallback = false;
+      const { getService } = await import("../di/container");
+      const { PERSONA_MAIL_QUEUE_SERVICE } = await import("../di/tokens");
+      const mailQueue =
+        getService<import("./personaMailQueueService").PersonaMailQueueService>(
+          PERSONA_MAIL_QUEUE_SERVICE,
+        );
 
-      // Plain text response — use safeExecute with generateOrThrow
-      const replyContent = await safeExecute({
-        fn: async () => {
-          const result = await this.aiService.generateOrThrow(userPrompt, ARCHITECT_SYSTEM_PROMPT);
-          return result.response;
-        },
-        context: "Tutorial hint from The Architect",
-        logger: this.logger,
-        silent: true,
-        fallback: staticHint,
-        onError: () => { usedFallback = true; },
-      })();
-
-      // Queue retry if AI failed — when it recovers, send the real hint as a follow-up
-      if (usedFallback) {
-        this.aiService.queueForRetry(userPrompt, ARCHITECT_SYSTEM_PROMPT, async (response) => {
-          if (response && response.trim().length > 0) {
-            await msgSvc.sendAIMessage(architectId, senderId, replySubjectForRetry, response).catch(() => {});
-          }
-        });
-      }
-
-      // ── 7. Send the reply from The Architect ───────────────────
-      await this.messageService.sendAIMessage(
+      const architectUserId = await resolveAiPersonaUserId(
         architectPersona.id,
-        senderId,
-        `Re: ${step.architectMail.subject}`,
-        replyContent,
+        architectPersona.name,
       );
+
+      await mailQueue.enqueue({
+        senderId: architectUserId,
+        recipientId: senderId,
+        subject: `Re: ${step.architectMail.subject}`,
+        prompt: userPrompt,
+        systemPrompt: ARCHITECT_SYSTEM_PROMPT,
+        personaId: architectPersona.id,
+        fallback: staticHint,
+        kind: "reply",
+      });
 
       this.logger.debug(
         { senderId, step: stepIndex + 1 },
-        "Sent Architect hint reply to player",
+        "Queued Architect hint reply to player",
       );
     } catch (error) {
       this.logger.error(

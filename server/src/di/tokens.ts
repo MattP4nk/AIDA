@@ -106,3 +106,9 @@ export const REFERENCE_VALIDATION_SERVICE = "ReferenceValidationService";
 
 // Epoch Scheduling (timed story events)
 export const EPOCH_SCHEDULER_SERVICE = "EpochSchedulerService";
+
+// NPC reactions (server owners respond to intrusions in character)
+export const NPC_REACTION_SERVICE = "NpcReactionService";
+
+// Deferred persona mail (in-character reply delay + AI load smoothing)
+export const PERSONA_MAIL_QUEUE_SERVICE = "PersonaMailQueueService";

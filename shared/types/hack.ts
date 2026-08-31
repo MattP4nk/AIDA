@@ -89,6 +89,13 @@ export interface HackSessionInfo {
   startedAt: number;
   expiresAt: number;
   layerStartedAt: number;
+  /**
+   * Skill shortfall severity (0..1) at the moment the session started, for a
+   * player attempting this below the command's baseline skill. Captured at
+   * start so mid-session skill gains cannot retroactively soften the attempt.
+   * 0 or absent means the player met the requirement.
+   */
+  skillPenaltySeverity?: number;
 }
 
 export interface LayerResult {

@@ -851,6 +851,32 @@ export class NetworkCommandsModule implements CommandModule {
         return errorResult("Failed to update connection state");
       }
 
+      // ── Credit "gain access" objectives for non-hack entry ──
+      // completeConnection() is the single funnel for both direct connects and
+      // post-challenge success, so this covers key- and backdoor-based entry.
+      // hackService reports its own progress via onHackComplete; the guard
+      // inside onAccessGranted ignores open servers and servers you own, so
+      // routine travel does not credit a breach objective.
+      //
+      // Typed, NOT `as any`. An untyped call here is precisely what let the
+      // `onFactionServerHacked` arity bug survive undetected — the cast erased
+      // the signature so tsc could not see a 4-parameter method being handed a
+      // single object. Keeping this typed means a signature change breaks the
+      // build instead of silently no-oping at runtime.
+      const missionIntegration = context.services.missionIntegrationService as
+        | import("../missionIntegration").MissionIntegrationService
+        | undefined;
+      if (missionIntegration) {
+        try {
+          await missionIntegration.onAccessGranted(
+            context.userId,
+            result.serverId,
+            result.accessLevel ?? 0,
+            "connect",
+          );
+        } catch { /* non-critical — never block a connection on mission bookkeeping */ }
+      }
+
       const serverRole = (targetServer as any).role || "general";
       const network = targetServer.networkId
         ? await context.db.client.network.findUnique({

@@ -1,4 +1,5 @@
 import { injectable, inject } from "tsyringe";
+import { db } from "../database/client";
 import { MISSION_SERVICE, LOGGER, FACTION_KNOWLEDGE_SERVICE } from "../di/tokens";
 import MissionService from "./missionService";
 import type { Logger } from "pino";
@@ -194,7 +195,7 @@ export class MissionIntegrationService {
   ): Promise<void> {
     await safeExecute({
       fn: async () => {
-        const hackObjectiveTypes = ["hack", "hack_target", "hack_stealth", "hack_method", "gain_access", "install_backdoor"];
+        const hackObjectiveTypes = ["hack", "hack_target", "hack_stealth", "hack_method", "gain_access", "breach_server", "install_backdoor"];
         const activeMissions = await this.getActiveMissionsWithObjectiveTypes(userId, hackObjectiveTypes);
 
         for (const mission of activeMissions) {
@@ -232,6 +233,13 @@ export class MissionIntegrationService {
                 newProgress = true;
                 shouldUpdate = true;
               }
+            } else if (objType === "breach_server") {
+              // Any successful breach counts, at ANY access level — a "minimal"
+              // breach legitimately reports accessLevel 0.
+              if (success && matchesEntity(objective, targetId, "serverId")) {
+                newProgress = true;
+                shouldUpdate = true;
+              }
             } else if (objType === "install_backdoor") {
               if (
                 success &&
@@ -255,6 +263,75 @@ export class MissionIntegrationService {
         }
       },
       context: "onHackComplete",
+      logger: this.logger,
+      silent: true,
+    })();
+  }
+
+  /**
+   * Handle access gained WITHOUT hacking — an access key found in a file, or a
+   * previously installed backdoor.
+   *
+   * Only `breach_server` and `gain_access` are credited here, and deliberately
+   * not the `hack*` family: those describe the act of hacking, so crediting them
+   * from a key would let any "hack N servers" mission be completed by looting
+   * credentials instead.
+   *
+   * Without this hook the key path was a dead end for mission progress: the
+   * tutorial's Breach Protocol step offers "brute force OR find the key", but
+   * only `hackService` ever reported progress, so a player who took the key
+   * route got access and then sat on a step that could never complete.
+   */
+  public async onAccessGranted(
+    userId: string,
+    serverId: string,
+    accessLevel: number,
+    /**
+     * How the player got in, for the log line only. The `connect` funnel cannot
+     * distinguish an access key from a backdoor bypass — both arrive the same
+     * way — so it reports "connect" rather than guessing one of them.
+     */
+    via: "connect" | "key" | "backdoor",
+  ): Promise<void> {
+    await safeExecute({
+      fn: async () => {
+        // Only *earned* access counts. Connecting to an open server, or to a
+        // server you own, must not satisfy a breach objective.
+        const server = await db.client.gameServer.findUnique({
+          where: { id: serverId },
+          select: { accessMethod: true, ownerId: true },
+        });
+        if (!server) return;
+        if (server.ownerId === userId) return;
+        if (!["keycard", "hack_or_key", "hackable"].includes(server.accessMethod ?? "")) return;
+
+        const creditable = ["breach_server", "gain_access"];
+        const activeMissions = await this.getActiveMissionsWithObjectiveTypes(userId, creditable);
+
+        for (const mission of activeMissions) {
+          for (const objective of mission.objectives) {
+            const objType = objective.type as string;
+            if (!creditable.includes(objType)) continue;
+            // `gain_access` is about reaching a LEVEL, so it still gates on one;
+            // `breach_server` only cares that you got in.
+            if (objType === "gain_access" && accessLevel < ((objective as any).metadata?.minLevel || 1)) continue;
+            // A server-scoped objective still has to name this server.
+            if ((objective as any).metadata?.serverId && !matchesEntity(objective, serverId, "serverId")) continue;
+
+            await this.missionService.updateObjective(
+              userId,
+              mission.missionId,
+              objective.id,
+              true,
+            );
+            this.logger.info(
+              { userId, serverId, via, objType, missionId: mission.missionId, objectiveId: objective.id },
+              "Access objective credited from non-hack access",
+            );
+          }
+        }
+      },
+      context: "onAccessGranted",
       logger: this.logger,
       silent: true,
     })();

@@ -211,8 +211,11 @@ export class SystemCommandsModule implements CommandModule {
       let output = "";
 
       if (hasFlag(parsed, "l", "long")) {
-        // Long format — table with box-drawing borders
-        const columns: Column[] = [
+        // Long format — table with box-drawing borders.
+        // Named `tableColumns`, not `columns`: the module imports a `columns()`
+        // helper from asciiBox for the short format, and a local named `columns`
+        // shadowed it. Block scoping made that harmless, but only by accident.
+        const tableColumns: Column[] = [
           { header: "TYPE", width: 4 },
           { header: "PERMS", width: 9 },
           { header: "SIZE", width: 10, align: "right" },
@@ -235,7 +238,7 @@ export class SystemCommandsModule implements CommandModule {
             name,
           ];
         });
-        output = render(table(columns, rows, undefined, context.terminalWidth));
+        output = render(table(tableColumns, rows, undefined, context.terminalWidth));
       } else {
         // Short format — dense, multi-column, like a real `ls`. Suffix markers
         // follow `ls -F` convention so they cost one character instead of a

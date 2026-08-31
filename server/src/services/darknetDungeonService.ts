@@ -16,6 +16,7 @@ import crypto from "crypto";
 import { safeExecute } from "../utils/safeExecute";
 import { LOGGER, AI_SERVICE, EVENT_SERVICE } from "../di/tokens";
 import { db } from "../database/client";
+import { resolveNpcOwnerId } from "../../prisma/npcOwnership";
 import type { AIService } from "./aiService";
 import type EventService from "./eventService";
 import { EventSeverity } from "../../../shared/types";
@@ -288,6 +289,15 @@ export class DarkNetDungeonService {
 
         const serverName = `[${dungeonName}] ${roleInfo.nameTemplate}`;
 
+        // Every server needs an owner, or it cannot be hacked at all
+        // (resolveHackTarget refuses ownerless targets, and the defence math
+        // needs the owner's PlayerProgress). Dungeons regenerate periodically,
+        // so without this each new dungeon would be unhackable.
+        const dungeonOwnerId = await resolveNpcOwnerId(db.client, {
+          factionId: darknetFactionId,
+          type: roleInfo.type,
+        });
+
         const server = await db.client.gameServer.create({
           data: {
             name: serverName,
@@ -296,6 +306,7 @@ export class DarkNetDungeonService {
             role: roleInfo.role,
             networkId: network.id,
             factionId: darknetFactionId,
+            ownerId: dungeonOwnerId,
             securityLevel: serverSecurity,
             firewallLevel: Math.max(1, serverSecurity - 1),
             encryptionLevel: isVault

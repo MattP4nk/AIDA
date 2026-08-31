@@ -15,6 +15,15 @@
  */
 
 import { prisma } from "../database/client";
+import { resolveAiPersonaUserId } from "../utils/aiUserIdentity";
+
+/**
+ * Per-recipient flood protection for persona mail: at most this many messages
+ * from one sender to one player inside the window. Sized so a story beat plus a
+ * couple of reactions land fine, but a loop cannot bury a player's inbox.
+ */
+const AI_MESSAGE_FLOOD_LIMIT = 5;
+const AI_MESSAGE_FLOOD_WINDOW_MS = 60 * 60 * 1000;
 import { Server as SocketIOServer } from "socket.io";
 import crypto from "crypto";
 import { Logger } from "pino";
@@ -302,8 +311,14 @@ export class MessageService {
         });
       }
 
-      // Increment messagesSent stat (fire-and-forget)
-      prisma.playerProgress.update({
+      // Increment messagesSent stat (fire-and-forget).
+      //
+      // `updateMany`, not `update`: persona and NPC senders may have no
+      // PlayerProgress row, and `update` throws P2025 on a missing record.
+      // The `.catch()` swallowed it in JS but Prisma still logged an error for
+      // every persona mail delivered — noise that looked like a real fault.
+      // updateMany matches zero rows silently, which is the intent here.
+      prisma.playerProgress.updateMany({
         where: { userId: senderId },
         data: { messagesSent: { increment: 1 } },
       }).catch(() => {});
@@ -433,29 +448,38 @@ export class MessageService {
     content: string,
   ): Promise<MessageOperationResult> {
     try {
-      // Check daily AI message limit (20 total across all personas)
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-
-      const todayCount = await prisma.message.count({
-        where: {
-          messageType: "faction",
-          timestamp: { gte: today },
-          sender: {
-            id: { startsWith: "ai_" }, // AI persona IDs
-          },
-        },
-      });
-
-      if (todayCount >= 20) {
-        return {
-          success: false,
-          message: "Daily AI message limit reached (20/day total)",
-        };
-      }
-
       // Get or create AI system user for this persona
       const aiUserId = await this.getAIUserId(personaId);
+
+      // ── Flood protection is PER RECIPIENT, PER SENDER ──
+      //
+      // This replaces a global "20 AI messages per day" cap that was the wrong
+      // control in three ways:
+      //   - It could not save AI cost: `content` arrives already generated, so
+      //     the tokens were spent before the check ran.
+      //   - Most of what it blocked was not AI output at all. Tutorial mail and
+      //     the connection-challenge briefing are static string constants.
+      //   - Being global, it let one persona send a single player 20 messages
+      //     while stopping 20 players from receiving one each — backwards from
+      //     what inbox protection means.
+      // Discretionary persona chatter is already budgeted in the right place:
+      // aiSchedulerService's per-persona AI_MAX_ACTIONS_PER_DAY, checked BEFORE
+      // generation.
+      const since = new Date(Date.now() - AI_MESSAGE_FLOOD_WINDOW_MS);
+      const recentToRecipient = await prisma.message.count({
+        where: { senderId: aiUserId, recipientId, timestamp: { gte: since } },
+      });
+
+      if (recentToRecipient >= AI_MESSAGE_FLOOD_LIMIT) {
+        this.logger.debug(
+          { personaId, recipientId, recentToRecipient },
+          "AI message suppressed — per-recipient flood limit",
+        );
+        return {
+          success: false,
+          message: `This sender has already messaged you ${recentToRecipient} times in the last hour.`,
+        };
+      }
 
       const message = await prisma.message.create({
         data: {
@@ -475,7 +499,7 @@ export class MessageService {
       return {
         success: true,
         message: "AI message sent",
-        data: { messageId: message.id, count: todayCount + 1 },
+        data: { messageId: message.id, recentToRecipient: recentToRecipient + 1 },
       };
     } catch (error: any) {
       this.logger.error({ err: error }, "Send AI message error");
@@ -1046,41 +1070,11 @@ export class MessageService {
    * PHASE 5: Creates user accounts for AI personas to send messages
    */
   private async getAIUserId(personaId: string): Promise<string> {
-    const aiId = `ai_${personaId}`;
-
-    // Check by ID first (fastest)
-    const byId = await prisma.user.findUnique({ where: { id: aiId }, select: { id: true } });
-    if (byId) return byId.id;
-
-    // Check by persona name (seed may have created with different ID)
-    const persona = await prisma.aIPersona.findUnique({
-      where: { id: personaId },
-      select: { name: true },
-    });
-
-    if (persona?.name) {
-      const byName = await prisma.user.findFirst({
-        where: { username: persona.name, email: { endsWith: "@ai.aida.internal" } },
-        select: { id: true },
-      });
-      if (byName) return byName.id;
-    }
-
-    // Create AI user account via upsert to prevent race conditions
-    const aiUsername = persona?.name || `AI_${personaId.substring(0, 8)}`;
-    const newAIUser = await prisma.user.upsert({
-      where: { id: aiId },
-      update: {},
-      create: {
-        id: aiId,
-        username: aiUsername,
-        email: `${personaId}@ai.aida.internal`,
-        password: crypto.randomBytes(32).toString("hex"),
-        homeIp: "127.0.0.1",
-      },
-    });
-
-    return newAIUser.id;
+    // Delegates to the shared resolver. This method used to create the account
+    // itself with `homeIp: "127.0.0.1"` — and `User.homeIp` is @unique, so the
+    // FIRST persona to need an account succeeded and every persona after it
+    // failed on a constraint violation. See utils/aiUserIdentity.ts.
+    return resolveAiPersonaUserId(personaId);
   }
 
   /**

@@ -235,10 +235,87 @@ export const BOUNTY_BASE_REP = 5;
 // Reputation
 // ═══════════════════════════════════════════════════════════════════
 
-/** Reputation bounds and thresholds. */
+// (An orphaned "Reputation bounds and thresholds" docstring used to sit here,
+// above the Connection Challenges banner, documenting the wrong section.)
+
+// ═══════════════════════════════════════════════════════════════════
+// Soft Skill Gates
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Skill requirements are a BASELINE, not a wall.
+ *
+ * A player below the requirement may still attempt the action, but pays a
+ * penalty proportional to how far short they are. This exists because the
+ * underlying systems already degrade gracefully with skill — `successRate`,
+ * `detectionRate`, minigame layer difficulty and earned access level all scale
+ * with it, and `awardExperience` grants XP even on failure. The old hard gate
+ * sat on top of that and blocked the one loop that could resolve it: hacking
+ * skill is earned BY hacking, so a player at the starting Hacking 10 could
+ * never reach the `hack` requirement of 20.
+ *
+ * Shortfall beyond SKILL_SOFT_BAND is still refused. "Within reach" is the
+ * intent — curiosity should not let a Hacking 10 player burn an hour of
+ * resources on a rootkit that cannot land.
+ */
+
+/** Max points below a requirement at which an attempt is still permitted. */
+export const SKILL_SOFT_BAND = 15;
+
+/**
+ * Penalty ceilings, reached at the edge of the band (severity 1.0).
+ * Severity is `shortfall / SKILL_SOFT_BAND`, so these are the worst case.
+ */
+export const SKILL_PENALTY = {
+  /** successRate multiplier at full shortfall (0.6 → down to 40% of normal). */
+  maxSuccessPenalty: 0.6,
+  /** Absolute detectionRate added at full shortfall. Fumbling is loud. */
+  maxDetectionPenalty: 0.25,
+} as const;
+
+/**
+ * Severity of a skill shortfall, 0 (met the requirement) to 1 (at the edge of
+ * the band). Returns null when the shortfall exceeds the band — caller refuses.
+ */
+export function getSkillShortfallSeverity(
+  required: number,
+  current: number,
+): number | null {
+  const shortfall = Math.max(0, required - current);
+  if (shortfall === 0) return 0;
+  if (shortfall > SKILL_SOFT_BAND) return null;
+  return shortfall / SKILL_SOFT_BAND;
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // Connection Challenges
 // ═══════════════════════════════════════════════════════════════════
+
+/**
+ * WHAT `securityLevel` ACTUALLY CHANGES (measured 2026-08-31, U2).
+ *
+ * Every consumer rounds and then BUCKETS the difficulty, so most single-step
+ * changes to a server's securityLevel are invisible to players. Across the
+ * whole 1..10 range there are only **6 distinct player-visible configurations**,
+ * and these values are strictly indistinguishable from each other:
+ *
+ *     sec 1 == 2        sec 4 == 5        sec 8 == 9 == 10
+ *
+ * The real thresholds — the only places a +1 is felt — are:
+ *
+ *   sec 3  revisits start being challenged (CONNECTION_CHALLENGE_SKIP_THRESHOLD)
+ *   sec 4  connection challenge tier easy -> medium
+ *   sec 7  connection challenge tier medium -> hard
+ *   sec 8  a 4th hack layer appears (assignLayers duplicates the hardest type)
+ *
+ * Corollary: tuning a server from 1->2 or 4->5 does nothing. Move it across a
+ * threshold or don't bother. This is why the seed's Training Firewall 2->1
+ * change had no measurable effect.
+ *
+ * `firewallLevel` is NOT a difficulty knob despite the name: its only consumer
+ * is `assignLayers`, where it merely REORDERS the same three layer types. It
+ * never adds, removes, or hardens a layer. Treat it as flavour.
+ */
 
 /** Security threshold below which revisits skip the challenge. */
 export const CONNECTION_CHALLENGE_SKIP_THRESHOLD = 2;

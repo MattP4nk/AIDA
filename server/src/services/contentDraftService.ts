@@ -11,6 +11,7 @@ import { injectable, inject } from "tsyringe";
 import { PrismaClient } from "@prisma/client";
 import type { Logger } from "pino";
 import { PRISMA_CLIENT, LOGGER } from "../di/tokens";
+import { resolveNpcOwnerId } from "../../prisma/npcOwnership";
 
 export interface CreateDraftInput {
   type: "server" | "file" | "link" | "mission" | "forum_post" | "network" | "forum";
@@ -207,6 +208,12 @@ export class ContentDraftService {
       latency = topo.latency;
     }
 
+    // AI-authored servers need an owner too, else they are unhackable — see
+    // resolveNpcOwnerId. A payload-supplied owner wins if there is one.
+    const draftOwnerId =
+      payload.ownerId ??
+      (await resolveNpcOwnerId(this.prisma, { factionId, type: payload.type }));
+
     const server = await this.prisma.gameServer.create({
       data: {
         name: payload.name,
@@ -215,6 +222,7 @@ export class ContentDraftService {
         role: payload.role || "general",
         networkId,
         factionId,
+        ownerId: draftOwnerId,
         securityLevel: payload.securityLevel ?? 1,
         firewallLevel: payload.firewallLevel ?? 1,
         encryptionLevel: payload.encryptionLevel ?? 0,

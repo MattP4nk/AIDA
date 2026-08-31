@@ -41,8 +41,17 @@ server/scripts/
 # architecture reference — could not be committed at all. Docs are now tracked.
 
 # SQL dumps — but NOT Prisma migrations, which are source, not dumps.
-# The blanket *.sql rule was swallowing server/prisma/migrations/**, so a fresh
-# clone could not provision a database at all. See PLAN.md (D1).
+#
+# The exception is kept ready rather than needed: as of 2026-08-31 the project
+# deliberately has NO migrations and provisions with `prisma db push` from
+# schema.prisma (see PROJECT_KNOWLEDGE @migrations). The blanket *.sql rule would
+# swallow server/prisma/migrations/** the moment migrations ARE adopted, which is
+# the trap this exception exists to prevent.
+#
+# Correction to the original D1 note, which claimed a fresh clone "could not
+# provision a database at all" without migrations: it always could, from
+# schema.prisma. What ignoring migrations actually costs is deploy history — the
+# ability to evolve a database whose data you cannot drop.
 *.sql
 !server/prisma/migrations/**/*.sql
 

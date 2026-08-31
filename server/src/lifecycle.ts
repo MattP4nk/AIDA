@@ -94,6 +94,15 @@ export async function gracefulShutdown(
       logger.info("Content queue stopped");
     } catch { /* Not fatal */ }
 
+    // Stop persona mail queue. Queued rows survive in the database, so anything
+    // undelivered is picked up on the next boot rather than lost.
+    try {
+      const { PERSONA_MAIL_QUEUE_SERVICE } = await import("./di/tokens");
+      const mailQueue = getService<any>(PERSONA_MAIL_QUEUE_SERVICE);
+      mailQueue.stop();
+      logger.info("Persona mail queue stopped");
+    } catch { /* Not fatal */ }
+
     // Clear hack session timers
     try {
       const hackService = getService<any>(HACK_SERVICE);

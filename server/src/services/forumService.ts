@@ -1,5 +1,9 @@
 import { EventEmitter } from "events";
 import { prisma } from "../database/client";
+import {
+  resolveAiPersonaUserId,
+  resolveNpcHandleUserId,
+} from "../utils/aiUserIdentity";
 import type {
   Forum,
   Post,
@@ -767,27 +771,9 @@ export class ForumService extends EventEmitter {
       }
 
       // Get or create AI user ID
-      const aiUserId = `ai_${personaId}`;
-      let aiUser = await prisma.user.findUnique({ where: { id: aiUserId } });
-
-      if (!aiUser) {
-        // Create AI user account
-        const crypto = await import("crypto");
-        const { getService } = await import("../di/container");
-        const { IP_SERVICE } = await import("../di/tokens");
-        const ipService = getService<any>(IP_SERVICE);
-        const homeIp = await ipService.generateUniqueIP();
-
-        aiUser = await prisma.user.create({
-          data: {
-            id: aiUserId,
-            username: persona.name,
-            email: `${personaId}@ai.aida.internal`,
-            password: crypto.randomBytes(32).toString("hex"),
-            homeIp: homeIp,
-          },
-        });
-      }
+      // Shared resolver — this used to allocate an IP from the PLAYER range via
+      // ipService, which worked but put AI accounts in player address space.
+      const aiUserId = await resolveAiPersonaUserId(personaId, persona.name);
 
       // Auto-register as forum member if not already
       const memberKey = {
@@ -1071,20 +1057,10 @@ ${forum.description ? `Description: ${forum.description}` : ""}`;
       .toLowerCase()
       .replace(/[^a-z0-9_.-]/g, "_")
       .slice(0, 30);
-    const npcUserId = `npc_forum_${handle}`;
-
-    // Upsert NPC user account
-    await prisma.user.upsert({
-      where: { id: npcUserId },
-      create: {
-        id: npcUserId,
-        username: handle,
-        email: `${handle}@npc.aida.internal`,
-        password: (await import("crypto")).randomBytes(32).toString("hex"),
-        homeIp: `127.0.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}`,
-      },
-      update: {},
-    });
+    // Shared resolver. Previously created the account inline with a RANDOM
+    // `127.0.x.y` address and no retry, so a collision on the unique homeIp
+    // column would surface as a constraint error rather than resolving.
+    const npcUserId = await resolveNpcHandleUserId(handle);
 
     // Upsert ForumMember with personality
     const personality = {
@@ -2093,23 +2069,10 @@ YOUR POST TITLE: "${post.title}"`;
         throw new Error("Post not found");
       }
 
-      // Get or create AI user ID
-      const aiUserId = `ai_${personaId}`;
-      let aiUser = await prisma.user.findUnique({ where: { id: aiUserId } });
-
-      if (!aiUser) {
-        // Create AI user account
-        const crypto = await import("crypto");
-        aiUser = await prisma.user.create({
-          data: {
-            id: aiUserId,
-            username: persona.name,
-            email: `${personaId}@ai.aida.internal`,
-            password: crypto.randomBytes(32).toString("hex"),
-            homeIp: "127.0.0.1",
-          },
-        });
-      }
+      // Get or create AI user ID. Was a duplicate of the post path above, but
+      // with `homeIp: "127.0.0.1"` hardcoded — so it could only ever create one
+      // account before hitting the unique constraint.
+      const aiUserId = await resolveAiPersonaUserId(personaId, persona.name);
 
       // Auto-register as forum member if not already
       const memberKey = {

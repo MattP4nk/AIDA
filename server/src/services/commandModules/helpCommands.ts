@@ -11,6 +11,7 @@ import {
   SKILL_REQUIREMENTS,
   resolveSkillKey,
   meetsSkillRequirement,
+  fullyMeetsSkillRequirement,
 } from "./skillRequirements";
 import { successResult, errorResult } from "./helpers";
 
@@ -194,6 +195,7 @@ export class HelpCommandsModule implements CommandModule {
       usage: string;
       examples: string[];
       locked?: boolean;
+      underSkilled?: boolean;
     }>,
     category: string,
   ): CommandResult {
@@ -228,12 +230,19 @@ export class HelpCommandsModule implements CommandModule {
     const unlocked = categoryCommands.filter((cmd) => !cmd.locked);
     const lockedCount = categoryCommands.length - unlocked.length;
 
+    // Mark soft-gated commands the player is under-skilled for. They CAN run
+    // them, so hiding them would be wrong, but presenting them identically to
+    // mastered commands would hide the penalty they will pay.
     const entries: HelpEntry[] = unlocked.map((cmd) => ({
-      command: cmd.command,
+      command: cmd.underSkilled ? `${cmd.command} *` : cmd.command,
       description: cmd.description,
     }));
 
     const lines = helpPanel(`${category.toUpperCase()} COMMANDS`, entries);
+    if (unlocked.some((cmd) => cmd.underSkilled)) {
+      lines.push("");
+      lines.push(" * below the recommended skill — usable, but at a penalty.");
+    }
     if (lockedCount > 0) {
       lines.push("");
       lines.push(
@@ -490,6 +499,7 @@ export class HelpCommandsModule implements CommandModule {
       usage: string;
       examples: string[];
       locked?: boolean;
+      underSkilled?: boolean;
     }>
   > {
     const allCommands: Array<{
@@ -499,6 +509,7 @@ export class HelpCommandsModule implements CommandModule {
       usage: string;
       examples: string[];
       locked?: boolean;
+      underSkilled?: boolean;
     }> = [];
 
     // Check discovery level — hide fragment/endgame commands until player discovers them
@@ -523,12 +534,15 @@ export class HelpCommandsModule implements CommandModule {
           }
 
           let locked = false;
+          let underSkilled = false;
           if (playerSkills) {
-            locked = !meetsSkillRequirement(
-              info.command,
-              undefined,
-              playerSkills,
-            );
+            // `locked` = cannot run at all. `underSkilled` = a soft gate the
+            // player may attempt below its baseline, at a penalty. Collapsing
+            // the two would advertise a penalised command as fully mastered.
+            locked = !meetsSkillRequirement(info.command, undefined, playerSkills);
+            underSkilled =
+              !locked &&
+              !fullyMeetsSkillRequirement(info.command, undefined, playerSkills);
           }
           allCommands.push({
             command: info.command,
@@ -537,14 +551,18 @@ export class HelpCommandsModule implements CommandModule {
             usage: info.usage,
             examples: info.examples || [],
             locked,
+            underSkilled,
           });
         }
       } else {
         // Fallback: list command names with minimal info
         for (const cmd of mod.commands) {
           let locked = false;
+          let underSkilled = false;
           if (playerSkills) {
             locked = !meetsSkillRequirement(cmd, undefined, playerSkills);
+            underSkilled =
+              !locked && !fullyMeetsSkillRequirement(cmd, undefined, playerSkills);
           }
           allCommands.push({
             command: cmd,
@@ -553,6 +571,7 @@ export class HelpCommandsModule implements CommandModule {
             usage: cmd,
             examples: [],
             locked,
+            underSkilled,
           });
         }
       }

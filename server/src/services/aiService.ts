@@ -128,6 +128,24 @@ export class AIService {
     return `ai:${crypto.createHash("md5").update(data).digest("hex")}`;
   }
 
+  /**
+   * Current pressure on the concurrency throttle, 0 (idle) to 1+ (saturated).
+   *
+   * Exposed so callers with a *deferrable* workload can back off instead of
+   * queueing behind a full throttle and timing out. `personaMailQueueService`
+   * uses it to slide a reply's delivery time later — an NPC taking longer to
+   * answer reads as them being busy, which is strictly better than either
+   * blocking on a slot or dropping the reply.
+   */
+  public getLoad(): { activeRequests: number; queueDepth: number; saturation: number } {
+    const capacity = this.MAX_CONCURRENT_REQUESTS + this.MAX_QUEUE_DEPTH;
+    return {
+      activeRequests: this.activeRequests,
+      queueDepth: this.requestQueue.length,
+      saturation: (this.activeRequests + this.requestQueue.length) / capacity,
+    };
+  }
+
   /** Acquire a slot in the concurrency throttle. */
   private async acquireSlot(): Promise<void> {
     if (this.activeRequests < this.MAX_CONCURRENT_REQUESTS) {

@@ -1616,3 +1616,41 @@ model ContentJob {
   @@index([createdAt])
   @@map("content_jobs")
 }
+
+/// Persona mail waiting to be delivered.
+///
+/// AI-voiced replies are deliberately NOT instant: a character answering a
+/// message the same second it arrives reads as a vending machine, not a person.
+/// The delay is also load management — generation happens when the item comes
+/// due, so a burst of player messages spreads across time instead of contending
+/// for AI slots, and when the AI is saturated the delivery time slides later
+/// (in fiction: they are still composing) rather than the reply being dropped.
+model PendingPersonaMail {
+  id          String  @id @default(cuid())
+  /// AIPersona whose voice this uses. Null for hand-written mail.
+  personaId   String? @map("persona_id")
+  /// User row the mail is sent FROM (the persona/NPC account).
+  senderId    String  @map("sender_id")
+  recipientId String  @map("recipient_id")
+  subject     String
+  /// Pre-rendered body. When null, `prompt` is generated at delivery time.
+  content     String? @db.Text
+  prompt      String? @db.Text
+  systemPrompt String? @db.Text
+  /// Used when generation keeps failing, so a reply always eventually lands.
+  fallback    String? @db.Text
+  /// "reply" | "notice" — drives the delay profile.
+  kind        String  @default("reply")
+  status      String  @default("pending") // pending | sent | failed | cancelled
+  attempts    Int     @default(0)
+  maxAttempts Int     @default(3) @map("max_attempts")
+  deliverAt   DateTime @map("deliver_at")
+  sentAt      DateTime? @map("sent_at")
+  error       String?  @db.Text
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@index([status, deliverAt])
+  @@index([recipientId])
+  @@map("pending_persona_mail")
+}
