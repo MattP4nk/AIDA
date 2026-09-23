@@ -470,6 +470,12 @@ export class FileService {
         success: true,
         message: `File read: ${path}`,
         data: {
+          // The node id is needed by callers that report the read/download to
+          // mission tracking: `steal`, `delete_file` and `exfiltrate_data`
+          // objectives are bound to `metadata.fileId`. Both `download` call
+          // sites previously had no way to obtain it and passed an empty
+          // string, so those objectives could never be credited (M12).
+          nodeId: file.id,
           path,
           content,
           size: file.size,

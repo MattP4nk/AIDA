@@ -1,6 +1,7 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
-import { getSession, successResult, errorResult } from "./helpers";
+import { getSession, successResult, errorResult, refreshComputerSpec } from "./helpers";
+import { HARDWARE_SPECS, resolveInstalledHardware } from "../../config/gameBalance";
 import {
   boxTop,
   boxBottom,
@@ -26,6 +27,7 @@ export class ProcessCommandsModule implements CommandModule {
     "renice",
     "free",
     "uptime",
+    "specs",
   ]);
 
   public async execute(
@@ -38,11 +40,23 @@ export class ProcessCommandsModule implements CommandModule {
     }
 
     try {
+      // Recompute the rig BEFORE any readout.
+      //
+      // None of these handlers used to do this, and `getComputerSpec` falls back
+      // to `calculateBaseSpec(1)` for a user with no map entry — so a level-40
+      // player who connected and typed `free` was shown a level-1 rig
+      // (200/256/100) until they happened to spawn their first process. With
+      // installed hardware now feeding the same numbers, a stale readout would
+      // also make every hardware purchase look like it did nothing.
+      await this.refreshSpec(context);
+
       switch (command.command) {
         case "ps":
           return this.handlePs(context);
         case "top":
           return this.handleTop(context);
+        case "specs":
+          return this.handleSpecs(context);
         case "kill":
           return this.handleKill(command, context);
         case "pkill":
@@ -73,7 +87,79 @@ export class ProcessCommandsModule implements CommandModule {
       { command: "renice", category: "process", description: "Change priority of a running process", usage: "renice <priority> <pid>", examples: ["renice -10 101", "renice 5 102"] },
       { command: "free", category: "process", description: "Show memory usage breakdown", usage: "free", examples: ["free"] },
       { command: "uptime", category: "process", description: "Show system uptime and resource summary", usage: "uptime", examples: ["uptime"] },
+      { command: "specs", category: "process", description: "Show your rig: resource totals and installed hardware", usage: "specs", examples: ["specs"] },
     ];
+  }
+
+  /**
+   * Reload the player's rig from level + installed hardware before a readout.
+   */
+  private async refreshSpec(context: CommandContext): Promise<void> {
+    const progress = await context.db.client.playerProgress.findUnique({
+      where: { userId: context.userId },
+      select: { level: true },
+    });
+    await refreshComputerSpec(context, progress?.level ?? 1);
+  }
+
+  // ==================== SPECS ====================
+
+  private async handleSpecs(context: CommandContext): Promise<CommandResult> {
+    const memoryService = context.services.memoryService;
+    if (!memoryService) {
+      return errorResult("Resource system unavailable.");
+    }
+
+    const owned = await context.db.client.inventoryItem.findMany({
+      where: {
+        userId: context.userId,
+        quantity: { gt: 0 },
+        shopItemId: { in: Object.keys(HARDWARE_SPECS) },
+      },
+      select: { shopItemId: true },
+    });
+    const { installed } = resolveInstalledHardware(
+      owned.map((r) => r.shopItemId),
+    );
+
+    const spec = memoryService.getComputerSpec(context.userId);
+    const shopService = context.services.shopService;
+
+    const W = 48;
+    const lines: string[] = [];
+    lines.push(boxTop(W));
+    lines.push(boxCenter("SYSTEM SPECIFICATIONS", W));
+    lines.push(boxDivider(W));
+    lines.push(boxRow(` CPU   ${String(spec.cpuUsed).padStart(4)} / ${String(spec.cpuTotal).padEnd(5)} units`, W));
+    lines.push(boxRow(` RAM   ${String(spec.ramUsed).padStart(4)} / ${String(spec.ramTotal).padEnd(5)} MB`, W));
+    lines.push(boxRow(` NET   ${String(spec.bwUsed).padStart(4)} / ${String(spec.bwTotal).padEnd(5)} Mbps`, W));
+    lines.push(boxDivider(W));
+    lines.push(boxRow(" INSTALLED HARDWARE", W));
+
+    const channels: Array<[keyof typeof installed, string]> = [
+      ["cpu", "CPU"],
+      ["ram", "RAM"],
+      ["bw", "NET"],
+    ];
+    for (const [key, label] of channels) {
+      const id = installed[key];
+      if (!id) {
+        lines.push(boxRow(`  ${label}   (none — stock)`, W));
+        continue;
+      }
+      const part = shopService?.getItem(id);
+      const spec2 = HARDWARE_SPECS[id];
+      const amount = spec2 ? `+${spec2.amount}` : "";
+      lines.push(boxRow(`  ${label}   ${part?.name ?? id} ${amount}`, W));
+    }
+
+    lines.push(boxBottom(W));
+    return successResult(render(lines), {
+      cpuTotal: spec.cpuTotal,
+      ramTotal: spec.ramTotal,
+      bwTotal: spec.bwTotal,
+      installed,
+    });
   }
 
   // ==================== PS ====================

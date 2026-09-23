@@ -6,6 +6,7 @@ import logger from "./logger";
 
 import { config, validateConfig, CORS_ORIGINS } from "./config/environment";
 import { db } from "./database/client";
+import { reconcileShopItems } from "../prisma/reconcileShopItems";
 import { initializeContainer, getService } from "./di/container";
 import {
   GAME_STATE_MANAGER,
@@ -112,6 +113,12 @@ async function initialize(): Promise<void> {
   await shopService.syncCatalogToDatabase();
   logger.info("✅ Shop catalog synced");
 
+  // Retire the old `seed_*` item universe. This has to run at BOOT, not only in
+  // the seed: existing databases already hold those rows and will never be
+  // reseeded. Must follow the sync, which creates the catalog rows it repoints
+  // onto. Idempotent — a no-op once there is nothing left to move.
+  await reconcileShopItems(db.client);
+
   // GameStateManager is resolved to trigger its constructor/cleanup timer
   getService<GameStateManager>(GAME_STATE_MANAGER);
   logger.info("✅ Game State Manager initialized");
@@ -161,6 +168,27 @@ async function initialize(): Promise<void> {
       fn().catch((err) => logger.error({ err }, label));
     });
   };
+
+  // ── Reward notifications: bridge service events to the player's socket ──
+  //
+  // `missionService` has always raised these with full payloads, and the client
+  // has always had handlers for them — but nothing forwarded the EventEmitter
+  // event onto the socket, so they fired into the void. The player earned XP and
+  // credits from background paths (a process completing, a mission credited by a
+  // hook, a dungeon payout) with NO feedback at all.
+  //
+  // The old client comment "silent — shown in command output" was true when
+  // rewards only came from synchronous commands. It stopped being true once they
+  // started arriving asynchronously.
+  missionService.on("rewards:xp_granted", (data: any) => {
+    if (!data?.userId) return;
+    io.to(`player:${data.userId}`).emit("rewards:xp_granted", data);
+  });
+
+  missionService.on("rewards:credits_granted", (data: any) => {
+    if (!data?.userId) return;
+    io.to(`player:${data.userId}`).emit("rewards:credits_granted", data);
+  });
 
   hackService.on("hack:detected", (data: any) => {
     defer(() => dynamicContent.processEvent("hack:detected", data), "Dynamic content error on hack:detected");

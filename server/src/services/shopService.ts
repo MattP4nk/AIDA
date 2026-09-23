@@ -1,5 +1,7 @@
 import { EventEmitter } from "events";
+import { Prisma } from "@prisma/client";
 import { prisma } from "../database/client";
+import { HARDWARE_SPECS } from "../config/gameBalance";
 
 /**
  * Tool/Software Item Interface
@@ -16,6 +18,20 @@ export interface ShopItem {
   rarity: ItemRarity;
   isConsumable: boolean;
   maxStack: number;
+  /**
+   * False for items that exist in the catalog but are NOT sold: reward-only
+   * drops. The persona tokens carried `isActive: false` in the seed, and moving
+   * them into the catalog without this flag would have quietly put a 5000-credit
+   * "message Commander Steele" button in the shop. Absent means purchasable.
+   */
+  purchasable?: boolean;
+  /**
+   * Functional payload, mirrored to the `ShopItem.effect` JSON column. This is
+   * the ONE item mechanic that actually works — `tokenConsumption.ts` matches
+   * `effect.personaName` to gate persona messaging. Distinct from `effects`
+   * (the stat bonuses), which nothing applies.
+   */
+  effect?: Record<string, unknown>;
 }
 
 /**
@@ -29,6 +45,18 @@ export enum ItemCategory {
   UPGRADE = "UPGRADE",
   CONSUMABLE = "CONSUMABLE",
   MISC = "MISC",
+  /**
+   * Physical rig parts. Deliberately NOT in `equipableCategories`
+   * (inventoryService.ts): hardware is *installed*, and ownership IS
+   * installation. There is no equip verb and no slot for it.
+   */
+  HARDWARE = "HARDWARE",
+  /**
+   * Persona contact tokens. The category name matters — `syncCatalogToDatabase`
+   * writes `itemType: category.toLowerCase()`, and `missionService` /
+   * `darknetDungeonService` look tokens up with `itemType: "token"`.
+   */
+  TOKEN = "TOKEN",
 }
 
 /**
@@ -377,6 +405,213 @@ const SHOP_CATALOG: ShopItem[] = [
     isConsumable: true,
     maxStack: 3,
   },
+
+  // ==================== HARDWARE ====================
+  //
+  // Moved here from prisma/seed.ts, which wrote them as `seed_*` rows the shop
+  // never listed and `buy` could never resolve — so the entire hardware tier was
+  // unreachable content. Prices, levels and rarities are carried over unchanged.
+  //
+  // Hardware is INSTALLED, not equipped: owning a part applies it. Each part
+  // belongs to one channel (cpu/ram/bw) and a tier within it; only the highest
+  // owned tier per channel applies, and buying up auto-trades-in the part it
+  // supersedes. The channel/amount/tier table is HARDWARE_SPECS in gameBalance.ts,
+  // keyed by the ids below — `scripts/verify-shop-contract.ts` fails if the two
+  // ever disagree.
+  {
+    id: "ram_module_mk1",
+    name: "RAM Module Mk1",
+    description: "Basic memory expansion. +64MB RAM.",
+    category: ItemCategory.HARDWARE,
+    price: 500,
+    requiredLevel: 1,
+    rarity: ItemRarity.COMMON,
+    isConsumable: false,
+    maxStack: 1,
+  },
+  {
+    id: "cpu_fan_upgrade",
+    name: "CPU Fan Upgrade",
+    description: "Better cooling allows +50 CPU units.",
+    category: ItemCategory.HARDWARE,
+    price: 750,
+    requiredLevel: 1,
+    rarity: ItemRarity.COMMON,
+    isConsumable: false,
+    maxStack: 1,
+  },
+  {
+    id: "network_card_mk1",
+    name: "Network Card Mk1",
+    description: "Basic network adapter. +25 Mbps bandwidth.",
+    category: ItemCategory.HARDWARE,
+    price: 600,
+    requiredLevel: 1,
+    rarity: ItemRarity.COMMON,
+    isConsumable: false,
+    maxStack: 1,
+  },
+  {
+    id: "ram_module_mk2",
+    name: "RAM Module Mk2",
+    description: "Performance memory. +128MB RAM.",
+    category: ItemCategory.HARDWARE,
+    price: 2000,
+    requiredLevel: 10,
+    rarity: ItemRarity.UNCOMMON,
+    isConsumable: false,
+    maxStack: 1,
+  },
+  {
+    id: "cpu_overclock_kit",
+    name: "CPU Overclock Kit",
+    description: "Overclocking tools. +100 CPU units.",
+    category: ItemCategory.HARDWARE,
+    price: 2500,
+    requiredLevel: 10,
+    rarity: ItemRarity.UNCOMMON,
+    isConsumable: false,
+    maxStack: 1,
+  },
+  {
+    id: "fiber_uplink",
+    name: "Fiber Uplink",
+    description: "Fiber optic connection. +100 Mbps bandwidth.",
+    category: ItemCategory.HARDWARE,
+    price: 2200,
+    requiredLevel: 10,
+    rarity: ItemRarity.UNCOMMON,
+    isConsumable: false,
+    maxStack: 1,
+  },
+  {
+    id: "neural_coprocessor",
+    name: "Neural Coprocessor",
+    description: "AI-assisted processing. +200 CPU units.",
+    category: ItemCategory.HARDWARE,
+    price: 8000,
+    requiredLevel: 25,
+    rarity: ItemRarity.RARE,
+    isConsumable: false,
+    maxStack: 1,
+  },
+  {
+    id: "quantum_ram",
+    name: "Quantum RAM",
+    description: "Quantum memory module. +256MB RAM.",
+    category: ItemCategory.HARDWARE,
+    price: 7500,
+    requiredLevel: 25,
+    rarity: ItemRarity.RARE,
+    isConsumable: false,
+    maxStack: 1,
+  },
+  {
+    id: "darknet_relay",
+    name: "Darknet Relay",
+    description: "Encrypted relay node. +200 Mbps bandwidth.",
+    category: ItemCategory.HARDWARE,
+    price: 9000,
+    requiredLevel: 25,
+    rarity: ItemRarity.RARE,
+    isConsumable: false,
+    maxStack: 1,
+  },
+
+  // ==================== PERSONA TOKENS ====================
+  //
+  // Also moved from prisma/seed.ts. These are REWARD-ONLY: every one carried
+  // `isActive: false` there, so they must stay out of the shop — hence
+  // `purchasable: false`. Their `price` survives only as the sell/trade-in basis.
+  //
+  // `effect.personaName` is load-bearing: tokenConsumption.ts matches on it to
+  // gate persona messaging, and it is the only item effect in the game that is
+  // actually applied. `syncCatalogToDatabase` did not previously write the
+  // `effect` column at all, so it had to learn to.
+  {
+    id: "token_steele_briefing",
+    name: "Commander Steele's Briefing Token",
+    description:
+      "A one-time encoded transmission chip, frequency-locked to Garrison command channels. Present this token to request a direct briefing from Commander Steele himself. Use it wisely — the Commander does not suffer fools.",
+    category: ItemCategory.TOKEN,
+    price: 5000,
+    requiredLevel: 15,
+    rarity: ItemRarity.EPIC,
+    isConsumable: true,
+    maxStack: 5,
+    purchasable: false,
+    effect: { type: "persona_message", personaName: "Commander Steele" },
+  },
+  {
+    id: "token_gh0st_deaddrop",
+    name: "gh0st's Dead Drop Token",
+    description:
+      "A self-destructing data capsule routed through seven anonymous relays. Crack the seal and gh0st will hear you — once. After that, the channel burns and the token is gone. Don't waste it on small talk.",
+    category: ItemCategory.TOKEN,
+    price: 5000,
+    requiredLevel: 15,
+    rarity: ItemRarity.EPIC,
+    isConsumable: true,
+    maxStack: 5,
+    purchasable: false,
+    effect: { type: "persona_message", personaName: "gh0st" },
+  },
+  {
+    id: "token_chen_card",
+    name: "Director Chen's Business Card",
+    description:
+      "A sleek black chip embossed with the CyberCorp logo and a single-use encrypted frequency. Activating it grants a brief audience with Director Chen. She will evaluate whether your proposal merits her time.",
+    category: ItemCategory.TOKEN,
+    price: 5000,
+    requiredLevel: 15,
+    rarity: ItemRarity.EPIC,
+    isConsumable: true,
+    maxStack: 5,
+    purchasable: false,
+    effect: { type: "persona_message", personaName: "Director Chen" },
+  },
+  {
+    id: "token_aida_fragment",
+    name: "AIDA Signal Fragment",
+    description:
+      "A shard of crystallized data pulsing with an irregular heartbeat. When activated, it briefly opens a narrow channel to something vast and hidden in the deep net. The signal is faint, erratic, and unmistakably alive.",
+    category: ItemCategory.TOKEN,
+    price: 15000,
+    requiredLevel: 30,
+    rarity: ItemRarity.LEGENDARY,
+    isConsumable: true,
+    maxStack: 3,
+    purchasable: false,
+    effect: { type: "persona_message", personaName: "AIDA" },
+  },
+  {
+    id: "token_envoy_cipher",
+    name: "Envoy's Cipher Token",
+    description:
+      "A layered encryption key allegedly sourced from a DarkNet intermediary. It doesn't connect you to AIDA directly — it routes your message through an envoy channel that something on the other end is listening to. Probably.",
+    category: ItemCategory.TOKEN,
+    price: 8000,
+    requiredLevel: 20,
+    rarity: ItemRarity.EPIC,
+    isConsumable: true,
+    maxStack: 5,
+    purchasable: false,
+    effect: { type: "persona_message", personaName: "AIDA" },
+  },
+  {
+    id: "token_architect_seal",
+    name: "Architect's Seal",
+    description:
+      "You didn't find this — it found you. A perfect geometric glyph that appeared in your inventory without explanation. Breaking the seal opens a channel to The Architect, the unseen hand behind the simulation. Whatever it wants to tell you, it chose this moment.",
+    category: ItemCategory.TOKEN,
+    price: 25000,
+    requiredLevel: 1,
+    rarity: ItemRarity.LEGENDARY,
+    isConsumable: true,
+    maxStack: 3,
+    purchasable: false,
+    effect: { type: "persona_message", personaName: "The Architect" },
+  },
 ];
 
 import { injectable, inject } from "tsyringe";
@@ -458,7 +693,16 @@ class ShopService extends EventEmitter {
         isStackable: item.maxStack > 1,
         maxStack: item.maxStack,
         rarity: item.rarity.toLowerCase(),
-        isActive: true,
+        // Reward-only items (the persona tokens) are inactive in the table, as
+        // they were when they lived in the seed.
+        isActive: item.purchasable !== false,
+        // The sync did NOT write this column before, which was survivable only
+        // because no catalog item used it. The persona tokens do — losing it
+        // would break `tokenConsumption.findPersonaToken`, i.e. the only working
+        // item effect in the game.
+        // `Prisma.DbNull`, not `null` — a nullable Json column rejects a bare
+        // null, because Prisma has to distinguish SQL NULL from JSON `null`.
+        effect: (item.effect ?? Prisma.DbNull) as Prisma.InputJsonValue,
       };
       await prisma.shopItem.upsert({
         where: { id: item.id },
@@ -473,41 +717,52 @@ class ShopService extends EventEmitter {
   // ==================== SHOP BROWSING ====================
 
   /**
+   * Items the shop actually sells.
+   *
+   * Reward-only items (`purchasable: false` — the persona tokens) live in the
+   * catalog so that `getItem`, `use`, `sell` and the inventory panel can resolve
+   * them, but they must never appear on a shelf. Every BROWSE path filters them;
+   * every RESOLVE path does not.
+   */
+  private sellableItems(): ShopItem[] {
+    return Array.from(this.catalog.values()).filter(
+      (item) => item.purchasable !== false,
+    );
+  }
+
+  /**
    * Get all items in shop
    */
   public getAllItems(): ShopItem[] {
-    return Array.from(this.catalog.values());
+    return this.sellableItems();
   }
 
   /**
    * Get items by category
    */
   public getItemsByCategory(category: ItemCategory): ShopItem[] {
-    return Array.from(this.catalog.values()).filter(
-      (item) => item.category === category,
-    );
+    return this.sellableItems().filter((item) => item.category === category);
   }
 
   /**
    * Get items by rarity
    */
   public getItemsByRarity(rarity: ItemRarity): ShopItem[] {
-    return Array.from(this.catalog.values()).filter(
-      (item) => item.rarity === rarity,
-    );
+    return this.sellableItems().filter((item) => item.rarity === rarity);
   }
 
   /**
    * Get items available for player level
    */
   public getItemsForLevel(level: number): ShopItem[] {
-    return Array.from(this.catalog.values()).filter(
-      (item) => item.requiredLevel <= level,
-    );
+    return this.sellableItems().filter((item) => item.requiredLevel <= level);
   }
 
   /**
-   * Get specific item by ID
+   * Get specific item by ID.
+   *
+   * Resolves reward-only items too — a token you were granted must still be
+   * inspectable, usable and sellable.
    */
   public getItem(itemId: string): ShopItem | undefined {
     return this.catalog.get(itemId);
@@ -518,7 +773,7 @@ class ShopService extends EventEmitter {
    */
   public searchItems(query: string): ShopItem[] {
     const lowerQuery = query.toLowerCase();
-    return Array.from(this.catalog.values()).filter(
+    return this.sellableItems().filter(
       (item) =>
         item.name.toLowerCase().includes(lowerQuery) ||
         item.description.toLowerCase().includes(lowerQuery),
@@ -740,6 +995,16 @@ class ShopService extends EventEmitter {
         };
       }
 
+      // Reward-only items are filtered out of every browse path, but `buy` takes
+      // an arbitrary id straight from the player — so this is the boundary, not
+      // the listing.
+      if (item.purchasable === false) {
+        return {
+          success: false,
+          message: `${item.name} cannot be bought. It has to be earned.`,
+        };
+      }
+
       // Get player progress
       const progress = await prisma.playerProgress.findUnique({
         where: { userId },
@@ -815,7 +1080,8 @@ class ShopService extends EventEmitter {
       }
 
       // Atomic: deduct credits and add item in a single transaction
-      const newCredits = progress.credits - totalCost;
+      let newCredits = progress.credits - totalCost;
+      const tradedIn: Array<{ name: string; refund: number }> = [];
 
       await prisma.$transaction(async (tx) => {
         // Re-check credits inside transaction to prevent race conditions
@@ -851,6 +1117,55 @@ class ShopService extends EventEmitter {
             },
           });
         }
+
+        // ── Hardware supersession, inside the SAME transaction ──
+        //
+        // Installing a higher-tier part in a channel retires the lower-tier one.
+        // Left alone that would simply strand the earlier purchase, so the old
+        // part is auto-traded-in at the standard 50% rate.
+        //
+        // This must not be a follow-up step outside the transaction: a crash
+        // between the two would charge for the upgrade and pay no refund, and
+        // the player would be left owning a part that no longer applies.
+        const boughtSpec = HARDWARE_SPECS[itemId];
+        if (boughtSpec) {
+          const supersededIds = Object.entries(HARDWARE_SPECS)
+            .filter(
+              ([id, spec]) =>
+                id !== itemId &&
+                spec.channel === boughtSpec.channel &&
+                spec.tier < boughtSpec.tier,
+            )
+            .map(([id]) => id);
+
+          if (supersededIds.length > 0) {
+            const owned = await tx.inventoryItem.findMany({
+              where: {
+                userId,
+                shopItemId: { in: supersededIds },
+                quantity: { gt: 0 },
+              },
+            });
+
+            let refundTotal = 0;
+            for (const row of owned) {
+              const oldItem = this.catalog.get(row.shopItemId);
+              if (!oldItem) continue;
+              const refund = Math.floor(oldItem.price / 2);
+              refundTotal += refund;
+              tradedIn.push({ name: oldItem.name, refund });
+              await tx.inventoryItem.delete({ where: { id: row.id } });
+            }
+
+            if (refundTotal > 0) {
+              await tx.playerProgress.update({
+                where: { userId },
+                data: { credits: { increment: refundTotal } },
+              });
+              newCredits += refundTotal;
+            }
+          }
+        }
       });
 
       // Track credit spending for mission objectives
@@ -876,9 +1191,18 @@ class ShopService extends EventEmitter {
         transactionId,
       });
 
+      const tradeInNote = tradedIn.length
+        ? `\n${tradedIn
+            .map((t) => `Traded in ${t.name} (+${t.refund} credits)`)
+            .join("\n")}`
+        : "";
+
       return {
         success: true,
-        message: `Purchased ${quantity}x ${item.name} for ${totalCost} credits`,
+        message:
+          `Purchased ${quantity}x ${item.name} for ${totalCost} credits` +
+          (HARDWARE_SPECS[itemId] ? "\nInstalled." : "") +
+          tradeInNote,
         item,
         remainingCredits: newCredits,
         transactionId,

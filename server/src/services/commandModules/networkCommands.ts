@@ -1,7 +1,7 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
 import logger from "../../logger";
-import { spawnBackgroundProcess, successResult, errorResult } from "./helpers";
+import { spawnBackgroundProcess, successResult, errorResult, refreshComputerSpec } from "./helpers";
 import { redactSensitiveContent } from "../../utils/contentRedaction";
 import {
   validateIPAddress,
@@ -1230,7 +1230,7 @@ export class NetworkCommandsModule implements CommandModule {
         where: { userId: context.userId },
         select: { networking: true, level: true },
       });
-      memoryService.initComputerSpec(context.userId, progress?.level ?? 1);
+      await refreshComputerSpec(context, progress?.level ?? 1);
 
       const check = memoryService.canSpawnProcess(context.userId, "traceroute");
       if (!check.allowed) {

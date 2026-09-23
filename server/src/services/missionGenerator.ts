@@ -304,14 +304,51 @@ export class MissionGeneratorService {
         ...(built.metadata !== undefined && { metadata: built.metadata }),
       });
 
-      if (!validation.valid) {
-        this.logger.warn(
+      // Reject a TARGET/progressType mismatch; only log missing metadata.
+      //
+      // The distinction matters and I got it wrong once here. Required metadata
+      // (`serverId`, `fileId`, `networkId`, …) is deliberately absent at this
+      // point — `provisionMissionInfrastructure` backfills it later in
+      // `createMission`. Treating the full validation as fatal rejects **49 of
+      // 134** template objectives, i.e. almost every mission.
+      //
+      // A target/progressType mismatch is different: it is a genuine authoring
+      // error, knowable here, and unfixable later. It is how two unwinnable
+      // missions shipped — `kingmaker` gave a count-credited `install_backdoor` a
+      // boolean-era target of 2, and `intelligence_sweep` did the same to
+      // `decode_content`. The validator caught both; the warning was discarded.
+      const definition = OBJECTIVE_TYPES.get(built.type);
+      if (!definition) {
+        throw new Error(
+          `Template "${template.id}" uses unknown objective type "${built.type}"`,
+        );
+      }
+      const targetKind = typeof built.target;
+      const wantsNumber = definition.progressType === "count";
+      if (
+        (wantsNumber && targetKind !== "number") ||
+        (!wantsNumber && targetKind !== "boolean")
+      ) {
+        this.logger.error(
           {
             templateId: template.id,
             objectiveType: built.type,
-            errors: validation.errors,
+            progressType: definition.progressType,
+            target: built.target,
           },
-          "Objective validation warning in template-based generation",
+          "Rejecting malformed objective — target type does not match progressType",
+        );
+        throw new Error(
+          `Template "${template.id}": ${built.type} has progressType "${definition.progressType}" ` +
+            `but target is ${targetKind} (${JSON.stringify(built.target)})`,
+        );
+      }
+
+      // Metadata gaps are expected pre-provisioning — record, don't fail.
+      if (!validation.valid) {
+        this.logger.debug(
+          { templateId: template.id, objectiveType: built.type, errors: validation.errors },
+          "Objective metadata pending provisioning",
         );
       }
 

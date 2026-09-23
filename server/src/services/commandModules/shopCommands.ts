@@ -97,43 +97,53 @@ export class ShopCommandsModule implements CommandModule {
         command: "shop",
         category: "shop",
         description: "Browse the darknet marketplace",
-        usage: "shop [category] [search]",
-        examples: ["shop", "shop EXPLOIT", "shop exploit scanner"],
+        // `[search]` is deliberately NOT advertised: `args[0]` is always eaten as
+        // a category, and when a search does run it replaces the item list
+        // wholesale, discarding both the category and the player-level filter —
+        // so it offers items the player cannot buy. See S7 in
+        // SHOP_ARCHITECTURE.md; restore the argument here when that is fixed.
+        usage: "shop [category]",
+        examples: ["shop", "shop EXPLOIT", "shop TOOL"],
       },
       {
         command: "buy",
         category: "shop",
         description: "Purchase an item from the shop",
+        // Every example id below is a REAL SHOP_CATALOG id. They used to be
+        // invented (port_scanner, firewall, health_pack, stealth_module, ...),
+        // so `man buy` taught a command that answers "Script not found in store
+        // catalog". scripts/verify-shop-contract.ts now fails the build if an
+        // example id stops resolving.
         usage: "buy <item_id> [quantity]",
-        examples: ["buy port_scanner", "buy firewall 2"],
+        examples: ["buy basic_scanner", "buy quantum_charge 2"],
       },
       {
         command: "sell",
         category: "shop",
         description: "Sell an item from inventory",
         usage: "sell <item_id> [quantity]",
-        examples: ["sell old_script", "sell exploit_v1 3"],
+        examples: ["sell basic_scanner", "sell quantum_charge 3"],
       },
       {
         command: "use",
         category: "shop",
         description: "Use an item from inventory",
         usage: "use <item_id>",
-        examples: ["use health_pack", "use skill_boost"],
+        examples: ["use stealth_boost", "use xp_booster"],
       },
       {
         command: "equip",
         category: "shop",
         description: "Equip an item from your inventory",
         usage: "equip <item_id>",
-        examples: ["equip port_scanner", "equip stealth_module"],
+        examples: ["equip basic_scanner", "equip cpu_upgrade"],
       },
       {
         command: "unequip",
         category: "shop",
         description: "Unequip an item from a slot",
         usage: "unequip <slot|item_id>",
-        examples: ["unequip TOOL", "unequip port_scanner"],
+        examples: ["unequip TOOL", "unequip basic_scanner"],
       },
       {
         command: "equipment",

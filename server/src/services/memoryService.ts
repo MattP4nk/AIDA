@@ -3,6 +3,7 @@ import { injectable, inject } from "tsyringe";
 import type { Logger } from "pino";
 import { Server as SocketIOServer } from "socket.io";
 import { LOGGER, SOCKET_IO } from "../di/tokens";
+import { resolveInstalledHardware } from "../config/gameBalance";
 
 /**
  * MemoryService — Player Computer Resource Management
@@ -163,39 +164,12 @@ export function getDetectionModifierForPriority(priority: number): number {
   return Math.max(-0.20, Math.min(0.30, detMod));
 }
 
-/** Hardware item name → resource bonus mapping */
-const HARDWARE_BONUSES: Record<string, { cpu?: number; ram?: number; bw?: number }> = {
-  "RAM Module Mk1":      { ram: 64 },
-  "RAM Module Mk2":      { ram: 128 },
-  "Quantum RAM":         { ram: 256 },
-  "CPU Fan Upgrade":     { cpu: 50 },
-  "CPU Overclock Kit":   { cpu: 100 },
-  "Neural Coprocessor":  { cpu: 200 },
-  "Network Card Mk1":    { bw: 25 },
-  "Fiber Uplink":        { bw: 100 },
-  "Darknet Relay":       { bw: 200 },
-};
-
-function calculateBaseSpec(playerLevel: number, equipmentBonuses?: { cpu?: number; ram?: number; bw?: number }): { cpuTotal: number; ramTotal: number; bwTotal: number } {
+function calculateBaseSpec(playerLevel: number, hardwareBonuses?: { cpu?: number; ram?: number; bw?: number }): { cpuTotal: number; ramTotal: number; bwTotal: number } {
   return {
-    cpuTotal: 200 + Math.floor(playerLevel / 10) * 100 + (equipmentBonuses?.cpu || 0),
-    ramTotal: 256 + Math.floor(playerLevel / 10) * 128 + (equipmentBonuses?.ram || 0),
-    bwTotal:  100 + Math.floor(playerLevel / 10) * 50  + (equipmentBonuses?.bw  || 0),
+    cpuTotal: 200 + Math.floor(playerLevel / 10) * 100 + (hardwareBonuses?.cpu || 0),
+    ramTotal: 256 + Math.floor(playerLevel / 10) * 128 + (hardwareBonuses?.ram || 0),
+    bwTotal:  100 + Math.floor(playerLevel / 10) * 50  + (hardwareBonuses?.bw  || 0),
   };
-}
-
-/** Sum hardware bonuses from a list of equipped item names */
-function sumHardwareBonuses(equippedItemNames: string[]): { cpu: number; ram: number; bw: number } {
-  let cpu = 0, ram = 0, bw = 0;
-  for (const name of equippedItemNames) {
-    const bonus = HARDWARE_BONUSES[name];
-    if (bonus) {
-      cpu += bonus.cpu || 0;
-      ram += bonus.ram || 0;
-      bw += bonus.bw || 0;
-    }
-  }
-  return { cpu, ram, bw };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -226,12 +200,22 @@ class MemoryService extends EventEmitter {
   // ═══════════════════════════════════════════════════════════════════════
 
   /**
-   * Initialize or update a player's computer spec from their level + equipment.
-   * Pass equipped item names to apply hardware bonuses.
+   * Initialize or update a player's computer spec from their level + hardware.
+   *
+   * `ownedHardwareIds` are SHOP_CATALOG ids of hardware the player owns —
+   * ownership IS installation. Supersession (highest tier per channel wins) is
+   * applied by `resolveInstalledHardware`.
+   *
+   * The predecessor of this parameter took item *names* and was never passed by
+   * any of the nine call sites, so hardware had no effect on anything. Prefer
+   * `refreshComputerSpec` in commandModules/helpers.ts, which loads the ids for
+   * you; call this directly only when you already have them.
    */
-  initComputerSpec(userId: string, playerLevel: number, equippedItemNames?: string[]): void {
-    const equipmentBonuses = equippedItemNames ? sumHardwareBonuses(equippedItemNames) : undefined;
-    this.baseSpecs.set(userId, calculateBaseSpec(playerLevel, equipmentBonuses));
+  initComputerSpec(userId: string, playerLevel: number, ownedHardwareIds?: readonly string[]): void {
+    const hardwareBonuses = ownedHardwareIds
+      ? resolveInstalledHardware(ownedHardwareIds).bonuses
+      : undefined;
+    this.baseSpecs.set(userId, calculateBaseSpec(playerLevel, hardwareBonuses));
     if (!this.gameProcesses.has(userId)) this.gameProcesses.set(userId, new Map());
     if (!this.passiveConsumers.has(userId)) this.passiveConsumers.set(userId, new Map());
     if (!this.nextPid.has(userId)) this.nextPid.set(userId, 100);

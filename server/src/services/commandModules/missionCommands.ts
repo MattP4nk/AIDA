@@ -164,19 +164,59 @@ export class MissionCommandsModule implements CommandModule {
 
     let missions = await missionService.getPlayerMissions(context.userId);
 
-    // Auto-generate missions if list is empty
-    if (missions.length === 0 && missionGenerator) {
-      try {
-        const generated = await missionGenerator.generateMissionsForPlayer(
-          context.userId,
-          5,
-        );
-        if (generated.length > 0) {
-          missions = await missionService.getPlayerMissions(context.userId);
-        }
-      } catch (err) {
-        logger.error({ err }, "Mission auto-generation failed");
-      }
+    // Auto-generate only when THIS PLAYER has nothing left to accept.
+    //
+    // Offers are PER PLAYER. `missionGenerator` creates level-scaled Mission rows
+    // and then writes each one into this player's own `missionProgress` with
+    // `status: "available"` (missionGenerator.ts:178-205) precisely so
+    // getPlayerMissions() returns it. So "do I have an offer?" is answered by the
+    // player's own list.
+    //
+    // History, because I got this wrong twice and the comments should not lie:
+    //  1. The original guard was `missions.length === 0`, which is never true for
+    //     a real player — the tutorial auto-assigns a mission on first login. So
+    //     `generateMissionsForPlayer` had NEVER RUN, and every mission in the
+    //     database was a tutorial mission.
+    //  2. I replaced it with the per-player count below — which was correct — but
+    //     it appeared to fail, because generation was awaited inline and never
+    //     completed (see the note under it), so the count stayed 0 and every
+    //     `missions` call regenerated. I misread that as "offers are not in
+    //     missionProgress" and switched to counting global Mission rows plus
+    //     merging rows into the panel. That was wrong: it let one player's offers
+    //     suppress generation for everyone, served other players' level-scaled
+    //     missions, and combined with a lazy claim in acceptMission it allowed two
+    //     players to hold and complete the same mission. All of that is reverted.
+    //
+    // The real bug was never the guard's shape; it was the guard never firing,
+    // and then generation never finishing.
+    const openOffers = missions.filter(
+      (m: any) => m.status === "available" || m.status === "assigned",
+    ).length;
+
+    // Generation is AI-bound and must NOT be awaited here.
+    //
+    // `generateMissionsForPlayer` calls the AI service, which retries with
+    // 5s/15s backoff under rate limiting. Awaiting it meant the first player to
+    // find an empty offer pool got **no response at all** — measured at over
+    // 180s with nothing rendered. Same failure shape as inline persona-reply
+    // generation, and the same remedy: kick it off and render immediately.
+    //
+    // The player is told offers are being drafted rather than being shown an
+    // empty panel with no explanation, and a later `missions` picks them up.
+    let draftingOffers = false;
+    if (openOffers === 0 && missionGenerator) {
+      draftingOffers = true;
+      void missionGenerator
+        .generateMissionsForPlayer(context.userId, 5)
+        .then((generated: unknown[]) => {
+          logger.info(
+            { userId: context.userId, count: generated?.length ?? 0 },
+            "Background mission generation finished",
+          );
+        })
+        .catch((err: unknown) => {
+          logger.error({ err }, "Background mission generation failed");
+        });
     }
 
     // Filter by status if requested
@@ -296,6 +336,12 @@ export class MissionCommandsModule implements CommandModule {
     this.missionIndex.set(context.userId, indexList);
 
     lines.push(boxDivider(W));
+    // Generation runs in the background (see above), so say so instead of
+    // leaving the player looking at an empty list with no explanation.
+    if (draftingOffers) {
+      lines.push(boxRow("  New contracts are being drafted — check back shortly.", W));
+      lines.push(boxDivider(W));
+    }
     lines.push(boxRow("  'mission 1' for details", W));
     lines.push(boxRow("  'accept 1' to take a mission", W));
     lines.push(boxRow("  'progress' to track active objectives", W));

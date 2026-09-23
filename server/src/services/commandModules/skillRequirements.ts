@@ -82,10 +82,28 @@ export const SKILL_REQUIREMENTS: Readonly<Record<string, SkillRequirement>> = {
 
   // ── File access minigames ─────────────────────────────────────────
   sweep: { skill: "forensics", level: 15, label: "Forensics" },
-  "sweep.reveal": { skill: "forensics", level: 15, label: "Forensics" },
-  "crack.dict": { skill: "cryptography", level: 20, label: "Cryptography" },
-  "crack.mask": { skill: "cryptography", level: 25, label: "Cryptography" },
-  "crack.pattern": { skill: "cryptography", level: 20, label: "Cryptography" },
+  // UNBLOCKABLE — these four ANSWER a challenge the player is already inside,
+  // and are the same defect class as handshake.ack/signal.trace above.
+  //
+  // `crack.dict`/`mask`/`pattern` were a LIVE soft-lock: they answer a file-crack
+  // session opened by `crack`, which gates on HACKING 30, while they gate on
+  // CRYPTOGRAPHY 20/25/20. A player with Hacking 30 and low cryptography could
+  // open a session and then be refused permission to answer it. Different skill,
+  // blockable answer — the session was unwinnable and could not be abandoned
+  // into progress.
+  //
+  // `sweep.reveal` is not a lock *today* only because its gate happens to equal
+  // `sweep`'s exactly (Forensics 15 both). That is a coincidence, not a design:
+  // the moment `sweep` becomes soft, an under-skilled player opens a sweep they
+  // cannot answer. Fixed now rather than left as a tripwire.
+  //
+  // The difficulty of each of these was already set from the player's skill when
+  // the challenge was GENERATED, so the skill has been accounted for once; a
+  // second check at answer time only strands them.
+  "sweep.reveal": { skill: "forensics", level: 15, label: "Forensics", mode: "unblockable" },
+  "crack.dict": { skill: "cryptography", level: 20, label: "Cryptography", mode: "unblockable" },
+  "crack.mask": { skill: "cryptography", level: 25, label: "Cryptography", mode: "unblockable" },
+  "crack.pattern": { skill: "cryptography", level: 20, label: "Cryptography", mode: "unblockable" },
   "crack.protected": { skill: "cryptography", level: 40, label: "Cryptography" },
   "crack.storm": { skill: "cryptography", level: 50, label: "Cryptography" },
   "crack.storm.submit": { skill: "cryptography", level: 5, label: "Cryptography", mode: "unblockable" },
@@ -132,7 +150,10 @@ export const SKILL_REQUIREMENTS: Readonly<Record<string, SkillRequirement>> = {
   // ── File commands ──────────────────────────────────────────────────
   encrypt: { skill: "cryptography", level: 10, label: "Cryptography" },
   decrypt: { skill: "cryptography", level: 15, label: "Cryptography" },
-  analyze: { skill: "forensics", level: 10, label: "Forensics" },
+  // SOFT: penalty is CONCLUSIVENESS — buildAnalysisReport withholds the fields
+  // that take real forensic skill. New players start at Forensics 5, so this was
+  // refused outright.
+  analyze: { skill: "forensics", level: 10, label: "Forensics", mode: "soft" },
   // upload, download → ungated (basic file ops)
 
   // ── Social commands ────────────────────────────────────────────────

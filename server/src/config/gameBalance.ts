@@ -55,6 +55,87 @@ export const HACK_TOOL_ITEMS: Readonly<Record<string, string>> = {
 export const MAX_TOOL_SUCCESS_BONUS = 0.3;
 export const MAX_TOOL_STEALTH_BONUS = 0.3;
 
+/**
+ * Catalog id of the consumable that `crack.protected` spends.
+ *
+ * Referenced by ID, not by name. `crack.protected` used to search the player's
+ * inventory for a name *containing* `"quantum charge"`, but the catalog item is
+ * called "Quantum Decryptor Charge" — which does not contain that substring. The
+ * command was therefore impossible for everyone, and told the holder of a
+ * 7500-credit charge that they needed one. Names are prose and get reworded;
+ * ids are the contract. Same reason `HACK_TOOL_ITEMS` above maps to ids.
+ */
+export const QUANTUM_CHARGE_ITEM_ID = "quantum_charge";
+
+/** The three resource channels a hardware part can upgrade. */
+export type HardwareChannel = "cpu" | "ram" | "bw";
+
+export interface HardwareSpec {
+  channel: HardwareChannel;
+  /** Amount added to that channel's total while installed. */
+  amount: number;
+  /** Higher tier supersedes lower within the same channel. */
+  tier: number;
+}
+
+/**
+ * Rig parts, keyed by SHOP_CATALOG id.
+ *
+ * Hardware is *installed*, not equipped — owning the part applies it. Within a
+ * channel only the highest owned tier counts, and buying up automatically trades
+ * in the part it supersedes at the standard 50% rate, so the earlier purchase is
+ * never simply stranded.
+ *
+ * This replaced a table keyed by item NAME which matched nothing purchasable:
+ * the names existed only as `seed_*` rows the shop never listed. Keyed by id
+ * now, and `scripts/verify-shop-contract.ts` fails if an id here has no catalog
+ * entry, or if a HARDWARE catalog entry is missing from here.
+ */
+export const HARDWARE_SPECS: Readonly<Record<string, HardwareSpec>> = {
+  cpu_fan_upgrade: { channel: "cpu", amount: 50, tier: 1 },
+  cpu_overclock_kit: { channel: "cpu", amount: 100, tier: 2 },
+  neural_coprocessor: { channel: "cpu", amount: 200, tier: 3 },
+
+  ram_module_mk1: { channel: "ram", amount: 64, tier: 1 },
+  ram_module_mk2: { channel: "ram", amount: 128, tier: 2 },
+  quantum_ram: { channel: "ram", amount: 256, tier: 3 },
+
+  network_card_mk1: { channel: "bw", amount: 25, tier: 1 },
+  fiber_uplink: { channel: "bw", amount: 100, tier: 2 },
+  darknet_relay: { channel: "bw", amount: 200, tier: 3 },
+};
+
+/**
+ * Resolve owned hardware ids into per-channel bonuses, applying supersession.
+ *
+ * Returns both the totals and the winning part per channel, because the readout
+ * has to name what is installed — a number with no part name is untraceable to
+ * the purchase that produced it.
+ */
+export function resolveInstalledHardware(ownedItemIds: readonly string[]): {
+  bonuses: Record<HardwareChannel, number>;
+  installed: Partial<Record<HardwareChannel, string>>;
+} {
+  const bonuses: Record<HardwareChannel, number> = { cpu: 0, ram: 0, bw: 0 };
+  const best: Partial<Record<HardwareChannel, { id: string; tier: number }>> = {};
+
+  for (const id of ownedItemIds) {
+    const spec = HARDWARE_SPECS[id];
+    if (!spec) continue;
+    const incumbent = best[spec.channel];
+    if (!incumbent || spec.tier > incumbent.tier) {
+      best[spec.channel] = { id, tier: spec.tier };
+      bonuses[spec.channel] = spec.amount;
+    }
+  }
+
+  const installed: Partial<Record<HardwareChannel, string>> = {};
+  for (const [channel, winner] of Object.entries(best)) {
+    if (winner) installed[channel as HardwareChannel] = winner.id;
+  }
+  return { bonuses, installed };
+}
+
 /** Cooldown between hack attempts (seconds). Decreases with hacking skill. */
 export const HACK_COOLDOWN_BASE_S = 30;
 export const HACK_COOLDOWN_MIN_S = 10;
@@ -238,6 +319,17 @@ export const BOUNTY_BASE_REP = 5;
 // (An orphaned "Reputation bounds and thresholds" docstring used to sit here,
 // above the Connection Challenges banner, documenting the wrong section.)
 
+/**
+ * Ceiling on `encryptionLevel` for RUNTIME-GENERATED content.
+ *
+ * `canAccessServer` derives `requiredLevel = encryptionLevel * 2`, and the whole
+ * seeded world sits at 0-5 — so the level curve was only ever balanced against
+ * that band. A generator writing 10-100 (as mission provisioning did) produces
+ * content requiring player level 20-200, which is unreachable and reads as a
+ * broken mission rather than a hard one. Generators clamp here.
+ */
+export const MAX_CONTENT_ENCRYPTION_LEVEL = 5;
+
 // ═══════════════════════════════════════════════════════════════════
 // Soft Skill Gates
 // ═══════════════════════════════════════════════════════════════════
@@ -271,6 +363,15 @@ export const SKILL_PENALTY = {
   maxSuccessPenalty: 0.6,
   /** Absolute detectionRate added at full shortfall. Fumbling is loud. */
   maxDetectionPenalty: 0.25,
+  /**
+   * Points added to a minigame's difficulty (1–10 scale) at full shortfall.
+   *
+   * Overreaching should make the CHALLENGE harder, not only the odds worse.
+   * Layer difficulty already falls with skill via `-relevantSkill/25`, but that
+   * term is far too weak to carry this on its own: a full 15-point shortfall —
+   * the entire soft band — moves it by only 0.6 on a 1–10 scale.
+   */
+  maxMinigameDifficultyBump: 3,
 } as const;
 
 /**

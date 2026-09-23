@@ -15,7 +15,6 @@
     "db:reset": "npx prisma db push --force-reset && tsx prisma/seed.ts",
     "migrate:home-dirs": "tsx scripts/migrate-home-directories.ts",
     "migrate:home-dirs:dry-run": "tsx scripts/migrate-home-directories.ts --dry-run",
-    "test": "jest",
     "lint": "eslint src/**/*.ts",
     "lint:fix": "eslint src/**/*.ts --fix"
   },

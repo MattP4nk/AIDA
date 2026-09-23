@@ -471,16 +471,25 @@ class CommandProcessor extends EventEmitter {
         }
       }
 
-      // Skill-gated command categories
-      const skillGatedCategories = new Set(["hack", "network", "file", "social", "alias"]);
-      if (module && skillGatedCategories.has(module.category)) {
-        const validation = await this.validateSkillRequirements(
-          parsedCommand,
-          user.progress,
-        );
-        if (!validation.valid) {
-          return validation;
-        }
+      // Skill gates apply to EVERY command, not to a list of categories.
+      //
+      // This used to be filtered by an allow-list of five module categories
+      // (`hack`, `network`, `file`, `social`, `alias`). Four categories that own
+      // gated commands were missing — `fragment`, `file_access`, `defense`,
+      // `math` — so TWELVE entries in SKILL_REQUIREMENTS were declared and never
+      // evaluated. The worst was `fragment.crack`, deliberately kept `mode:
+      // "hard"` because failure PERMANENTLY BRICKS a unique endgame item: any
+      // player could run it at any skill level and destroy one.
+      //
+      // The requirement map is already the single source of truth — a command
+      // absent from it has no gate — so the category filter added nothing except
+      // a second place to forget to register something.
+      const validation = await this.validateSkillRequirements(
+        parsedCommand,
+        user.progress,
+      );
+      if (!validation.valid) {
+        return validation;
       }
 
       // Server-specific commands require being connected

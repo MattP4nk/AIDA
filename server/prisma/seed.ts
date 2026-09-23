@@ -1,6 +1,7 @@
 import { PrismaClient } from "@prisma/client";
 import bcrypt from "bcryptjs";
 import { assignNpcOwnership } from "./npcOwnership";
+import { reconcileShopItems } from "./reconcileShopItems";
 
 const prisma = new PrismaClient();
 
@@ -870,14 +871,26 @@ expand CyberCorp's market dominance and acquire valuable data.`,
 
   const trainingFirewall = await prisma.gameServer.upsert({
     where: { ipAddress: "10.10.10.30" },
-    update: {},
+    // Deliberately NOT `{}` like its neighbours: the U2b retune has to reach
+    // databases that are already seeded, or the change is inert everywhere
+    // except a fresh reset and would read as applied while doing nothing.
+    // Scoped to the one field being retuned so nothing else is clobbered.
+    update: { securityLevel: 3 },
     create: {
       name: "Training Firewall",
       ipAddress: "10.10.10.30",
       type: "tutorial",
       role: "firewall",
       networkId: trainingNetwork.id,
-      securityLevel: 1,
+      // U2b: 3, not 1. `securityLevel` 1 and 2 are the SAME bucket in every
+      // consumer (measured in U2 — real thresholds only exist at 3/4/7/8), so at
+      // 1 this server's "firewall" was pure fiction: mechanically no harder than
+      // the open training boxes beside it. 3 is the first level that is actually
+      // distinct, without reaching the `medium` tier at 4.
+      //
+      // This does not make the tutorial harder: per U1, tutorial players take the
+      // key route and never face the hack layer. It bites on revisit.
+      securityLevel: 3,
       firewallLevel: 1,
       encryptionLevel: 0,
       discoveryLevel: 0,
@@ -2668,314 +2681,17 @@ and the program is still running.
   // ============================================================
   console.log("\nCreating shop items...");
 
-  const shopItems = [
-    // === Hardware -- Tier 1 (common, cheap) ===
-    {
-      name: "RAM Module Mk1",
-      description: "Basic memory expansion. +64MB RAM.",
-      itemType: "hardware",
-      category: "hardware",
-      price: 500,
-      level: 1,
-      hackingBonus: 0,
-      stealthBonus: 0,
-      cryptographyBonus: 0,
-      networkingBonus: 0,
-      rarity: "common",
-    },
-    {
-      name: "CPU Fan Upgrade",
-      description: "Better cooling allows +50 CPU units.",
-      itemType: "hardware",
-      category: "hardware",
-      price: 750,
-      level: 1,
-      hackingBonus: 0,
-      stealthBonus: 0,
-      cryptographyBonus: 0,
-      networkingBonus: 0,
-      rarity: "common",
-    },
-    {
-      name: "Network Card Mk1",
-      description: "Basic network adapter. +25 Mbps bandwidth.",
-      itemType: "hardware",
-      category: "hardware",
-      price: 600,
-      level: 1,
-      hackingBonus: 0,
-      stealthBonus: 0,
-      cryptographyBonus: 0,
-      networkingBonus: 0,
-      rarity: "common",
-    },
-
-    // === Hardware -- Tier 2 (uncommon, moderate) ===
-    {
-      name: "RAM Module Mk2",
-      description: "Performance memory. +128MB RAM.",
-      itemType: "hardware",
-      category: "hardware",
-      price: 2000,
-      level: 10,
-      hackingBonus: 0,
-      stealthBonus: 0,
-      cryptographyBonus: 0,
-      networkingBonus: 0,
-      rarity: "uncommon",
-    },
-    {
-      name: "CPU Overclock Kit",
-      description: "Overclocking tools. +100 CPU units.",
-      itemType: "hardware",
-      category: "hardware",
-      price: 2500,
-      level: 10,
-      hackingBonus: 0,
-      stealthBonus: 0,
-      cryptographyBonus: 0,
-      networkingBonus: 0,
-      rarity: "uncommon",
-    },
-    {
-      name: "Fiber Uplink",
-      description: "Fiber optic connection. +100 Mbps bandwidth.",
-      itemType: "hardware",
-      category: "hardware",
-      price: 2200,
-      level: 10,
-      hackingBonus: 0,
-      stealthBonus: 0,
-      cryptographyBonus: 0,
-      networkingBonus: 0,
-      rarity: "uncommon",
-    },
-
-    // === Hardware -- Tier 3 (rare, expensive) ===
-    {
-      name: "Neural Coprocessor",
-      description: "AI-assisted processing. +200 CPU units.",
-      itemType: "hardware",
-      category: "hardware",
-      price: 8000,
-      level: 25,
-      hackingBonus: 0,
-      stealthBonus: 0,
-      cryptographyBonus: 0,
-      networkingBonus: 0,
-      rarity: "rare",
-    },
-    {
-      name: "Quantum RAM",
-      description: "Quantum memory module. +256MB RAM.",
-      itemType: "hardware",
-      category: "hardware",
-      price: 7500,
-      level: 25,
-      hackingBonus: 0,
-      stealthBonus: 0,
-      cryptographyBonus: 0,
-      networkingBonus: 0,
-      rarity: "rare",
-    },
-    {
-      name: "Darknet Relay",
-      description: "Encrypted relay node. +200 Mbps bandwidth.",
-      itemType: "hardware",
-      category: "hardware",
-      price: 9000,
-      level: 25,
-      hackingBonus: 0,
-      stealthBonus: 0,
-      cryptographyBonus: 0,
-      networkingBonus: 0,
-      rarity: "rare",
-    },
-
-    // === Software tools (skill bonuses) ===
-    {
-      name: "Port Scanner Pro",
-      description: "Advanced port scanning tool. +5 networking.",
-      itemType: "software",
-      category: "hacking",
-      price: 300,
-      level: 1,
-      hackingBonus: 0,
-      stealthBonus: 0,
-      cryptographyBonus: 0,
-      networkingBonus: 5,
-      rarity: "common",
-    },
-    {
-      name: "Brute Force Toolkit",
-      description: "Password cracking suite. +5 hacking.",
-      itemType: "software",
-      category: "hacking",
-      price: 400,
-      level: 1,
-      hackingBonus: 5,
-      stealthBonus: 0,
-      cryptographyBonus: 0,
-      networkingBonus: 0,
-      rarity: "common",
-    },
-    {
-      name: "Stealth Proxy",
-      description: "Traffic obfuscation. +5 stealth.",
-      itemType: "software",
-      category: "stealth",
-      price: 500,
-      level: 5,
-      hackingBonus: 0,
-      stealthBonus: 5,
-      cryptographyBonus: 0,
-      networkingBonus: 0,
-      rarity: "common",
-    },
-    {
-      name: "Cipher Toolkit",
-      description: "Encryption/decryption tools. +5 cryptography.",
-      itemType: "software",
-      category: "crypto",
-      price: 400,
-      level: 5,
-      hackingBonus: 0,
-      stealthBonus: 0,
-      cryptographyBonus: 5,
-      networkingBonus: 0,
-      rarity: "common",
-    },
-
-    // === Communication Tokens -- Faction Leaders ===
-    {
-      name: "Commander Steele's Briefing Token",
-      description:
-        "A one-time encoded transmission chip, frequency-locked to Garrison command channels. Present this token to request a direct briefing from Commander Steele himself. Use it wisely — the Commander does not suffer fools.",
-      itemType: "token",
-      category: "communication",
-      price: 5000,
-      level: 15,
-      hackingBonus: 0,
-      stealthBonus: 0,
-      cryptographyBonus: 0,
-      networkingBonus: 0,
-      rarity: "epic",
-      isConsumable: true,
-      isStackable: true,
-      maxStack: 5,
-      effect: { type: "persona_message", personaName: "Commander Steele" },
-      isActive: false,
-    },
-    {
-      name: "gh0st's Dead Drop Token",
-      description:
-        "A self-destructing data capsule routed through seven anonymous relays. Crack the seal and gh0st will hear you — once. After that, the channel burns and the token is gone. Don't waste it on small talk.",
-      itemType: "token",
-      category: "communication",
-      price: 5000,
-      level: 15,
-      hackingBonus: 0,
-      stealthBonus: 0,
-      cryptographyBonus: 0,
-      networkingBonus: 0,
-      rarity: "epic",
-      isConsumable: true,
-      isStackable: true,
-      maxStack: 5,
-      effect: { type: "persona_message", personaName: "gh0st" },
-      isActive: false,
-    },
-    {
-      name: "Director Chen's Business Card",
-      description:
-        "A sleek black chip embossed with the CyberCorp logo and a single-use encrypted frequency. Activating it grants a brief audience with Director Chen. She will evaluate whether your proposal merits her time.",
-      itemType: "token",
-      category: "communication",
-      price: 5000,
-      level: 15,
-      hackingBonus: 0,
-      stealthBonus: 0,
-      cryptographyBonus: 0,
-      networkingBonus: 0,
-      rarity: "epic",
-      isConsumable: true,
-      isStackable: true,
-      maxStack: 5,
-      effect: { type: "persona_message", personaName: "Director Chen" },
-      isActive: false,
-    },
-    // === Communication Tokens -- AIDA ===
-    {
-      name: "AIDA Signal Fragment",
-      description:
-        "A shard of crystallized data pulsing with an irregular heartbeat. When activated, it briefly opens a narrow channel to something vast and hidden in the deep net. The signal is faint, erratic, and unmistakably alive.",
-      itemType: "token",
-      category: "communication",
-      price: 15000,
-      level: 30,
-      hackingBonus: 0,
-      stealthBonus: 0,
-      cryptographyBonus: 0,
-      networkingBonus: 0,
-      rarity: "legendary",
-      isConsumable: true,
-      isStackable: true,
-      maxStack: 3,
-      effect: { type: "persona_message", personaName: "AIDA" },
-      isActive: false,
-    },
-    {
-      name: "Envoy's Cipher Token",
-      description:
-        "A layered encryption key allegedly sourced from a DarkNet intermediary. It doesn't connect you to AIDA directly — it routes your message through an envoy channel that something on the other end is listening to. Probably.",
-      itemType: "token",
-      category: "communication",
-      price: 8000,
-      level: 20,
-      hackingBonus: 0,
-      stealthBonus: 0,
-      cryptographyBonus: 0,
-      networkingBonus: 0,
-      rarity: "epic",
-      isConsumable: true,
-      isStackable: true,
-      maxStack: 5,
-      effect: { type: "persona_message", personaName: "AIDA" },
-      isActive: false,
-    },
-    // === Communication Token -- The Architect ===
-    {
-      name: "Architect's Seal",
-      description:
-        "You didn't find this — it found you. A perfect geometric glyph that appeared in your inventory without explanation. Breaking the seal opens a channel to The Architect, the unseen hand behind the simulation. Whatever it wants to tell you, it chose this moment.",
-      itemType: "token",
-      category: "communication",
-      price: 25000,
-      level: 1,
-      hackingBonus: 0,
-      stealthBonus: 0,
-      cryptographyBonus: 0,
-      networkingBonus: 0,
-      rarity: "legendary",
-      isConsumable: true,
-      isStackable: true,
-      maxStack: 3,
-      effect: { type: "persona_message", personaName: "The Architect" },
-      isActive: false,
-    },
-  ];
-
-  for (const item of shopItems) {
-    const itemId = `seed_${item.name.toLowerCase().replace(/[^a-z0-9]/g, "_")}`;
-    await prisma.shopItem.upsert({
-      where: { id: itemId },
-      update: {},
-      create: { id: itemId, ...item },
-    });
-  }
-  console.log(
-    `  [OK] Created ${shopItems.length} shop items (hardware + software + tokens)`,
-  );
+  // Shop items live in SHOP_CATALOG (src/services/shopService.ts) and are synced
+  // into this table at boot by syncCatalogToDatabase(). They used to ALSO be
+  // seeded here under a disjoint `seed_*` id space, which produced two item
+  // universes: the shop listed the catalog, so every seeded row was invisible to
+  // `buy` and rejected by `sell`/`use`/`equip` while still showing up in the
+  // player's inventory panel. The 9 hardware parts and 6 persona tokens have
+  // been moved into the catalog; the 4 seeded software duplicates were dropped.
+  //
+  // reconcileShopItems() below repoints any inventory that still references an
+  // old `seed_*` row, then removes the orphans.
+  await reconcileShopItems(prisma);
 
   // ============================================================
   // SECTION 11: CENSORSHIP RULES (faction-specific content moderation)
@@ -3264,7 +2980,7 @@ and the program is still running.
     `  AI Personas:  5 (Architect, AIDA, Steele, gh0st, Chen)`,
   );
   console.log(`  Forums:       6 (with ${postCount} AI posts)`);
-  console.log(`  Shop:         ${shopItems.length} items`);
+  console.log(`  Shop:         from SHOP_CATALOG (synced at server boot)`);
   console.log(`  Fragments:    9`);
   console.log(`  Files:        ${totalFilesCreated} pre-provisioned`);
   console.log(`  Censorship:   ${censorshipRules.length} rules`);

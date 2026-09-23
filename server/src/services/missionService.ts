@@ -3,7 +3,7 @@ import { Mission } from "@prisma/client";
 import { db } from "../database/client";
 import { injectable, inject } from "tsyringe";
 import type { Logger } from "pino";
-import { CACHE_SERVICE, LOGGER } from "../di/tokens";
+import { CACHE_SERVICE, LOGGER, SOCKET_IO } from "../di/tokens";
 import type { CacheService } from "./cacheService";
 import { Server as SocketIOServer } from "socket.io";
 
@@ -115,8 +115,17 @@ class MissionService extends EventEmitter {
   constructor(
     @inject(LOGGER) private logger: Logger,
     @inject(CACHE_SERVICE) private cacheService: CacheService,
+    // INJECTED. `setSocketIO()` was only ever called by
+    // `missionIntegration.setSocketIO()`, which itself has ZERO callers — so
+    // `this.io` was permanently null and all 12 socket emits here were dead:
+    // mission:accepted/assigned/completed/abandoned/expired/feedback,
+    // rewards:xp_granted, rewards:credits_granted, and player:levelup — the last
+    // of which the client answers with a sound and an urgent notification that
+    // has therefore never fired.
+    @inject(SOCKET_IO) io?: SocketIOServer,
   ) {
     super();
+    this.io = io || null;
   }
 
   /**
@@ -526,6 +535,21 @@ class MissionService extends EventEmitter {
       const missionProgress = (progress.missionProgress as any) || {};
       const playerMission = missionProgress[missionId];
 
+      // REVERTED 2026-08-31. A lazy "materialise the progress entry from the
+      // Mission row" branch briefly lived here. It was wrong on two counts:
+      //
+      //  - It was unnecessary. `missionGenerator` ALREADY writes each generated
+      //    mission into the player's own missionProgress with
+      //    `status: "available"` (missionGenerator.ts:178-205), precisely so
+      //    getPlayerMissions() returns it. Offers are per-player by design; they
+      //    are not anonymous rows waiting to be claimed. The reason no offer was
+      //    ever visible was that generation had never run at all.
+      //  - It was harmful. Materialising here while the generator also writes a
+      //    blob entry for the same globally-shared row lets TWO players hold the
+      //    same mission "active" and both complete it.
+      //
+      // So this correctly stays a hard requirement: you can only accept a
+      // mission that is already on offer TO YOU.
       if (!playerMission) {
         throw new Error("Mission not assigned to player");
       }

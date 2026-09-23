@@ -116,7 +116,11 @@ const REWARD_TYPES: ReadonlyArray<{
   {
     type: "rare_script",
     weight: 4,
-    data: { scriptName: "zero_day_exploit", credits: 10000 },
+    // `zero_day_exploit` is a catalog ID, not a name — the row is called
+    // "Zero-Day Exploit". The grant site used to look it up by name, so this
+    // reward silently paid out only its credits and never the script. Field
+    // renamed to say what the value actually is.
+    data: { scriptItemId: "zero_day_exploit", credits: 10000 },
   },
   { type: "credits_cache", weight: 6, data: { amount: 25000 } },
   { type: "intel_package", weight: 4, data: { xp: 5000, skillPoints: 2 } },
@@ -1102,11 +1106,26 @@ Respond ONLY with JSON:
           data: { credits: { increment: credits } },
         });
 
-        // Grant script item if one exists in the shop
-        if (data.scriptName) {
-          const scriptItem = await db.client.shopItem.findFirst({
-            where: { name: data.scriptName },
+        // Grant script item if one exists in the shop.
+        //
+        // Looked up by ID. `scriptName` is the legacy field name still present
+        // in rewardData persisted on in-flight dungeon instances; its value was
+        // always an id, so reading it here is safe and needs no data migration.
+        const scriptItemId: string | undefined =
+          data.scriptItemId ?? data.scriptName;
+        if (scriptItemId) {
+          const scriptItem = await db.client.shopItem.findUnique({
+            where: { id: scriptItemId },
           });
+
+          if (!scriptItem) {
+            // Never silent again: a missing row is why this reward paid nothing
+            // for as long as it existed.
+            this.logger.warn(
+              { userId, scriptItemId },
+              "rare_script dungeon reward: no ShopItem with that id, script not granted",
+            );
+          }
 
           if (scriptItem) {
             const existing = await db.client.inventoryItem.findFirst({

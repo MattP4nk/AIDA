@@ -23,6 +23,8 @@
  *   - AI is optional: falls back to static templates when AI is unavailable
  */
 
+import { MAX_CONTENT_ENCRYPTION_LEVEL } from "../config/gameBalance";
+import { resolveNpcOwnerId } from "../../prisma/npcOwnership";
 import { injectable, inject } from "tsyringe";
 import { PrismaClient } from "@prisma/client";
 import type { Logger } from "pino";
@@ -1470,6 +1472,38 @@ At least one file must be an "objective_target".`;
 // Service
 // ---------------------------------------------------------------------------
 
+/**
+ * Objective types for which `provisionMissionInfrastructure` creates a target
+ * server / plants files / patches metadata.
+ *
+ * This is the GATE. The `switch (obj.type)` inside that method is the WORK.
+ * They must list the same types — they previously did not, and three types with
+ * working `case` arms were unreachable because the gate excluded them.
+ *
+ * Exported so a check can assert the pairing rather than trusting a comment.
+ */
+export const PROVISIONED_OBJECTIVE_TYPES: ReadonlySet<string> = new Set([
+  // need a target server to exist, even though they bind no id
+  "hack",
+  "hack_stealth",
+  "hack_method",
+  "explore",
+  // bind metadata.serverId
+  "hack_target",
+  "gain_access",
+  "upload_file",
+  "connect_server",
+  "discover_server_type",
+  "steal_count",
+  // bind metadata.fileId
+  "steal",
+  "delete_file",
+  // previously MISSING from the gate despite having switch arms
+  "infiltrate_network",
+  "trace_connection",
+  "exfiltrate_data",
+]);
+
 @injectable()
 export class ServerContentService {
   private prisma: PrismaClient;
@@ -1956,21 +1990,21 @@ export class ServerContentService {
     userId: string,
   ): Promise<MissionProvisionResult | null> {
     try {
-      // Determine which objective types need server/file infrastructure
-      const serverObjectiveTypes = new Set([
-        "hack",
-        "hack_target",
-        "hack_stealth",
-        "hack_method",
-        "gain_access",
-        "steal",
-        "steal_count",
-        "upload_file",
-        "delete_file",
-        "connect_server",
-        "explore",
-        "discover_server_type",
-      ]);
+      // Objective types that need server/file infrastructure.
+      //
+      // MUST stay in sync with the `switch (obj.type)` patch block below — this
+      // set is the gate, that switch does the work, and they had silently
+      // drifted: the switch already had `case` arms for `infiltrate_network`,
+      // `trace_connection` and `exfiltrate_data`, but the gate omitted all
+      // three. Any mission built only from those types returned early with no
+      // server, no planted file and no metadata, so its objectives could never
+      // be satisfied. `deep_extraction` is exactly that shape and was
+      // impossible to complete.
+      //
+      // Kept as one named constant next to the switch so the pairing is visible;
+      // `PROVISIONED_OBJECTIVE_TYPES` is asserted against the switch's coverage
+      // by scripts/verify-mission-provisioning.ts.
+      const serverObjectiveTypes = PROVISIONED_OBJECTIVE_TYPES;
 
       const needsServer = mission.objectives.some((obj) =>
         serverObjectiveTypes.has(obj.type),
@@ -2632,10 +2666,28 @@ export class ServerContentService {
       // Generate a thematic name
       const name = this.generateServerName(serverType, mission.factionId);
 
-      const encryptionLevel = Math.min(
-        100,
-        Math.max(0, mission.difficulty * 10),
+      // P0-4: `difficulty * 10` produced encryptionLevel 10-100, but G4 made
+      // `requiredLevel = encryptionLevel * LEVEL_PER_ENCRYPTION` (=2), so a
+      // DIFFICULTY-1 mission provisioned a target needing player level 20 —
+      // 36,100 XP — and answered "Insufficient level" forever. G4 was calibrated
+      // against seed.ts, where nothing exceeds 5, and never against this writer.
+      //
+      // Map difficulty 1-10 onto the 0-5 band the seeded world actually uses, so
+      // the hardest generated target needs level 10 rather than level 200.
+      const encryptionLevel = Math.max(
+        0,
+        Math.min(MAX_CONTENT_ENCRYPTION_LEVEL, Math.round(mission.difficulty / 2)),
       );
+
+      // P0-3: every server must have an owner — `hack` refuses ownerless targets
+      // ("Target server has no owner"), so a mission target created without one
+      // is an objective the player cannot complete. U3b fixed this for the three
+      // creation sites known at the time; this is the fourth, and it defaulted to
+      // null through `serverService.createServer`'s `ownerId ?? null`.
+      const npcOwnerId = await resolveNpcOwnerId(this.prisma, {
+        factionId: mission.factionId ?? null,
+        type: serverType,
+      });
 
       const server = await serverService.createServer({
         name,
@@ -2643,6 +2695,7 @@ export class ServerContentService {
         type: serverType,
         encryptionLevel,
         maxConnections: 10 + mission.difficulty * 2,
+        ownerId: npcOwnerId,
       });
 
       // Associate with faction if applicable
@@ -2669,7 +2722,7 @@ export class ServerContentService {
         ipAddress: ip,
         name,
         type: serverType,
-        ownerId: null,
+        ownerId: npcOwnerId,
       };
     } catch (error) {
       this.logger.error(

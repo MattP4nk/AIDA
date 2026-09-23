@@ -1,6 +1,7 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
 import { infoBox, render } from "./asciiBox";
+import { getSkillShortfall } from "./skillRequirements";
 import {
   resolvePath,
   getSession,
@@ -201,6 +202,10 @@ export class FileCommandsModule implements CommandModule {
 
     const fileContent = readCheck.data.content;
     const fileIsEncrypted = readCheck.data.isEncrypted;
+    // Source file's node id, for mission crediting. `steal`/`exfiltrate_data`
+    // objectives are bound to `metadata.fileId`; both download paths used to
+    // pass "" here, so they could never be credited (M12).
+    const sourceFileId: string = readCheck.data.nodeId ?? "";
     const memoryService = context.services.memoryService;
 
     // ── Spawn download as a background process ──
@@ -220,10 +225,12 @@ export class FileCommandsModule implements CommandModule {
           const accessKeysGranted: string[] = [];
           try {
             // Track download for mission objectives FIRST (before file copy which can fail)
-            const missionIntegration = context.services.missionIntegrationService;
+            const missionIntegration = context.services.missionIntegrationService as
+              | import("../missionIntegration").MissionIntegrationService
+              | undefined;
             if (missionIntegration) {
               try {
-                await (missionIntegration as any).onFileOperation(userId, "download", "", sourceServerId);
+                await missionIntegration.onFileOperation(userId, "download", sourceFileId, sourceServerId);
               } catch { /* non-critical */ }
             }
 
@@ -324,10 +331,12 @@ export class FileCommandsModule implements CommandModule {
     // Fallback: no process system available — direct copy
     try {
       // Track download for mission objectives FIRST
-      const missionIntegration = context.services.missionIntegrationService;
+      const missionIntegration = context.services.missionIntegrationService as
+              | import("../missionIntegration").MissionIntegrationService
+              | undefined;
       if (missionIntegration) {
         try {
-          await (missionIntegration as any).onFileOperation(context.userId, "download", "", serverId);
+          await missionIntegration.onFileOperation(context.userId, "download", sourceFileId, serverId);
         } catch { /* non-critical */ }
       }
 
@@ -582,6 +591,65 @@ export class FileCommandsModule implements CommandModule {
     }
   }
 
+  /**
+   * Build the ANALYSIS REPORT, degraded by an under-skilled forensic read.
+   *
+   * U3c penalty currency for `analyze`: **conclusiveness**, not speed or noise.
+   * A weak analyst still gets the report, but the fields that take real forensic
+   * skill to establish come back inconclusive. Type and Size are never withheld —
+   * they are trivially observable from a directory listing the player can already
+   * run, so hiding them would be arbitrary rather than a degraded analysis.
+   *
+   * Shared by the process path and the no-resource-system fallback so the two
+   * cannot drift.
+   */
+  private buildAnalysisReport(
+    filename: string,
+    entry: any,
+    severity: number,
+  ): string {
+    const labelWidth = 14;
+    const inconclusive = "-- inconclusive --";
+
+    // Fields ordered by how much skill they take to establish. At full severity
+    // all three of these are lost; at zero, none are.
+    const skilled = [
+      {
+        label: "Encrypted:",
+        value: entry.isEncrypted ? "Yes" : "No",
+      },
+      {
+        label: "Permissions:",
+        value: entry.permissions || "N/A",
+      },
+      {
+        label: "Modified:",
+        value: new Date(entry.modified).toLocaleString(),
+      },
+    ];
+    const lost = Math.min(skilled.length, Math.round(severity * skilled.length));
+    // Lose the hardest first — Modified, then Permissions, then Encrypted.
+    const keptCount = skilled.length - lost;
+
+    const rows = [
+      { label: "Type:".padEnd(labelWidth), value: entry.type },
+      { label: "Size:".padEnd(labelWidth), value: `${entry.size} bytes` },
+      ...skilled.map((f, i) => ({
+        label: f.label.padEnd(labelWidth),
+        value: i < keptCount ? f.value : inconclusive,
+      })),
+    ];
+
+    if (lost > 0) {
+      rows.push({
+        label: "".padEnd(labelWidth),
+        value: `(forensics too low for a full read)`,
+      });
+    }
+
+    return render(infoBox(`ANALYSIS REPORT: ${filename}`, rows, 40));
+  }
+
   private async handleAnalyze(
     command: Command,
     context: CommandContext,
@@ -599,6 +667,20 @@ export class FileCommandsModule implements CommandModule {
     }
 
     const path = resolvePath(filename, getSession(context)?.currentDirectory || "/");
+
+    // U3c soft gate: `analyze` has a baseline of Forensics 10 but a new player
+    // starts at 5, so it was refused outright. Now it runs and degrades — see
+    // buildAnalysisReport for the currency.
+    const progress = await context.db.client.playerProgress.findUnique({
+      where: { userId: context.userId },
+      select: { forensics: true },
+    });
+    const shortfall = getSkillShortfall(
+      command.command,
+      command.args,
+      (progress ?? {}) as unknown as Record<string, unknown>,
+    );
+    const severity = shortfall?.severity ?? 0;
 
     // ── Spawn analyze as a background process ──
     const memoryService = context.services.memoryService;
@@ -646,28 +728,10 @@ export class FileCommandsModule implements CommandModule {
               return;
             }
 
-            const labelWidth = 14;
-            const resultOutput = render(
-              infoBox(
-                `ANALYSIS REPORT: ${filename}`,
-                [
-                  { label: "Type:".padEnd(labelWidth), value: entry.type },
-                  { label: "Size:".padEnd(labelWidth), value: `${entry.size} bytes` },
-                  {
-                    label: "Encrypted:".padEnd(labelWidth),
-                    value: entry.isEncrypted ? "Yes" : "No",
-                  },
-                  {
-                    label: "Permissions:".padEnd(labelWidth),
-                    value: entry.permissions || "N/A",
-                  },
-                  {
-                    label: "Modified:".padEnd(labelWidth),
-                    value: new Date(entry.modified).toLocaleString(),
-                  },
-                ],
-                40,
-              ),
+            const resultOutput = this.buildAnalysisReport(
+              filename,
+              entry,
+              severity,
             );
 
             if (context.io) {
@@ -714,29 +778,7 @@ export class FileCommandsModule implements CommandModule {
         return errorResult(`File not found: ${filename}`);
       }
 
-      const labelWidth = 14;
-      const output = render(
-        infoBox(
-          `ANALYSIS REPORT: ${filename}`,
-          [
-            { label: "Type:".padEnd(labelWidth), value: entry.type },
-            { label: "Size:".padEnd(labelWidth), value: `${entry.size} bytes` },
-            {
-              label: "Encrypted:".padEnd(labelWidth),
-              value: entry.isEncrypted ? "Yes" : "No",
-            },
-            {
-              label: "Permissions:".padEnd(labelWidth),
-              value: entry.permissions || "N/A",
-            },
-            {
-              label: "Modified:".padEnd(labelWidth),
-              value: new Date(entry.modified).toLocaleString(),
-            },
-          ],
-          40,
-        ),
-      );
+      const output = this.buildAnalysisReport(filename, entry, severity);
 
       return successResult(output, { entry });
     } catch (error) {

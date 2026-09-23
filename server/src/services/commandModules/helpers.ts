@@ -7,6 +7,10 @@ import type { CommandResult, PlayerSession } from "../../../../shared/types";
 import type { CommandContext } from "./interface";
 import type { GameProcessType } from "../memoryService";
 import { sanitizePath } from "../../utils/pathSanitizer";
+import { HARDWARE_SPECS } from "../../config/gameBalance";
+
+/** Catalog ids of every rig part, computed once — used to scope the inventory read. */
+const HARDWARE_ITEM_IDS = Object.keys(HARDWARE_SPECS);
 
 // ═══════════════════════════════════════════════════════════════════
 // Path Resolution
@@ -146,6 +150,41 @@ export interface SpawnProcessResult {
 }
 
 /**
+ * Recompute a player's rig from their level AND their installed hardware.
+ *
+ * Every resource-consuming command needs this, and each one used to do half of
+ * it — reading `level` and calling `initComputerSpec(userId, level)` while
+ * silently omitting hardware, at all nine call sites. Hardware therefore did
+ * nothing. Load the ids in ONE place so a new call site cannot reintroduce the
+ * omission by copying its neighbour.
+ *
+ * Ownership is installation: any hardware row with quantity > 0 counts, and
+ * `resolveInstalledHardware` keeps only the highest tier per channel.
+ */
+export async function refreshComputerSpec(
+  context: CommandContext,
+  playerLevel: number,
+): Promise<void> {
+  const memoryService = context.services.memoryService;
+  if (!memoryService) return;
+
+  const owned = await context.db.client.inventoryItem.findMany({
+    where: {
+      userId: context.userId,
+      quantity: { gt: 0 },
+      shopItemId: { in: HARDWARE_ITEM_IDS },
+    },
+    select: { shopItemId: true },
+  });
+
+  memoryService.initComputerSpec(
+    context.userId,
+    playerLevel,
+    owned.map((r) => r.shopItemId),
+  );
+}
+
+/**
  * Spawn a background game process with resource checking.
  * Returns a CommandResult + optional process object.
  * Returns null if memoryService is unavailable (caller should handle fallback).
@@ -162,7 +201,7 @@ export async function spawnBackgroundProcess(
     select: { [skillKey]: true, level: true } as any,
   });
 
-  memoryService.initComputerSpec(context.userId, progress?.level ?? 1);
+  await refreshComputerSpec(context, progress?.level ?? 1);
 
   const check = memoryService.canSpawnProcess(context.userId, processType);
   if (!check.allowed) {

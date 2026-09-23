@@ -7,7 +7,7 @@ import {
   validateStormAnswer,
 } from "../fileAccessMinigameGenerator";
 import { CommandModule, CommandContext } from "./interface";
-import { HACK_TOOL_ITEMS } from "../../config/gameBalance";
+import { HACK_TOOL_ITEMS, QUANTUM_CHARGE_ITEM_ID, SKILL_PENALTY } from "../../config/gameBalance";
 import { getSkillShortfall } from "./skillRequirements";
 import {
   boxTop,
@@ -24,7 +24,7 @@ import {
   progressBar,
   render,
 } from "./asciiBox";
-import { successResult, errorResult } from "./helpers";
+import { successResult, errorResult, refreshComputerSpec } from "./helpers";
 import logger from "../../logger";
 
 /**
@@ -391,7 +391,7 @@ export class HackCommandsModule implements CommandModule {
     // ── Resource check: can we afford the hack prep process? ──
     if (memoryService) {
       // Ensure computer spec is initialized
-      memoryService.initComputerSpec(context.userId, progress?.level ?? 1);
+      await refreshComputerSpec(context, progress?.level ?? 1);
 
       const check = memoryService.canSpawnProcess(context.userId, "hack_prep");
       if (!check.allowed) {
@@ -930,7 +930,9 @@ export class HackCommandsModule implements CommandModule {
 
     const progress = await context.db.client.playerProgress.findUnique({
       where: { userId: context.userId },
-      select: { cryptography: true },
+      // `hacking` is what the GATE reads (`crack` is Hacking 30); `cryptography`
+      // is what the challenge generator uses for hints.
+      select: { cryptography: true, hacking: true },
     });
     const cryptography = progress?.cryptography ?? 0;
 
@@ -938,8 +940,27 @@ export class HackCommandsModule implements CommandModule {
     const metadata = (fileNode.metadata as any) || {};
     const encryptionKey = fileNode.encryptionKey || metadata.encryptionKey || null;
 
+    // U3c-0: `crack` is declared `mode: "soft"`, so a player up to
+    // SKILL_SOFT_BAND below Hacking 30 is allowed here. Without a penalty that
+    // was a pure difficulty cut. The currency for `crack` is the CHALLENGE
+    // ITSELF: overreaching gives you a harder cipher, not just worse odds.
+    const crackSeverity =
+      getSkillShortfall(
+        "crack",
+        _command.args,
+        (progress ?? {}) as unknown as Record<string, unknown>,
+      )?.severity ?? 0;
+
+    const baseDifficulty =
+      fileNode.encryptionLevel ||
+      Math.min(10, Math.max(1, Math.floor((fileNode.size || 500) / 500)));
+    const difficulty = Math.min(
+      10,
+      baseDifficulty + crackSeverity * SKILL_PENALTY.maxMinigameDifficultyBump,
+    );
+
     const challenge = generateBruteForceChallenge(
-      fileNode.encryptionLevel || Math.min(10, Math.max(1, Math.floor((fileNode.size || 500) / 500))),
+      difficulty,
       { id: fileNode.id, name: fileName, encryptionKey, metadata },
       { cryptography },
     );
@@ -985,10 +1006,19 @@ export class HackCommandsModule implements CommandModule {
     if (memoryService) {
       const progress = await context.db.client.playerProgress.findUnique({
         where: { userId: context.userId },
-        select: { cryptography: true, level: true },
+        // `hacking` is here for the SKILL GATE, `cryptography` for the work:
+        // `crack` is gated on Hacking 30 (skillRequirements.ts), so selecting
+        // only cryptography made getSkillShortfall read a missing field and
+        // silently return severity 0 — a soft gate that never bites.
+        select: { cryptography: true, hacking: true, level: true },
       });
-      memoryService.initComputerSpec(context.userId, progress?.level ?? 1);
+      await refreshComputerSpec(context, progress?.level ?? 1);
 
+      // NOTE: no shortfall penalty on this path. `crack`'s message branch just
+      // spawns a decrypt process — there is no success roll and no minigame to
+      // degrade, so there is nothing here to make harder. The penalty for an
+      // under-skilled `crack` is applied on the FILE branch instead, by raising
+      // the brute-force challenge difficulty (see handleCrackFile).
       const check = memoryService.canSpawnProcess(context.userId, "decrypt");
       if (!check.allowed) {
         return errorResult(`Insufficient resources: ${check.reason}\nUse 'ps' to see running processes, 'kill <pid>' to free resources.`);
@@ -1137,12 +1167,20 @@ export class HackCommandsModule implements CommandModule {
     const fileNode = resolution.node as any;
     if (!fileNode.isProtected) return errorResult(`${fileName} is not protected.`);
 
-    // Check for quantum_charge in inventory
-    const inventory = await context.db.client.inventoryItem.findMany({
-      where: { userId: context.userId },
-      include: { shopItem: true },
+    // Check for the charge in inventory, BY CATALOG ID.
+    //
+    // This used to pull the whole inventory and look for a name containing
+    // "quantum charge" — but the item is named "Quantum Decryptor Charge", which
+    // does not contain that substring, so the find always failed and this
+    // command was unusable by everyone. The error below even names the item the
+    // player was holding. Match the id instead; see QUANTUM_CHARGE_ITEM_ID.
+    const charge = await context.db.client.inventoryItem.findFirst({
+      where: {
+        userId: context.userId,
+        shopItemId: QUANTUM_CHARGE_ITEM_ID,
+        quantity: { gt: 0 },
+      },
     });
-    const charge = inventory.find((i: any) => i.shopItem.name?.toLowerCase().includes("quantum charge") && i.quantity > 0);
     if (!charge) {
       return errorResult(
         "Requires a Quantum Decryptor Charge.\n" +
@@ -1309,6 +1347,28 @@ export class HackCommandsModule implements CommandModule {
       return errorResult("Usage: exploit <target_ip> <exploit_name>");
     }
 
+    // OWNERSHIP CHECK — this was missing entirely.
+    //
+    // `exploitName` is raw player input and used to be handed straight to
+    // processHackAttempt as the tools array, where `calculateToolBonus` looks it
+    // up in TOOL_EFFECTIVENESS. So `exploit <ip> zero_day` bought a +0.25 success
+    // bonus for free, and `exploit <ip> advanced_stealth` the stealth ceiling on
+    // top — while owning nothing. `filterOwnedTools` existed and was wired only
+    // into `hack`, so S4's ownership control covered one of the two paths that
+    // needed it.
+    const exploitCheck = await this.filterOwnedTools(context, [exploitName]);
+    if (exploitCheck.unknown.length > 0) {
+      return errorResult(
+        `Unknown exploit: ${exploitName}\nRun 'shop' to see what is available.`,
+      );
+    }
+    if (exploitCheck.unowned.length > 0) {
+      return errorResult(
+        `You don't own ${exploitName}.\nBuy it from the shop before deploying it.`,
+      );
+    }
+    const ownedExploits = exploitCheck.owned;
+
     const targetResolution = await this.resolveHackTarget(targetIp, context);
     if (!targetResolution.success) {
       return errorResult(targetResolution.error || "Failed to resolve target");
@@ -1325,7 +1385,17 @@ export class HackCommandsModule implements CommandModule {
         where: { userId: context.userId },
         select: { hacking: true, level: true },
       });
-      memoryService.initComputerSpec(context.userId, progress?.level ?? 1);
+      await refreshComputerSpec(context, progress?.level ?? 1);
+
+      // U3c-0: these commands are declared `mode: "soft"`, so an under-skilled
+      // player is ALLOWED here — but the penalty has to be applied or "soft"
+      // is just a difficulty cut. Threaded into processHackAttempt below.
+      const shortfall = getSkillShortfall(
+        command.command,
+        command.args,
+        (progress ?? {}) as unknown as Record<string, unknown>,
+      );
+      const skillSeverity = shortfall?.severity ?? 0;
 
       const check = memoryService.canSpawnProcess(context.userId, "hack_prep");
       if (!check.allowed) {
@@ -1336,7 +1406,7 @@ export class HackCommandsModule implements CommandModule {
       const proc = memoryService.spawnGameProcess(
         userId, session.socketId, "hack_prep", progress?.hacking ?? 1, `${targetIp} (${exploitName})`, serverId,
         async () => {
-          const result = await context.services.hackService.processHackAttempt(userId, ownerId!, serverId!, HackMethod.EXPLOIT, [exploitName]);
+          const result = await context.services.hackService.processHackAttempt(userId, ownerId!, serverId!, HackMethod.EXPLOIT, ownedExploits, skillSeverity);
           if (context.io) {
             context.io.to(`player:${userId}`).emit("command:result", {
               success: result.success,
@@ -1353,8 +1423,20 @@ export class HackCommandsModule implements CommandModule {
       return successResult(`Deploying exploit '${exploitName}' against ${targetIp}... ETA ${etaSec}s [PID ${proc.pid}]\nUse 'ps' to monitor progress.`);
     }
 
-    // Fallback
-    const result = await context.services.hackService.processHackAttempt(context.userId, ownerId!, serverId!, HackMethod.EXPLOIT, [exploitName]);
+    // Fallback path (no resource system). The soft-gate penalty must apply here
+    // too — otherwise an under-skilled attempt is free whenever memoryService is
+    // unavailable, which is exactly the U3c-0 hole being closed.
+    const fbProgress = await context.db.client.playerProgress.findUnique({
+      where: { userId: context.userId },
+      select: { hacking: true },
+    });
+    const fbSeverity =
+      getSkillShortfall(
+        command.command,
+        command.args,
+        (fbProgress ?? {}) as unknown as Record<string, unknown>,
+      )?.severity ?? 0;
+    const result = await context.services.hackService.processHackAttempt(context.userId, ownerId!, serverId!, HackMethod.EXPLOIT, ownedExploits, fbSeverity);
     if (result.success) {
       return successResult(`Exploit ${exploitName} executed successfully`);
     }
@@ -1384,9 +1466,21 @@ export class HackCommandsModule implements CommandModule {
     if (memoryService) {
       const progress = await context.db.client.playerProgress.findUnique({
         where: { userId: context.userId },
-        select: { stealth: true, level: true },
+        // `hacking` is required by the gate (Hacking 50); `stealth` is used by
+        // the work. Selecting only stealth made the shortfall silently zero.
+        select: { stealth: true, hacking: true, level: true },
       });
-      memoryService.initComputerSpec(context.userId, progress?.level ?? 1);
+      await refreshComputerSpec(context, progress?.level ?? 1);
+
+      // U3c-0: `backdoor` is declared `mode: "soft"`, so an under-skilled player
+      // is ALLOWED here — the penalty must be applied or "soft" is just a
+      // difficulty cut. Threaded into processHackAttempt below.
+      const shortfall = getSkillShortfall(
+        command.command,
+        command.args,
+        (progress ?? {}) as unknown as Record<string, unknown>,
+      );
+      const skillSeverity = shortfall?.severity ?? 0;
 
       const check = memoryService.canSpawnProcess(context.userId, "backdoor_install");
       if (!check.allowed) {
@@ -1397,7 +1491,7 @@ export class HackCommandsModule implements CommandModule {
       const proc = memoryService.spawnGameProcess(
         userId, session.socketId, "backdoor_install", progress?.stealth ?? 1, targetIp, serverId,
         async () => {
-          const result = await context.services.hackService.processHackAttempt(userId, ownerId!, serverId!, HackMethod.BACKDOOR, ["backdoor_tool"]);
+          const result = await context.services.hackService.processHackAttempt(userId, ownerId!, serverId!, HackMethod.BACKDOOR, ["backdoor_tool"], skillSeverity);
           if (context.io) {
             context.io.to(`player:${userId}`).emit("command:result", {
               success: result.success,
@@ -1415,7 +1509,20 @@ export class HackCommandsModule implements CommandModule {
     }
 
     // Fallback
-    const result = await context.services.hackService.processHackAttempt(context.userId, ownerId!, serverId!, HackMethod.BACKDOOR, ["backdoor_tool"]);
+    // Fallback path (no resource system). The soft-gate penalty must apply here
+    // too — otherwise an under-skilled attempt is free whenever memoryService is
+    // unavailable, which is exactly the U3c-0 hole being closed.
+    const fbProgress = await context.db.client.playerProgress.findUnique({
+      where: { userId: context.userId },
+      select: { hacking: true },
+    });
+    const fbSeverity =
+      getSkillShortfall(
+        command.command,
+        command.args,
+        (fbProgress ?? {}) as unknown as Record<string, unknown>,
+      )?.severity ?? 0;
+    const result = await context.services.hackService.processHackAttempt(context.userId, ownerId!, serverId!, HackMethod.BACKDOOR, ["backdoor_tool"], fbSeverity);
     if (result.success) {
       return successResult("Backdoor installed successfully");
     }
@@ -1447,7 +1554,17 @@ export class HackCommandsModule implements CommandModule {
         where: { userId: context.userId },
         select: { stealth: true, hacking: true, level: true },
       });
-      memoryService.initComputerSpec(context.userId, progress?.level ?? 1);
+      await refreshComputerSpec(context, progress?.level ?? 1);
+
+      // U3c-0: these commands are declared `mode: "soft"`, so an under-skilled
+      // player is ALLOWED here — but the penalty has to be applied or "soft"
+      // is just a difficulty cut. Threaded into processHackAttempt below.
+      const shortfall = getSkillShortfall(
+        command.command,
+        command.args,
+        (progress ?? {}) as unknown as Record<string, unknown>,
+      );
+      const skillSeverity = shortfall?.severity ?? 0;
 
       // Rootkit uses backdoor_install costs but takes longer (uses lower skill of stealth/hacking)
       const check = memoryService.canSpawnProcess(context.userId, "backdoor_install");
@@ -1460,7 +1577,7 @@ export class HackCommandsModule implements CommandModule {
       const proc = memoryService.spawnGameProcess(
         userId, session.socketId, "backdoor_install", effectiveSkill, targetIp, serverId,
         async () => {
-          const result = await context.services.hackService.processHackAttempt(userId, ownerId!, serverId!, HackMethod.ROOTKIT, ["rootkit_installer"]);
+          const result = await context.services.hackService.processHackAttempt(userId, ownerId!, serverId!, HackMethod.ROOTKIT, ["rootkit_installer"], skillSeverity);
           if (context.io) {
             context.io.to(`player:${userId}`).emit("command:result", {
               success: result.success,
@@ -1478,7 +1595,20 @@ export class HackCommandsModule implements CommandModule {
     }
 
     // Fallback
-    const result = await context.services.hackService.processHackAttempt(context.userId, ownerId!, serverId!, HackMethod.ROOTKIT, ["rootkit_installer"]);
+    // Fallback path (no resource system). The soft-gate penalty must apply here
+    // too — otherwise an under-skilled attempt is free whenever memoryService is
+    // unavailable, which is exactly the U3c-0 hole being closed.
+    const fbProgress = await context.db.client.playerProgress.findUnique({
+      where: { userId: context.userId },
+      select: { hacking: true },
+    });
+    const fbSeverity =
+      getSkillShortfall(
+        command.command,
+        command.args,
+        (fbProgress ?? {}) as unknown as Record<string, unknown>,
+      )?.severity ?? 0;
+    const result = await context.services.hackService.processHackAttempt(context.userId, ownerId!, serverId!, HackMethod.ROOTKIT, ["rootkit_installer"], fbSeverity);
     if (result.success) {
       return successResult("Rootkit installed successfully");
     }
@@ -1842,7 +1972,11 @@ export class HackCommandsModule implements CommandModule {
         where: { userId: context.userId },
         select: { stealth: true, level: true },
       });
-      memoryService.initComputerSpec(context.userId, progress?.level ?? 1);
+      await refreshComputerSpec(context, progress?.level ?? 1);
+
+      // NOTE: `trace.evade` is still mode "hard" (U3c), so there is deliberately
+      // no shortfall computed here — an under-skilled player never reaches this
+      // point. Wire one here at the same time as flipping it to "soft".
 
       const check = memoryService.canSpawnProcess(context.userId, "trace_evade");
       if (!check.allowed) {

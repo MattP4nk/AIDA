@@ -278,9 +278,14 @@ class SocketService {
       });
     });
 
-    this.on("message:error", (data: any) => {
-      console.error("💬 Message error:", data);
-      socketError.set(`Message error: ${data.message}`);
+    // Was listening for "message:error", which the server never emits. The real
+    // event is "message:result" — but it is an ACK, not an error channel: it
+    // carries { success, error } and fires on success too. A straight rename
+    // would have shown "Message error: undefined" on every message successfully
+    // sent, so the body is reconciled to the actual payload rather than renamed.
+    this.on("message:result", (data: any) => {
+      if (data?.success !== false) return;
+      socketError.set(`Message error: ${data.error ?? "unknown error"}`);
     });
 
     // ==================== FORUM EVENTS ====================
@@ -450,8 +455,10 @@ class SocketService {
 
     // ==================== SYSTEM EVENTS ====================
 
-    this.on("system:announcement", (data: any) => {
-      console.log("📢 System announcement:", data);
+    // Renamed from "system:announcement". The admin `broadcast` command has always
+    // emitted "system:broadcast" ({ message, from, timestamp }); this handler was
+    // listening for a name nothing sent, so admin broadcasts never reached anyone.
+    this.on("system:broadcast", (data: any) => {
       this.showNotification("System Announcement", data.message);
     });
 
@@ -483,14 +490,26 @@ class SocketService {
       }
     });
 
-    this.on("discovery:made", async (data: any) => {
-      this.showNotification("Discovery", `New discovery: ${data.title}`);
+    // Was listening for "discovery:made" and reading `data.title`. The server
+    // emits "server:discovered" with { count, subnet, servers[] } and no title at
+    // all — a straight rename would have rendered "New discovery: undefined".
+    this.on("server:discovered", async (data: any) => {
+      const count: number = data?.count ?? 0;
+      if (count <= 0) return;
+      const subnet: string = data?.subnet && data.subnet !== "global" ? ` on ${data.subnet}` : "";
+      const summary = `Discovered ${count} server${count === 1 ? "" : "s"}${subnet}`;
+      this.showNotification("Discovery", summary);
       const ns = await getNotifService();
       if (ns) {
+        // `servers` is capped at 5 by the server; name the first few so the
+        // notification is actionable rather than just a count.
+        const names = Array.isArray(data?.servers)
+          ? data.servers.map((x: any) => x?.ipAddress ?? x?.name).filter(Boolean)
+          : [];
         ns.add({
           type: "game",
           title: "Discovery",
-          message: data.title || "New discovery",
+          message: names.length ? `${summary}: ${names.join(", ")}` : summary,
           priority: "normal",
           data,
         });
@@ -622,7 +641,9 @@ class SocketService {
       }
     });
 
-    this.on("game:state_update", async (data: any) => {
+    // Renamed from "game:state_update" — the server emits "game:event" with a
+    // compatible payload ({ type, message, timestamp }).
+    this.on("game:event", async (data: any) => {
       const ns = await getNotifService();
       if (ns && data.message) {
         ns.add({
@@ -651,12 +672,44 @@ class SocketService {
       }
     });
 
-    this.on("rewards:xp_granted", (data: any) => {
-      // Silent — XP rewards don't need a popup, shown in command output
+    // These were empty, on the reasoning that rewards are "shown in command
+    // output". That held when rewards only came from a command the player had
+    // just typed. It stopped holding once they started arriving asynchronously —
+    // a background process completing, a mission credited by a hook, a dungeon
+    // payout — where there is no command output to show them in, and the player
+    // got XP and credits with no feedback at all.
+    //
+    // Low priority on purpose: this is a confirmation, not an interruption. The
+    // level-up handler above stays "urgent" because that one IS an event.
+    this.on("rewards:xp_granted", async (data: any) => {
+      const amount = data?.xpGained ?? 0;
+      if (amount <= 0) return;
+      const ns = await getNotifService();
+      if (ns) {
+        const skill = data?.skillName && data.skillName !== "general" ? ` (${data.skillName})` : "";
+        ns.add({
+          type: "game",
+          title: "Experience gained",
+          message: `+${amount} XP${skill}`,
+          priority: "low",
+          data,
+        });
+      }
     });
 
-    this.on("rewards:credits_granted", (data: any) => {
-      // Silent — credit rewards shown in command output
+    this.on("rewards:credits_granted", async (data: any) => {
+      const amount = data?.amount ?? 0;
+      if (amount <= 0) return;
+      const ns = await getNotifService();
+      if (ns) {
+        ns.add({
+          type: "game",
+          title: "Credits received",
+          message: `+${amount} credits`,
+          priority: "low",
+          data,
+        });
+      }
     });
 
     this.on("achievement:unlocked", async (data: any) => {

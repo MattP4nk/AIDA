@@ -269,6 +269,17 @@ class HackService extends EventEmitter {
     targetServerId: string,
     method: HackMethod,
     tools: string[],
+    /**
+     * Skill shortfall severity (0..1) for an under-skilled attempt.
+     *
+     * REQUIRED for correctness, not optional polish: `exploit`, `backdoor` and
+     * `rootkit` are all declared `mode: "soft"` in skillRequirements.ts and all
+     * route through here. Without this parameter they were attemptable a full
+     * SKILL_SOFT_BAND below their requirement at ZERO cost — a straight
+     * difficulty cut, and a direct violation of that module's own rule that a
+     * requirement only becomes soft once a penalty is wired at the call site.
+     */
+    skillPenaltySeverity: number = 0,
   ): Promise<HackResult> {
     const startTime = Date.now();
 
@@ -346,6 +357,7 @@ class HackService extends EventEmitter {
         server,
         method,
         tools,
+        skillPenaltySeverity,
       );
 
       // 5. Determine success
@@ -1431,10 +1443,21 @@ class HackService extends EventEmitter {
     }
 
     // 10. Mission integration
+    //
+    // M11 FIX: this passed `targetId ?? attackerId` — the target **USER's** id —
+    // into a parameter that `missionIntegration` compares against
+    // `objective.metadata.serverId`. `GameServer.id === User.id` is never true,
+    // so `hack_target` was unwinnable in EVERY case, across 7 mission templates.
+    // `targetServerId` was in scope the whole time and simply unused.
+    //
+    // Note this makes `install_backdoor` and `breach_server` STRICTER: they were
+    // only ever completing because an unbound `matchesEntity` returns true, i.e.
+    // they credited hacking *any* server. Bound objectives now require the right
+    // one, which is the intended behaviour.
     if (this.missionIntegration && result.success) {
       await this.missionIntegration.onHackComplete(
         attackerId,
-        targetId ?? attackerId,
+        targetServerId,
         result.success,
         result.detected,
         result.accessLevel,

@@ -1150,7 +1150,7 @@ const templates: MissionTemplate[] = [
         type: "decode_content",
         descriptionTemplate:
           "Bonus: decode {target} encoded files from your sweep for additional intel",
-        target: 2,
+        target: true,
         isBonus: true,
       },
     ],
@@ -1752,7 +1752,7 @@ const templates: MissionTemplate[] = [
       {
         type: "install_backdoor",
         descriptionTemplate: "Install a backdoor on a core server",
-        target: true,
+        target: 1,
         metadata: {},
       },
       {

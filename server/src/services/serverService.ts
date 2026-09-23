@@ -5,6 +5,7 @@ import { db } from "../database/client";
 import { injectable, inject } from "tsyringe";
 import {
   LOGGER,
+  SOCKET_IO,
   CACHE_SERVICE,
   MISSION_INTEGRATION_SERVICE,
   FACTION_KNOWLEDGE_SERVICE,
@@ -130,9 +131,20 @@ class ServerService {
     missionIntegrationService?: MissionIntegrationService,
     @inject(FACTION_KNOWLEDGE_SERVICE)
     factionKnowledgeService?: FactionKnowledgeService,
+    // INJECTED, not set later. `setSocketIO()` existed and had ZERO callers, so
+    // `this.io` was permanently null and all 9 socket emits in this service —
+    // server:discovered / alert / created / deleted / updated / disconnected —
+    // could never reach a client. Found by driving a real subnet sweep: the
+    // process completed and nothing arrived.
+    //
+    // A setter that must be remembered is a setter that gets forgotten; taking it
+    // from the container (as memoryService does) removes the failure mode rather
+    // than adding one more call site to forget.
+    @inject(SOCKET_IO) io?: SocketIOServer,
   ) {
     this.missionIntegration = missionIntegrationService || null;
     this.factionKnowledge = factionKnowledgeService || null;
+    this.io = io || null;
     this.logger.info("ServerService initialized");
   }
 
@@ -595,11 +607,27 @@ class ServerService {
           ipPrefix,
         });
 
-        // Emit Socket.IO event
+        // Emit the SAME event the other discovery path uses.
+        //
+        // This used to emit `server:subnet-scan` with `{count, prefix}` — an
+        // event no client has ever listened for, and one my contract check could
+        // not even see (its regex did not allow hyphens). Meanwhile the client's
+        // discovery handler listens for `server:discovered` with
+        // `{count, subnet, servers}`, which is only emitted by `discoverServers`
+        // — and that is reached solely from the sweep's dead no-resource fallback.
+        //
+        // So the live path emitted an event nobody heard, and the event the
+        // client heard was emitted only from a path that never runs. One name and
+        // one shape for one concept.
         if (this.io) {
-          this.io.to(`player:${userId}`).emit("server:subnet-scan", {
+          this.io.to(`player:${userId}`).emit("server:discovered", {
             count: servers.length,
-            prefix: ipPrefix,
+            subnet: ipPrefix,
+            servers: servers.slice(0, 5).map((s) => ({
+              id: s.id,
+              name: s.name,
+              ipAddress: s.ipAddress,
+            })),
           });
         }
 

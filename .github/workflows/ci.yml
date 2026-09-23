@@ -1,0 +1,113 @@
+# Static gate for AIDA.
+#
+# Per PLAN.md decision 2 there are NO automated tests until Phase 7, so this is
+# the only automated net Phases 3-8 have. Keep it strict.
+#
+# NOTE ON SCOPE: the verification harnesses in `server/scripts/verify-*.ts` are
+# deliberately gitignored (single-machine dev-only, maintainer's call), so CI
+# cannot run them. `scripts/check-socket-contract.ts` lives at the repo root and
+# IS committed, because it is build infrastructure rather than a dev utility.
+name: CI
+
+on:
+  push:
+    branches: [Main, test]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same branch makes the in-flight run pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # `tsc` on the server needs the generated Prisma client to exist, but not a
+  # reachable database. A syntactically valid URL is enough for `prisma generate`.
+  DATABASE_URL: "postgresql://ci:ci@localhost:5432/ci?schema=public"
+
+jobs:
+  server:
+    name: server (tsc, eslint, audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - name: Install
+        working-directory: server
+        run: npm ci
+
+      # Must precede tsc: the server imports @prisma/client types that only
+      # exist after generation, so skipping this fails with confusing
+      # "has no exported member" errors rather than a clear cause.
+      - name: Generate Prisma client
+        working-directory: server
+        run: npx prisma generate
+
+      - name: Typecheck
+        working-directory: server
+        run: npx tsc --noEmit
+
+      - name: Lint
+        working-directory: server
+        run: npm run lint
+
+      - name: Audit (production deps, high+ only)
+        working-directory: server
+        run: npm audit --omit=dev --audit-level=high
+
+  client:
+    name: client (svelte-check, audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - name: Install
+        working-directory: client
+        run: npm ci
+
+      - name: Svelte check
+        working-directory: client
+        run: npx svelte-check --threshold error
+
+      - name: Build
+        working-directory: client
+        # Proves the production build works AND exercises the VITE_API_URL guard.
+        env:
+          VITE_API_URL: "http://localhost:3001"
+        run: npm run build
+
+      - name: Audit (production deps, high+ only)
+        working-directory: client
+        run: npm audit --omit=dev --audit-level=high
+
+  socket-contract:
+    name: socket contract (visible, non-blocking until Phase 7)
+    runs-on: ubuntu-latest
+    # NON-BLOCKING ON PURPOSE. 10 known violations remain, 7 of which are shape
+    # mismatches that Phase 7's typed socket contract will settle — they are not
+    # renames and forcing them now means doing the work twice. A gate that is red
+    # for five phases teaches everyone to ignore every gate, which is precisely
+    # how those mismatches accumulated. Flip this to blocking (delete the line
+    # below) the moment Phase 7 lands.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Check socket event contract
+        run: npx --yes tsx scripts/check-socket-contract.ts

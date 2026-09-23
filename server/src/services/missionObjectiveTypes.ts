@@ -151,11 +151,16 @@ export const OBJECTIVE_TYPES: Map<string, ObjectiveTypeDefinition> = new Map<
     {
       type: "install_backdoor",
       description: "Install a backdoor on a server",
-      progressType: "boolean",
+      // COUNT, not boolean. Four of the five templates using this type already
+      // author a numeric target (1,1,1,2) — only one used `true`. It was
+      // registered boolean while the hook wrote `true`, so `Number(true) === 1`
+      // made target:1 complete by accident and target:2 (kingmaker) unwinnable.
+      // Following the authoring intent is the fix that preserves content.
+      progressType: "count",
       trackedBy: "onHackComplete",
       requiredMetadata: [],
       optionalMetadata: ["serverId"],
-      exampleTarget: true,
+      exampleTarget: 1,
     },
   ],
 

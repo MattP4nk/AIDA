@@ -187,7 +187,16 @@ export class MissionIntegrationService {
    */
   public async onHackComplete(
     userId: string,
-    targetId: string,
+    /**
+     * The **SERVER** that was hacked — this is compared against
+     * `objective.metadata.serverId`.
+     *
+     * Renamed from `targetId` because that name invited exactly the bug it got:
+     * `hackService` was passing the target **user's** id here, so every
+     * `hack_target` comparison was `GameServer.id === User.id` and could never
+     * be true. `hack_target` was unwinnable in every case.
+     */
+    targetServerId: string,
     success: boolean,
     detected: boolean,
     accessLevel: number,
@@ -211,7 +220,7 @@ export class MissionIntegrationService {
                 shouldUpdate = true;
               }
             } else if (objType === "hack_target") {
-              if (success && matchesEntity(objective, targetId, "serverId")) {
+              if (success && matchesEntity(objective, targetServerId, "serverId")) {
                 newProgress = true;
                 shouldUpdate = true;
               }
@@ -236,7 +245,7 @@ export class MissionIntegrationService {
             } else if (objType === "breach_server") {
               // Any successful breach counts, at ANY access level — a "minimal"
               // breach legitimately reports accessLevel 0.
-              if (success && matchesEntity(objective, targetId, "serverId")) {
+              if (success && matchesEntity(objective, targetServerId, "serverId")) {
                 newProgress = true;
                 shouldUpdate = true;
               }
@@ -244,9 +253,12 @@ export class MissionIntegrationService {
               if (
                 success &&
                 (method === "backdoor" || method === "rootkit") &&
-                matchesEntity(objective, targetId, "serverId")
+                matchesEntity(objective, targetServerId, "serverId")
               ) {
-                newProgress = true;
+                // COUNT now, not boolean — see the registry note. Writing `true`
+                // meant Number(true)===1, so "plant 2 backdoors" could never
+                // finish.
+                newProgress = (objective.current as number) + 1;
                 shouldUpdate = true;
               }
             }
@@ -376,9 +388,13 @@ export class MissionIntegrationService {
                 shouldUpdate = true;
               }
             } else if (objType === "upload_file") {
+              // G6: was a raw `metadata?.serverId === serverId`, strict with no
+              // unbound fallback — permanently uncreditable whenever provisioning
+              // did not bind serverId (it returns null silently under a
+              // `safeExecute({ silent: true })`).
               if (
                 operation === "upload" &&
-                (objective as any).metadata?.serverId === serverId
+                matchesEntity(objective as any, serverId, "serverId")
               ) {
                 newProgress = true;
                 shouldUpdate = true;
@@ -393,16 +409,22 @@ export class MissionIntegrationService {
               }
             } else if (objType === "download_file") {
               if (operation === "download") {
-                const meta = (objective as any).metadata;
-                if (meta?.fileId === fileId || !meta?.fileId) {
+                // G6: hand-rolled tolerance (`|| !meta?.fileId`) replaced by the
+                // helper, which encodes the same rule once.
+                if (matchesEntity(objective as any, fileId, "fileId")) {
                   newProgress = true;
                   shouldUpdate = true;
                 }
               }
             } else if (objType === "exfiltrate_data") {
               if (operation === "download") {
-                const meta = (objective as any).metadata;
-                if (meta?.serverId === serverId && meta?.fileId === fileId) {
+                // G6: was strict on BOTH ids with no unbound fallback, so an
+                // unprovisioned objective could never complete. `deep_extraction`
+                // is exactly this shape.
+                if (
+                  matchesEntity(objective as any, serverId, "serverId") &&
+                  matchesEntity(objective as any, fileId, "fileId")
+                ) {
                   newProgress = true;
                   shouldUpdate = true;
                 }
@@ -515,9 +537,14 @@ export class MissionIntegrationService {
               }
             } else if (objType === "infiltrate_network") {
               const meta = (objective as any).metadata;
+              // G6: was strict on networkId, and provisioning writes
+              // `networkId: targetServer.networkId || null` — so a target server
+              // created without a network made the objective permanently
+              // uncreditable. Route through the helper so an UNBOUND objective
+              // stays creditable; a bound one still has to match exactly.
               if (
                 serverMeta?.networkId &&
-                meta?.networkId === serverMeta.networkId
+                matchesEntity(objective as any, serverMeta.networkId, "networkId")
               ) {
                 const roleMatch = !meta.targetRole || serverMeta.role === meta.targetRole;
                 if (roleMatch) {
@@ -526,8 +553,8 @@ export class MissionIntegrationService {
                 }
               }
             } else if (objType === "trace_connection") {
-              const meta = (objective as any).metadata;
-              if (meta?.serverId === serverId) {
+              // G6: strict-only before; unbound objectives could never complete.
+              if (matchesEntity(objective as any, serverId, "serverId")) {
                 newProgress = true;
                 shouldUpdate = true;
               }
