@@ -199,6 +199,58 @@ nothing threw would have passed *before* the fix too. Includes a regression
 guard asserting zero `getService<any>` call sites remain. Full suite: 17
 harnesses, **197 checks, 0 failures.**
 
+
+### Phase 5 R4 — traces: completion was unreachable, and evasion did nothing
+
+Four defects, and R5 is what made them findable: until the arity fix, no trace
+was ever created from the counter-measures path, so none of this could be
+observed.
+
+1. **Completion was unreachable.** `progress` is `elapsed / totalDuration`, so
+   `progress >= 100` becomes true at *exactly* the instant `now >= expiresAt` —
+   and an expiry check sitting above it `continue`d first. Every trace in the
+   history of the service ended `"expired"`, and `trace:completed` had never
+   once fired. Reaching full duration now COMPLETES the trace, which is what
+   the rest of the design says: duration shrinks as evidence rises, and
+   `getTraceEvasionChance` falls as progress climbs, so evasion has to happen
+   early. A trace running to term is the hacker being caught, not the trace
+   giving up — nothing except evasion was ever going to stop it, so there is no
+   "ran out of time" outcome to model.
+2. **The resource drain leaked.** An active trace registers a passive consumer
+   costing cpu 15 / ram 16 / bw 5. `unregisterActiveTrace` had **zero callers
+   in the entire codebase**, so the drain outlived every trace and a player who
+   was traced once carried it for the rest of the process's life.
+3. **The drain was keyed wrong**, which would have defeated the fix for (2) on
+   its own: `registerActiveTrace(userId, traceId, label)` was being passed
+   `serverId`. Both are strings, so nothing complained — but the consumer was
+   keyed `trace:<serverId>` while unregister looks up `trace:<traceId>`, so a
+   release could never have matched. Same invisible-wrong-argument family as
+   R5's `initiateTrace`. It is now keyed by the trace actually created, and
+   only registered when one exists.
+4. **`trace.evade` now matters.** Evading previously changed a status column and
+   nothing else. It now releases the drain, which is the concrete thing the
+   player gets back for spending the stealth.
+
+**Reported, not fixed** (out of R4's scope, and design decisions rather than
+defects):
+- **Nothing listens to `trace:completed`, `trace:evaded`, or `trace:initiated`** —
+  server or client. Completion logs "hacker identity exposed" and emits, and
+  the event goes nowhere. Making a completed trace actually expose the hacker
+  is a gameplay decision, not a bug fix.
+- **`gameBalance.getTraceDuration` is dead code** (zero callers; the live
+  `_getDuration` takes evidence only and ignores stealth). Worth noting before
+  anyone wires it up: its `baseMins - stealth * 0.3` makes a *stealthier*
+  player get traced FASTER, which is backwards now that reaching term means
+  being caught.
+
+Evidence: `scripts/verify-phase5-r4-traces.ts` **12/12**. Negative-controlled —
+restoring the expiry-first branch turns 7 of the 12 red, so the harness
+genuinely discriminates rather than asserting "the trace ended" (which both the
+broken and fixed code satisfy). That control also caught an isolation flaw in
+the harness itself: R4-d originally shared a player with R4-b/c and inherited
+its leaked consumer, so its verdict was really about the previous block. Given
+its own player. Full suite: 18 harnesses, **209 checks, 0 failures.**
+
 ## Decisions log
 
 Recorded so the plan stays internally consistent as it evolves.

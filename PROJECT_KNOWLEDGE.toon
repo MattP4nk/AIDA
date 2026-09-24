@@ -2482,3 +2482,29 @@
     "Lesson: an `any` at a call site is often a symptom of a lying signature upstream, not laziness at the call site."
   ]
 }
+
+
+@phase5_r4_traces {
+  @summary [
+    "4 defects. R5 is what made them FINDABLE — until the arity fix, no trace was ever created from the counter-measures path, so none of this was observable."
+    "Evidence: scripts/verify-phase5-r4-traces.ts 12/12, negative-controlled (restoring the bug turns 7 of 12 red). Full suite 18 harnesses / 209 checks / 0 fail."
+  ]
+
+  @bugs_fixed [
+    "COMPLETION WAS UNREACHABLE. progress = elapsed/totalDuration, so progress>=100 is true at EXACTLY the instant now>=expiresAt — and an expiry check above it continue'd first. Every trace ever ended 'expired'; trace:completed had never fired. Reaching full duration now COMPLETES."
+    "Why completion (not expiry) is the right reading: duration SHRINKS as evidence rises, and getTraceEvasionChance FALLS as progress climbs, so evasion must happen early. A trace running to term = the hacker caught. Nothing but evasion was ever going to stop it, so there is no 'ran out of time' outcome to model."
+    "THE RESOURCE DRAIN LEAKED. active_trace is a passive consumer (cpu 15 / ram 16 / bw 5). unregisterActiveTrace had ZERO callers in the whole codebase — a player traced once carried the drain for the life of the process."
+    "THE DRAIN WAS KEYED WRONG, which would have defeated the leak fix on its own: registerActiveTrace(userId, traceId, label) was passed serverId. Both strings so nothing complained; consumer keyed trace:<serverId> while unregister looks up trace:<traceId>. Same invisible-wrong-argument family as R5's initiateTrace."
+    "trace.evade now MATTERS: it releases the drain. Previously it changed a status column and nothing else."
+  ]
+
+  @reported_not_fixed [
+    "NOTHING listens to trace:completed / trace:evaded / trace:initiated — server or client. Completion logs 'hacker identity exposed', emits, and the event goes nowhere. Giving a completed trace a real consequence is a gameplay decision, not a bug fix."
+    "gameBalance.getTraceDuration is DEAD CODE (zero callers; live _getDuration takes evidence only, ignores stealth). Before wiring it up: its `baseMins - stealth*0.3` makes a STEALTHIER player get traced FASTER, which is backwards now that reaching term means being caught."
+  ]
+
+  @harness_lesson [
+    "The negative control caught a flaw in MY OWN harness, not just the code: R4-d shared a player with R4-b/c, so R4-b/c's leaked consumer made R4-d fail for a reason that had nothing to do with evasion. A cascading failure is a misleading failure — give each block its own fixture."
+    "Discriminating assertions matter here specifically: a trace ending 'expired' and one ending 'completed' BOTH end, so 'the trace is no longer active' would have passed before the fix. Every check names the terminal state."
+  ]
+}

@@ -1996,10 +1996,23 @@ class HackService extends EventEmitter {
             );
             if (traceResult?.success) counterMeasures.push("trace_active");
 
-            // Register trace as passive resource drain on attacker
-            const { MEMORY_SERVICE } = await import("../di/tokens");
-            const memoryService = getService<MemoryService>(MEMORY_SERVICE);
-            memoryService.registerActiveTrace(attackerId, serverId, `Trace from ${server.name}`);
+            // Register trace as passive resource drain on attacker.
+            //
+            // R4: this passed `serverId` into the `traceId` parameter. Both are
+            // strings, so nothing complained — but the consumer was then keyed
+            // `trace:<serverId>`, which `unregisterActiveTrace` (keyed
+            // `trace:<traceId>`) could never have matched even once it had a
+            // caller. Only register when a trace actually exists, and key it by
+            // the trace we just created.
+            if (traceResult?.success && traceResult.trace?.id) {
+              const { MEMORY_SERVICE } = await import("../di/tokens");
+              const memoryService = getService<MemoryService>(MEMORY_SERVICE);
+              memoryService.registerActiveTrace(
+                attackerId,
+                traceResult.trace.id,
+                `Trace from ${server.name}`,
+              );
+            }
           } catch (err) {
             this.logger.error({ err }, "Failed to initiate trace");
           }

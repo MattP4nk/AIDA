@@ -5,6 +5,7 @@ import { db } from "../database/client";
 import { LOGGER, PLAYER_PROGRESS_REPOSITORY } from "../di/tokens";
 import type PlayerProgressRepository from "../repositories/playerProgressRepository";
 
+import type MemoryService from "./memoryService";
 /**
  * TraceService — Manages active trace-backs against hackers who left evidence.
  *
@@ -128,8 +129,13 @@ class TraceService extends EventEmitter {
    * Progress all active traces. Intended to be called on a recurring timer.
    *
    * For each active trace the progress is recomputed from elapsed time vs total
-   * duration. Traces that reach 100 % are completed; traces past their expiry
-   * are expired.
+   * duration. A trace that reaches 100 % — equivalently, that reaches its
+   * `expiresAt` — is COMPLETED: the hacker is caught. Only evasion stops it.
+   *
+   * `expired` is retained in the return shape for callers, but the loop no
+   * longer produces that status; see the note at the completion branch. It
+   * stays a valid stored value for rows written before this was fixed, which
+   * `cleanupOldTraces` still collects.
    */
   async progressTraces(): Promise<{
     completed: string[];
@@ -154,26 +160,33 @@ class TraceService extends EventEmitter {
           const totalDuration = expiresAtMs - createdAtMs;
           const elapsed = now - createdAtMs;
 
-          // Check expiry first
-          if (now >= expiresAtMs) {
-            await db.client.activeTrace.update({
-              where: { id: trace.id },
-              data: { status: "expired", progress: trace.progress },
-            });
-            expired.push(trace.id);
-            this.logger.info(
-              { traceId: trace.id, targetId: trace.targetId },
-              "Trace expired",
-            );
-            continue;
-          }
-
+          // R4: completion used to be UNREACHABLE.
+          //
+          // `progress` is purely `elapsed / totalDuration`, so `progress >= 100`
+          // is true at exactly the same instant as `now >= expiresAt` — and an
+          // expiry check sitting above it `continue`d first. Every trace ended
+          // "expired"; `trace:completed` had never once fired in the history of
+          // this service.
+          //
+          // Reaching full duration means the trace SUCCEEDED, which is what the
+          // rest of the design says: duration shrinks as evidence rises (a
+          // sloppier hack is traced sooner) and `getTraceEvasionChance` falls as
+          // progress climbs, so evasion has to happen early. A trace running to
+          // term is the hacker being caught, not the trace giving up. There is
+          // no separate "ran out of time" outcome to model, because nothing
+          // except evasion was ever going to stop it.
+          //
+          // `expired` remains a valid stored status for legacy rows and is
+          // still honoured by `cleanupOldTraces`; the progress loop no longer
+          // produces it.
           const newProgress = Math.min(
             100,
-            Math.floor((elapsed / totalDuration) * 100),
+            totalDuration > 0
+              ? Math.floor((elapsed / totalDuration) * 100)
+              : 100,
           );
 
-          if (newProgress >= 100) {
+          if (now >= expiresAtMs || newProgress >= 100) {
             // Trace completed — hacker identity exposed
             await db.client.activeTrace.update({
               where: { id: trace.id },
@@ -193,6 +206,8 @@ class TraceService extends EventEmitter {
               },
               "Trace completed — hacker identity exposed",
             );
+
+            await this._releaseTraceDrain(trace.targetId, trace.id);
 
             this.emit("trace:completed", {
               traceId: trace.id,
@@ -367,6 +382,14 @@ class TraceService extends EventEmitter {
           data: { status: "evaded" },
         });
 
+        // R4 — this is what makes `trace.evade` MATTER. An active trace is a
+        // passive resource consumer (cpu 15 / ram 16 / bw 5). Nothing ever
+        // released it: `unregisterActiveTrace` had zero callers in the whole
+        // codebase, so evading changed a status column and nothing else, and a
+        // player who had been traced carried the drain for the rest of the
+        // process's life.
+        await this._releaseTraceDrain(userId, traceId);
+
         this.emit("trace:evaded", { traceId, targetId: userId });
 
         return {
@@ -485,6 +508,33 @@ class TraceService extends EventEmitter {
 
     // Allow the Node process to exit even if this timer is still running
     this._progressTimer.unref?.();
+  }
+
+  /**
+   * Release the passive resource drain a live trace imposes on its target.
+   *
+   * Must be called on EVERY terminal state (completed / evaded), or the
+   * consumer outlives the trace. Resolved lazily rather than injected because
+   * `memoryService` is not a constructor dependency of this service and a
+   * static import would add an edge for no benefit.
+   */
+  private async _releaseTraceDrain(
+    userId: string,
+    traceId: string,
+  ): Promise<void> {
+    try {
+      const { getService } = await import("../di/container");
+      const { MEMORY_SERVICE } = await import("../di/tokens");
+      const memoryService = getService<MemoryService>(MEMORY_SERVICE);
+      memoryService.unregisterActiveTrace(userId, traceId);
+    } catch (err) {
+      // A drain we failed to release is a resource bug, not a gameplay one —
+      // log it rather than letting it abort the progress tick.
+      this.logger.error(
+        { err, userId, traceId },
+        "Failed to release trace resource drain",
+      );
+    }
   }
 
   /**
