@@ -1379,23 +1379,30 @@ export class MessageService {
       take: 10,
     });
 
-    // Build conversation context (oldest-first)
-    const conversationLines = history
-      .reverse()
-      .map((pm) => {
-        const role =
-          pm.direction === "outbound" ? playerUsername : persona.name;
-        return `[${role}]: ${pm.content}`;
-      })
-      .join("\n");
+    // 3. Build prompt — sanitize the HISTORY as well as the current turn.
+    //
+    // S6c: this import used to sit one line BELOW the history loop, and the
+    // loop mapped `pm.content` in raw. That made the current-turn wrapping
+    // decorative: a payload sent as message N was wrapped on turn N, then read
+    // back out of `personaMessage.content` and spliced in bare on turn N+1.
+    // Send the payload, then say "hi".
+    //
+    // `playerUsername` is sanitized too — it is player-chosen text, and a name
+    // can close a boundary tag exactly as well as a message body can.
+    const { sanitizeForPrompt, sanitizeTranscript, stripPromptBoundaries } =
+      await import("../utils/aiPromptSanitizer");
 
-    // 3. Build prompt (sanitize user content to prevent prompt injection)
-    const { sanitizeForPrompt } = await import("../utils/aiPromptSanitizer");
+    const conversationLines = sanitizeTranscript(
+      history.reverse().map((pm) => ({
+        role: pm.direction === "outbound" ? playerUsername : persona.name,
+        content: pm.content,
+      })),
+    );
+
+    const safeUsername = stripPromptBoundaries(playerUsername, 64);
     const prompt =
-      `A player named ${playerUsername} has used a ${token.shopItemName} to contact you.\n` +
-      (conversationLines
-        ? `Recent conversation:\n${conversationLines}\n\n`
-        : "") +
+      `A player named ${safeUsername} has used a ${token.shopItemName} to contact you.\n` +
+      (conversationLines ? `Recent conversation:\n${conversationLines}\n\n` : "") +
       `Their latest message subject: ${sanitizeForPrompt(originalSubject, 200)}\n` +
       `Their latest message content:\n${sanitizeForPrompt(originalContent)}\n\n` +
       `Respond in character. Keep your reply concise (1-3 paragraphs).`;

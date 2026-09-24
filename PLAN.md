@@ -3434,15 +3434,32 @@ encryption round-trips without data loss.
           granted. Caps sit above that, so **no legitimate mission is altered** — the harness asserts
           that from both sides, because a cap that quietly nerfs the endgame is its own bug.
         - `scripts/verify-phase6-s5c-rewards.ts` — 30 checks, negative-controlled.
-- [ ] **S6** Sanitize prompt history, not just the current turn. **Re-verified 2026-09-24 — the
-      "~25 sites" figure is an undercount: there are 37 AI invocation sites (34 generation +
-      3 moderation), and `sanitizeForPrompt` is used at only 5 prompts / 6 invocations.**
-      The history bug is worse than "not covered": in `messageService.ts:1370-1398` the sanitizer is
-      imported on line **1390 — one line AFTER** the loop that splices raw `pm.content` history into
-      the prompt at :1385. So current-turn sanitization is trivially bypassed by sending the payload
-      on turn N and letting it be replayed bare on turn N+1. `playerUsername` (:1392) is unsanitized
-      too. Same shape in `forumService.ts:1304-1310`, where the replayed "memory" is itself
-      AI-extracted from earlier player text — a *persistent* injection channel, not a per-turn one.
+- [~] **S6 — history sanitized (S6c DONE 2026-09-24); the wider sweep remains.**
+      - **The bypass was structural.** In `generatePersonaReply` the sanitizer was imported one line
+        BELOW the loop that mapped `pm.content` into the prompt, so the current-turn wrapping
+        protected exactly the turn that did not need it: a payload sent as message N was wrapped on
+        turn N, then read back out of `personaMessage.content` and spliced in **bare** on turn N+1.
+        Send the payload, then say "hi".
+      - **`forumService.handleNPCReply` was worse** — the replayed NPC `memory` is an AI-extracted
+        summary of *earlier* player text, persisted and replayed on every later reply, so an
+        injection there outlives the conversation that carried it. Per-turn wrapping cannot defend a
+        channel that stores its payload.
+      - `aiPromptSanitizer` now exports `sanitizeTranscript` (bounded: 20 entries, 1000 chars each,
+        most-recent-kept) and `stripPromptBoundaries` for values interpolated into prose. **Roles are
+        sanitized too** — the speaker label is `playerUsername`, player-chosen text that can close a
+        tag as easily as a body can. Boundary stripping covers *all* tags the module uses, not just
+        the one being wrapped, or a payload closing a different tag escapes.
+      - Five raw player-derived fragments fixed in `handleNPCReply`: post title, reply body,
+        replying username, and each memory entry's username and summary.
+      - `scripts/verify-phase6-s6c-history.ts` — 21 checks including the two-turn replay itself.
+        Negative-controlled. **One harness assertion was wrong and failed against correct output**
+        (it forbade the container's own closing tags); corrected to assert what actually must hold —
+        the payload contributes none of them.
+      - [ ] **Still open — the wider sweep.** 37 AI invocation sites; sanitization covers the two
+        replay paths plus the 5 pre-existing prompts. Unsanitized player-derived text still reaches:
+        all 5 `runAgentLoop` sites via raw tool results (S5a), `aiService.moderate` callers'
+        upstream content, and `personaActionService.ts:622` (`JSON.stringify(action.input)`).
+
 - [x] **S7 DONE 2026-09-24 — moderation.** All four legs were false; fixed together because they
       share one cause: a boolean that meant two different things.
       - **The verdict published what it flagged.** `parsed.safe as boolean` was a compile-time cast

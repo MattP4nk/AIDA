@@ -1293,18 +1293,38 @@ RULES:
 - Also extract any key facts from the player's message worth remembering
 - Return ONLY valid JSON: {"reply": "your reply text or PASS", "memoryEntry": {"summary": "what the player shared/asked", "topic": "category"} | null}`;
 
+      // S6c: every player-derived fragment below is sanitized.
+      //
+      // Five of them were interpolated raw: the post title, the reply body,
+      // the replying player's username, and each memory entry's username and
+      // summary. The memory is the dangerous one — it is an AI-extracted
+      // summary of EARLIER player text, persisted and replayed on every
+      // subsequent reply, so an injection landed there outlives the
+      // conversation that carried it. Per-turn wrapping cannot help with a
+      // channel that stores its payload.
+      const { sanitizeForPrompt, sanitizeTranscript, stripPromptBoundaries } =
+        await import("../utils/aiPromptSanitizer");
+
       let userPrompt = `FORUM: "${post.forum.name}"
-YOUR POST TITLE: "${post.title}"`;
+YOUR POST TITLE: "${stripPromptBoundaries(post.title, 200)}"`;
 
       if (memory.length > 0) {
         const recentMemory = memory.slice(-10);
-        userPrompt += `\n\nYOUR MEMORY OF PAST INTERACTIONS:`;
-        for (const entry of recentMemory) {
-          userPrompt += `\n- ${entry.username || "someone"}: ${entry.summary} (${entry.topic || "general"})`;
+        const memoryBlock = sanitizeTranscript(
+          recentMemory.map((entry: any) => ({
+            role: entry.username || "someone",
+            content: `${entry.summary} (${entry.topic || "general"})`,
+          })),
+          { maxEntryLength: 400 },
+        );
+        if (memoryBlock) {
+          userPrompt += `\n\nYOUR MEMORY OF PAST INTERACTIONS:\n${memoryBlock}`;
         }
       }
 
-      userPrompt += `\n\nPLAYER "${replyUser.username}" REPLIED:\n"${replyContent}"`;
+      userPrompt +=
+        `\n\nPLAYER "${stripPromptBoundaries(replyUser.username, 64)}" REPLIED:\n` +
+        sanitizeForPrompt(replyContent);
 
       const { enrichWithTopology } = await import("./worldTopologyContext");
       const enrichedReplySystemPrompt = await enrichWithTopology(systemPrompt, prisma, this.logger);
