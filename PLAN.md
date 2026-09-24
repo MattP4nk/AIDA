@@ -3337,6 +3337,15 @@ Fixed in this pass:
 
 Filed, not fixed:
 
+- [ ] **`KnowledgeTopic` / `PlayerKnowledge` are dead schema (found 2026-09-24 on a fresh
+      `db:reset`).** Both models exist *only* in `schema.prisma` — the definitions plus their
+      relation back-references. Repo-wide grep across `server/src`, `server/prisma`, `shared/`
+      and `client/src` finds no creator, reader, or writer, and the seed populates neither, so
+      a fresh database has two permanently empty tables. `KNOWLEDGE_DESIGN.md` describes the
+      intended feature; only its migration landed. Either implement it or drop the tables —
+      empty tables with FK relations are a standing trap for anyone reading the schema for
+      what the game does. (The accumulated dev DB hid this; only a from-scratch seed showed it.)
+
 - [ ] **Per-tab working directory (withdrawn R12-d).** All tabs share `session.currentDirectory`, so
       two tabs in different directories resolve relative paths against whichever `cd` ran last. R12
       "fixed" this with a `getSessionContext` helper that had **zero callers** and preferred
