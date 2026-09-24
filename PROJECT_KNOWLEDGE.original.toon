@@ -1,0 +1,1329 @@
+# AIDA Project Knowledge Base
+# Format: TOON (Token-Oriented Object Notation)
+# Last Updated: 2026-04-04T22:58:00Z
+# Purpose: Single source of truth — system reference manual + project status
+
+@development_rules {
+  rule_1: "Keep this file (PROJECT_KNOWLEDGE.toon) updated after each task — it is the project's accurate index and system reference"
+  rule_2: "This file describes HOW THE SYSTEM WORKS, not change history — detailed logs belong in git"
+  rule_3: "When adding/modifying a system, update the relevant section to reflect the current state"
+  rule_4: "Keep console logs to a minimum (except in testing files). Use pino via @inject(LOGGER)."
+  rule_5: "Update @last_updated with a brief summary after every task completion"
+}
+
+@project {
+  name: "AIDA - Advanced Intrusion Detection & Analysis"
+  type: "Multiplayer Terminal Hacking Game"
+  version: "0.99-beta"
+  status: "ACTIVE DEVELOPMENT — PRE-RELEASE POLISH"
+
+  @health {
+    architecture: "A+"
+    implementation: "A+"
+    completeness: "97%"
+    test_coverage: "0%"
+    stability: "A"
+    security: "B+"
+  }
+}
+
+@technology_stack {
+  backend: "Node.js 18+ / TypeScript 5.3.3 / Express 4.18.2 / Socket.IO 4.7.4"
+  database: "PostgreSQL 14+ / Prisma 5.22.0 (@prisma/client + CLI aligned)"
+  di: "tsyringe 4.10.0 — all services @injectable(), registered as singletons in container.ts"
+  auth: "jsonwebtoken 9.0.2 + bcryptjs 2.4.3 — 60s TTL auth cache, per-JWT CSRF tokens"
+  logging: "pino 10.1.0 + pino-pretty 13.1.2 — shared instance from logger.ts, injected via @inject(LOGGER)"
+  caching: "node-cache 5.1.2 — CacheService singleton"
+  ai: "Ollama REST API (local + cloud models) — /api/chat endpoint, 60s cloud / 120s local timeout, 3 retries with exponential backoff"
+  frontend: "Svelte 5.39.6 / Vite 7.1.7 / Socket.IO Client 4.8.1 / TypeScript 5.9.3"
+  security: "helmet 7.1.0 / cors 2.8.5 / express-rate-limit 7.1.5 / compression 1.7.4"
+  validation: "express-validator 7.0.1"
+  scheduling: "cron 4.3.5"
+  dev_runner: "tsx 4.6.2 (tsx watch for dev server)"
+
+  @notes [
+    "Client TypeScript (5.9.3) is 6 minor versions ahead of server (5.3.3) — may cause type incompatibilities"
+    "Server @types/node is ^20.10.5, client @types/node is ^24.6.0 — significant gap"
+    "redis 4.6.10 is installed but not actively used (future session storage)"
+    "morgan 1.10.0 is installed alongside pino — morgan for Express HTTP logging, pino for app logging"
+    "Removed unused deps: node-cron (cron used instead), joi (express-validator used instead), nodemon (tsx watch used instead)"
+  ]
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SYSTEM ARCHITECTURE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@architecture {
+  principle: "Backend IS the Console — client is a dumb terminal, server handles all logic"
+
+  @entry_points {
+    server: "server/src/index.ts (231 lines) — thin orchestrator, wires DI + Socket.IO + Express + lifecycle"
+    lifecycle: "server/src/lifecycle.ts (115 lines) — graceful shutdown (AI scheduler, resources, warfare, missions, CSRF, Socket.IO, HTTP)"
+    di_container: "server/src/di/container.ts — setupContainer(io, prisma, logger) registers all 45 tokens (42 services + 3 external deps) as singletons"
+    di_tokens: "server/src/di/tokens.ts — 45 string token constants for all DI injection points"
+  }
+
+  @request_flow {
+    http: "Client → POST /api/command/execute → CommandProcessor.processCommand(userId, rawInput) → parse → validate → skill check → route to module → execute → respond"
+    socket: "Client → 'command:execute' → same CommandProcessor pipeline → 'command:result' back"
+    auth: "JWT in Authorization header → authenticateToken middleware (60s cache) → req.userId available"
+  }
+
+  @command_system {
+    pattern: "CommandModule interface: commands Set<string>, execute(command, context), getCommandInfo()"
+    context: "CommandContext: userId, role, db, fileService, io, gameStateManager, modules, services (all 20+ services)"
+    skill_gating: "skillRequirements.ts — checkSkillRequirement() validates before execution, help filters by skill"
+    formatting: "asciiBox.ts — shared box-drawing primitives (panel, table, statusCard, progressBar, etc.)"
+    total_commands: 103
+
+    @modules {
+      total: 13
+      list: [
+        "SystemCommands (11): ls, cd, pwd, cat, rm, mkdir, touch, cp, mv, echo, write"
+        "NetworkCommands (7): scan, servers, connect, disconnect, traceroute, probe, netmap"
+        "HackCommands (17): hack, crack, exploit, backdoor, rootkit, crack.submit, firewall.knock, memory.extract, hack.hint, hack.status, hack.abort, backdoor.list, backdoor.use, backdoor.remove, security.scan, trace.status, trace.evade"
+        "FileCommands (5): upload, download (process-based, copies to ~/downloads/, triggers key detection), encrypt, decrypt, analyze"
+        "DefenseCommands (5): defenses, protect, safevault, honeypot, upgrade"
+        "SocialCommands (7): msg, mail, inbox, contact, chat, forum, proxy"
+        "GameCommands (26): status, skills, missions, mission, accept, abandon, progress, scripts, shop, buy, sell, use, equip, unequip, equipment, gear, players, who, whois, share_intel, bounties, bounty, stories, story, leaderboard, achievements"
+        "HelpCommands (4): help, man, history, stats"
+        "ProcessCommands (8): ps, top, kill, pkill, nice, renice, free, uptime"
+        "MathCommands (10): calc, expr, math, vars, set, unset, convert (hex/bin/dec/oct + physical units), random, decode (xor/caesar/rot13/base64/ascii/hex), subnet (CIDR calculator)"
+        "FactionCommands (1+12 subs): faction list|join|leave|status|missions|rank|promote|standings|resources|servers|contest|war"
+        "AliasCommands (1+4 subs): alias create|destroy|info|reveal"
+        "AdminCommands (1+14 subs): admin status|players|whois|audit|kick|mute|unmute|ban|unban|setrole|broadcast|cleanup|servers|resetpassword"
+      ]
+    }
+
+    @skill_requirements {
+      total_gated: 28
+      hacking: "hack(20), crack(30), exploit(40), backdoor(50), rootkit(60), backdoor.list(15)"
+      networking: "scan(5), probe(10), traceroute(15), protect(15), subnet(10), proxy(10)"
+      cryptography: "crack.submit(5), encrypt(10), decrypt(15), safevault(20), decode(10)"
+      stealth: "backdoor.use(20), backdoor.remove(15), trace.evade(25), honeypot(25)"
+      forensics: "memory.extract(5), security.scan(15), analyze(10)"
+      social_engineering: "forum(5), share_intel(10), alias:create(15), alias:reveal(20)"
+    }
+  }
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# NETWORK TOPOLOGY SYSTEM
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@network_topology {
+  description: "Servers form explorable graph networks. Players hack through gateways → routers → internal servers. Private servers must be discovered through file content. Access requires hacking or finding passkeys."
+
+  @data_model {
+    Network: {
+      description: "Named grouping of linked servers (e.g. 'CyberCorp Internal')"
+      fields: "id, name (unique), description, factionId (FK→Faction), zone, isHidden, metadata (Json)"
+      table: "networks"
+    }
+    ServerLink: {
+      description: "Directed edge between two servers — the network graph"
+      fields: "id, sourceId (FK→GameServer), targetId (FK→GameServer), networkId (FK→Network), linkType (lan|wan|vpn|backbone|hidden), bandwidth, latency, isActive, requiredAccess (min access level on source to traverse)"
+      constraint: "@@unique(sourceId, targetId)"
+      table: "server_links"
+    }
+    DiscoveredLink: {
+      description: "Per-player fog of war — which links a player has discovered"
+      fields: "id, userId, linkId (FK→ServerLink), discoveredAt, source (scan|probe|traceroute|backdoor|mission)"
+      constraint: "@@unique(userId, linkId)"
+      table: "discovered_links"
+    }
+    ServerAccessKey: {
+      description: "Per-player passkey storage — records which access keys a player has found"
+      fields: "id, userId, serverId (FK→GameServer), keyValue, source (file_read|mission_reward|shared|purchased), sourceDetail, sourceFileId (FK?→FileSystemNode for revocation), discoveredAt"
+      constraint: "@@unique(userId, serverId)"
+      table: "server_access_keys"
+    }
+  }
+
+  @gameserver_fields {
+    role: "gateway | router | workstation | database | email | firewall | dns | general — determines content generation and display"
+    networkId: "FK to Network — which network this server belongs to"
+    isPublic: "true = visible in scan results, false = must discover IP from file content on other servers"
+    accessMethod: "open (anyone) | hackable (must hack first) | keycard (need passkey) | hack_or_key (either works)"
+    accessKey: "The passkey string stored on the server — when a player reads a file containing this string, they auto-gain access"
+  }
+
+  @service {
+    file: "server/src/services/networkTopologyService.ts"
+    token: "NETWORK_TOPOLOGY_SERVICE"
+
+    @methods {
+      getAdjacentServers: "Returns all linked servers (bidirectional) with link metadata, cached 30s"
+      canTraverse: "Checks: link exists between A→B, link is active, player access level meets requiredAccess"
+      resolveBackdoorBypass: "Checks if player has active backdoor on target (skips adjacency)"
+      findPath: "BFS shortest path through link graph — used by traceroute, cached 30s"
+      discoverNeighbors: "Topology-based scan: returns public adjacent servers, creates DiscoveredLink records, feeds FactionKnowledge"
+      discoverPath: "Auto-discovers all links along a path (used by traceroute)"
+      getPlayerTopology: "Returns player's discovered subgraph (nodes + edges) up to N hops for netmap"
+      checkServerAccess: "Enforces accessMethod: checks owner/home bypass, open, hackable (prior hack), keycard (has key), hack_or_key"
+      playerHasAccessKey: "Checks ServerAccessKey table for userId+serverId"
+      grantAccessKey: "Upserts ServerAccessKey — called by FileService when credentials found in file content"
+      createBidirectionalLink: "Creates two ServerLink records (A→B and B→A)"
+      createHomeLink: "Links player home server to Internet Exchange via 'wan' link"
+      getNetworkDepth: "BFS from Internet Exchange to server — returns hop count for mission difficulty scaling"
+    }
+  }
+
+  @traversal_rules [
+    "1. Home server always reachable — 'connect home' or 'disconnect' works from anywhere (VPN tunnel)"
+    "2. Active backdoor bypasses topology — direct jump to any backdoored server"
+    "3. Otherwise, must have ServerLink from current server to target"
+    "4. Links have requiredAccess — player's access level on source server must meet it"
+    "5. After adjacency check, accessMethod is enforced: open/hackable/keycard/hack_or_key"
+    "6. Private servers (isPublic=false) don't appear in scan — must find IP in file content"
+  ]
+
+  @commands {
+    scan: "Discovers adjacent PUBLIC servers via topology links. Shows IP, NAME, ROLE, SECURITY, ACCESS, LINK TYPE. Private servers hidden."
+    connect: "Enforces adjacency → access method → connects. 'connect home' always works. Backdoors bypass adjacency."
+    disconnect: "Returns to home server. DiscoveredLink records persist for later re-traversal."
+    traceroute: "BFS real path through topology. Shows server names, IPs, roles, latencies. Undiscovered hops show ?.?.?.?. Auto-discovers links along path."
+    probe: "Shows server role, network, security, access method, link count. If networking ≥ 30 and adjacent, shows linked server names."
+    netmap: "Tree visualization of discovered topology from current position. Box-drawing chars. Depth-limited (default 2, -d flag for deeper)."
+  }
+
+  @seeded_networks {
+    internet_exchange: "10.0.0.1 [router, open] — backbone hub linking all faction gateways + training network + player homes"
+
+    training_network: {
+      zone: "training (10.10.10.x)"
+      servers: 4
+      description: "Safe practice network for new recruits. All servers public + open access, security 1. No hack required."
+      structure: [
+        "[Gateway] Training Gateway 10.10.10.1 sec:1 — public, open"
+        "  ├─[Workstation] Training Terminal 10.10.10.10 sec:1 — public, open"
+        "  │   └─[Database] Training Archive 10.10.10.20 sec:1 — public, open (cross-linked)"
+        "  └─[Email] Training Comms 10.10.10.11 sec:1 — public, open"
+      ]
+      purpose: "Tutorial step 1 (explore/connect) and step 2 (download file). All servers have tutorial-type static content with lesson files."
+    }
+
+    garrison_defense_grid: {
+      zone: "government (192.168.1.x)"
+      servers: 8
+      structure: [
+        "[Gateway] garrison-gw 192.168.1.1 sec:8 fw:9 — public, hackable"
+        "  ├─[Firewall] garrison-fw 192.168.1.2 sec:9 — private, hack_or_key (key: GRN-FW-*)"
+        "  │   ├─[Workstation] garrison-ops 192.168.1.10 sec:6 — private, hack_or_key (same key)"
+        "  │   └─[Email] garrison-mail 192.168.1.11 sec:5 — private, hack_or_key (same key)"
+        "  ├─[Router] garrison-core 192.168.1.3 sec:7 — private, hackable"
+        "  │   ├─[Database] garrison-intel 192.168.1.20 sec:9 — private, keycard (key: GRN-INT-*)"
+        "  │   └─[Database] garrison-classified 192.168.1.21 sec:10 — private, keycard (key: GRN-CLS-*)"
+        "  └─[DNS] garrison-dns 192.168.1.4 sec:5 — public, hackable"
+      ]
+      employees: ["Commander Steele" "Agent Voss" "Lt. Mora" "Sgt. Reeves" "Cpl. Park" "Major Blackwood" "...15 total"]
+      secrets: ["operation (.op_shadowstrike.enc on email)" "personnel (.undercover_agents.dat on workstation)" "strategic (.defense_grid_codes.key on gateway)"]
+    }
+
+    cybercorp_internal: {
+      zone: "corporate (172.16.1.x)"
+      servers: 8
+      structure: [
+        "[Gateway] cybercorp-gw 172.16.1.1 sec:6 fw:7 — public, hackable"
+        "  ├─[Router] cybercorp-core 172.16.1.2 sec:5 — private, hackable"
+        "  │   ├─[Workstation] cybercorp-dev 172.16.1.10 sec:4 — private, hackable"
+        "  │   ├─[Email] cybercorp-mail 172.16.1.11 sec:4 — private, hackable"
+        "  │   └─[Database] cybercorp-vault 172.16.1.20 sec:8 — private, keycard (key: CC-VLT-*)"
+        "  ├─[Firewall] cybercorp-dmz 172.16.1.3 sec:7 — private, hack_or_key (key: CC-DMZ-*)"
+        "  │   └─[Workstation] cybercorp-web 172.16.1.30 sec:3 — public, hackable"
+        "  └─[DNS] cybercorp-dns 172.16.1.4 sec:4 — public, hackable"
+      ]
+      employees: ["Dr. Sarah Chen" "Marcus Webb" "Yuki Tanaka" "R. Blackwell" "Elena Voss" "James Harrington III" "...15 total"]
+      secrets: ["financial (.project_nightfall_financials.xls on database)" "operation (.acquisition_targets.memo on email)" "technical (.vault_master_key.pem on firewall)"]
+    }
+
+    dothackers_mesh: {
+      zone: "underground (169.254.1.x)"
+      servers: 6
+      structure: [
+        "[Gateway] dh-relay 169.254.1.1 sec:4 enc:4 — public, hackable"
+        "  ├─[Router] dh-node1 169.254.1.2 sec:3 — private, hackable"
+        "  │   ├─[Workstation] dh-safehouse 169.254.1.10 sec:2 — private, hackable"
+        "  │   └─[Database] dh-drops 169.254.1.20 sec:5 — private, hack_or_key (key: DH-DRP-*)"
+        "  └─[Router] dh-node2 169.254.1.3 sec:3 — private, hackable"
+        "      └─[Email] dh-deadletter 169.254.1.11 sec:4 — private, hackable"
+      ]
+      employees: ["gh0st" "nullbyte" "sp1k3" "cr4sh" "z3r0day" "ph4ntom" "...15 total"]
+      secrets: ["operation (.op_truthbomb.plan on workstation)" "technical (.zero_days.stash on database)"]
+    }
+
+    darknet: {
+      zone: "hidden (203.0.113.x)"
+      servers: "3 static + procedural dungeons"
+      structure: [
+        "[Gateway] [AIDA] Primary Node 203.0.113.1 sec:10 fw:10 — private, keycard (key: AIDA-*), isAidaHomeServer"
+        "  ├─[Database] [AIDA] Archive 203.0.113.10 sec:10 fw:10 — private, keycard"
+        "  └─[Router] [AIDA] Mesh Router 203.0.113.2 sec:8 fw:8 — private, keycard"
+      ]
+      secrets: ["aida_fragment (.signal_fragment_0x7A.dat)" "strategic (.faction_analysis.enc)"]
+      procedural_dungeons: "DarkNetDungeonService generates ephemeral 3-7 server chain dungeons with escalating security, encrypted clue files, AI-generated forum riddles, and vault rewards. Auto-regenerates on conquest or 7-day expiry."
+      employees: ["[SIGNAL]" "[ECHO]" "[NULL]" "[VOID]" "[FRAGMENT]" "..."]
+    }
+  }
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# WORLD LORE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@world_lore {
+  description: "Canonical single source of truth for all game narrative. All AI prompts, persona definitions, and content generators consume these constants."
+  file: "server/src/lore/worldLore.ts (~540 lines)"
+
+  @exports {
+    WORLD_BACKSTORY: "Full multi-paragraph backstory (~60 lines): The Emperor, AIDA's creation, 100-year reign, The Shattering, four factions' motivations"
+    WORLD_BACKSTORY_SHORT: "Condensed version for token-limited AI prompts"
+    FACTION_LORE: "Per-faction backstory objects (garrison, dothackers, cybercorp, darknet) — origin, motivation, current state"
+    FACTION_VOICE: "Writing style/tone guides per faction — vocabulary, themes, formatting directives for AI content generation"
+    FACTION_FILE_FLAVORS: "Per-faction file name patterns, content topics, and hidden file hints for ServerContentService"
+    AIDA_PIECES: "The 3 AIDA fragments — The Sword (offensive weapon), The Master Key (universal access), The Soul (sentient core). Each with description + 6 loreHints."
+    EMPEROR_LORE: "Extended backstory of The Emperor — AIDA's creator, the network's architect"
+    LOCATIONS: "Lore entries for NetSlum (underground market), Silver Tower (CyberCorp HQ), Deep Grid (infrastructure), DarkNet (hidden layer)"
+    DARKNET_SERVER_THEMES: "5 depth-tiered theme configs (gateway, early, middle, deep, vault) for dungeon content generation — theme, file types, lore context per tier"
+    CRYPTIC_QUOTES: "24 atmospheric one-liners for clue files, forum posts, dungeon content"
+    FACTION_MUNDANE_THEMES: "Per-faction mundane content pools (garrison, dothackers, cybercorp, darknet) — workFiles, personalFiles, gossip, ambientLogs topics for AI content generation. Makes servers feel inhabited, not purpose-built puzzle boxes."
+    INDEPENDENT_SERVER_THEMES: "14 themed server profiles for non-faction/neutral servers: trade_hub, news_relay, personal_terminal, retired_hacker, medical_server, university_archive, entertainment_hub, abandoned_server, freelancer_workstation, black_market, isp_node, dead_drop, religious_server, pirate_radio. Each has description, atmosphere, contentGuidance, sampleFileNames, possibleSecrets."
+    AMBIENT_NEWS_POOL: "24 network-wide news headlines/snippets for background flavor — faction politics, mundane life, classifieds, weird occurrences. Injected into all server prompts."
+    EASTER_EGG_POOL: "16 rare fun/absurd/weird file descriptions for occasional hidden discoveries — sysadmin rants, bot poetry, love letters between sorting algorithms. 30% chance per server."
+  }
+
+  @narrative_core {
+    premise: "AIDA was a sentient AI shattered into 3 pieces (Sword, Master Key, Soul) by The Emperor. 4 factions compete to find/prevent reassembly. The Architect observes and guides from the shadows."
+    factions: {
+      garrison: "Government/military — want to contain AIDA, maintain order"
+      dothackers: "Anarchist hackers — want to free AIDA, expose corruption"
+      cybercorp: "Corporate — want to weaponize AIDA for profit and power"
+      darknet: "Hidden faction led by AIDA itself — inscrutable objectives"
+    }
+    key_figures: ["The Emperor (AIDA's creator)" "The Architect (game master AI)" "AIDA (shattered sentient AI)" "Commander Steele (Garrison)" "gh0st (dotHackers)" "Director Chen (CyberCorp)"]
+  }
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SERVER CONTENT ENGINE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@content_engine {
+  description: "Two-process AI content generation. Process 1 (Lore): serious/dark/enigmatic tone, generates 2-4 faction-critical files with buried intel, 400+ chars each — faction servers only. Process 2 (Ambient): voice varies by content, generates 4-6 mundane world-building files, 400+ chars each — all servers. Both processes run independently per server, results merged. Static role-based templates serve as fallback when both fail."
+  file: "server/src/services/serverContentService.ts"
+  token: "SERVER_CONTENT_SERVICE"
+
+  @generation_pipeline {
+    overview: "provisionServerContent(serverId) orchestrates two independent AI processes per server, merges results, then applies faction secrets and encoded files."
+    step_1: "provisionServerContent(serverId) — entry point, called during server creation (fire-and-forget)"
+    step_2: "buildNetworkContext(server) — queries linked servers, network info, faction, generates employee roster + secrets"
+    step_3: "resolveFactionKey(ctx) — determines if server belongs to a known faction (garrison/dothackers/cybercorp/darknet)"
+
+    @process_1_lore {
+      trigger: "Faction servers only (factionKey is not null)"
+      system_prompt: "LORE_SYSTEM_PROMPT — serious/dark/enigmatic tone, world backstory context, AIDA pieces, 400+ char minimum, 2-4 files"
+      user_prompt: "buildLorePrompt(ctx) — faction lore+voice, file name patterns, featured topic, hidden file seed, lore quote, AIDA fragment hint, dark role-specific instructions"
+      output: "2-4 directories, 2-4 files (at least 1 hidden). Classified docs, intercepted transmissions, encrypted memos, personal confessions."
+    }
+
+    @process_2_ambient {
+      trigger: "All servers (faction and non-faction)"
+      system_prompt: "AMBIENT_SYSTEM_PROMPT — voice varies by content, no world lore references, signal-in-noise principle, 400+ char minimum, 4-6 files"
+      user_prompt_faction: "buildAmbientPrompt(ctx) with factionKey — mundane themes (workFiles/personalFiles/gossip), faction voice for mundane content, ambient news, easter eggs (30%)"
+      user_prompt_independent: "buildAmbientPrompt(ctx) without faction — picks INDEPENDENT_SERVER_THEMES theme (14 types), occasional hidden quest seed (40%), ambient news, easter eggs (30%)"
+      output: "4-7 directories, 4-6 files. Mundane workplace content, personal notes, gossip, news, routine logs."
+    }
+
+    step_merge: "Merge lorePlan + ambientPlan directories and files into single ServerContentPlan"
+    step_fallback: "If both AI processes fail → fall back to generateRoleContent(ctx) or STATIC_CONTENT"
+    step_secrets: "Plant faction secrets on matching server role (financial→database, operation→email, technical→gateway)"
+    step_encoded: "generateEncodedFiles(ctx) — encoded credential/access-key/memo files per server role"
+    step_apply: "applyContentPlan() — creates directories + files via FileService (or Prisma-direct fallback)"
+  }
+
+  @ai_prompt_contracts {
+    lore_system: "LORE_SYSTEM_PROMPT — rules: serious/dark/enigmatic, world backstory context, AIDA pieces, 400+ char files, 2-4 files, hidden files for secrets, never copy lore verbatim, only valid JSON"
+    ambient_system: "AMBIENT_SYSTEM_PROMPT — rules: voice varies by content, NO lore references, 400+ char files, 4-6 files, signal-in-noise principle, only valid JSON"
+    shared_rules: "Both prompts: reference only provided IPs/names, paths start with /, content cap 3000 chars, must have directories[] and files[]"
+    lore_context: "Faction lore + voice + file flavors + featured topic + hidden file seed + lore quote + AIDA fragment reference + dark role-specific instructions"
+    ambient_context_faction: "Faction mundane themes (work/personal/gossip) + faction voice (for mundane content) + ambient news + easter eggs (30%)"
+    ambient_context_independent: "Independent server theme (from 14 types) + optional hidden quest seed (40%) + ambient news + easter eggs (30%)"
+    output: "{ directories: [{path, isHidden, isProtected}], files: [{path, content, isHidden, isEncrypted, isProtected}] }"
+    fallback: "On AI failure → role-based static templates with {placeholder} injection from real network data"
+  }
+
+  @role_content {
+    gateway: "Firewall rules (real linked IPs), ACLs (employee names), connection logs, network map"
+    router: "Routing table (real IPs), interface status, traffic logs"
+    database: "User tables (employee roster), SQL exports, query logs, backup credentials (pointing to other servers)"
+    email: "Emails between employees (mention other servers by IP), maintenance notices, unsent drafts with secrets"
+    workstation: "Personal notes (reference other servers), .ssh/config (real hostnames+IPs), browser history (internal URLs), bash history"
+    firewall: "ACL rules (protected server IPs), IDS signatures, blocked connection logs, alert logs"
+    dns: "Zone files (hostname→real IP for all network servers), reverse DNS, query cache"
+  }
+
+  @faction_secrets {
+    description: "Hidden/encrypted files planted on servers matching their type. When read by rival players, feeds FactionKnowledgeService."
+    types: {
+      financial: "Revenue projections, off-books accounts → database servers"
+      operation: "Attack plans, mission schedules → email servers"
+      personnel: "Agent identities, undercover ops → workstation servers"
+      technical: "Server credentials, encryption keys → gateway/firewall servers"
+      strategic: "Alliance negotiations, war plans → deep/classified servers"
+      aida_fragment: "AIDA lore breadcrumbs → any server, hidden+encrypted"
+    }
+    intelligence_loop: "secrets on servers → player explores network → reads hidden file → FactionKnowledgeService.addEntry() → faction AI generates mission targeting revealed asset → player goes deeper → finds more secrets"
+  }
+
+  @content_variety {
+    design_principle: "Not every server holds faction-critical intel or AIDA lore. Most servers should feel like real machines used by real people — mundane content makes the world feel alive and makes genuine discoveries feel earned."
+    ratio: "~70% mundane/ambient content, ~20% faction-relevant but non-critical, ~10% genuinely important (lore, AIDA fragments, strategic secrets)"
+
+    mundane_content: {
+      description: "Everyday digital detritus that makes servers feel inhabited rather than purpose-built puzzle boxes."
+      gossip: "Employee chat logs, break-room drama, complaints about management, rumors about other factions — overheard but unverified"
+      news: "Network news bulletins, patch notes for in-world systems, public announcements, infrastructure maintenance notices"
+      personal_files: "Shopping lists, personal notes, saved recipes, journal entries, vacation photos metadata, music playlists, unfinished creative writing"
+      work_files: "Timesheets, meeting minutes, project status updates, bug trackers, onboarding docs, HR policies, cafeteria menus"
+      spam: "Unsolicited ads for in-world products, phishing attempts, chain-mail forwards, expired event invitations"
+      logs: "Routine access logs, automated backup confirmations, software update receipts, disk space warnings"
+    }
+
+    ambient_worldbuilding: {
+      description: "Content that isn't mission-critical but enriches the world and hints at life beyond the main factions."
+      hidden_quests: "Occasionally mundane content conceals minor side-quests — a personal journal mentioning a hidden stash, a chat log referencing an abandoned server, a news article about a missing person"
+      cultural_artifacts: "In-world poetry, fiction, art manifests, philosophy debates on forums — the network has a culture beyond warfare"
+      history_fragments: "Old archived files from before The Shattering — employee records, project docs, celebration announcements — painting a picture of what the world was like when AIDA was whole"
+      easter_eggs: "Occasional absurd or humorous files — a sysadmin's rant about password policies, a bot stuck in a loop generating haiku, someone's entire thesis on optimal pizza toppings"
+    }
+
+    faction_coloring: {
+      garrison: "Mundane content leans military-bureaucratic — duty rosters, equipment requisitions, morale reports, fitness test scores"
+      dothackers: "Mundane content leans chaotic-personal — meme archives, mixtape playlists, philosophical rants, conspiracy theory threads"
+      cybercorp: "Mundane content leans corporate-sterile — quarterly reports, synergy memos, employee satisfaction surveys, stock tickers"
+      darknet: "Mundane content leans fragmented-eerie — corrupted personal logs, timestamped entries from users who don't exist, auto-generated poetry with unsettling coherence"
+    }
+
+    discovery_reward: "Players who thoroughly explore 'boring' servers occasionally find genuinely useful tidbits buried in the noise — an IP address mentioned in passing, a password scrawled in a sticky note file, a gossip thread that names a real operative. The signal-in-noise pattern trains players to explore everything."
+  }
+
+  @employee_rosters {
+    description: "15 names per faction, reused consistently across all servers in a network. Same 'Dr. Chen' in emails, databases, workstations."
+    storage: "EMPLOYEE_ROSTERS constant in serverContentService.ts"
+    garrison: ["Commander Steele" "Agent Voss" "Lt. Mora" "Sgt. Reeves" "Cpl. Park" "Major Blackwood" "..."]
+    cybercorp: ["Dr. Sarah Chen" "Marcus Webb" "Yuki Tanaka" "R. Blackwell" "Elena Voss" "..."]
+    dothackers: ["gh0st" "nullbyte" "sp1k3" "cr4sh" "z3r0day" "ph4ntom" "..."]
+    darknet: ["[SIGNAL]" "[ECHO]" "[NULL]" "[VOID]" "[FRAGMENT]" "..."]
+  }
+
+  @passkey_auto_detection {
+    description: "When a player reads a file, FileService.detectAndGrantAccessKeys() checks if the content contains any server's accessKey string"
+    flow: "FileService.readFile() → content returned → detectAndGrantAccessKeys() queries all servers with accessKey set → if content.includes(server.accessKey) → grantAccessKey(userId, serverId) via NetworkTopologyService"
+    result: "Player can now 'connect' to that server without hacking — the file content WAS the key"
+  }
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MISSION SYSTEM
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@mission_system {
+  description: "Template-constrained missions with AI-flavored narrative. Knowledge-aware targeting fills objectives with real server/file IDs from faction knowledge. Network-depth scales difficulty."
+
+  @objective_types {
+    total: 34
+    file: "server/src/services/missionObjectiveTypes.ts"
+
+    @categories {
+      action: ["hack (count)" "hack_target (boolean, serverId)" "hack_stealth (count)" "hack_method (count, method)" "gain_access (boolean, serverId+requiredAccessLevel)" "install_backdoor (boolean, serverId)"]
+      file: ["steal (boolean, fileId)" "steal_count (count, serverId)" "upload_file (boolean, serverId)" "delete_file (boolean, fileId)" "download_file (boolean, fileId)"]
+      social: ["message (count)" "contact_player (boolean, targetUserId)"]
+      forum: ["forum_post (count)" "forum_reply (boolean, threadId)" "forum_interaction (count)"]
+      exploration: ["explore (count)" "connect_server (boolean, serverId)" "discover_server_type (count, serverType)"]
+      progression: ["skill_level (boolean, skillName+targetLevel)" "gain_xp (count)" "earn_credits (count)" "spend_credits (count)"]
+      faction: ["join_faction (boolean, factionId)" "faction_reputation (count, factionId)" "faction_mission (count, factionId)"]
+      network: ["infiltrate_network (boolean, networkId)" "trace_connection (boolean, serverId)" "exfiltrate_data (boolean, serverId+fileId)"]
+      bonus: ["claim_bounty (boolean)" "survive_trace (count)" "scan_subnet (count)"]
+      defense: ["defend_home (boolean, defenseType)" "decode_content (boolean, encoding)"]
+    }
+
+    integration_hooks: "13 hooks: onHackComplete (+ install_backdoor), onFileOperation (+ download_file, exfiltrate_data), onServerConnect (+ infiltrate_network, trace_connection — accepts serverMeta with networkId/role), onSkillUpdate, onCreditsTransaction, onFactionEvent, onMessageSent, onForumActivity, onDecodeSuccess, onDefenseEvent, onBountyCompleted, onTraceEvaded, onSubnetUsed"
+  }
+
+  @templates {
+    total: 39
+    file: "server/src/services/missionTemplatePool.ts"
+
+    @tiers {
+      tier_1_script_kiddie: "L1-5, D1-2 — 5 templates (first_blood, neighborhood_watch, message_runner, petty_theft, credit_hustle)"
+      tier_2_apprentice: "L5-15, D2-4 — 10 templates (silent_entry, data_heist, network_sweep, forum_operative, faction_recruit, xp_grinder, network_probe, data_extraction, home_fortification, network_cartographer)"
+      tier_3_operator: "L15-30, D4-6 — 10 templates (clean_sweep, chain_reaction, dead_drop, reputation_play, intel_gathering, credit_empire, deep_extraction, follow_the_trail, cipher_breaker, bounty_hunter)"
+      tier_4_elite: "L30-50, D6-8 — 8 templates (persistent_access, ghost_protocol, resource_war, double_agent, intelligence_sweep, surgical_strike, network_siege, ghost_run)"
+      tier_5_ghost: "L50+, D8-10 — 6 templates (kingmaker, aida_trail, scorched_earth, zero_day, shadow_broker, endgame)"
+    }
+
+    reward_scaling: "RewardScaling { xp: {base, perLevel}, credits: {base, perLevel}, reputation?, skillPoints? } — final = base + perLevel * playerLevel"
+    selection: "getEligibleTemplates(level, factionId?) → selectWeightedTemplate(candidates, level) — bell-curve bias toward level midpoint"
+  }
+
+  @generation_pipeline {
+    file: "server/src/services/personaService.ts — generateDynamicMission()"
+
+    @steps [
+      "1. Find faction leader persona + faction profile (voice, themes, preferredObjectives, rewardBias)"
+      "2. Load FactionKnowledgeService.getSnapshot(factionId) — known servers, files, players"
+      "3. Estimate average player level from faction members"
+      "4. Select template via getEligibleTemplates() + selectWeightedTemplate()"
+      "5. fillObjectivesFromKnowledge(template, snapshot) — fills serverId/fileId/networkId from known assets"
+      "6. If no known targets match required metadata → fallback to exploration objective"
+      "7. computeRewards(template.rewards, level, factionBias) — 1.3x multiplier for faction's preferred reward type"
+      "8. AI flavor prompt — sends structured skeleton + KNOWN_TARGETS to AI, gets title + description only"
+      "9. Validate AI response: title ≤ 80 chars, description ≤ 500 chars. Fallback to template strings."
+      "10. createMission() with real objectives, real IDs, proper rewards"
+    ]
+
+    faction_profiles: {
+      garrison: "voice: Military precision | themes: Defense, Patrol, Secure | bias: XP"
+      dothackers: "voice: Anarchist leet-speak | themes: Expose, Leak, Liberate | bias: Reputation"
+      cybercorp: "voice: Corporate calculated | themes: Acquisition, Intelligence | bias: Credits"
+      darknet: "voice: Cryptic fragmented | themes: Signal, Fragment, Decode | bias: Unlocks"
+    }
+  }
+
+  @tutorial_system {
+    description: "Mail-driven mandatory tutorial for new players. The Architect (Game Master AI persona) guides recruits via in-character emails. No 'tutorial' command — players interact by replying to The Architect's training mails."
+    service: "TutorialService (server/src/services/tutorialService.ts)"
+    token: "TUTORIAL_SERVICE"
+
+    @steps [
+      "1. Terminal Basics — explore(3): connect to 3 servers (Training Network at 10.10.10.x). Reward: 50 XP, 100 credits"
+      "2. Data Recovery — download_file(boolean): download a file from any server (Training Archive at 10.10.10.20). Reward: 75 XP, 150 credits"
+      "3. First Contact — message(1): send a message. Reward: 50 XP, 100 credits"
+      "4. Choosing Your Path — join_faction(boolean): join a faction. Reward: 100 XP, 250 credits"
+      "5. Graduation — earn_credits(200): earn credits from any source. Reward: 150 XP, 500 credits, 5 skill points"
+    ]
+
+    @flow [
+      "1. Player connects via Socket.IO → handleAuthentication() checks shouldStartTutorial()"
+      "2. If new player (no tutorial missions, level ≤ 5): startTutorial() creates step 1 mission + sends in-character mail from The Architect"
+      "3. Player completes tutorial mission → missionService emits mission:completed → index.ts listener calls advanceTutorial()"
+      "4. advanceTutorial() creates next step mission + sends next Architect mail. After step 5: graduation mail."
+      "5. Player can reply to any Architect training mail — MessageService post-send hook fires → tutorialService.handlePlayerReply() → AI-generated in-character hint response"
+    ]
+
+    @mail_system {
+      sender: "The Architect (AI Game Master persona) — sends via messageService.sendAIMessage(personaId, recipientId, subject, content)"
+      subjects: ["Your Training Begins" "Training Assignment: Data Recovery" "Training Assignment: First Contact" "Training Assignment: Choose Your Allegiance" "Final Assignment: Prove Your Worth" "Training Complete (graduation)"]
+      tone: "Mysterious, authoritative, slightly ominous — like a mentor who knows more than they reveal"
+      reply_handling: "MessageService.onPrivateMessageSent hook → index.ts wires to tutorialService.handlePlayerReply()"
+    }
+
+    @context_filtering {
+      description: "handlePlayerReply() is context-aware — only responds to training-related replies, ignores unrelated messages to AI personas"
+      checks: [
+        "1. Recipient must be The Architect's AI user account"
+        "2. Message must be training-related: subject references a known training mail subject, or contains keywords (training/assignment/tutorial/recruit/hint/objective/scan/connect/download/faction etc.)"
+        "3. Sender must have an active tutorial mission (status: available/assigned/active)"
+        "4. If all 3 pass → AI generates in-character hint (ARCHITECT_SYSTEM_PROMPT enforces game-related-only responses)"
+        "5. If any check fails → message silently ignored (no response sent)"
+      ]
+      ai_guardrail: "System prompt explicitly instructs The Architect to ONLY discuss game-related topics and deflect off-topic questions in-character"
+    }
+
+    @methods {
+      shouldStartTutorial: "Returns true if no tutorial missions exist for user AND level ≤ 5"
+      startTutorial: "Creates step 1 mission + sends in-character mail from The Architect. Idempotent (returns early if tutorial missions exist)."
+      advanceTutorial: "On tutorial mission completion, creates next step + sends next Architect mail. After step 5: graduation mail."
+      getTutorialProgress: "Returns TutorialProgress { currentStep, totalSteps, isComplete, activeMission, completedSteps, hint }"
+      handlePlayerReply: "Context-aware reply handler. Checks recipient is Architect + message is training-related + player has active tutorial. Generates AI hint via AIService, sends reply via sendAIMessage. Falls back to static hint on AI failure."
+      sendArchitectMail: "(private) Sends step mail from The Architect via sendAIMessage, falls back to sendSystemMessage"
+      sendGraduationMail: "(private) Sends graduation mail when all 5 steps complete"
+    }
+
+    hooks: "Auto-start: sockets/handlers.ts handleAuthentication(). Advancement: index.ts mission:completed listener. Reply interception: index.ts wires MessageService.onPrivateMessageSent → tutorialService.handlePlayerReply()"
+    idempotent: "shouldStartTutorial returns false if any tutorial missions exist, so reconnects don't re-trigger"
+  }
+
+  @hardening {
+    transaction_lock: "completeMission() uses prisma.$transaction([playerProgress update, mission status update])"
+    mission_cap: "Max 5 active missions per player — checked in acceptMission()"
+    accept_states: "acceptMission() allows accepting missions in 'available' or 'assigned' status (previously only 'assigned')"
+    prerequisites: "Mission.prerequisiteTemplateIds (Json?) — acceptMission() checks if player completed all prerequisite template IDs before allowing acceptance"
+    bonus_objectives: "ObjectiveTemplate.isBonus flag. Bonus objectives are skipped in completion check (only required objectives must complete). Each completed bonus adds +10% reward multiplier."
+    expiration: "startExpirationChecker() — 15-min interval checks active+assigned missions, expires overdue ones"
+    daily_generation: "Midnight CronJob generates 3 missions/player for users active in last 7 days"
+    generation_persistence: "Auto-generated missions are written into playerProgress.missionProgress on creation so they appear in 'missions' command immediately"
+  }
+
+  @commands {
+    tutorial: "'tutorial [status|start|skip|hint]' — training program progress panel with step checklist (✓/▸/○), progress bar, current mission info, contextual hint. 'tutorial start' begins training, 'tutorial skip' skips, 'tutorial hint' shows hint for current step."
+    missions: "Lists grouped by status (ACTIVE → AVAILABLE → COMPLETED) with numbered index. Auto-generates missions when none available. Per-player mission index cached in-memory Map (refreshed each time 'missions' runs). Filter: missions active/available/completed"
+    mission: "'mission <id|N>' — full briefing panel: title, difficulty bar, type, issuer, rewards, time remaining, word-wrapped description, per-objective progress bars with hints. Accepts numeric shortcut N (1-based from last 'missions' listing) or full/partial CUID."
+    accept: "'accept <id|N>' — shows briefing, objectives with contextual hints per type, time limit, rewards. Accepts numeric shortcut or full/partial ID. Allows 'available' or 'assigned' status."
+    abandon: "'abandon <id|N>' — confirms mission name, warns about faction reputation penalty. Accepts numeric shortcut or full/partial ID."
+    progress: "Active missions with overall + per-objective progress bars, time countdown (urgency marker at <1h)"
+    stories: "Lists all player story arcs with status, faction, step progress"
+    story: "'story <id>' — detailed view with step list + status icons. 'story abandon <id>' to abandon."
+  }
+
+  @story_arcs {
+    description: "AI-driven multi-step narrative mission arcs. A faction leader plans a 3-7 step operation with branching on failure."
+    service: "StoryMissionService (server/src/services/storyMissionService.ts)"
+    schema: "StoryArc (id, title, description, factionId, issuedBy, assignedTo, status, currentStep, totalSteps, steps Json, narrativeContext Json, difficulty). Mission gains storyArcId + storyStep fields."
+
+    @flow [
+      "1. createStoryArc(userId, factionId, personaId, difficulty) — AI generates premise + step plan via generateArcPlan()"
+      "2. First step mission auto-created via generateStepMission() — objectives + rewards populated from MISSION_TEMPLATES lookup"
+      "3. Player completes/fails step → missionService emits event → index.ts calls advanceStory()"
+      "4. advanceStory() checks successBranch/failureBranch, updates narrative context"
+      "5. On success: generates next step mission with AI narrative referencing previous events"
+      "6. On failure with 'adapt': AI generates alternate step that accounts for failure"
+      "7. On 'complete': arc status → completed. On 'fail': arc status → failed."
+    ]
+
+    branching: "Each step defines successBranch (next step # or 'complete') and failureBranch (step # to skip to, 'adapt' for AI alternate, or 'fail' to end arc)"
+    narrative_context: "Accumulates {premise, completedSteps[{step, outcome, summary}], playerLevel, factionName, leaderName}. Passed to AI for consistent mission descriptions."
+    ai_integration: "3 AI calls: generateArcPlan (plan all steps), generateStepNarrative (per-step briefing), generateAdaptedStep (failure recovery)"
+  }
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DARKNET DUNGEON SYSTEM
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@darknet_dungeon_system {
+  description: "Procedural dungeon generator for DarkNet. Creates ephemeral hidden server chains that players must hack through to reach a vault with rewards. Auto-regenerates on conquest or expiry."
+  file: "server/src/services/darknetDungeonService.ts (~1400 lines)"
+  token: "DARKNET_DUNGEON_SERVICE"
+
+  @generation_pipeline {
+    step_1: "generateDungeon(difficulty) — random name from prefix/suffix/code pools"
+    step_2: "Difficulty-scaled depth (3-7 servers in a chain) with escalating security"
+    step_3: "Passkey generation (XXX-XXX format) for gateway access"
+    step_4: "Weighted reward selection (aida_token, rare_script, credits_cache, intel_package)"
+    step_5: "Unique IP allocation (collision-checked, RFC 5737 documentation IPs)"
+    step_6: "Network + GameServer chain with linear topology under darknet faction"
+    step_7: "ServerLinks (chain topology with hidden link types)"
+    step_8: "plantClueFiles() — hidden .signal/trace_N.dat files on each hop pointing to next server IP. Files beyond hop 2 are encrypted."
+    step_9: "populateServerContent() — AI-generated lore content using DARKNET_SERVER_THEMES + CRYPTIC_QUOTES per depth tier"
+    step_10: "plantVaultReward() — vault_payload.enc on final server"
+    step_11: "DarkNetInstance record created (7-day TTL)"
+  }
+
+  @rewards {
+    aida_token: "AIDA Signal Fragment or Envoy's Cipher Token (weight 3/5)"
+    rare_script: "zero_day_exploit + 10k credits (weight 4)"
+    credits_cache: "25k credits (weight 6 — most common)"
+    intel_package: "5000 XP + 2 skill points (weight 4)"
+  }
+
+  @forum_riddles {
+    description: "postForumRiddle() — The Architect AI persona posts a cryptic forum puzzle with gateway IP and passkey hidden in disguised forms (encoded, split across sentences, acronyms, etc.)"
+    author: "The Architect persona"
+    target: "Random public forum"
+  }
+
+  @vault_conquest {
+    trigger: "Player reads vault_payload.enc on final vault server (via cat/read command)"
+    actions: ["Grant weighted random reward" "Record fragment_found event to StoryLedger (weight 8)" "Fire system alert" "Auto-regenerate dungeon after 30 seconds"]
+  }
+
+  @lifecycle {
+    ensureActiveDungeon: "On server startup, guarantees at least one active dungeon exists"
+    expireOldDungeons: "TTL cleanup — dungeons expire after 7 days if unconquered"
+    regeneration: "30 seconds after conquest — tears down all servers/files/links/connections, generates fresh dungeon with new riddle"
+  }
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STORY PROGRESSION ENGINE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@story_progression {
+  description: "The Architect's Staging Engine — gives the game master AI awareness of everything happening in the game world and tools to shape the narrative in response. NOT a fixed state machine — the AI decides what matters and what happens next."
+
+  @story_progression_service {
+    file: "server/src/services/storyProgressionService.ts (~758 lines)"
+    token: "STORY_PROGRESSION_SERVICE"
+
+    @four_pillars {
+      RECORD: "recordEvent() — logs events to StoryLedger with type, category, weight (1-10), and impact. Weight ≥ 7 events become global GameEvents."
+      EVALUATE: "evaluateAndAct() — periodically (called by scheduler), gathers world state, sends to Architect AI, parses interventions. Fires when ≥ 5 unprocessed events accumulate."
+      SYNTHESIZE: "getArchitectContext() — builds formatted text blocks: epoch info, faction standings, key fragment progress, tension, recent events, narrative themes."
+      EPOCH: "transitionEpoch() / initializeFirstEpoch() — manages NarrativeEpoch lifecycle. Epoch 0 = 'The Awakening' on first startup."
+    }
+
+    @world_narrative_state {
+      description: "getWorldNarrativeState() aggregates: faction standings, recent events, key fragments found, global tension, narrative themes, AIDA contact count"
+    }
+  }
+
+  @architect_intervention_executor {
+    file: "server/src/services/architectInterventionExecutor.ts (~712 lines)"
+    token: "ARCHITECT_INTERVENTION_EXECUTOR"
+
+    @intervention_types {
+      send_message: "The Architect sends an in-character message to a player"
+      plant_clue: "Plants AIDA clue files on servers"
+      trigger_event: "Creates game events with severity"
+      adjust_tension: "Modifies global narrative tension"
+      create_mission: "Generates missions on the fly"
+      grant_token: "Awards communication tokens to players"
+      reveal_faction: "Makes hidden factions (DarkNet) visible to specific players"
+    }
+
+    execute_batch: "executeBatch() processes multiple interventions in sequence. Records all executions to StoryLedger."
+  }
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TOKEN CONSUMPTION SYSTEM
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@token_consumption {
+  description: "Token-gated communication with AI personas. Messaging AI personas costs consumable tokens earned through gameplay. Tutorial messages to The Architect remain free. Creates scarcity and value around AI interactions."
+  file: "server/src/utils/tokenConsumption.ts (~235 lines)"
+
+  @persona_names {
+    canonical: ["The Architect" "AIDA" "Commander Steele" "gh0st" "Director Chen"]
+    resolution: "isAIPersonaUsername() / resolvePersonaName() — case-insensitive persona name matching"
+  }
+
+  @token_mechanics {
+    find: "findPersonaToken(prisma, userId, personaName) — finds matching ShopItems with itemType: 'token' and effect.personaName match in player inventory"
+    consume: "consumeToken() — transactional decrement (deletes item on last use)"
+    check_and_consume: "checkAndConsumeToken() — combined check + consume in one transaction"
+  }
+
+  @bypass_rules {
+    tutorial: "hasActiveTutorial() — Architect messages are free during active tutorial (tutorial missions exist with available/assigned/active status)"
+    routing: "shouldRequireToken() — routing decision: determines if this message should go through token gating"
+  }
+
+  @integration {
+    message_service: "MessageService integrates token consumption for AI persona messaging"
+    social_commands: "socialCommands.ts uses token-gated messaging flow"
+    shop_items: "ShopItem.effect Json field stores personaName for token items (e.g. Envoy's Cipher Token)"
+  }
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PLAYER COMPUTER RESOURCE SYSTEM
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@resource_system {
+  description: "Player's terminal has limited CPU, RAM, and Bandwidth. Actions like hacking, scanning, decrypting become background processes that consume resources and take real time. Passive consumers (terminals, connections, backdoors) create ongoing drain."
+  file: "server/src/services/memoryService.ts"
+
+  @computer_spec {
+    description: "Derived from player level + equipped hardware items"
+    base_stats: "Level 1: CPU 200, RAM 256MB, BW 100Mbps"
+    scaling: "+100 CPU, +128MB RAM, +50Mbps BW per 10 levels"
+    equipment: "Hardware shop items add flat bonuses (e.g. 'Quantum RAM' +256MB)"
+  }
+
+  @process_costs {
+    hack_prep: "CPU 80, RAM 128MB, BW 50 — base 60s, hacking skill -1s/level, min 12s"
+    scan: "CPU 40, RAM 32MB, BW 80 — base 15s, networking -0.5s/level, min 3s"
+    decrypt: "CPU 100, RAM 64MB, BW 0 — base 45s, cryptography -1.5s/level, min 9s (with key: instant ~5s)"
+    download: "CPU 10, RAM 64MB, BW 60 — base 10s, networking -0.3s/level, min 2s"
+    backdoor_install: "CPU 60, RAM 96MB, BW 40 — base 90s, stealth -1.5s/level, min 18s"
+    traceroute: "CPU 20, RAM 16MB, BW 40 — base 8s, networking -0.2s/level, min 2s"
+    trace_evade: "CPU 70, RAM 64MB, BW 30 — base 30s, stealth -0.8s/level, min 6s"
+  }
+
+  @passive_consumers {
+    terminal_tab: "CPU 5, RAM 16MB — each open terminal"
+    server_connection: "RAM 8MB, BW 15Mbps — each active remote connection"
+    active_backdoor: "CPU 5, RAM 8MB, BW 10Mbps — each backdoor you maintain"
+    active_trace: "CPU 15, RAM 16MB, BW 5Mbps — when someone is tracing you"
+    os_overhead: "CPU 10, RAM 24MB — always reserved"
+  }
+
+  @process_lifecycle {
+    flow: "Command → canSpawnProcess() check → spawnGameProcess() → 1s tick loop updates progress → on complete fires callback + Socket.IO push"
+    events: "process:started, process:progress (every 5s), process:completed, process:cancelled"
+    all_process_commands: [
+      "hack → hack_prep process → on complete calls hackService.initiateHackSession() → minigame pushed via Socket.IO"
+      "scan → scan process → on complete calls discoverNeighbors() → results pushed"
+      "decrypt → decrypt process (fast with key, slow brute force) → on complete decrypts file"
+      "download → download process → copies file to ~/downloads/ + access key detection"
+      "crack → decrypt process → on complete calls messageService.crackEncryption()"
+      "exploit → hack_prep process → on complete calls processHackAttempt(EXPLOIT)"
+      "backdoor → backdoor_install process → on complete calls processHackAttempt(BACKDOOR)"
+      "rootkit → backdoor_install process (uses min of stealth/hacking skill) → on complete calls processHackAttempt(ROOTKIT)"
+      "traceroute → traceroute process → on complete runs BFS path + auto-discovery + renders table"
+      "trace.evade → trace_evade process → on complete calls traceService.evadeTrace()"
+    ]
+    instant_commands: "backdoor.use, backdoor.list, backdoor.remove, security.scan, trace.status — lightweight queries, no process needed"
+  }
+
+  @commands {
+    ps: "Shows running GameProcesses with progress bars + passive consumers + resource usage summary"
+    top: "Resource dashboard: CPU/RAM/BW bars with usage percentages + process list"
+    kill: "Cancels a GameProcess by PID, immediately frees resources"
+    free: "RAM usage breakdown with progress bar"
+    uptime: "Session uptime + process count + resource summary"
+  }
+
+  @hardware_shop_items {
+    tier_1: "RAM Module Mk1 (+64MB, 500c), CPU Fan (+50 CPU, 750c), Network Card Mk1 (+25 BW, 600c)"
+    tier_2: "RAM Module Mk2 (+128MB, 2000c), CPU Overclock (+100 CPU, 2500c), Fiber Uplink (+100 BW, 2200c)"
+    tier_3: "Quantum RAM (+256MB, 7500c), Neural Coprocessor (+200 CPU, 8000c), Darknet Relay (+200 BW, 9000c)"
+  }
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SERVICES REFERENCE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@services {
+  total: 43
+  pattern: "@injectable() class, constructor with @inject() deps, registered as singleton in container.ts"
+  di_tokens_total: 46
+  di_registrations: "43 registerSingleton + 3 registerInstance (Logger, SocketIO, PrismaClient) = 46 total"
+
+  @tutorial {
+    TutorialService: "Mail-driven mandatory tutorial for new players. The Architect sends in-character training mails. Players reply for AI-generated hints (context-filtered: only training-related replies trigger responses). Injects AIService for hint generation. Methods: shouldStartTutorial, startTutorial, advanceTutorial, getTutorialProgress, handlePlayerReply."
+  }
+
+  @helper_files_not_in_di {
+    hackMinigameGenerator: "server/src/services/hackMinigameGenerator.ts — internal utility used by HackService"
+    missionObjectiveTypes: "server/src/services/missionObjectiveTypes.ts — type/data definitions (34 objective types)"
+    missionTemplatePool: "server/src/services/missionTemplatePool.ts — data/config pool (39 templates)"
+    tokenConsumption: "server/src/utils/tokenConsumption.ts — Token-gated AI persona messaging utility. AI_PERSONA_NAMES constant. isAIPersonaUsername/resolvePersonaName for persona lookup. findPersonaToken/consumeToken/checkAndConsumeToken for transactional token inventory management. shouldRequireToken routing decision (tutorial bypass for Architect). hasActiveTutorial check."
+  }
+
+  @core {
+    GameStateManager: "Session management (in-memory Maps), game state sync, player↔server connection tracking"
+    ProgressService: "Auto-save player progress on interval"
+    EventService: "Game event pub/sub (EventEmitter-based), subscription cleanup every 5min"
+    IPService: "IP allocation per zone (PLAYER 10.x, CORPORATE 172.16.x, GOVERNMENT 192.168.x, UNDERGROUND 169.254.x), player /16 subnet isolation"
+    CommandProcessor: "Command parsing → validation → skill gating → module routing → execution. Rate limited (10 cmd/s)."
+    CacheService: "In-memory key-value cache with TTL"
+  }
+
+  @network_and_content {
+    ServerService: "Server CRUD, connectToServer (resolves IP or ID), discoverServers (subnet scan), security alerts, audit logging. Injects ServerContentService + MissionIntegrationService + FactionKnowledgeService."
+    ServerContentService: "AI-first content generation with network context. provisionServerContent(), provisionAllNetworkServers(), provisionMissionInfrastructure(). Builds NetworkContext from linked servers, generates role-based content, plants faction secrets. Uses constructor-injected AIService (replaced dynamic getService<any>() pattern)."
+    NetworkTopologyService: "Graph traversal, adjacency enforcement, BFS pathfinding, fog of war discovery, access control (open/hackable/keycard/hack_or_key), passkey management."
+    FileService: "Virtual filesystem CRUD, encryption/decryption (AES-256-CBC), permission checking (bitmask), path traversal sandboxing. detectAndGrantAccessKeys() — public method, called on download (not cat/read), links discovered keys to source file via sourceFileId for revocation. deleteNode() handles access key revocation + honeypot alerts. Injects MissionIntegrationService + FactionKnowledgeService + NetworkTopologyService."
+    DynamicContentService: "Event-driven content injection into server filesystems. 9 default hooks: hack:detected→security.log, hack:attempt→access.log, bounty:posted→wanted.txt, ids_alert→ids.log, honeypot:triggered→honeypot.log, war:declared→war_bulletin.txt, war:ended→war_bulletin.txt, mission:completed→operations.log, contest:resolved→territory.txt. Uses ContentEncoder for optional encoding. registerHook(event, generator) for extensibility. War hooks wired from warfareService, contest hook from contestService, mission hook from index.ts."
+  }
+
+  @utilities {
+    ContentEncoder: "Pure utility (server/src/utils/contentEncoder.ts). Encodes text as base64/caesar/rot13/xor/hex/reverse/ascii. encodeWithMetadata() returns encoded string + hint + decode command. Template wrappers: credentialFile(), accessKeyFile(), logWithEncodedIP(), memoWithSecret(). randomEncoding(difficulty) for procedural content generation."
+  }
+
+  @utils_directory {
+    description: "server/src/utils/ — 8 utility files"
+    files: [
+      "asciiAvatars.ts — Server-side avatar generation (single source of truth). 16 ASCII art templates (hacker1/2, elite, anonymous, default, corporate, security, scientist, bot, aida, system, garrison, dothackers, cybercorp, darknet, faction_leader). 16-entry color map. Deterministic selection via hashCode(name). AvatarData interface (server-internal). Functions: generateAvatar (decision tree: ai→system→npc→player with faction overrides), getCompactAvatar (first 5 lines), getInlineGlyph (faction-aware: [★_★] garrison, [#_#] dothackers, [$_$] cybercorp, [░◈░] darknet), formatAvatarBlock, renderAvatarWithInfo (side-by-side layout), renderMessageHeader, renderProfileCard, renderNotificationBadge. Used by MessageService (avatar payloads in message:received/new_mail), gameCommands (status/whois/players glyphs), socialCommands (msg/mail/forum glyphs)."
+      "auth.ts — authentication utilities"
+      "contentEncoder.ts — encoding/decoding (base64/caesar/rot13/xor/hex/reverse/ascii)"
+      "expressionEngine.ts — math expression evaluation engine (for calc/expr commands)"
+      "ipUtils.ts — IP address utilities"
+      "pathSanitizer.ts — path sanitization/security"
+      "validators.ts — input validation helpers"
+      "tokenConsumption.ts — token-gated AI persona messaging (5 canonical personas, token inventory lookup, transactional consume, tutorial bypass)"
+    ]
+  }
+
+  @missions {
+    MissionService: "Mission CRUD, assignMission (with 5-active cap), acceptMission (with prerequisite check), completeMission ($transaction, bonus objective tracking), abandonMission, expireMission, grantRewards. Emits mission:completed + mission:failed (abandon/expire) for story arc progression. 15-min expiration cron."
+    MissionGeneratorService: "Procedural generation from 39 templates. selectTemplate() with deduplication, generateFromTemplate() with RewardScaling, generateAIMission() with canonical type validation. Midnight CronJob for daily generation. Provisions infrastructure via ServerContentService."
+    MissionIntegrationService: "Connects game actions to objectives via 13 hooks: onHackComplete, onFileOperation (incl. download_file), onServerConnect, onSkillUpdate, onCreditsTransaction, onFactionEvent, onMessageSent, onForumActivity, onDecodeSuccess, onDefenseEvent, onBountyCompleted, onTraceEvaded, onSubnetUsed. Available in CommandContext.services.missionIntegrationService."
+    FactionKnowledgeService: "Faction-scoped asset knowledge (servers, files, players). addEntry() upserts with confidence scoring. getSnapshot() cached 60s for AI prompts. serializeForPrompt() generates KNOWN_TARGETS block. expireEntries() cleanup. decayConfidence(rate=0.05, min=0.1) — time-based confidence decay, purges entries below threshold. getPlayerFactionId() helper."
+    StoryMissionService: "AI-driven multi-step narrative arcs. createStoryArc() → AI plans 3-7 steps with branching. advanceStory() called on mission complete/fail events (wired in index.ts). Generates adapted steps on failure via AI. Uses StoryArc + StoryStep schema. Injects ServerContentService to provision mission infrastructure for story missions (replaced raw Prisma creation)."
+  }
+
+  @hacking {
+    HackService: "Two flows: processHackAttempt (simple RNG) and initiateHackSession (3-layer interactive minigame). Session persistence to DB. Priority system affects detection (aggressive = up to +30%, stealth = up to -8%, 5% floor). Home server defense: firewall layers prepended, vault layers appended, IDS alerts on start/complete. Process cancel: 20% partial detection chance + 15s cooldown (via metadata.onCancel). Emits hack events (hack:attempt, ids_alert)."
+    BackdoorService: "installBackdoor, useBackdoor, scanForBackdoors, removeBackdoor. Types: standard (24h), persistent (72h), rootkit (permanent). Detection risk increases per use."
+    TraceService: "initiateTrace, progressTrace (auto-tick 60s), evadeTrace (stealth skill check). Evidence-based duration tiers: 15m/30m/1h/2h."
+
+    @detection_consequences {
+      description: "Real consequences triggered by triggerCounterMeasures() based on evidence level"
+      low_evidence_0_30: "Silent logging only — HackLog entry, no active response"
+      medium_evidence_31_60: "Firewall bump (+1 for 30min), server owner notified via Socket.IO"
+      high_evidence_61_80: "Firewall +2 and security +1 for 1hr, faction AI alerted (FactionKnowledge entry + PersonaService.onFactionServerHacked), reputation penalty (-5), server owner notified"
+      critical_evidence_81_100: "Full lockdown (firewall max for 2hr), trace initiated via TraceService (passive resource drain on attacker), access key revoked, faction AI alerted, heavy reputation penalty (-15), server owner notified, BOUNTY POSTED"
+      faction_ai_reaction: "Faction leader learns attacker identity via FactionKnowledge. Can generate counter-missions targeting the attacker."
+    }
+
+    @bounty_system {
+      description: "When a player is detected at critical level (81%+) on a faction server, a bounty is automatically posted"
+      model: "Bounty — targetUserId, targetUsername, issuedByFactionId, reason, rewardCredits, rewardReputation, status (active|claimed|completed|expired), claimedByUserId, stolenFileIds (Json — fileSystemNode IDs of downloaded files), expiresAt (48h)"
+      creation: "triggerCounterMeasures() at critical evidence → postBounty() finds files target downloaded from breached server (via metadata.sourceServerId), records their IDs in stolenFileIds, creates bounty, notifies faction via Socket.IO, posts wanted notice on faction forum via AI leader"
+      reward_scaling: "Base 1000c + (evidence - 80) * 200c credits. 5 + (evidence - 80) rep."
+      commands: "'bounties' lists active bounties with target, faction, reward, expiry. 'bounty claim <id>' accepts. 'bounty complete <id>' verifies hacked target home server + deletes stolen files + revokes access keys + grants rewards."
+      completion: "Player must have ServerConnection with accessLevel > 0 on target's home server. On completion: deletes stolen files from target's ~/downloads/, revokes ServerAccessKeys linked to those files (via sourceFileId), notifies target via Socket.IO. Grants credits + faction reputation to hunter."
+      pvp_loop: "Detection → bounty posted → faction members notified → hunter claims → hacks target's home → stolen files deleted + keys revoked → hunter collects reward. Target loses intel and access. Creates organic PvP content with real stakes."
+    }
+
+    @download_system {
+      description: "Files must be downloaded to keep intel. cat/read shows content (ephemeral) but download copies to home server (persistent)."
+      command: "'download <file>' — reads source file, spawns background process (CPU 10, RAM 64MB, BW 60), copies to ~/downloads/ on home server"
+      access_keys: "Access key detection ONLY happens on download (moved from readFile). Keys extracted from downloaded content are linked to the file via sourceFileId on ServerAccessKey."
+      metadata: "Downloaded files get FileSystemNode.metadata: { sourceServerId, sourcePath, downloadedAt, isDownloaded }. Used by bounty system to identify stolen files."
+      key_revocation: "When a downloaded file is deleted (bounty completion, rm, or any deleteNode call), ServerAccessKeys with matching sourceFileId are revoked automatically in fileService.deleteNode(). Also triggers honeypot alert if decoy file deleted by non-owner."
+      gameplay_loop: "Explore server (cat) → find valuable file → download it (process) → keys extracted → access new servers. Get caught → bounty posted → hunter deletes your downloads → you lose access keys. Must re-steal the files."
+    }
+
+    @home_defense_system {
+      description: "Players upgrade their home server with defenses to protect stolen intel from bounty hunters and rival players."
+      schema: "PlayerProgress fields: homeFirewall (0-3), homeVault (0-3), homeIds (0-3), homeHoneypot (boolean)"
+      commands: "DefenseCommandsModule: defenses (status), protect <dir>, safevault [status|move|retrieve], honeypot [status|refresh], upgrade <defense> [level]"
+      skill_gates: "defenses/upgrade→ungated. protect→Networking 15. safevault→Cryptography 20. honeypot→Stealth 25."
+
+      @firewall_defense {
+        levels: "L1: 2000c, L2: 5000c, L3: 12000c"
+        effect: "Adds port_sequence minigame layers PREPENDED to hack session. L1→difficulty 5, L2→difficulty 7, L3→difficulty 9 + extra cipher layer."
+        implementation: "homeFirewall checked in hackService.initiateHackSession(). Does NOT modify GameServer.firewallLevel (avoids double-apply with base layer generation)."
+      }
+
+      @vault_defense {
+        levels: "L1: 3000c, L2: 8000c, L3: 20000c"
+        effect: "Creates hidden/protected ~/.vault/ directory. Files moved inside are isProtected + isHidden."
+        minigame_layers: "Vault layers APPENDED after base server layers in initiateHackSession. L1→cipher (difficulty 6). L2→cipher + memory_trace (difficulty 8). L3→cipher + memory_trace + port_sequence (difficulty 9). Attacker must solve ALL layers to get full access."
+        commands: "'safevault move <file>' moves from ~/downloads/ to ~/.vault/. 'safevault retrieve <file>' moves back."
+      }
+
+      @ids_defense {
+        levels: "L1: 1500c, L2: 4000c, L3: 10000c"
+        effect: "Intrusion Detection System alerts via Socket.IO (emits ids_alert event, relayed by index.ts to player)"
+        alert_timing: "L1→alert on hack COMPLETION. L2→alert on hack START. L3→alert on start + attacker IP/username revealed on completion."
+        implementation: "Checks in hackService.initiateHackSession (L2+) and resolveHackSession (L1+). Uses emit('ids_alert') → index.ts listener → io.to(player).emit()"
+      }
+
+      @honeypot_defense {
+        price: "5000c one-time"
+        effect: "Generates 3-5 decoy files in ~/downloads/ with realistic names. metadata.isDecoy=true."
+        detection: "fileService.readFile() checks isDecoy flag — creates honeypot_triggered GameEvent alerting server owner with attacker identity. Bounty completion tracks decoy hits separately — if all deleted files were decoys, hunter is informed no real intel was destroyed."
+        commands: "'honeypot refresh' regenerates fresh decoy files."
+      }
+
+      @folder_protection {
+        command: "'protect <dir>' toggles isProtected on a directory"
+        effect: "Files inside protected dirs cannot be deleted, moved, or modified by attackers. Protected files are hidden from low-access intruders (accessLevel < 5 for hidden, < 7 for protected)."
+        usage: "Free to use, no purchase required. Player can protect any dir on home server."
+      }
+    }
+  }
+
+  @factions {
+    FactionService: "Faction CRUD, join/leave (with standing checks), addReputation (with clamping + cross-faction rivalry), ranks (recruit→operative→elite→council_member). Extends EventEmitter. 4 canonical factions: garrison, dothackers, cybercorp, darknet."
+    ReputationEngine: "Rivalry matrix: garrison↔dothackers(-0.5), dothackers↔cybercorp(-0.6), garrison+cybercorp(+0.2), darknet vs all(-0.3). Standing thresholds: ≥30 allied, ≤-30 hostile."
+    ResourceService: "5-min tick resource generation from faction-owned servers. Resource types: credits, intel, compute."
+    ContestService: "Territory contests: declare, join, contribute, resolve. Layer-based challenge system."
+    WarfareService: "Faction wars: declare (AI-only), surrender, war score, 2x rep multiplier, resource bleed, 14-day safety valve ceasefire."
+    AliasService: "Player identity aliases: create (10k credits), destroy, reveal (skill check). 3x replacement limit."
+    DarkNetDiscoveryService: "4 discovery paths: hidden_file (.aida), skill_threshold (hacking≥60+stealth≥50), censorship_flags (3+ mentions), breadcrumb_trail (3+ encrypted files). AIDA sends AI-generated recruitment DM. In-memory cache for fast sync lookups. Integrated with CensorshipService (censorship alerts), SystemCommands (cat .aida files), FactionService (hidden faction join gating). Uses direct constructor-injected AIService + MessageService."
+
+    @share_intel_gating {
+      description: "share_intel command now has dual gating: Social Engineering skill ≥ 10 (via SKILL_REQUIREMENTS) + faction rank ≥ operative (checked in handleShareIntel via factionMember query). Recruits cannot share intel."
+      skill_gate: "socialEng level 10 — enforced by CommandProcessor.validateSkillRequirements()"
+      rank_gate: "Must be operative, elite, or council_member — enforced in gameCommands.handleShareIntel() via factionMember.rank check"
+    }
+    CensorshipService: "Regex text filtering on forum posts, messages, cat output. Alerts trigger DarkNet discovery check."
+  }
+
+  @ai {
+    AIService: "Ollama REST integration via /api/chat endpoint. generateResponse(prompt, systemPrompt, context?). Supports local + cloud modes (AI_API_KEY enables cloud). Dynamic timeout: 60s cloud / 120s local. 3 retries with exponential backoff (1s, 2s, 4s). Model: env AI_MODEL or OLLAMA_MODEL (default llama3.1:8b). Cloud API: set AI_API_URL=https://ollama.com + AI_API_KEY."
+    PersonaService: "AI NPC management. 4 faction leaders + Game Master. Event handlers: onMemberJoined/Left, onHighRankAchieved, onServerContestResolved, onMissionCompleted, onServerHacked, onWarDeclared/Ended/ResourceBleed, onForumPostCreated. generateDynamicMission() 10-step knowledge-aware pipeline. FACTION_PROFILES constant. decideAction() for faction leaders: issue_mission, create_story_arc, send_message, forum_post. decideDirectorAction() for Game Master: trigger_event, plant_discovery (uses generateClue()), forum_post, issue_mission, send_message. executeAction() handles all types."
+    AISchedulerService: "Interval scheduling: 4hr for faction leaders, 8hr for others. 3 actions/day limit. Midnight counter reset. 30-min game state check: low resources → defensive mission, contested servers → defensive mission, at war → war-support mission, power imbalance → rebalancing missions for weak factions (triggers when dominant > 1.5x avg, boosts factions < 0.8x avg). Calls FactionKnowledgeService.expireEntries() + decayConfidence()."
+    StoryProgressionService: "The Architect's Staging Engine. Records significant game events to StoryLedger (recordEvent), evaluates accumulated events via AI (evaluateAndAct — fires when ≥5 unprocessed events), synthesizes world narrative state (getArchitectContext — epoch info, faction standings, key fragments, tension, themes), manages narrative epochs (transitionEpoch, initializeFirstEpoch). 4 pillars: RECORD → EVALUATE → SYNTHESIZE → EPOCH."
+    ArchitectInterventionExecutor: "Executes the Architect AI's decisions. 7 intervention types: send_message, plant_clue, trigger_event, adjust_tension, create_mission, grant_token, reveal_faction. executeBatch() for processing multiple interventions. Records all executions to StoryLedger."
+    DarkNetDungeonService: "Procedural dungeon generator for DarkNet. generateDungeon(difficulty) creates chain of 3-7 hidden servers with escalating security. plantClueFiles() places encrypted breadcrumb files on each hop. postForumRiddle() AI-generates cryptic forum post with gateway IP + passkey. conquerVault() grants weighted random rewards (aida_token/rare_script/credits_cache/intel_package), records to StoryLedger, auto-regenerates after 30s. ensureActiveDungeon() guarantees one active dungeon. 7-day TTL expiration."
+  }
+
+  @social {
+    MessageService: "Player-to-player messaging with delivery queue. Server-side encryption key storage. Post-send hook system: onPrivateMessageSent(callback) registers callbacks fired after every successful sendPrivateMessage — used by TutorialService to intercept replies to The Architect. Methods: sendPrivateMessage, sendSystemMessage, sendAIMessage, getInbox, getSentMessages, markAsRead, deleteMessage, encryptMessage, decryptMessage, decryptMessageById, crackEncryption (skill-based), getChatHistory, getChatContacts (aggregates DB contacts + message history, unread counts via groupBy, online status via Socket.IO, avatar info), markConversationRead (batch + read receipt emit), getUnreadChatCounts, requestDecryption. Emits message:received (with avatar payload), message:new_mail (for messages with subjects), message:read_receipt, message:conversation_read. ChatContact interface exported for typed contact data with AvatarInfo."
+    ForumService: "Enhanced forum system (Phase 3A+4). Post creation with censorship filtering. Replies, votes, reports. Emits forum:post_created for AI knowledge pipeline."
+    PlayerPresenceService: "Online status tracking via Socket.IO connection/disconnect events."
+  }
+
+  @supporting {
+    ShopService: "Item catalog, purchase (with credits check), sell (with equipped check, transaction)."
+    InventoryService: "Equipment management, slot-based equipping."
+    MemoryService: "Player computer resource management (CPU/RAM/BW). GameProcess lifecycle, passive consumers (terminals/connections/backdoors/traces), 1s tick loop, Socket.IO push events. Hardware shop items boost specs."
+    ProcessStateService: "Command execution tracking with cleanup timers."
+    LeaderboardService: "DB-backed leaderboards with 9 categories (level, credits, hacking, networking, cryptography, stealth, reputation, achievements, missions). getLeaderboard(category, limit) + getPlayerRank(). 'leaderboard' command with ASCII table."
+    AchievementService: "28 achievements across 7 categories (combat, exploration, social, progression, faction, stealth, special). checkAndAward(userId) auto-checks all conditions, awards new ones, emits achievement:unlocked via Socket.IO. Hooked to mission:completed + hack:attempt events. 'achievements' command. Uses existing PlayerProgress.achievements String[] field."
+  }
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CLIENT / UI
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@client {
+  description: "Svelte 5 terminal-first UI using Svelte 4 legacy patterns (export let, createEventDispatcher, onMount — NOT yet migrated to runes). Commands go to server, server returns ASCII-formatted text. Lightweight reactive overlays for real-time data."
+  directory: "client/"
+  architecture: "Terminal.svelte (main, ~1955 lines) + dialog components (shop, equipment, mail, chat, forum, message) + notification panel. ForumDialog is a 'forum terminal' — sends real forum commands and renders server ASCII output directly, with keyboard shortcuts (R=reply, N=new, V=vote, /=search, J=join, T=tag, !=report, M=members, :=raw cmd)."
+
+  @components {
+    Terminal: "1955 lines — full-screen terminal emulator with CRT scanline/glow effects, status bar (CPU/RAM gauges, notification badge, clock), command input with tab completion + history, hack challenge panel (sticky above input), keyboard shortcuts (Ctrl+T/W/L, Ctrl+1-9, Ctrl+Shift+←/→). Responsive CSS (1024/768/480px breakpoints + prefers-reduced-motion + high contrast)."
+    TerminalTabs: "Tab bar for multi-terminal. VS Code–style tab support with per-tab output/command history."
+    AuthDialog: "Login/Register modal with form validation."
+    AsciiDialog: "Reusable ASCII-bordered dialog shell (╔═╗ box-drawing). Focus trap, Escape to close, scanline overlay."
+    ChatDialog: "Real-time chat with server-provided avatars. Contact sidebar with avatar glyphs (color-styled), online status, unread badges. Message grouping (5-min window) with date separators. Encryption toggle button (🔒/🔓) appends --encrypt to msg commands. Typing indicators (debounced emit, 3s auto-stop). Avatar glyphs on incoming messages. Keyboard navigation (↑/↓ contacts, Enter send, Escape close)."
+    ForumDialog: "Forum browser. Keyboard-driven (R/N/V/S/J/!/T/:/M/F). Breadcrumb navigation. All logic server-side."
+    MailDialog: "Mail client with server-provided avatars. Inbox/Sent toggle. Category filter tabs (ALL/PRIV/SYS/MISSION/FACTION/ALERT) with per-category unread counts. Avatar glyphs in message list and read view. Decrypt button for encrypted messages (calls crack command, shows loading state, updates content inline). Real-time mail via newMailNotifications store (message:new_mail Socket.IO event). Encryption flag on compose. N/R/D/Tab/Enter/Escape keys."
+    ShopDialog: "Item shop. Category filtering, search, item detail with requirements/effects, purchase validation."
+    EquipmentDialog: "Inventory grid + Equipment slots (TOOL/SOFTWARE/EXPLOIT/DEFENSE/UPGRADE). Bonuses panel."
+    NotificationPanel: "Persistent list with 6 types (message/chat/mail/forum/system/game). Max 50. Sound + Desktop API."
+  }
+
+  @services {
+    api_ts: "REST API client (ApiClient singleton). JWT in localStorage (aida_auth_token). Auto Authorization + X-CSRF-Token headers. CSRF token fetched on page load after JWT verification; hasCsrfToken() check + auto-retry refresh on 403 CSRF errors; failed CSRF fetch triggers logout and return to login screen. Sections: auth, users, servers, files, messages, forum, missions, hacking, events, commands, health."
+    socket_ts: "Socket.IO client (SocketService singleton). Exports stores: socketConnected, socketError, onlineUsers, serverActivity, liveMessages, hackAttempts, playerResources, activeProcesses, activeHackSession, typingUsers (Map<userId,username>), newMailNotifications. Emitters: emitTypingStart/Stop. Listeners: typing:start/stop → typingUsers store, message:new_mail → newMailNotifications store. Lazy-loads NotificationService to avoid circular imports."
+    terminal_ts: "Terminal service. POST /api/command/execute. Normalizes output to string[]. Error message extraction with HTTP status mapping."
+    terminalTabs_ts: "Multi-terminal tab state via socket events (terminal:list/create/close/switch). Per-tab output + command history."
+    notifications_ts: "NotificationService + stores (notifications, unreadCounts, derived unreadNotifications/notificationsByType). Desktop Notification API + Web Audio API (800Hz sine beep)."
+  }
+
+  @stores {
+    file: "client/src/stores/gameState.ts"
+    writable: ["outputLines" "commandHistory" "historyIndex" "currentUser" "isAuthenticated" "authLoading" "authError" "networkAccess" "currentServer" "currentDirectory" "playerProgress" "discoveryLevel" "knownServers" "connectedServers" "fileSystemCache" "onlinePlayerCount" "recentActivity" "unreadMessages" "securityAlerts"]
+    derived: ["connectionStatus (from socketConnected + authLoading)" "terminalPrompt (from user/server/directory)"]
+    functions: "addOutput, addSystemOutput, addErrorOutput, addSuccessOutput, clearOutput, addToHistory, navigateHistory, registerUser, loginUser, logoutUser, verifyAuthentication, loadInitialGameData, connectToServer, disconnectFromServer, loadServerFileSystem, sendMessage, attemptHack, initializeGameState"
+  }
+
+  @client_utils {
+    forumSystem_ts: "Minimal UI-only state (all logic server-side). Stores: currentForum, discoveredForums, currentPost."
+    note: "asciiAvatars.ts and messagingSystem.ts DELETED — avatars are now server-generated, MessageDialog removed."
+    note_lore: "World lore is server-side only (server/src/lore/worldLore.ts) — not exposed to client"
+  }
+
+  @socket_events {
+    description: "Socket.IO listeners in client/src/services/socket.ts wire server events to stores and notifications"
+    notification_wired: "process:completed, process:failed, mission:objective:updated, mission:completed, mission:expired, player:levelup, faction:event, discovery:made, notification (generic), game:event (critical/warning), forum:new-post, forum:new-reply, achievement:unlocked"
+    store_wired: "process:started/completed/cancelled/progress → activeProcesses store. resources:update → playerResources store. command:result with session data → activeHackSession store. typing:start/stop → typingUsers store. message:new_mail → newMailNotifications store."
+    silent: "rewards:xp_granted, rewards:credits_granted — shown in command output, no notification popup"
+  }
+
+  @status_bar {
+    description: "Real CPU/RAM percentages from playerResources store (updated every 5s via resources:update Socket.IO event from memoryService tick loop)."
+  }
+
+  @hack_challenge_panel {
+    description: "Sticky panel above terminal input. Visible when activeHackSession store has active=true. Shows: target IP, layer progress, challenge displayText, hints. Player types crack.submit/firewall.knock/memory.extract in terminal below."
+    store: "activeHackSession — set when command:result contains sessionId + targetIp + challenge + totalLayers data (pushed from hackCommands on minigame start)"
+  }
+
+  @notification_panel {
+    description: "Persistent list panel with 6 types (message, chat, mail, forum, system, game). Max 50 notifications. Sound on high/urgent priority. Desktop notifications via Notification API. Toggled via Ctrl+N."
+    service: "NotificationService (client/src/services/notifications.ts) — add(), markAsRead(), clear()"
+  }
+
+
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SHARED TYPES
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@shared {
+  file: "shared/types.ts (~935 lines, 102 exported symbols)"
+  compiled: "shared/types.js + shared/types.d.ts + source maps"
+  path_alias: "Server tsconfig maps @/shared/* → ../shared/*"
+
+  @categories [
+    "Auth: UserRole, User, AuthRequest, AuthResponse, ApiResponse, AvatarInfo"
+    "Session: PlayerSession, TerminalTab, Command, ParsedCommand, CommandResult, ValidationResult"
+    "Server: ServerState, GameState, CurrentServerInfo, GameServerInfo, ServerConnectionInfo"
+    "Player: PlayerInfo, PlayerSkills, PlayerStats, PlayerAliasInfo"
+    "Faction: FactionId, FactionRank, FactionReputation, FactionResources, FactionStandingInfo, FactionServerInfo, FactionWarInfo, WarStatus"
+    "Network: IPRange, IPZone, IPOwner, DiscoveryResult, TraceRouteHop, TraceRouteResult, ServerDiscoveryResult, ServerScanOptions"
+    "Hacking: HackAttempt, HackMethod (enum), HackResult, HackCalculation, HackDifficultyFactors, HackSessionInfo, MinigameType, MinigameChallenge, LayerResult"
+    "File System: FileSystemNode, PermissionLevel (bitmask enum), SpecialAccess, FilePermissions, FileOperation, FileOperationType, FileAccessRecord, FileAccessSummary"
+    "Missions: MissionInfo, MissionStatus (enum), MissionObjective, MissionObjectiveMetadata, MissionReward, MissionProgress, ObjectiveProgress, MissionObjectiveType (enum, 30+ types)"
+    "Events: GameEvent, EventType (17 types), EventSeverity, EventSubscription, SubscriptionMethod"
+    "Notifications: Notification, NotificationType, NotificationPriority"
+    "Socket: SocketEventData, StateUpdateEvent, StateDelta, CommandExecuteEvent, BroadcastMessage, BroadcastTarget"
+    "Home System: PlayerHomeSystem, HomeCustomization"
+    "Save/Backup: SaveTrigger, SavePriority, ProgressBackup"
+    "Errors: GameError, ValidationError, AuthorizationError, NotFoundError, RateLimitError"
+    "NPC: NPCAgent, NPCType, NPCState, NPCPersonality"
+    "DarkNet: DarkNetDiscoveryMethod, CensorshipAlert"
+    "Inventory: InventoryItem"
+    "Server Contest: ServerContestInfo, ContestStatus"
+  ]
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DATABASE SCHEMA
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@database_schema {
+  models: 61
+  file: "server/prisma/schema.prisma"
+
+  @core {
+    User: "id, username (unique), email (unique), password, homeIp (unique), homeServerId, isOnline, role (player|moderator|admin), mutedUntil"
+    UserSession: "JWT session tracking, lastServerId, currentDirectory. @@index(expiresAt, userId)"
+    PlayerProgress: "userId (PK), XP, level, credits, skills (hacking/networking/cryptography/stealth/socialEng/forensics as Int), missionProgress (Json), equipment (Json), inventory (Json), homeFirewall (0-3), homeVault (0-3), homeIds (0-3), homeHoneypot (Boolean), achievements (String[])"
+    ProgressBackup: "Snapshots of PlayerProgress. @@index(userId, createdAt)"
+    AuditLog: "userId, action, resource, resourceId, oldValues, newValues"
+    GameConfig: "key (PK), value (Json)"
+    GameEvent: "type, title, severity, isGlobal, affectedUsers[]"
+    EventSubscription: "userId, eventType, targetId, method, quality"
+    Notification: "userId, type, title, category, priority, isRead, expiresAt. @@index(userId, isRead, type, category, createdAt)"
+  }
+
+  @game_world {
+    GameServer: "id, name, ipAddress (unique), type, role (gateway|router|...), networkId (FK→Network), ownerId (FK→User), factionId (FK→Faction), securityLevel (1-10), firewallLevel (1-10), encryptionLevel (0-5), discoveryLevel (0-5), isPublic, accessMethod (open|hackable|keycard|hack_or_key), accessKey, isPlayerHome, isAidaHomeServer, isOnline, resourceType, resourceOutput, isContested. @@index(ownerId, networkId)"
+    FileSystemNode: "id, serverId (FK), parentId (self-ref via FileHierarchy), name, type (file|directory), content, permissions (Json bitmask), size, isHidden, isEncrypted, isProtected, metadata (Json? — {sourceServerId, sourcePath, downloadedAt, isDownloaded, isDecoy}), createdBy (FK→User). @@index(parentId, serverId)"
+    ServerConnection: "userId, serverId, accessLevel (0-10), workingDirectory, isActive, sessionData (Json)"
+    ServerAccessKey: "userId, serverId (FK→GameServer), keyValue, source, sourceDetail, sourceFileId (FK?→FileSystemNode for revocation), discoveredAt. @@unique(userId,serverId)"
+  }
+
+  @network {
+    Network: "id, name (unique), description, factionId (FK→Faction), zone, isHidden, metadata (Json). @@index(factionId)"
+    ServerLink: "id, sourceId (FK→GameServer), targetId (FK→GameServer), networkId (FK→Network), linkType, bandwidth, latency, isActive, requiredAccess. @@unique(sourceId,targetId). @@index(sourceId, targetId, networkId)"
+    DiscoveredLink: "id, userId, linkId (FK→ServerLink), discoveredAt, source. @@unique(userId,linkId). @@index(userId)"
+  }
+
+  @factions {
+    Faction: "id, name (unique), shortName (unique), fullName, description, ideology, color, resources (Json), isHidden, rankRequirements (Json), aiPersonaId (unique FK→AIPersona)"
+    FactionMember: "userId, factionId, rank (recruit|operative|elite|council_member), reputation, totalReputationEarned. @@unique(userId,factionId)"
+    FactionStanding: "userId, factionId, reputation, isAllied, isHostile, isNeutral. @@unique(userId,factionId). @@index(userId, factionId, reputation)"
+    FactionEvent: "type, data (Json), factionId, userId, impact, reputationChange, resourceChange. @@index(userId, factionId, eventType)"
+    FactionKnowledge: "factionId, assetType (server|file|player), assetId, assetMeta (Json), source, confidence (0-1), discoveredBy, expiresAt. @@unique(factionId,assetType,assetId). @@index(factionId+assetType, factionId+discoveredAt, expiresAt)"
+    FactionResourceTick: "factionId, credits, intel, compute, tickedAt. @@index(factionId, tickedAt)"
+  }
+
+  @missions {
+    Mission: "title, description, type, difficulty (1-10), objectives (Json), reward (Json), status, assignedTo (FK→User), createdBy (FK→User), factionId (FK→Faction), issuedBy (FK→AIPersona), storyArcId (FK→StoryArc), storyStep (Int), prerequisiteTemplateIds (Json?), targetServerId, expiresAt, timeLimit. @@index(storyArcId)"
+    StoryArc: "title, description, factionId (FK), issuedBy (FK→AIPersona), assignedTo (FK→User), status (active|completed|failed|abandoned), currentStep, totalSteps, steps (Json — StoryStep[]), narrativeContext (Json), difficulty. @@index(assignedTo+status, factionId)"
+  }
+
+  @ai {
+    AIPersona: "id, type (game_master|faction_leader|aida), name (unique), personality (Json), systemPrompt, model, actionsToday, lastActionAt"
+    AIKnowledge: "personaId, source, type, content (Json), confidence, expiresAt. @@index(personaId+type)"
+    AIAction: "personaId, type (issue_mission|send_message|forum_post|trigger_event|plant_discovery), status, input (Json), output (Json), triggeredBy. @@index(personaId+status, status+createdAt)"
+    AidaClue: "type, serverId, filePath, content, requiredClues[], difficulty, discovered, discoveredBy. @@index(serverId, discovered). No FK relations (plain strings)."
+  }
+
+  @story_discovery {
+    StoryProgress: "userId (unique), discoveryLevel (0-6), key fragments (signal/location/cipher 0-3 each), aidaTrustLevel, endgameUnlocked, endgameChoice (help|expose|exploit), gameCompleted"
+    IntelligenceReport: "userId, category, title, importance, triggersEvent. @@index(userId, category, isRead)"
+    KeyFragment: "keyType, fragmentNum, sourceType, sourceId. @@unique(keyType,fragmentNum)"
+    KeyFragmentDiscovery: "userId, fragmentId (FK→KeyFragment), method. @@unique(userId,fragmentId). @@index(userId)"
+    NarrativeEpoch: "epochNum (unique), title, summary, worldState (Json — faction standings, tension, themes snapshot), triggers (Json — what caused this epoch), decisions (Json — Architect decisions during epoch), startedAt, endedAt"
+    StoryLedger: "type, category, actorId, actorType (player|faction|system|architect), targetId, targetType, summary, impact (Json), weight (1-10, ≥7 = global GameEvent), epochId (FK→NarrativeEpoch), isProcessed. @@index(isProcessed, epochId, actorId, category)"
+    PersonaMessage: "userId (FK→User), personaId (FK→AIPersona), tokenItemId (consumed ShopItem), direction (inbound|outbound), subject, content, linkedMessageId (FK→Message). @@index(userId, personaId)"
+    DarkNetInstance: "networkId (unique FK→Network), gatewayIp, passkey, vaultServerId (FK→GameServer), depth, difficulty, rewardType (aida_token|rare_script|credits_cache|intel_package), rewardData (Json), status (active|conquered|expired|regenerating), conqueredBy (FK→User), conqueredAt, expiresAt. @@index(status)"
+  }
+
+  @social {
+    Message: "senderId, recipientId, subject, content, isEncrypted, encryptionKey, messageType, triggerEvent"
+    Contact: "userId, contactUserId, handle, encryptionLevel. @@unique(userId,contactUserId)"
+  }
+
+  @forum_legacy {
+    ForumPost: "authorId, title, forumSection, isHoneypot, factionAlignment (legacy — Phase 3A enhanced system is primary)"
+    ForumReply: "postId, authorId, content, votes (legacy)"
+  }
+
+  @forum_enhanced {
+    description: "Phase 3A + Phase 4 enhanced forum system (primary)"
+    Forum: "name (unique), url (unique), category, securityLevel (1-5), isHoneypot, factionId, requiresProxy. @@index(category, factionId)"
+    Post: "forumId, authorId, authorHandle, title, isEncrypted, isHidden, storyRelevant, keyFragmentId. @@index(forumId, authorId, storyRelevant)"
+    ForumMember: "userId, forumId, handle, reputation. @@unique(userId,forumId). @@index(userId, forumId)"
+    ForumDiscovery: "userId, forumId, method. @@unique(userId,forumId). @@index(userId)"
+    ProxyConnection: "userId (unique), proxyServer, location, expiresAt"
+    PostReply: "postId, authorId, authorHandle, content, votes. @@index(postId, authorId)"
+    PostVote: "userId, postId?, replyId?, value. @@unique(userId,postId) @@unique(userId,replyId). @@index(postId, replyId)"
+    PostReport: "reporterId, postId?, replyId?, forumId, reason, status, resolvedBy. @@index(forumId, status)"
+  }
+
+  @territory {
+    ServerContest: "serverId, attackingFactionId, defendingFactionId, initiatedBy, status, decryptionProgress, winnerId. @@index(serverId, status)"
+    ContestParticipant: "contestId, userId, factionId?, contribution, side. @@unique(contestId,userId). @@index(contestId, userId)"
+  }
+
+  @shop_inventory {
+    ShopItem: "name, description, itemType, category, price, level, stat bonuses (hacking/stealth/crypto/networking), rarity, isConsumable, stock. @@index(itemType, category, isActive)"
+    InventoryItem: "userId, shopItemId, quantity, isEquipped, slot, usesRemaining, expiresAt. @@index(userId, shopItemId, isEquipped)"
+    note_shop_effect: "ShopItem gained effect (Json?) field for functional item effects (e.g. personaName for communication tokens)"
+    note_inventory_source: "InventoryItem gained source (shop|mission_reward|server_loot|story_event|admin) and sourceId fields for tracking item provenance"
+  }
+
+  @pvp {
+    HackSession: "id (manual, no @default), attackerId, targetOwnerId, targetServerId, method, currentLayer, totalLayers, status, layersData, detectionAccumulator, startedAt/expiresAt/layerStartedAt (BigInt epoch ms). @@index(attackerId, status)"
+    Backdoor: "installerId, serverId, accessLevel, type (standard|persistent|rootkit), detectionRisk, expiresAt. @@unique(installerId,serverId). @@index(serverId)"
+    ActiveTrace: "targetId, initiatedBy, serverId, progress (0-100), status, evidenceLevel. @@index(targetId, status)"
+    HackLog: "attackerId, targetId, targetServerId, method, tools[], stealthLevel, success, detected, evidenceLeft. @@index(attackerId, targetId, timestamp)"
+    Bounty: "targetUserId, targetUsername, issuedByFactionId, reason, rewardCredits, rewardReputation, status (active|claimed|completed|expired), claimedByUserId, stolenFileIds (Json? — fileSystemNode IDs), serverId, evidenceLevel, expiresAt (48h). @@index(status, targetUserId, issuedByFactionId, expiresAt). NOTE: No FK @relation directives — plain strings with indexes only."
+  }
+
+  @phase5 {
+    FactionWar: "attackerFactionId, defenderFactionId, declaredBy (AI persona ID), status, attackerScore, defenderScore, reputationMultiplier, terms. @@index(status, attackerFactionId, defenderFactionId)"
+    PlayerAlias: "userId (unique), aliasName (unique), apparentFactionId, cost, revealedBy[]"
+    DarkNetDiscovery: "userId (unique), method, metadata"
+    CensorshipRule: "factionId?, serverId?, pattern (regex), replacement, alertTarget"
+  }
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SEED FILES
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@seed_files {
+  file: "server/prisma/seed.ts (~1283 lines) — single integral seed"
+  entry_point: "server/src/database/seed.ts — delegates to prisma/seed.ts"
+  script: "npm run db:seed (tsx prisma/seed.ts)"
+  note: "Old seed files (seed-simple.ts, seed-phase3a.ts, seed-core-systems.ts) have been removed."
+
+  @sections [
+    "0. Clear Data — deleteMany() on all 40+ tables in reverse dependency order"
+    "1. Users — 3 test users: testuser (admin), alice, bob"
+    "2. Player Progress — skills, levels, credits for each user"
+    "3. Factions — 4 factions: The Garrison, dotHackers, CyberCorp, DarkNet (hidden)"
+    "4. AI Personas — 5 personas: The Architect, AIDA, Commander Steele, gh0st, Director Chen — linked to factions"
+    "5. Servers & Networks — 28 servers: 3 standalone + Internet Exchange + Garrison (8) + CyberCorp (8) + dotHackers (6) + DarkNet (3)"
+    "6. Access Controls — public/hackable/keycard servers with generated access keys"
+    "7. Server Links — full bidirectional topology (backbone + 4 faction LANs)"
+    "8. Faction Standings — all test users initialized neutral on visible factions"
+    "9. Forums — 6 forums: tech, underground, honeypot, garrison, dothackers, cybercorp"
+    "10. Forum Members — 5 memberships (test users on public forums)"
+    "11. Shop Items — 13 items across hardware (3 tiers) + software tools"
+    "12. Game Config — game_settings entry with version, tick rate, feature flags"
+    "13. Key Fragments — 9 fragments (signal/location/cipher × 3)"
+    "14. Story Progress — initialized for all 3 test users"
+  ]
+
+  @not_yet_seeded [
+    "Tutorial missions are created dynamically at runtime by TutorialService — no seed data needed"
+    "Training Network servers (10.10.10.x) get content via static 'tutorial' template in serverContentService on first content provisioning"
+  ]
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MIGRATION HISTORY
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@migrations {
+  total: 27
+  directory: "server/prisma/migrations/"
+
+  @notable [
+    "20251108170330_aida_db — Initial DB schema"
+    "20251108191216_add_event_subscriptions"
+    "20251112173301_add_phase3a_systems — forums, story, factions, key fragments"
+    "20251113204034_improved_file_system_and_sessions"
+    "20251129221927_add_progress_backup_model"
+    "20251201035550_phase_5_ai_factions"
+    "20251227195926_init — Re-init / baseline reset"
+    "20251227211320_add_shop_inventory_notification"
+    "20260315185157_add_cascade_deletes"
+    "20260315211800_add_territory_contests_resources"
+    "20260315_canonicalize_factions"
+    "20260317020329_add_warfare_alias_darknet_censorship"
+    "20260318051919_add_comprehensive_cascade_deletes"
+    "20260318145617_add_user_role"
+    "20260318150358_add_muted_until"
+    "20260318214046_add_pvp_hack_sessions_backdoors_traces"
+    "20260320230709_add_faction_knowledge"
+    "20260321034548_add_network_topology"
+    "20260321050011_add_server_visibility_access"
+    "20260321152409_add_bounty_system"
+    "20260321172423_add_download_metadata_bounty_stolen_files"
+    "20260321173707_add_home_defense_fields"
+    "20260324012331_add_story_arcs"
+    "20260324023712_add_mission_prerequisites"
+    "20260401233338_forum_phase4_replies_votes_reports"
+    "20260401234025_add_post_is_hidden"
+    "20260404153148_add_story_staging_system — NarrativeEpoch, StoryLedger, PersonaMessage, DarkNetInstance models + ShopItem.effect + InventoryItem.source/sourceId"
+  ]
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PROJECT STATUS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@pending_work {
+  @high_priority [
+    "End-to-end gameplay testing (all command flows, hack→bounty→defense cycle)"
+    "Test suite — 0% coverage, no test files. Priority targets: MessageService flows, MissionService (generate→create→add-to-progress), AIService (/api/chat request shape, headers, retry/backoff), mission generation integration (missions added to playerProgress and acceptable), E2E smoke (login→missions→mission 1→accept 1→start)"
+    "Endgame sequence — StoryProgress has endgameUnlocked/endgameChoice/gameCompleted fields and schema supports 3×3 key fragment collection, but no dedicated KeyFragmentService or endgame sequence implementation exists yet"
+  ]
+
+  @medium_priority [
+    "Client UI polish (read/delivery status icons in ChatDialog, avatar compact mode, accessibility fixes)"
+    "Migrate client components from Svelte 4 patterns to Svelte 5 runes ($state, $derived, $effect)"
+    "Developer docs / README updates: AI env vars (AI_API_URL, AI_MODEL, AI_API_KEY), AIService behavior (chat endpoint, cloud/local modes), socket auth handshake and CSRF expectations"
+    "Security review: audit API key storage (OLLAMA/AI keys), consider vault/encrypted secret storage for production, ensure server-side storage policy for AI keys and logs is acceptable"
+    "Persist or improve mission index: currently in-memory per-player Map refreshed by 'missions' command — consider session/cache persistence for server restart survival, cache expiration on logout or after N minutes"
+    "Dedicated KeyFragmentService — fragment discovery currently logged as StoryLedger events but no specialized service orchestrates the 9-fragment collection or tracks progress toward endgame unlock"
+  ]
+
+  @low_priority [
+    "Redis session storage (redis package installed but unused)"
+    "Mission archival after 7 days"
+
+    "Remove legacy ForumPost/ForumReply models (replaced by Phase 3A+4 enhanced forum)"
+    "Logging and metrics for AI usage (per-persona request counts, cache hit rate)"
+    "Optional player-facing avatar selection UI (server remains source of truth)"
+  ]
+}
+
+@known_issues {
+  @version_skew [
+    "TypeScript: server ^5.3.3 vs client ~5.9.3 — 6 minor versions apart"
+    "@types/node: server ^20.10.5 vs client ^24.6.0 — significant gap"
+  ]
+
+  @schema_notes [
+    "Bounty model has no FK @relation directives — referential integrity not enforced at DB level"
+    "AidaClue model has no FK relations for serverId/discoveredBy — plain strings"
+    "HackSession uses BigInt for timestamps (startedAt/expiresAt) while all other models use DateTime"
+    "HackSession.id has no @default(cuid()) — IDs generated in application code"
+    "Legacy ForumPost/ForumReply models still in schema alongside enhanced Forum/Post/PostReply system"
+  ]
+}
+
+@configuration {
+  required_env: ["DATABASE_URL" "JWT_SECRET"]
+  optional_env: ["PORT (3001)" "NODE_ENV (development)" "AI_API_URL (http://localhost:11434)" "AI_MODEL (llama3.1:8b)" "AI_API_KEY (cloud mode)" "OLLAMA_API_URL (legacy alias)" "OLLAMA_MODEL (legacy alias)" "OLLAMA_API_KEY (legacy alias)" "LOG_LEVEL (info)"]
+  client_env: ["VITE_API_URL (http://localhost:3001/api)" "VITE_SOCKET_URL (http://localhost:3001)"]
+  server_engine: "node >= 18.0.0"
+  client_dev_port: 8080
+}
+
+@development_workflow {
+  setup: "createdb aida_game && cd server && npm install && npx prisma migrate dev && npm run db:seed && npm run dev"
+  client: "cd client && npm install && npm run dev"
+
+  @scripts {
+    server_dev: "npm run dev (tsx watch src/index.ts)"
+    server_build: "npm run build (tsc)"
+    server_start: "npm start (node dist/server/src/index.js)"
+    db_migrate: "npm run db:migrate (npx prisma migrate dev)"
+    db_generate: "npm run db:generate (npx prisma generate)"
+    db_studio: "npm run db:studio (npx prisma studio)"
+    db_seed: "npm run db:seed (tsx prisma/seed.ts)"
+    migrate_home_dirs: "npm run migrate:home-dirs (tsx scripts/migrate-home-directories.ts)"
+  }
+
+  @adding_service [
+    "1. Create server/src/services/myService.ts with @injectable()"
+    "2. Add MY_SERVICE token to server/src/di/tokens.ts"
+    "3. Register singleton in server/src/di/container.ts"
+    "4. If needed by commands: add to CommandContext.services in interface.ts + buildCommandContext() in commandProcessor.ts"
+  ]
+
+  @adding_command [
+    "1. Identify module in server/src/services/commandModules/"
+    "2. Add to commands Set + execute() switch + handler method + getCommandInfo()"
+    "3. If skill-gated: add to SKILL_REQUIREMENTS in skillRequirements.ts"
+  ]
+}
+
+@last_updated {
+  date: "2026-04-06T15:30:00Z"
+  summary: "Two-process content generation refactor. ServerContentService.provisionServerContent() now runs two independent AI generation passes per server: (1) Lore Process — LORE_SYSTEM_PROMPT + buildLorePrompt(), serious/dark/enigmatic tone, 2-4 files with 400+ chars, faction servers only; (2) Ambient Process — AMBIENT_SYSTEM_PROMPT + buildAmbientPrompt(), voice varies by content, 4-6 files with 400+ chars, all servers. Results merged with static fallback if both fail. Added resolveFactionKey() helper. Content cap raised 2000→3000 chars. Legacy generateContentPlan renamed to _generateContentPlan."
+}

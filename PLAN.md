@@ -1,0 +1,2665 @@
+# AIDA Remediation Plan
+
+Companion to `AUDIT_2026-08-30.md`. IDs (G1, S2, D4…) cross-reference that report.
+
+**Context:** dev/local data only — no reconciliation needed, schema changes are free, the DB can
+be reset and reseeded at will. This lets us fix the data model properly in Phase 3 instead of
+working around it.
+
+**Execution:** phase by phase, with a review gate at the end of each. Each phase ends in a
+verifiable state — the game runs and the phase's fixes are demonstrated against a live server,
+not just a typecheck.
+
+---
+
+## Decisions log
+
+Recorded so the plan stays internally consistent as it evolves.
+
+| # | Decision | Date | Consequence |
+|---|---|---|---|
+| 1 | **Dev/local data only** — no live players | 08-30 | No reconciliation phase. Migration baseline is regenerable. Schema changes are free. |
+| 2 | **No automated tests until Phase 7** | 08-30 | Phase 2 is tooling/deploy only. Gates become manual (`VERIFY.md`) + static CI. |
+| 3 | **Phase 7 uses characterization tests** | 08-30 | Written *at* Phase 7, black-box, immediately before each refactor — pinning observable behaviour, not internals. |
+| 4 | **Shared world, mostly-solo play, with contested objectives / PvP / contests** | 08-30 | Phase 3 concurrency prioritized by what is *contested* or *self-racing*, not blanket-hardened. |
+| 5 | **Audience: shallow entry, deep ceiling** | 08-30 | Full shell ships ungated. Discoverability via `man` + hints. Every objective solvable simply *and* elegantly; elegance rewarded with **stealth**, not just speed. |
+| 6 | **Keybindings: shell semantics win when input is focused** | 08-30 | App shortcuts move to `Ctrl+Shift+*`. See `SHELL_DESIGN.md` §12.1 for the full map. |
+| 7 | **The tokenizer *is* the G8 fix** | 08-30 | Phase 9 Tier 1 pulls forward into Phase 1. No interim `parseFlags` helper. |
+| 8 | **Scale-out deferred** | 08-30 | Single-instance is a supported constraint for now; `redis` stays installed pending Phase 8's formal call. |
+| 9 | **U3c: per-command penalty currency** | 08-31 | Each hard-gated family gets its OWN currency matched to its fiction, not a shared channel. More tuning surface, but no command is penalised in a way that doesn't fit what it does. |
+| 10 | **U2b: Training Firewall → `securityLevel 3`** | 08-31 | First level mechanically distinct from the measured `1 == 2` dead band, so the tutorial's last server actually bites on revisit. |
+| 13 | **Split O4: CI now, Docker at go-live** | 08-31 | CI and Docker had opposite value curves and were bundled in one item. CI can't rot (it validates whatever the code is) and its value peaks during the churny Phases 3-8 — which, per decision 2, have NO automated tests. Docker pins build output/start command/env/ports that Phase 7's refactor will churn, has zero consumers today, and its own stated trigger (migration adoption) has been deferred to go-live. |
+| 14 | **Migrations adopted at go-live, not before** | 08-31 | Maintainer's call: the DB is disposable and nobody is playing. Adoption moves to the go-live bucket alongside Docker — both are gated on "a database whose data cannot be dropped". |
+| 12 | **U3c: under-skilled attempts are HARDER and RISKIER, not just worse** | 08-31 | Supersedes decision 9's framing. A shortfall raises minigame difficulty, carries an external consequence (discovery/trace), and **rewards** the player who clears it anyway. Prerequisite: each affected skill needs a minigame, a process time, and a resource cost to hang these on — several have none today. |
+| 11 | **Strict phase order — no pulling later phases forward** | 08-31 | Repeatedly, a Phase 1 fix has brushed against Phase 8 work (skill economy, item effects) and been tempting to finish "while we're here". Doing so risks tuning the same curve twice and conflicting edits. Finish the phase, record the adjacent finding against its owning phase, move on. |
+| 15 | **A code review runs between every phase** | 09-23 | Maintainer's call, and the Phase 3 review is the evidence for it: a multi-angle review of the uncommitted diff found **nine real bugs, every one in code already reported as verified and passing its harnesses**. The harnesses cannot find these — four were "I fixed one half of a pair and left the other" (`copyNode` but not `moveNode`; the credit check but not the stack cap; the joined server's count but not the abandoned one; the `if` branch but not the `else`), which is invisible to a test of the half that works. The review is therefore not optional polish; it is the only step that catches this class. Run it on the phase's diff **before** the phase is called done. |
+| 16 | **Nothing is committed until Phase 7 passes and the review backlog is clear** | 09-23 | Maintainer's call. See the risk note below — this is a deliberate trade, not an oversight. |
+
+### Risk note on decision 16 — recorded so the trade is explicit
+
+Holding the commit until Phase 7 means carrying the working tree across Phases 4, 5, 6, 6b and 7 —
+which the plan itself estimates at **1–2 weeks for Phase 7 alone**. Three things make that a real
+cost, and they are written down so nobody rediscovers them the hard way:
+
+1. **The tree is already large**: 32+ modified files, ~1,900 added lines, two new directories.
+2. **We lost power mid-session on 2026-09-23** and got lucky — everything had been flushed. A second
+   outage with this much uncommitted work behind it would not necessarily be lucky.
+3. **This repo has already been bitten by it.** `@audit_2026_08_31` records the identical situation
+   as a HEADLINE PROCESS ISSUE: *"nothing is committed — 26 modified + 18 untracked paths including
+   4 new services"*.
+
+**Mitigation available without breaking the decision:** we are on branch `test`, not `Main`. Local
+WIP commits on `test` are not shipping anything — they satisfy "don't ship until it's clean" while
+removing the data-loss exposure, and can be squashed into one clean commit when Phase 7 closes.
+Offered to the maintainer; the call is theirs.
+
+---
+
+## Sequencing rationale
+
+Three constraints drive the order:
+
+1. **The game must be playable before anything else.** The P0 fixes are 1–5 lines each and make
+   the game exercisable end-to-end. Without them there is nothing to verify against, manually or
+   otherwise — you cannot check that a mission completes correctly when no mission can be accepted.
+2. **Refactors come last, and bring their own tests.** Phase 7 touches the DI graph, the command
+   context, and four 2,500-line services. Per decision 3, each refactor is preceded by
+   characterization tests written against then-current behaviour. Everything before Phase 7 is
+   verified manually via `VERIFY.md` plus the static CI gate.
+3. **The migration reset comes first.** It's free right now and it unblocks every schema change
+   in Phase 3 (unique constraints, indexes, the missing `skillPoints` column, a `credits >= 0`
+   check). Deferring it means doing those changes twice.
+
+**Pairs that must ship together** — splitting these ships a live exploit or a regression:
+- **G3 + S2** — fixing the shop FK arms the negative-quantity credit mint. Same commit.
+- **A1 + the `ReservedPID` copies** — delete the stale artifact and the duplicates together,
+  while all three definitions still agree.
+- **D2 + D7 + R8** — one migration regeneration carries the drift fix, the new constraints, and
+  the missing column.
+- **G8 + the Phase 9 tokenizer** — per decision 7, these are one change, not two.
+
+---
+
+## Uncommitted work in the tree (reviewed 2026-08-30)
+
+~560 lines of in-progress feature work predate this plan. It is a **coherent feature set**, not
+scratch work, and the plan is written to preserve it:
+
+| Area | What it does |
+|---|---|
+| **Resource economy** | `upload`, `analyze`, `probe`, `whois`, `nslookup` converted to background processes with CPU/RAM/bandwidth costs (`memoryService` `PROCESS_COSTS`, `spawnBackgroundProcess`) |
+| **Content redaction** | `contentRedaction.ts` + 8 call sites — superseded by `KNOWLEDGE_DESIGN.md` |
+| **Access-key discovery** | `scanForAccessKeys` (a `cat` hint) and `detectAndGrantAccessKeys` returning granted names (on `download`) |
+| **Tutorial alt-path** | Training Firewall becomes `accessMethod: "hack_or_key"`; seed plants a hidden `.fw_maintenance.key` on the Gateway; Architect mail teaches social engineering as an alternative to brute force |
+| **Lore de-naming** | `[AIDA] Primary Node` → `Unknown Signal Source`, `[AIDA] Archive` → `Phantom Archive`, `[AIDA] Mesh Router` → `Ghost Relay` — the same "earn the information" theme as redaction |
+| **Tuning** | AI message cap 5 → 20/day; some security/firewall levels 2 → 1 |
+
+### ⚠️ The new tutorial path is currently unplayable — and G8 is why
+
+The Architect mail added in `tutorialService.ts` tells the player:
+
+> *"Hidden files won't show in a normal 'ls' — try 'ls -a' to see everything. Download what you find."*
+
+**`ls -a` does not work.** Per G8, `resolvePath(args[0] …)` consumes `-a` as the path, so it
+returns `Directory not found: /-a`. The alternative-solution path you just authored — hidden file,
+seeded key, `hack_or_key` access method, updated mail — cannot be completed as written.
+
+Everything else in that feature is verified sound: `hack_or_key` **is** handled in
+`networkTopologyService.checkServerAccess` (:741) and in `networkCommands` (:416), and the seeded
+key and hidden file are both created correctly.
+
+**This reinforces decision 7 from the other direction.** The tokenizer isn't polish — it unblocks
+the newest gameplay content in the tree. It should be the first thing done in Phase 1.
+
+---
+
+## Recommended execution order
+
+The user's two stated pain points are **console feel** and **AI content quality**. They interleave
+well, because the AI work starts with passive measurement:
+
+1. **Phase 0** — ½ day. Clears landmines, including the stale `shared/types.js` sitting exactly
+   where `shared/shell/` needs to live.
+2. **AI instrumentation** (Phase 6b step 1) — ½ day. Then it accumulates data while you work on
+   everything else.
+3. **Tokenizer, as the G8 fix** — the spine of console feel; carries the `cd`/`ls` fixes with it.
+4. **Path tab completion** — largest single "feels fake" win; needs only step 3.
+5. **AI plumbing + validators** (Phase 6b steps 2–3) — by now there are measurements to check against.
+6. **Rest of Phase 1** — the remaining game-loop fixes.
+
+After that, reprioritize between Phases 3–6 and the rest of Phase 9 based on what the AI
+measurements show.
+
+---
+
+## Phase 0 — Unblock ✅ COMPLETE (2026-08-30)
+
+Independent one-liners and landmine removal. Nothing here depended on anything else.
+
+- [ ] **O1 — OPEN, OWNER: maintainer.** Rotate the `AI_API_KEY` at the provider. Requires
+      dashboard access; cannot be done from here. The value was published in cleartext in
+      `SECURITY_CLEANUP.md` in the working tree, so treat it as compromised regardless of the
+      (verified clean) git history.
+- [x] **O2** `SECURITY_CLEANUP.md` rewritten: cleartext key removed, false git-history claim
+      corrected with the verification method recorded, history rewrite explicitly retracted.
+- [x] `chmod 600 server/.env` (was `644`, world-readable).
+- [x] **D1** `.gitignore`: `!server/prisma/migrations/**/*.sql`. Verified with `git add --dry-run`
+      — migrations are addable, `server/.env` still refused.
+- [x] **O8** `.gitignore`: dropped the blanket `*.md` / `*.toon` rules; added explicit
+      `shared/**/*.js` etc. so compiled output can't be re-committed.
+- [x] **O8** Deleted `server/bun.lock` and `client/bun.lock`.
+- [x] **O8** `package.json` `"main"` → `dist/server/src/index.js` (previously pointed at a file
+      that never existed); `rootDir: ".."` set explicitly. Rebuild confirmed the emit layout is
+      unchanged and `npm start`'s path still resolves.
+- [x] **R1** `lifecycle.ts`: added `FAULT_SIGNALS`; `uncaughtException` / `unhandledRejection`
+      now `process.exit(1)`, ordinary signals still exit 0.
+- [x] **R2** `environment.ts` `getEnvNumber`: throws on non-finite. Also catches `parseInt`'s
+      silent truncation (`"1_0"` previously became `1`). Verified no behaviour change for valid
+      values or unset-with-default.
+- [x] **O3** `npm audit fix` in both packages → **0 production vulnerabilities** each. Remaining 6
+      high are dev-only (`@typescript-eslint` chain) and don't ship.
+- [x] **A1** Stale `shared/types.js{,.map}` + `types.d.ts.map` deleted from disk *and* index;
+      `resolve.extensions` pinned in `vite.config.ts`; both local `ReservedPID` copies replaced
+      with a **value import** from `shared/types` — the thing that was previously impossible.
+      Client build went 168 → 188 modules, confirming the real source now resolves.
+- [x] **O8** All 10 eslint errors resolved → **0**. The three `no-control-regex` hits are
+      deliberate security code (control-char stripping) and got documented suppressions rather
+      than "fixes". `@ts-ignore` in `serverContentService` turned out to be load-bearing
+      (suppressing `noUnusedLocals`) and became a `@ts-expect-error` with a reason.
+- [x] **A10** Removed `node-cache`, `uuid`, `@types/uuid`, root `sweetalert2` — each verified
+      unreferenced first. **`redis` kept** pending the Phase 8 scale-out decision.
+- [x] **O8** `README.md` AI-timeout claim corrected (said 60 s, code is 120 s).
+- [x] **K7** (pulled forward from Phase 5) `contentRedaction.ts` — `redactionCount++` moved above
+      the `cryptoSkill >= 50` branch. Verified: footer now reports `[3 sections redacted]` at
+      skill 0/49/50/90; previously it vanished at 50+.
+
+**Gate: PASSED.** `tsc --noEmit` clean, `eslint` clean (0 errors), client builds, server builds to
+the expected path, `npm audit --omit=dev` clean in both packages, and the server **boots to
+listening** on :3001 with config validation passing. Only pre-existing warning is the
+development-mode `sameSite=none` cookie notice, which Phase 4 (S8) addresses.
+
+**Not done here, deliberately:** nothing was committed. The working tree holds Phase 0 plus the
+earlier uncommitted gameplay work; splitting those is the maintainer's call.
+
+---
+
+## Phase 1 — Make the game playable (1–2 days)
+
+## PHASE 1 — audit defects FIXED 2026-08-31 (see `PHASE1_AUDIT.md`)
+
+All four P0s and the G6 gap are fixed and verified at runtime (`scripts/verify-p0-fixes.ts` 4/4, with
+a positive control). Suite green: gate 15/15, tutorial 11/11, G3 19/19, shop 10/10, provisioning 5/5.
+
+Still open from the audit, filed to their owning phases and deliberately NOT fixed here: Phase 4
+(socket arg whitelist bypass, player-deletable rate-limit rows), Phase 5 (`report server` farming
+`explore`, `deep_extraction`, unpersisted `skillPenaltySeverity`, `backdoor install` taught in four
+places, lower-tier hardware purchase), Phase 6 (destructive `reconcileIdentity` merge, the still-live
+`faction_leader` predicate, dead `FALLBACK_VOICES`, replies not actually deferred), Phase 3
+(data-model items).
+
+## (audit findings, as originally recorded)
+
+The closure below was premature. Five adversarial audits found **four P0-class defects**, three of
+them created by Phase 1's own work, plus four false claims in this document. Every individual fix is
+correct where it was applied; almost every defect is a **second code path the fix did not reach**.
+
+Must close before Phase 2:
+- **P0-1** `skillGatedCategories` covers 5 of the module categories, so **12 skill requirements are
+  never enforced** — including `fragment.crack`, kept `"hard"` precisely because failure permanently
+  bricks a unique endgame item. A Hacking-10 player can do that today.
+- **P0-2** `exploit` passes raw user input as the tools array with **no ownership check**
+  (`filterOwnedTools` has one call site, on `hack`), so `exploit <ip> zero_day` buys a +0.25 success
+  bonus for free. This is the hole S4 was written to close.
+- **P0-3** `createMissionTargetServer` passes `ownerId: null`, and `hack` refuses ownerless servers —
+  the P0 U3b claimed to close, via a sixth creation site the plan never listed.
+- **P0-4** G4 **moved** the encryption failure: mission targets get `encryptionLevel = difficulty*10`
+  against `requiredLevel = encryptionLevel*2`, so a difficulty-1 mission provisions a target requiring
+  level 20. Measured: 1 server affected today, but it recurs on every generation.
+
+Also correct in this document: M11's "stricter" note is false; G6's "all sites" is false (five
+comparisons bypass the helper); "all five soft commands gate on hacking" (there are six); "no `seed_*`
+rows remain" is not an invariant. And two Phase 1 items **cancelled each other** — `FALLBACK_VOICES`
+is keyed on the `npc_*` usernames that U3d-follow-3 renamed, so every hand-written NPC voice is dead.
+
+## PHASE 1 (previously marked closed) — 2026-08-31
+
+All coding items landed and verified against a live server. Final suite:
+`verify-gate-phase1` **15/15**, `verify-tutorial-altpath` **11/11**, `verify-g3-hardware` **19/19**,
+`verify-shop-contract` **10/10**, `verify-mission-provisioning` **5/5**; `tsc` 0, eslint 0 errors.
+
+The two closing items were both **regressions in the phase's own earlier work**, found by the U3c
+coverage audit rather than by a harness:
+
+- **U3c-0 — soft gates with no penalty.** `crack`, `exploit`, `backdoor`, `rootkit` were declared
+  `mode: "soft"` while `getSkillShortfall` had only two call sites, and `processHackAttempt` — which
+  three of them route through — took no severity parameter at all. Those four were attemptable a full
+  band below their requirement at **zero cost**: strictly easier than before U3, violating the doctrine
+  written in the same file. Fixed — `processHackAttempt` now takes `skillPenaltySeverity` and passes it
+  to the `calculateHackParameters` support that already existed; all **six** call sites (process path
+  and no-resource fallback for each command) thread it. `crack` takes its penalty as a **harder
+  challenge**: brute-force difficulty rises by `severity * SKILL_PENALTY.maxMinigameDifficultyBump`,
+  the first piece of decision 12 to actually ship.
+  Two silent no-ops fixed alongside: `crack` selected `cryptography` and `backdoor` selected only
+  `stealth`, but **all five soft commands gate on `hacking`** — so the shortfall would have read a
+  missing field and computed severity 0, a penalty that never bites.
+- **The submit soft-lock.** `crack.dict`/`crack.mask`/`crack.pattern` gate on Cryptography 20/25/20 but
+  answer a session opened by `crack`, which gates on **Hacking** 30 — so a player could open a
+  file-crack session they were then refused permission to answer, with no way to abandon it into
+  progress. Now `"unblockable"`, the same class as `handshake.ack`/`signal.trace`. `sweep.reveal`
+  joined them: it was safe only because its gate coincidentally equalled `sweep`'s, which stops being
+  true the moment `sweep` goes soft.
+
+**Deferred out of Phase 1 by decision 11**, reason recorded: the rest of U3c (decision 12's
+harder/riskier/rewarded model) needs minigames, process times and resource costs that **only `sweep`
+and `hack` have today** — Phase 8/9 feature work, whose reward half needs the skill economy Phase 8
+owns. See the U3c section below for the coverage matrix and the defects filed to Phase 5.
+
+**Original status note follows.**
+
+**STATUS 2026-08-31: substantially COMPLETE.** All coding items (G1–G8, S2, S4, N1–N7, N9) plus the
+whole U-series landed and were verified against a running server. Since then: mission Tier 1
+(M11–M14), the shop string bugs (S1/S5/S15), and **G3 itself** all landed and were verified against a
+live server. What remains under this phase is **two design decisions and nothing else**:
+- `U2b` — should the tutorial firewall sit above the `1 == 2` dead band?
+- `U3c` — the non-hack command families stay hard-gated until each has a penalty currency chosen.
+
+(`U3d-follow-4` is a recorded gotcha, and `U5` is scheduled into Phase 7's typed contract; neither
+blocks the phase.)
+
+The original scope estimate (1–2 days) proved badly low, for a reason worth recording: **the phase
+was scoped from the audit's list of broken things, and each fix exposed another layer beneath it** —
+see "Method learnings" §1. The work was not larger than described; there was simply more of it than
+was visible from the outside.
+
+The P0 block. Every item is small and surgical; the goal is a game you can actually play through.
+
+- [x] **G1 — DONE 2026-08-30.** `updateObjective` now derives semantics from the **runtime type of
+      `target`**, not from `objective.type`. That's the robust fix: the declared union
+      (`…|"count"|"boolean"`) matched **zero** of the 200+ pool entries, which all use semantic
+      types like `hack_stealth` / `earn_credits`, so everything fell through to an `else` that set
+      `completed = true` unconditionally. Targets in the pool are only ever numbers (75) or
+      booleans (59), so switching on the target's type covers every existing *and* future type
+      string — including whatever the AI generator invents.
+      Also: callers pass an **absolute** value, not a delta (they compute `current + amount`
+      themselves at `missionIntegration.ts:255,565,570`), so the fix must not add on top — the old
+      `count` branch would have double-counted had it ever run. Completion is now **sticky**, so a
+      completed objective can't revert if a counter later drops.
+      Widened the local `MissionObjective.type` to `string` with a comment explaining that `target`
+      drives semantics, and added the `metadata` field that G6 needs.
+      **Verified:** "earn 5000 credits" after earning 1 → no longer completes; after 5000 → does.
+      Boolean objectives complete only on a `true` event.
+- [x] **G2 — DONE 2026-08-30.** `acceptMission` required `"assigned"`, which **nothing writes** —
+      `missionGenerator.ts:181` writes `"available"`, the tutorial and story paths write `"active"`
+      directly and skip accept entirely, and `assignMission()` (the only possible producer of
+      `"assigned"`) has zero callers. So every generated mission threw *"Mission cannot be accepted
+      in current state"*.
+      Canonical lifecycle confirmed from usage as **available → active → completed/failed/expired**
+      (`"active"` is what all 10+ `missionIntegration` filters and `missionService.ts:1424` test
+      for). `acceptMission` now accepts `"available"`, still honours `"assigned"` so wiring
+      `assignMission()` back up can't reintroduce the mismatch, treats accepting an already-active
+      mission as an idempotent no-op rather than an error, and reports the actual state in the
+      failure message.
+- [x] **G3 + S2 — DONE 2026-08-30, single change as required.**
+      The real state was worse than the audit described: the shop **lists** from an in-memory
+      `SHOP_CATALOG` (18 items, ids like `basic_scanner`) while the `ShopItem` table held 15
+      *entirely different* seeded rows (`seed_*`). The two sets were **disjoint** — so everything
+      visible was unbuyable (P2003 on the required `InventoryItem.shopItemId` FK, rolled back as a
+      generic "server error"), and everything in the table was invisible.
+      **Fix:** `ShopService.syncCatalogToDatabase()` — an idempotent upsert of every catalog entry,
+      run at boot from `index.ts`. Chosen over just fixing the seed because the catalog is *code*:
+      adding an item there can now never again silently produce an unbuyable entry.
+      **S2 guard, defence in depth:** `parseQuantity()` at the command layer (rejects negatives,
+      zero, `NaN`, non-integers, and caps at 1000/transaction), **plus** an independent
+      `Number.isInteger(q) && q >= 1` check inside `purchaseItem` *and* `sellItem` — the service is
+      the security boundary, and the command layer isn't its only possible caller.
+      **Verified:** boot logs `{"synced":18}`; all 5 sampled catalog ids now exist as rows (37
+      total = 18 catalog + 19 legacy); `buy x -1000000` / `-1` / `0` / `abc` / `2.5` all rejected,
+      valid quantities unaffected.
+- [x] **G3 follow-up (visibility) — DONE 2026-08-30. This was a LIVE bug, and the earlier note
+      understated it.** Verified that missions *actively award* six of the legacy items today —
+      `missionService.ts:1297-1321` grants faction tokens by name, and
+      `missionTemplatePool.ts:1052,1774` lists them in `reward.items`. Rewards resolve via
+      `findFirst` on **name**, which matches the `seed_*` rows, so the grant succeeded and then
+      `getPlayerInventory` filtered the entry out — the player completed the mission and the reward
+      **silently vanished**.
+      Fix was contained, not a design decision: `getPlayerInventory` already loads the row via
+      `include: { shopItem: true }` and was discarding it on a catalog miss. Added a `fromDbRow()`
+      adapter and a fallback. Also confirmed the Phase-1 sync introduced **no name collisions**
+      (0 duplicates across all 37 rows), so reward-by-name lookups stayed unambiguous.
+- [x] **G3 follow-up (purchasability) — DONE 2026-08-31.** Resolved by folding the wanted items into
+      `SHOP_CATALOG` (maintainer's call: one source of truth), not by listing from the DB. 9 hardware
+      parts and 6 persona tokens moved across; the 4 software duplicates were dropped. Hardware is
+      *installed*, not equipped — ownership is installation, with supersession and a 50% trade-in.
+      See the "Shop / rig" section below and `SHOP_ARCHITECTURE.md` §7b. The shape mismatch noted
+      here was handled by adding `purchasable` and `effect` to the catalog item type rather than
+      reconciling the two bonus models, which stays with Phase 8's item-effects work.
+- [x] **G4 — DONE 2026-08-30.** Both formulas in `canAccessServer` corrected, with the curve
+      grounded in the **actual shipped data** rather than the schema's nominal range: queried the
+      DB and found `encryptionLevel` spans **0–5** across all 44 servers, `ServerLink.requiredAccess`
+      gates on **0/2/3/5**, and a new player starts at level 1 / hacking 10.
+      `requiredLevel`: `floor(enc / 20)` → `enc * LEVEL_PER_ENCRYPTION` (2). Was pinned at 1 for
+      every server in the game; now 1/2/4/6/8/10 across enc 0–5.
+      `accessLevel`: `hacking / max(1, enc/10) * 5` (divisor was *always exactly 1*, so it reduced
+      to `hacking * 5` and every player scored the max 10 everywhere) →
+      `clamp(floor(hacking / 10) - enc, 0, 10)`. Starting player gets 1 on an open server; a maxed
+      player gets exactly 5 on the most encrypted one, which clears the highest link gate.
+      Balance constants extracted to named module-level values with the data they're derived from.
+      **Caught during verification:** the fix would have locked every new player out of their own
+      home server — registration creates it with `encryptionLevel: 1` (`routes/auth.ts:116`) while
+      the player is level 1, so the newly-effective level check would reject them. Added an owner
+      bypass (`server.ownerId === userId` → full access) before the level check.
+      Confirmed the tutorial is unaffected: all five Training servers are `encryptionLevel: 0`.
+- [x] **G5 — DONE 2026-08-30.** `networkTopologyService.ts` — dropped `server.isPlayerHome ||`;
+      gates on `server.ownerId === userId` alone. Verified safe: registration sets
+      `ownerId: user.id` on the home server (`routes/auth.ts:115`), so owners still match.
+- [x] **G6 — DONE 2026-08-30.** All sites (9, not the 7 originally counted) now route through a `matchesEntity()` helper that
+      reads the id from `metadata` (`serverId` / `fileId` / `threadId` / `recipientId`) instead of
+      comparing `objective.target`, which templates set to the placeholder `true` — so every one
+      was evaluating `true === "cmx…"` and could never record progress.
+      **Semantics, chosen from how the data actually behaves:** strict when bound (provisioned
+      missions must match the exact entity), permissive when unbound. The permissive branch is
+      required, not lax — `contact_player` and `forum_reply` are never provisioned at all
+      (`provisionMissionInfrastructure` returns early for missions needing no server), so "any
+      recipient / any thread" is their only workable reading. It also matches the convention
+      `install_backdoor` already used, and keeps a mission completable if provisioning failed
+      rather than permanently stuck. A string `target` is still honoured for hand-authored
+      objectives.
+      Left alone deliberately: `missionIntegration.ts:667` compares `target === true` as a genuine
+      "any faction" sentinel.
+- [x] **G7 — DONE 2026-08-30. Three blockers, not two.**
+      1. `validateStoryArcPlan` filtered steps on `s.description` while the prompt asks the model
+         for `narrativeBrief` — a field it was never told to produce. Every step was dropped,
+         `steps.length < 2` tripped, and arc creation returned null *regardless of response
+         quality*. Now accepts `description` / `narrativeBrief` / `brief` / `summary`.
+      2. `successBranch`/`failureBranch` were kept only when `typeof === "string"`, but the prompt
+         explicitly allows a **step number** to jump ahead — so all numeric branching was silently
+         discarded and every arc degraded to a fixed linear chain. Now accepts string or number.
+      3. **Newly found:** the `expectedFormat` retry hint passed to `safeAI` advertised
+         `"description"` for steps while the prompt asked for `narrativeBrief` — so every retry
+         pushed the model *toward the wrong shape*. Rewritten to mirror the prompt exactly.
+      Separately, story missions are now registered in `playerProgress.missionProgress`.
+      Creating the `Mission` row was never enough: `getPlayerMissions` and every
+      `missionIntegration` hook read only that blob. Tutorial and generator both write it; story
+      was the sole outlier, which is why arcs were unreachable even when generation worked.
+      **Verified:** the exact JSON shape the prompt requests now validates to 3/3 steps with
+      branching intact; the same input previously returned `null`.
+- [x] **G8 — DONE 2026-08-30, implemented as the Phase 9 tokenizer** (decision 7).
+      Built `shared/shell/`: `lexer.ts` (quoting, escaping, operators, segment-tagged words),
+      `parser.ts` (full grammar → AST with `MAX_PIPELINE_STAGES`/`MAX_AST_DEPTH` limits),
+      `args.ts` (POSIX flag/option/positional splitting).
+      Wired into `commandProcessor.parseCommand` behind `tryShellParse()`, which **falls back to
+      the legacy whitespace split** whenever the shell can't handle input cleanly — so no existing
+      input can get worse. Two deliberate fallback cases: a non-simple AST (pipe/redirect/`&&`/`;`,
+      whose executor doesn't exist yet) and a `ShellParseError` (overwhelmingly an apostrophe in
+      free text, e.g. `msg alice it's fine` — erroring there would be a severe regression).
+      Fixed at the call sites: `ls`, `rm`, `cp`, `mv` now separate flags from positionals.
+      **Verified:** `ls -l`, `ls -a`, `ls -la /etc`, `rm -r`, `cp -r` all resolve the correct path;
+      `cat "system logs.txt"` yields one argument; apostrophes and `|`/`>` fall back cleanly.
+      Also landed from §10a: **N3/N4** (`~` has one meaning — home dir on your *own* home server,
+      and refuses elsewhere with "no home directory on this host"), **N5** (bare `cd` goes home,
+      not `/`), **N6** (`cd` is silent on success), **N9** (`cd -`, backed by a new
+      `PlayerSession.previousDirectory`).
+- [x] **N2 — DONE 2026-08-30.** Added `FileService.statPath()` — existence + type + readability in
+      O(path depth), reusing `resolvePath`'s already-loaded node so the common case adds zero
+      queries. `cd` now uses it instead of `listDirectory`, and additionally rejects `cd <file>`
+      with "not a directory". **Also fixed the underlying N+1:** `listDirectory` was calling
+      `canRead(userId, child.id, …)`, and `canRead` re-fetches when handed a string — so every
+      `ls` paid one extra `findUnique` per entry. It now passes the already-loaded row.
+- [x] **N7 — DONE 2026-08-30.** Added `columns()` to `asciiBox.ts` — width-aware, column-major
+      packing (reading *down* a column stays alphabetical, as in real `ls`). Bare `ls` is now dense
+      text; `ls -l` stays boxed because it *is* a report. Markers use `ls -F` convention
+      (`/` dir, `*` encrypted, `+` protected) so they cost one character instead of a bracketed tag
+      that would inflate every column, with a legend line shown only when a marker appears.
+      **Measured: 24 entries went from ~28 lines to 6** at width 70. Degrades to one column when a
+      single name exceeds the terminal width.
+- [ ] **Remaining from §10a:** **N8** (`tree` / `find` don't exist), **N10** (`ls -l` falls back to
+      a literal `"rwxr-xr-x"` when permissions are absent).
+- [x] **S4 — DONE 2026-08-30.** All three controls, because de-duplication alone does **not** close
+      this: the 15 distinct tool keywords sum to **+2.23** success bonus, which still pins the 0.95
+      clamp. Ownership is the load-bearing check.
+      1. **De-dup** in `parseTools` *and* again in `calculateToolBonus` — the accumulating method
+         must not depend on its callers behaving.
+      2. **Ownership** via a new `HACK_TOOL_ITEMS` map in `gameBalance.ts`. Needed because the two
+         vocabularies were never aligned (`passwordcracker` vs `password_cracker`, `zero_day` vs
+         `zero_day_exploit`), so a naive name lookup would have rejected legitimately owned tools.
+         11 of 15 keywords map to a catalog item; `keylogger`, `vpn`, `custom_backdoor` and
+         `anonymizer` have **no purchasable item at all** and are deliberately omitted — a tool you
+         cannot buy is a tool you cannot use. Fails closed if `shopService` is unavailable.
+      3. **Aggregate ceiling** `MAX_TOOL_SUCCESS_BONUS` / `MAX_TOOL_STEALTH_BONUS` (0.30 each), so
+         even a player owning everything can't pin the clamps on tools alone — skill keeps mattering.
+      Rejected tools now produce an explicit error naming which were unowned vs unrecognized,
+      rather than silently contributing nothing.
+      **Verified:** repeating one tool ×5 went from +1.00/+2.00 to +0.20/+0.30; all 15 tools from
+      +2.23/+1.15 to +0.30/+0.30; a single legitimately owned tool is unchanged at +0.20.
+- [x] **U1 — Unblock the uncommitted tutorial alt-path.** DONE. Driven end-to-end over the real
+      socket path by `server/scripts/verify-tutorial-altpath.ts` — note `server/scripts/` is
+      **gitignored** (`.gitignore:36`), so this harness is a local tool like `pentest.ts` and
+      `benchmark.ts` beside it and will not survive a clean checkout. If U1 should stay a permanent
+      acceptance test, promote it into the Phase 7 test suite — (register → authenticate → hop the
+      topology solving each connection challenge → `ls -a` → `cat` → `download` → `connect`), which
+      asserts 11 properties and now reports 11 PASS / 0 FAIL. Static reading alone would have missed
+      every one of the three defects below; each was found by *running* the flow.
+
+      The authored mechanics were all intact — `.fw_maintenance.key` exists, is hidden, its embedded
+      `ACCESS_KEY` matches the server's `accessKey` byte-for-byte (verified against the live DB, and
+      the Phase-1 catalog sync introduced no duplicate-name ambiguity), `ls -a` reveals it while bare
+      `ls` hides it, `cat` shows the CREDENTIALS DETECTED hint, `download` grants and persists the
+      key, and `hack_or_key` honours it. Three things around them were broken:
+
+      1. **The tutorial step could not complete by either route — it was a hard wall.**
+         Step 5's objective was `{type: "hack", target: 1}`, and `hack` objectives are credited
+         *only* by `hackService` → `onHackComplete`. The key route granted access and then left the
+         step permanently incomplete. Meanwhile the hack route is gated at Hacking 20
+         (`skillRequirements.ts:65`) and players arrive with the starting 10 — so brute force was
+         also unavailable. **Both** advertised paths were dead.
+         Fixed by adding a `breach_server` objective type ("get in, however you can"), credited by
+         `onHackComplete` *and* by a new `missionIntegration.onAccessGranted()` hook fired from
+         `networkCommands.completeConnection()` — the single funnel for direct and post-challenge
+         connects, so it covers key and backdoor entry alike.
+         **Deliberately not** credited from a key: the whole `hack*` family. Those name the act, so
+         crediting them would let any "hack N servers" mission be finished by looting credentials.
+         The harness asserts both directions (`breach_server` credited, `hack` not).
+      2. **`gain_access` was the obvious fix and would have been a regression.** It requires
+         `accessLevel >= minLevel` (default 1), but a scraped "minimal" breach reports
+         `success: true` with `accessLevel = floor(x * 0.1) = 0` (`hackService.ts:1020`, applied at `:1063`). Routing the
+         tutorial through `gain_access` would have broken the hack path for exactly the low-skill
+         players the tutorial exists for. Caught before landing; hence the dedicated type. (Related
+         latent wart, left alone: `metadata?.minLevel || 1` makes `minLevel: 0` unrepresentable.)
+      3. **The tutorial's first instruction did not work.** `connect` requires a *direct* link
+         (`canTraverse`), and a new player's home terminal links only to the Internet Exchange —
+         yet step 1's hint said `connect 10.10.10.1`, which answers "CONNECTION BLOCKED". Steps 1, 2
+         and 5 now teach the real route (`10.0.0.1` → `10.10.10.1` → …). Step 5's mail also led with
+         brute force and recommended `backdoor install` (Hacking 50): it now leads with the
+         credential route, states the Hacking 20 requirement instead of hiding it, and drops the
+         unreachable backdoor advice. The harness pins the adjacency rule so the corrected hint
+         cannot silently drift back out of date.
+
+      Not a defect, checked and fine: the first-visit connection challenge is *taught* — a one-time
+      Architect briefing mail fires on the first challenge and is DB-checked so it survives restart.
+- [x] **U2 — Re-tune seeded difficulty *after* G4.** DONE — **no change made, deliberately.**
+      The premise turned out to be wrong on both halves, and measuring it produced a more useful
+      result than re-tuning would have.
+
+      **It was never compensating for G4.** The single retuned server is the Training Firewall
+      (`seed.ts:875`, `securityLevel`/`firewallLevel` 2 → 1). G4 gates on `encryptionLevel`, which
+      is **0** for every Training server — so G4's formulas reduce to `requiredLevel = max(1, 0) = 1`
+      and are inert here. `securityLevel` and `firewallLevel` are not inputs to G4 at all. The
+      "calibrated against a broken baseline" worry does not apply to this change.
+
+      **And the change is a no-op regardless.** Every consumer rounds and then *buckets* the
+      difficulty, so 1 and 2 collapse to the same bucket everywhere. Measured, not reasoned:
+      - Connection challenge: both give tier `easy` on first visit; both skip entirely on revisit
+        (`CONNECTION_CHALLENGE_SKIP_THRESHOLD = 2`). Identical puzzle config.
+      - Hack layers: same three types; raw difficulties differ (`[1.6, 2.1, 2.6]` vs
+        `[1, 1.1, 1.6]`) but every generator buckets at `d <= 3`. Sampling 60 draws at each setting
+        produced **zero** structural shapes reachable at one level and not the other.
+      - Reputation penalty: `-max(5, sec * 2)` — the floor of 5 clamps both to `-5`.
+      - Contest layer count: `min(5, max(2, ceil(sec / 2)))` — both 2.
+      Reverting and keeping are therefore equivalent; the seed is left as committed rather than
+      generating churn with no effect.
+
+      **The finding worth keeping** (now documented at the top of the Connection Challenges section
+      in `gameBalance.ts`, where a tuner will actually look): across `securityLevel` 1..10 there are
+      only **6 distinct player-visible configurations**. `sec 1 == 2`, `sec 4 == 5`,
+      `sec 8 == 9 == 10`. The only thresholds where +1 is felt are **3** (revisits start being
+      challenged), **4** (challenge tier easy→medium), **7** (medium→hard) and **8** (a 4th hack
+      layer appears). Tuning within an equivalence class does nothing — move across a threshold or
+      don't bother.
+      Also: **`firewallLevel` is not a difficulty knob despite the name.** Its only consumer is
+      `assignLayers`, where it merely *reorders* the same three layer types — it never adds, removes
+      or hardens a layer. It is flavour, and any plan that leans on it for difficulty is mistaken.
+- [x] **U2b — DONE 2026-08-31. Raised to `securityLevel 3`** (decision 10). The first level
+      mechanically distinct from the measured `1 == 2` dead band, without reaching `medium` at 4.
+      The seed's `upsert` for this server was changed from `update: {}` to `update: { securityLevel: 3 }`
+      — scoped to the one retuned field — because otherwise the change would have been inert on every
+      already-seeded database and would have *read* as applied while doing nothing.
+      Does not make the tutorial harder: per U1 tutorial players take the key route and never meet
+      the hack layer. It bites on revisit.
+
+      (original note) **Should the tutorial firewall be a real threshold? (design decision, yours.)**
+      Falls out of the above. The Training Firewall sits at `securityLevel 1`, inside the
+      `1 == 2` dead band, so mechanically it is no harder to *connect to* than the open training
+      boxes around it — the "firewall" is fiction. Raising it to 3 would make revisits actually
+      challenge; 4 would move it to the `medium` tier. Both cut against newbie-friendliness, and
+      per U1 tutorial players reach it by key rather than by hacking anyway, so the hack-layer
+      difficulty never comes into play for them. Genuinely a taste call about whether the tutorial's
+      last server should bite. Pairs with U3.
+
+- [x] **U3 — Early-game skill gates → SOFT GATES.** DONE. Resolved by the maintainer's design call:
+      *a skill requirement is the baseline for an action, not a wall; below it you may still attempt,
+      at a penalty proportional to the shortfall.*
+
+      The decisive discovery is that the supporting machinery **already existed** — the hard gate was
+      layered on top of a system that already degrades gracefully:
+      `calculateHackParameters` scales success by hacking and detection by stealth,
+      `calculateLayerDifficulty` subtracts `relevantSkill / 25`, earned access level scales with
+      skill, and `awardExperience` grants `+1 hacking` **even on failure**
+      (`baseHackGain = success ? ceil(difficulty * 2) : 1`). The gate was the only thing preventing
+      the learn-by-failing loop from resolving its own chicken-and-egg.
+
+      **Model** (tunable, in the new *Soft Skill Gates* section of `gameBalance.ts`):
+      `severity = shortfall / SKILL_SOFT_BAND` (band = 15), then
+      `successRate *= 1 - severity * 0.6` and `detectionRate += severity * 0.25`.
+      Multiplicative on success so a shortfall scales down whatever edge you had rather than a flat
+      subtraction that could invert a strong build; additive on detection because fumbling is loud in
+      absolute terms. Beyond the band it is still refused — "within reach", not merely curious.
+      Severity is captured **when the session starts**, so mid-session skill gains can't retroactively
+      soften an attempt.
+
+      **`SkillRequirement.mode`** now makes enforcement explicit, defaulting to `"hard"` so adding an
+      entry can never silently reduce difficulty:
+      - `"soft"` — hack / crack / exploit / backdoor / rootkit. Measured: at the starting Hacking 10,
+        `hack` (baseline 20) is attemptable at severity 0.67 → success ×0.60, detection +0.167;
+        attemptable from Hacking 5; full strength from 20.
+      - `"hard"` — `fragment.crack` stays hard **on purpose**: failure *bricks* the fragment, and
+        that is an unrecoverable loss, not a penalty.
+      - `"unblockable"` — commands that ANSWER a challenge the game forced on the player.
+        **This caught a live soft-lock risk:** `handshake.ack` / `signal.trace` submit the mandatory
+        first-visit connection challenge, yet were skill-gated at Networking 5. Starting Networking is
+        10, so it passed by five points of luck; any tuning of starting skills downward would have
+        stranded new players inside an unanswerable challenge. Same treatment for `crack.submit`,
+        `firewall.knock`, `memory.extract`, `crack.storm.submit` — the layer's difficulty was already
+        set from the player's skill when it was generated.
+      - **Ungated entirely** — `fragments`, `fragment`, `backdoor.list`. These list things the player
+        already owns. A fragment is *claimed* by `cat`-ing a file with no skill check at all, so a
+        player could hold a fragment at Hacking 10 and be told they lacked the skill to list it.
+        Possession is the real gate, and for fragments the AIDA-discovery gate in `fragmentCommands`
+        already provides it. Also removed a now-stale `[Hacking 15]` label from `backdoor.list`'s
+        help text.
+
+      **Presentation.** An invisible penalty reads as broken balance (the same lesson as S4's
+      ignored-tools notice), so the prep card states it: `[!] UNDER-SKILLED: Hacking 10/20 — Success
+      reduced, detection raised. You will still learn from the attempt.` Help needed a third state
+      beyond locked/unlocked: `meetsSkillRequirement` is now true for a soft gate you're under-skilled
+      for, so a new `fullyMeetsSkillRequirement` drives a `*` marker plus the legend
+      *"below the recommended skill — usable, but at a penalty"*. Without that split, a penalised
+      command would be advertised as mastered.
+
+      **Verified live**, two players, attacker at Hacking 10: `hack` is no longer refused, reaches
+      EXPLOIT PREPARATION, and shows the notice. The U1 harness still reports 11/11.
+
+- [x] **U3b — P0: `hack` refused every ownerless server. FIXED — every server now has an owner.**
+      Resolved by the maintainer's call: *every server should have an owner, NPC or user.* That is the
+      better fix — it repairs the data model instead of synthesizing a fake defender at the call site,
+      and it gives the defence pipeline a real `PlayerProgress` to read.
+
+      **Half the foundation already existed.** Four NPC users were already present
+      (`npc_steele`, `npc_gh0st`, `npc_chen`, `npc_aida`) on synthetic `0.0.0.x` IPs, `role: "npc"` was
+      already a convention (`aiAgentTools.ts:608`), and `adminApi/stats.ts` already counts only
+      `role: "player"`, so NPCs don't inflate player stats. **But none of the four had a
+      `PlayerProgress`** — which was the second half of why NPC servers were unhackable, since the
+      pipeline bails on `!target?.progress`. No migration was needed: `role` already exists.
+
+      New `server/prisma/npcOwnership.ts` — **not** gitignored, unlike `server/scripts/`, so unlike the
+      harnesses it *can* be committed (it is still uncommitted; see the Working tree note at the end
+      of this phase) — idempotent, called from
+      `seed.ts` and runnable standalone:
+      - Ensures 5 NPC users each with a defender profile. Added `npc_sysadmin` for neutral public and
+        training infrastructure, deliberately soft (forensics 5) — it is the first defender a new
+        player ever meets.
+      - Assigns an owner by **rule, not by hand-listing**, so servers added later are covered:
+        faction → that faction's NPC; factionless → by `type`
+        (`tutorial`/`public` → sysadmin, `underground` → AIDA, `corporate` → Chen,
+        `government` → Steele).
+      - Skips (and warns about) any server flagged `isPlayerHome` with no owner — claiming one would
+        make it unreachable for its real owner. That is a data fault to surface, not to paper over.
+      **Result: 44 servers assigned, 0 remaining ownerless (verified 65/65 after later growth).**
+
+      **Seeding alone was not enough.** `darknetDungeonService` regenerates dungeons periodically and
+      `contentDraftService` creates AI-authored servers — both created servers with **no owner**, so
+      the invariant would have silently rotted. An exported `resolveNpcOwnerId()` is now called at all
+      three remaining creation sites (dungeon, AI draft, admin panel). It returns null rather than
+      throwing, so a resolution failure degrades hackability instead of aborting content generation —
+      and verified across 9 representative inputs including unknown type and empty input, it never
+      returns null (falls back to the sysadmin NPC).
+
+      **Also fixed a contradiction this exposed:** `validateHackAttempt` carried a second, undocumented
+      floor of `hacking < 10` that silently refused the Hacking 5–9 attempts the new soft gate had
+      just permitted. Now derived from the same constant (`20 - SKILL_SOFT_BAND`) so the two cannot
+      drift apart.
+
+      **Honest note on the defender numbers:** of the owner's skills, only `forensics` currently
+      affects a hack (up to −20% attacker success, +15% detection); attacker stealth is read from the
+      attacker. `hacking`/`stealth` on the NPC profiles are set for coherence and future mechanics but
+      have **no** mechanical effect today — documented in the file so nobody tunes them expecting one.
+      `homeFirewall`/`homeVault`/`homeIds`/`homeHoneypot` are left at 0 because those paths are all
+      gated on `isPlayerHome`, false for every NPC server.
+
+      **Verified live:** a brand-new player at Hacking 10 can now `hack 10.10.10.30` — the tutorial's
+      own brute-force instruction — reaching EXPLOIT PREPARATION with the under-skilled notice. That
+      route had never worked. 6/6 assertions pass, U1 still 11/11, server boots with 0 error-level
+      lines.
+
+- [x] **U3d — NPC owners now react to intrusions, in character.** DONE. 9/9 assertions pass.
+
+      **Prerequisite found first: the existing reaction path was dead.**
+      `alertFactionAI` called `personaService.onFactionServerHacked({ ...object })` against a
+      **4-positional signature** (`personaService.ts:775`), so `serverFactionId`, `attackerUserId` and
+      `detected` were all `undefined`, the lookup threw, and the faction AI **never learned about a
+      high-evidence intrusion**. It survived because that call site used
+      `getService<any>(PERSONA_SERVICE)` — the `any` erased the contract, so `tsc` never saw it, while
+      the *other* call site (`hackService.ts:1420`) was typed and correct. Fixed both the call and the
+      `any`. Verified by execution: `AIKnowledge` for Commander Steele now grows on a breach, with the
+      attacker and server recorded. (This is a concrete instance of the Phase 5 "arity bugs" item and
+      the audit's `getService<any>` theme.)
+
+      **New `npcReactionService.ts`**, hooked into the two upper rungs of the existing
+      `triggerCounterMeasures` ladder, adding an `owner_contacted` countermeasure:
+      - **The sender is the SERVER OWNER**, not a separately-minted `ai_*` persona user. The entity
+        that owns the box is the entity that contacts you. This also dodges `getAIUserId`'s
+        duplicate-identity problem — it would have produced a second "Commander Steele" distinct from
+        the `npc_steele` that owns the servers.
+      - **Silence stays meaningful.** Below evidence 61 nothing is sent, so a clean job feels clean.
+        61–80 warns; 81+ escalates in tone, matching the bounty and trace the ladder has already
+        applied.
+      - **Cooldown read from the database** (30 min per NPC↔player pair), not an in-memory Map, so a
+        restart cannot hand a player a fresh allowance of warnings. Verified per-NPC, not global: a
+        second NPC still reacts while the first is cooling down.
+      - **Hand-written voice per faction**, used when AI is unavailable, and as the validator's floor
+        so a garbled generation never reaches a player. The neutral `npc_sysadmin` has no persona and
+        deliberately uses its static voice — which makes it the first feedback a new player gets that
+        they were noisy.
+      - Prompt injection: the attacker's username reaches a prompt, so it goes through
+        `sanitizeForPrompt`.
+
+      **A bug of mine, caught by running it:** the persona lookup filtered on
+      `type: "faction_leader"`, but AIDA leads DarkNet while being typed `"aida"`. That silently
+      excluded **AIDA's 14 servers — the largest group** — from ever getting an AI-voiced reaction.
+      Now matched on faction, preferring a `faction_leader` without requiring one.
+
+      **Concrete Phase 6b data point.** The Garrison reaction generated a genuine AI message; the AIDA
+      one fell back. The whole run emitted **one log line, mine** — `safeAI`'s failure path logged
+      nothing at all, even at `debug`. That is the "mostly invisible fallbacks" hypothesis confirmed in
+      miniature: this path is only measurable because it now logs `usedAi` explicitly. Generalising
+      that instrumentation across the 41+ `safeAI` call sites belongs to Phase 6b.
+      Also observed: the successful AI output was noticeably purple and repetitive
+      ("there is no escape", "do not expect mercy", "the price will be paid") — a model-quality
+      symptom for Phase 6b, not a wiring fault.
+
+- [x] **U3d-follow — `getAIUserId` homeIp collision. FIXED.** 11/11 assertions, and the user-facing
+      symptom now works: all 5 personas deliver via `sendAIMessage` (was 1 at most).
+
+      **It was a duplicated pattern, not one bug.** Four sites open-coded "get an account for this
+      AI", with four different answers for a `@unique` column:
+      | site | `homeIp` | |
+      |---|---|---|
+      | `messageService.getAIUserId` | `"127.0.0.1"` | **broken — 2nd persona ever fails** |
+      | `forumService` post path | `ipService.generateUniqueIP()` | worked, but allocated from the **player** range |
+      | `forumService` reply path | `"127.0.0.1"` | **broken, same as above** |
+      | `forumService` npc handle | `127.0.<rand>.<rand>` | collision merely unlikely, no retry |
+
+      Replaced all four with `utils/aiUserIdentity.ts`:
+      - Addresses come from a reserved `0.0.x.y` block — non-routable, visibly not a game address,
+        and extending the convention `npcOwnership.ts` already uses at `0.0.0.1`–`0.0.0.5` rather
+        than inventing a second one. Allocation is **deterministic** (hash of the key) then
+        linear-probed, so a persona keeps the same address across runs but a collision still
+        resolves instead of throwing.
+      - Lookup keys on **email** (derived from the persona id, stable) before username (a display
+        name that can be edited), with the legacy `ai_<personaId>` id form honoured first so existing
+        rows keep resolving. Create is wrapped to re-read on a lost race instead of surfacing a
+        constraint error.
+      - Verified: reproduced the old failure (2nd hardcoded create throws), then all 5 personas +
+        12 NPC handles resolve, idempotently, with distinct non-colliding reserved addresses, and the
+        same key returns the same address after deletion.
+
+      **Two adjacent defects fixed while in here:**
+      1. `sendAIMessage`'s daily-cap query counted only senders whose id starts with `ai_`, so any
+         persona account seeded with a normal cuid was invisible to the cap. Fixed at the time by
+         matching on the AI email domains — **then superseded by U3d-follow-2, which removed the
+         global cap entirely.** The two helper exports that fix introduced
+         (`AI_IDENTITY_EMAIL_DOMAINS`, `isSyntheticAiEmail`) were left orphaned and have been
+         deleted; nothing referenced them once the cap was gone.
+      2. Legacy AI accounts created by the `generateUniqueIP()` path got `role: "player"` — so **an
+         AI persona was being counted as a player** by `adminApi/stats.ts`, and had a player-looking
+         home IP. The resolver now normalizes any account it resolves to `role: "npc"`. Confirmed on
+         the real "The Architect" row, which was `player`.
+
+- [x] **U3d-follow-2 — AI message cap replaced, and persona replies are now deferred.** DONE.
+      16/16 assertions. Four changes:
+
+      **1. The global 20/day cap is gone.** It was the wrong control in three ways:
+      it could not save AI cost (`content` arrives already generated, so the tokens were spent before
+      the check ran); most of what it blocked was not AI output at all (tutorial mail and
+      `CONNECTION_BRIEFING_CONTENT` are static string constants); and being global it let one persona
+      send a single player 20 messages while stopping 20 players from receiving one each — backwards
+      from what inbox protection means. Discretionary chatter is already budgeted in the right place:
+      `aiSchedulerService`'s per-persona `AI_MAX_ACTIONS_PER_DAY`, checked *before* generation.
+
+      **2. The connection briefing now falls back.** `connectionChallengeService` ignored
+      `sendAIMessage`'s return value, so a rejection dropped the briefing **silently** — and that is
+      the mail explaining the mandatory first-visit challenge. It now degrades to a system message.
+      (Correcting my earlier report: tutorial step mail always *did* fall back, so onboarding was
+      degraded rather than lost. The briefing was the real casualty.)
+
+      **3. Flood protection is per recipient+sender** — 5/hour from one sender to one player.
+      Verified all three dimensions: the limit bites (5 accepted, 4 rejected), a *different* persona
+      still reaches the same player, and an unrelated player is unaffected.
+
+      **5. Replies run OUTSIDE the daily AI budget (maintainer's requirement, 2026-08-31).**
+      Verified they already did — `canTakeAction`/`incrementActionCounter` are consulted *only* inside
+      `aiSchedulerService.processScheduledAction`, so nothing player-initiated ever touched them, and
+      a reply delivered with `actionsToday` at 13 against a cap of 3 without incrementing it. But the
+      exemption was implicit, so it is now documented at both ends as an invariant: the daily budget
+      covers **autonomous** activity only, and reply generation must not be routed through it.
+      That opened a hole worth closing: the flood limit caps *delivery*, while generation happens
+      before it, so a player spamming `msg` could have queued unbounded AI calls. Replies now
+      **coalesce** — one pending reply per sender→player, refreshed to the newest question while
+      keeping the original `deliverAt` so nagging cannot move the answer. Verified: 12 messages
+      collapse to 1 pending generation, the latest question wins, and `notice`-kind mail is not
+      swallowed by the coalescing.
+
+      **4. Replies are no longer instant** — new `personaMailQueueService` + `PendingPersonaMail`.
+      This was the maintainer's insight, and it solves immersion and load with one mechanism:
+      - A reply is queued with a human-plausible jittered delay (45–210s for replies, 15–75s for
+        notices) instead of arriving the same second the player wrote.
+      - Generation happens **when the item comes due**, not inline, so a player's `msg` command no
+        longer blocks on the model and a burst of messages spreads across time.
+      - **Backpressure becomes characterisation:** a new `aiService.getLoad()` probe lets the worker
+        *slide delivery later* when the model is saturated. "Still composing" is in-fiction plausible,
+        so the queue never has to skip or drop work. Verified by stubbing saturation to 0.95 —
+        the item deferred (not sent, not lost) and went out on the next tick once load cleared.
+      - Failed generation retries on later ticks with growing backoff, and once the attempt budget is
+        spent the hand-written fallback goes out, so a reply **always** eventually lands.
+      - State lives in the database, so anything undelivered survives a restart.
+      - The static hint no longer carries the `[AI response unavailable — static hint provided]`
+        tell, which leaked implementation detail into the fiction.
+
+      **Also fixed:** `sendPrivateMessage` incremented `messagesSent` with `update`, which throws
+      P2025 for senders with no `PlayerProgress` — i.e. every persona. The `.catch()` hid it in JS but
+      Prisma logged an error for *every persona mail delivered*. Now `updateMany`, which matches zero
+      rows silently. Boot is back to 0 error lines.
+
+      **Schema note (updated 2026-08-31):** `PendingPersonaMail` was originally added via
+      `prisma db execute` plus a hand-written `0002_pending_persona_mail` migration, because the 0001
+      baseline was unapplied (schema built with `db push`) and `migrate dev` would have offered to
+      reset the database. The maintainer then authorised a reset, so **migration state has since been
+      rebuilt properly** — see D2 in Phase 3. There is now a single `0001_init` generated from
+      `schema.prisma` via `migrate diff`, applied by `migrate reset`, and `migrate status` reports
+      "Database schema is up to date!". The interim 0002 file no longer exists.
+
+- ~~(historical)~~ **U3d-follow-2-orig — (superseded) The global AI message cap counts tutorial mail.**
+      Found because it blocked my own verification. `sendAIMessage` enforces 20 AI messages/day
+      **globally across all personas**, and tutorial onboarding runs through it: each registration
+      sends "Your Training Begins" plus the connection-challenge briefing. So **ten new players in a
+      day consume the entire budget**, after which no persona can message anyone — including the
+      tutorial mail for the eleventh player. Essential transactional mail (onboarding, security
+      briefings) should not share a budget with discretionary faction chatter. Suggest exempting
+      system/tutorial mail from the cap, or making the cap per-persona-per-player. My predicate fix
+      did not cause this — old and new predicates matched all 20 messages identically — but it is now
+      unambiguous rather than accidentally leaky.
+
+- [x] **U3d-follow-3 — One account per character. DONE.** 9/9 identity assertions plus a
+      player-visible sender check. Taken as option (b): the NPC owners now carry display names.
+
+      **It was a merge, not a rename** — `Commander Steele` already existed as a separate account, so
+      renaming `npc_steele` would have collided on the unique `username`. The direction was settled by
+      looking at what each row actually held: the `npc_*` accounts owned all the data (server
+      ownership, 535 authored files on Steele alone, forum memberships) while the persona accounts had
+      **zero references**. So the server-owning row wins and adopts both the display name and the
+      persona's canonical email, which makes `resolveAiPersonaUserId` resolve to it *by email* and stop
+      minting a second account per character.
+
+      New `reconcileIdentity()` in `npcOwnership.ts`, idempotent and ordered so it never trips a
+      unique constraint mid-flight:
+      - Gathers every candidate row for a character (legacy username, target display name, persona
+        email) and picks the one owning the most servers as canonical — data decides, not naming.
+      - Moves server ownership and sent messages off any duplicate. Forum memberships are unique per
+        `(userId, forumId)`, so a blind move would collide — colliding rows are dropped, the rest
+        reassigned.
+      - Frees the duplicate's unique columns before the canonical row claims them, then deletes it.
+      - Verified: `renamed 5, merged 4` on the first run, then **completely silent on re-run**.
+
+      Seed updated to create these accounts with display names directly, so a fresh database is
+      correct by construction rather than relying on the migration.
+
+      **Result:** owner and messenger are the same row for all four faction characters, server counts
+      preserved (AIDA 14, Steele 8, Chen 10, gh0st 6, sysadmin 6), and an intrusion warning now
+      arrives from "Commander Steele" / "AIDA" / "sysadmin" instead of `npc_steele`.
+
+- [x] **AUDIT 2026-08-31 — plan re-checked against the code.** Two independent read-only passes
+      verified every factual assertion in the checked items above. **All 17 Phase 0 / G-item
+      assertions CONFIRMED, no WRONG, no STALE.** The U-items produced six corrections, all now
+      applied:
+      1. **The `0002_pending_persona_mail` migration claim was WRONG** — that file no longer exists,
+         because the maintainer authorised a reset and migrations were rebuilt as a single `0001_init`
+         (see D2). The note has been rewritten rather than left describing a file that is gone.
+      2. **"tracked, unlike `scripts/`" was overstated.** `npcOwnership.ts` and the other new files
+         are *not gitignored* (so unlike the harnesses they CAN be committed) but they are still
+         **uncommitted**. Wording corrected; see the working-tree note below.
+      3. **A superseded fix was still described as live** — U3d-follow's email-domain cap predicate
+         was deleted outright by U3d-follow-2, not rewired. Marked superseded, and the two exports it
+         left orphaned (`AI_IDENTITY_EMAIL_DOMAINS`, `isSyntheticAiEmail`) were dead code and are now
+         deleted.
+      4. **Three line citations had drifted** (`skillRequirements.ts:39`→`:65`,
+         `hackService.ts:1050`→`:1020`, `seed.ts:871`→`:875`) because later work edited the same
+         files. Fixed.
+      5. **`matchesEntity` is used at 9 sites, not 7** — my own claim under-reported its reach.
+      6. **Six superseded `-orig` entries were still unchecked checkboxes**, so they counted as open
+         work and inflated the backlog. Demoted to historical markers.
+
+      Two code defects the audit surfaced, both fixed:
+      - **`networkCommands.ts` called `onAccessGranted` through `(missionIntegration as any)`** — the
+        exact untyped-call pattern whose removal U3d credits for exposing the `onFactionServerHacked`
+        arity bug. I had fixed one instance and introduced another in the same session. Now typed, so
+        a signature change breaks the build instead of silently no-oping.
+      - **`breach_server`'s `trackedBy` metadata named only `onHackComplete`**, under-reporting the
+        non-hack route that is the type's entire reason to exist.
+
+      Two latent hazards it flagged, both closed:
+      - **`shared/types.ts` (a 5-line barrel) coexisted with `shared/types/index.ts`**, so
+        `shared/types` resolved ambiguously and extension order stayed load-bearing — the same
+        mechanism behind the ReservedPID misdiagnosis, mitigated in Phase 0 only by pinning Vite's
+        `resolve.extensions`. The barrel is now **deleted**; all 61 imports resolve unambiguously to
+        the directory index. Verified: server `tsc` clean, `svelte-check` 0 errors, and `vite build`
+        succeeds.
+      - **A local `const columns` in `systemCommands.ts` shadowed the imported `columns()` helper.**
+        Block scoping made it harmless by accident; renamed to `tableColumns`.
+
+      Verification after all of the above: server `tsc` 0, `eslint` 0 errors, `svelte-check` 0,
+      client builds, server boots with 0 error-level lines, U1 harness 11/11 **on a freshly migrated
+      and seeded database**.
+
+- [x] **KNOWLEDGE AUDIT 2026-08-31 — `PROJECT_KNOWLEDGE.toon` re-checked against the schema.**
+      Prompted by the maintainer correcting a claim of mine: I said "the migrations directory is now
+      the source of truth for schema", which is **backwards**. `schema.prisma` is the declarative
+      authority and is tracked; `0001_init` was *generated from it*, so migrations are a derived
+      artifact reproducible in one command — losing the directory is recoverable, not catastrophic.
+      It should still be committed as deployment history, but it is not the authority.
+
+      The maintainer's rule: schema knowledge must live in **either `schema.prisma` or
+      `PROJECT_KNOWLEDGE`** — never only in a derived migration SQL file. Both `@database_schema` and
+      `@migrations` now state that explicitly.
+
+      This mattered because my earlier audit checked PLAN.md against code but **never checked the
+      knowledge file**, and it had drifted:
+      - `models: 61` while the schema had **66**.
+      - **Five models entirely undocumented** — `ContentDraft`, `ContentJob`, `PendingPersonaMail`,
+        `EpochEvent`, `MessageReport` — now added under new `@ai_pipeline_and_queues` and
+        `@moderation` groups. Verified in both directions: zero undocumented, zero phantom entries.
+      - `User.role` listed `(player|moderator|admin)`, **omitting `npc`** — despite npc-role accounts
+        now owning every NPC server and being excluded from admin player counts.
+      - `seed.ts` "~2833 lines" (actual 3286); services 52 (actual 62); DI tokens 55 (actual 58);
+        registrations 52 (actual 55).
+      - **`@migrations` was the worst case:** it listed **30 migrations by name that no longer exist
+        on disk**, and had already been stale *before* this session — the schema was being maintained
+        with `db push` while a 1798-line `0001_baseline` sat unapplied. Replaced with the current
+        single baseline, a regeneration recipe, and the scripts. The phantom list was deleted rather
+        than preserved: documenting migrations that cannot be applied is worse than documenting none.
+
+      Verified after: `prisma validate` passes, `migrate status` reports "Database schema is up to
+      date!", `tsc` 0.
+
+- ~~(note, no work outstanding)~~ **U3d-follow-4 — `startsWith` with a trailing underscore is a SQL LIKE wildcard.**
+      My own verification produced a false positive that turned out to be a real trap: Prisma compiles
+      `startsWith: "npc_"` to `LIKE 'npc_%'`, and `_` matches **any single character** — so it also
+      matched the probe account `npchack…`. Repo-wide check found **no remaining instances**: the only
+      one was `sendAIMessage`'s `startsWith: "ai_"` cap query, and that query was subsequently
+      **deleted outright** by U3d-follow-2 rather than merely rewired. Recorded because the next person to write
+      `startsWith: "some_prefix_"` will hit it silently — it over-matches rather than erroring.
+
+- ~~(historical)~~ **U3d-follow-3-orig — (superseded) Two accounts now exist per faction character.**
+      `npc_steele` owns 8 servers and sends the U3d intrusion warnings; `Commander Steele` is the
+      persona account that sends faction mail and forum posts. Same character, two identities — and a
+      player would see messages from both, one of them named `npc_steele`, which is not a name anyone
+      should see in an inbox. Options: (a) point `resolveAiPersonaUserId` at the existing NPC owner
+      for that persona's faction, so one account does both — simplest, but the visible name stays
+      `npc_steele`; (b) rename the NPC owners in `npcOwnership.ts` to their display names
+      ("Commander Steele"), which unifies *and* reads correctly, at the cost of migrating the
+      existing `ownerId` rows. I lean (b). Not done unilaterally because it changes what players see.
+
+- ~~(historical)~~ **U3d-follow-orig — (superseded) `getAIUserId` will throw on the second persona it ever creates.**
+      Spotted while choosing the message sender. `messageService.getAIUserId` creates AI users with
+      `homeIp: "127.0.0.1"`, and `User.homeIp` is `@unique`. No user currently holds that IP, so the
+      *first* persona to need an account succeeds and every one after it fails on a unique
+      constraint. `sendAIMessage` is therefore one call away from breaking for all but one persona.
+      Not hit by U3d (which deliberately sends as the server owner instead), so it is left as its own
+      item. Related: `sendAIMessage`'s daily-cap query counts only senders whose id starts with
+      `ai_`, which silently excludes any persona account created by seed with a normal cuid — the
+      20/day cap is not actually enforced for those.
+
+- ~~(historical)~~ **U3d-orig — (superseded, kept for context) Opportunity: NPC servers now have owners who could react.**
+      `triggerCounterMeasures` already runs for NPC-owned servers, and the persona system
+      (`personaActionService`) can generate messages and forum posts. An intrusion on a faction box
+      could now plausibly draw a response from that faction's NPC. Deliberately not built — flagged
+      because the ownership change is what makes it possible. Note the IDS/alert paths are gated on
+      `server.isPlayerHome`, so no junk notifications are being generated for NPCs today.
+
+- ~~(historical)~~ **U3b-orig — (superseded, kept for context) `hack` refuses every ownerless server.**
+      Found while verifying U3 — and it is a bigger problem than U3 was.
+      `hackCommands.resolveHackTarget` returns `"Target server has no owner"` when
+      `server.ownerId` is null (`hackCommands.ts:762`). **44 of 59 seeded servers have no owner**,
+      including every Training, faction and NPC box. So `hack` only ever works against the 15 player
+      homes — the game is effectively PvP-only for hacking, in a design the maintainer described as
+      "mostly solo play with shared objectives".
+      Consequences: the tutorial's brute-force route was impossible for a reason unrelated to skill
+      (this is why U3's penalty could not be demonstrated on the Training Firewall at all); and every
+      `hack_target` objective pointing at an NPC server is uncompletable.
+      The owner is needed because the pipeline reads the *defender's* `PlayerProgress` for defence
+      (`targetProgress.forensics` in `calculateHackParameters`) and bails on `!target?.progress` when
+      resolving. Fix = synthesize a defender profile for ownerless servers, derived from
+      `securityLevel`/`firewallLevel`/`encryptionLevel`, rather than requiring a `User` row. Not a
+      one-liner, and it should land before any further difficulty tuning — this is the same
+      "tuning against a broken subsystem" trap, and it currently masks the entire hack economy.
+
+- [ ] **U3c — REDESIGNED 2026-08-31 (decision 12). Scope is larger than a penalty wiring.**
+
+      The maintainer's model: *going beyond your limits should be harder and riskier, not merely
+      less productive — and clearing it anyway should pay.* Three parts, all required:
+
+      1. **Harder** — the shortfall raises the minigame's difficulty, rather than only degrading the
+         result. (Note this closes a gap already recorded against the hack family: `skillPenaltySeverity`
+         never reaches `generateLayersForServer`, so today an under-skilled hacker faces an
+         *identical* puzzle and only worse odds.)
+      2. **Riskier** — an external consequence outside the returned result: discovery, a trace, an
+         alerted owner. The cost of overreaching should land on the player's situation, not just on
+         the output they get back.
+      3. **Rewarded** — succeeding at an above-your-level challenge grants more than the same action
+         performed comfortably. This is what makes overreach a *choice* rather than a penalty.
+
+      **Prerequisite, and the reason this is not a small change:** parts 1–3 need somewhere to live.
+      A command with no minigame has no difficulty to raise; one with no process has no duration to
+      extend; one with no resource cost cannot be made expensive. Several of the ~20 have none of the
+      three today. Coverage matrix is being audited — see the U3c coverage table below.
+
+      **Sequencing risk to settle before building:** adding minigames, process times and resource
+      costs to commands that lack them is *feature work*, which is Phase 8/9 territory, not a Phase 1
+      gate fix. Per decision 11 this should not be quietly absorbed into Phase 1. Likely split:
+      convert the commands that already have the triad now; move the rest to Phase 8 alongside the
+      skill-award normalization, which tunes the same curve.
+
+      **U3c-0 — REGRESSION TO FIX FIRST (found 2026-08-31 by the coverage audit).**
+      `crack`, `exploit`, `backdoor` and `rootkit` are declared `mode: "soft"` but **no penalty is
+      wired for any of them**. `getSkillShortfall` has exactly two call sites — `hackCommands.ts:385`
+      (`hack`) and `fileCommands.ts:678` (`analyze`) — and `processHackAttempt`, which
+      exploit/backdoor/rootkit all route through, takes no severity parameter at all. So U3 shipped a
+      **strictly easier game** for those four: attemptable 15 points below the requirement at zero
+      cost. This violates the doctrine written in `skillRequirements.ts:41-50`. Either wire the
+      penalty or revert those four to `"hard"` — do this before adding any new soft conversions.
+
+      **COVERAGE AUDIT 2026-08-31 — only TWO commands have all three prerequisites:**
+
+      | | Minigame | Process | Resources |
+      |---|---|---|---|
+      | `sweep` | anomaly_scan / disk_sector | `sweep` | 60/64/20 |
+      | `hack` | layered cipher/port/memory | `hack_prep` | 80/128/50 |
+
+      Process but **no** minigame (9): `decrypt`, `analyze`, `probe`, `traceroute`, `scan`,
+      `trace.evade`, `exploit`, `backdoor`, `rootkit`.
+      Instant, free **and** consequence-free today (13): `encrypt`, `decode`, `subnet`, `protect`,
+      `safevault`, `honeypot`, `security.scan`, `backdoor.remove`, `key.contact`, `collar.shield`,
+      `share_intel`, `proxy`, `alias:reveal`.
+
+      So decision 12's model is buildable **today for `sweep` and `hack` only**. Everything else needs
+      a minigame and/or a process and/or a resource cost invented first — that is Phase 8/9 feature
+      work, not a Phase 1 gate fix (decision 11).
+
+      **Also found, filed to their owning phases — do NOT fix here:**
+      - `alias:reveal` is dead: `aliasService.ts:194` reads skills from the `progress.skills` **JSON**
+        column, but skills are top-level Int columns and that JSON defaults to `{}`, so `combinedSkill`
+        is always 0 against a threshold of 40. → **Phase 5**.
+      - `backdoor.use` prints "The server owner has been alerted" but no alert fires —
+        `backdoor:discovered` is emitted on the service's own EventEmitter and nothing subscribes.
+        → **Phase 5**.
+      - **Soft-lock class, same as the `handshake.ack` case U3 already caught:** `crack.dict` /
+        `crack.mask` / `crack.pattern` are `hard` at Cryptography 20/25/20 but answer a session started
+        by `crack`, which gates on **Hacking** 30. A player with Hacking 30 and low cryptography can
+        open a file-crack session they are then refused permission to answer. Same shape for
+        `sweep.reveal`. These are `submit` commands and belong in the `"unblockable"` set. → **Phase 1**,
+        it is the same defect class U3 was meant to close.
+      - `crack.storm` difficulty is hard-coded `10` (`hackCommands.ts:1218`), ignoring both the file's
+        `encryptionLevel` and the player's skill. → relevant to part 1 of decision 12.
+      - `sweep` spawns its process *before* checking whether any hidden files exist, so resources burn
+        on a guaranteed no-op. → **Phase 5**.
+      - No command registers a passive consumer; all four registrars are dead (already recorded as S8).
+
+      **Already done under the superseded framing (decision 9), and now insufficient on its own:**
+
+      **Done:**
+      - `analyze` (Forensics 10) → currency is **conclusiveness**. `buildAnalysisReport` withholds
+        the fields that take real forensic skill (Modified, then Permissions, then Encrypted),
+        hardest first; Type and Size are never withheld because `ls` already shows them, so hiding
+        them would be arbitrary rather than a degraded read. Extracted as a helper because the
+        process path and the no-resource fallback both built the box and would otherwise drift.
+        Measured curve: Forensics 5 (a new player) → severity 0.33 → 2 of 3 skilled fields still
+        conclusive, where before the command was refused outright.
+
+      **Remaining (~19)**, each still `"hard"` until its currency is wired — flipping `mode` without
+      one is a silent difficulty cut, not a soft gate:
+      `encrypt`, `decrypt`, `decode`, `sweep`/`sweep.reveal`, `crack.dict/mask/pattern/protected/
+      storm`, `probe`, `traceroute`, `subnet`, `protect`, `safevault`, `honeypot`, `trace.evade`,
+      `security.scan`, `backdoor.use`/`backdoor.remove`, `key.contact`, `collar.shield`,
+      `share_intel`, `alias:create`/`alias:reveal`, `endgame`, `forum`, `proxy`, `scan`.
+
+      Prioritise the ones a **brand-new player is refused today** (starting skills: hacking 10,
+      networking 10, stealth 10, cryptography 5, forensics 5, socialEng 5) — that is the set that
+      actually gates the early game: `encrypt`/`decode` (10), `decrypt` (15), `sweep` (15),
+      `traceroute` (15), `protect` (15), `security.scan` (15), `backdoor.remove` (15),
+      `share_intel` (10), `alias:create` (15). Note `crack.mask` (25) is beyond the band from a
+      starting cryptography of 5 and stays refused regardless.
+
+      Per the original scope decision, only the hack family had been converted. `decrypt`, `encrypt`, `sweep`, `crack.dict/mask/pattern/
+      protected/storm`, `analyze`, `honeypot`, `protect`, `safevault`, `trace.evade`, `probe`,
+      `traceroute`, `decode`, `subnet`, `key.contact`, `collar.shield`, `alias:*` remain `"hard"`
+      because they have no penalty channel wired yet — flipping them to `"soft"` without one would be
+      a silent difficulty cut, not a soft gate. Each needs its own currency chosen (fewer files
+      revealed, weaker encryption, longer runtime, higher detection) before flipping `mode`.
+      Note several are unreachable at the *starting* skills regardless: `cryptography` and `forensics`
+      both start at 5, so `encrypt`/`decode` (10), `analyze` (10), `decrypt` (15) and `sweep` (15) are
+      all refused to a brand-new player today.
+
+- ~~(historical)~~ **U3-orig — (superseded, kept for context) Decide the early-game Hacking gate.** `hack` requires
+      Hacking 20; players start at 10 (`auth.ts:97`). Hacking skill is awarded *by hacking*
+      (`hackService.ts:2317`), so it is very nearly a chicken-and-egg. The one escape hatch is
+      `crack.storm.submit`, which is **ungated** and awards +15 hacking — enough to cross 20 in a
+      single solve — but nothing teaches it, and it needs a protected file to practise on. U1 papered
+      over this by making the tutorial honest about the requirement; the underlying curve is still a
+      decision. Options: lower the `hack` gate to 10, grant skill points in early tutorial steps
+      (currently only step 7 awards any), or make the `crack.storm` route discoverable on purpose.
+      Note this interacts with U2 — both are early-game difficulty, and tuning either in isolation
+      risks the same "calibrated against a broken baseline" trap.
+- ~~(reassigned to Phase 7 / A3)~~ **U5 — `command:result.output` is `string | string[]`, and the client assumes `string`.**
+      `networkCommands` sends `output: challenge.displayText` (an array) while everything else sends
+      a rendered string. `socket.ts:767` passes it straight into `addOutputLine(_, text: string, _)`,
+      so the array lands in a field typed `string` and renders comma-joined — the handshake table
+      loses its line breaks and column alignment in the terminal transcript. Not player-blocking:
+      the puzzle itself is rendered correctly by the dedicated panel
+      (`Terminal.svelte:1734`, `{#each displayText as line}`), so this is duplicated noise beside a
+      correct rendering. But the no-target-tab fallback calls `data.output.substring(0, 100)`, which
+      throws on an array. Fix by normalising at the boundary; the typed socket contract in Phase 7
+      is where this belongs.
+
+**Gate — CLOSED 2026-08-31. All five legs verified.**
+`scripts/verify-gate-phase1.ts` drives the three legs the tutorial harness did not cover
+(mission accept→complete, shop purchase→inventory, encryption gate) over the real socket path:
+**15/15**, alongside `verify-tutorial-altpath.ts` at **11/11**.
+
+| Leg | Result |
+|---|---|
+| register → tutorial (key path) | 11/11 |
+| accept a mission → complete with the correct target | verified, incl. G1 stickiness |
+| buy an item → see it in `scripts` | verified, incl. credit deduction |
+| hack a server whose encryption matters | verified, with a positive control |
+| cannot reach another player's home server | verified |
+
+**Writing the harness found three more live bugs — the masking pattern again, twice in the same
+call path.** None were visible from the code; all three needed execution.
+
+1. **The mission economy had never started.** `missionCommands` auto-generated only
+   `if (missions.length === 0)`, but the tutorial auto-assigns a mission on first login, so that
+   count is never 0 for a real player. `generateMissionsForPlayer` therefore **never ran once**:
+   every one of the 9 missions in the database was a tutorial mission, and no player had ever been
+   offered a generated one.
+2. **Even with offers present, none could be accepted.** `acceptMission` required the mission to
+   already exist in the player's `missionProgress` and threw *"Mission not assigned to player"*
+   otherwise — but a generated mission is an offer in the `Mission` table with `assignedTo: null`
+   that nothing writes into any player's progress. **This sat beneath the G2 status fix**, so G2 was
+   necessary but insufficient. Accepting an open offer now materialises the progress entry (deep-
+   copying objectives, since the Mission row is a shared template) and claims the row so two players
+   cannot take the same offer.
+3. **Generation blocked the command.** `generateMissionsForPlayer` is AI-bound, and the AI service
+   was rate-limiting with 5s/15s backoff, so the first player to empty the offer pool got **no
+   response at all** — measured past 180s with nothing rendered. Now fired in the background with the
+   panel returning immediately and saying contracts are being drafted. Same failure shape and same
+   remedy as inline persona-reply generation.
+
+**And I broke it myself in between, which the control caught.** My first fix for (1) filtered the
+*player's own* missions for "available" — but offers deliberately are not there, so the count was
+always 0 and `missions` regenerated on **every** call, hanging outright. Worse than the original bug.
+The guard now counts unclaimed `Mission` rows, where offers actually live. Verified in **both**
+directions: pool non-empty → responds in 0.3s and does *not* regenerate; pool empty → responds in
+0.3s and offers appear in the background. A one-directional test would have passed the broken
+version.
+
+Two of the harness's own assertions were also wrong at first, both caught by controls rather than by
+review: `canAccessServer` takes a server **id**, not an IP, so every G4 row was passing for the wrong
+reason (`"Server not found"` reads as a refusal); and the guard probe sampled the offer pool once
+immediately after a call I had just made asynchronous. Method learnings §2 earned its place twice
+over.
+
+Note the hack path through the *tutorial* is still not exercisable at tutorial skill level (U3), but
+that is no longer a Phase 1 blocker: the key path completes the step, and the Phase 8 skill-economy
+work is what makes the brute-force route reachable.
+
+---
+
+## Missions — read `MISSIONS_ARCHITECTURE.md` before touching them
+
+**Written 2026-08-31**, after the maintainer stopped three consecutive symptom-patches (two of which
+were wrong) and asked for a full read first. That was the right call and the document is the result.
+
+Headline findings, all of which change Phase 1/8 scope:
+
+- **State lives in two places** — the `Mission` table and `PlayerProgress.missionProgress`. Offers are
+  **per player**: the generator writes each generated mission into that player's own blob as
+  `"available"`. Treating them as an anonymous global pool (which I briefly did) breaks level scaling
+  and lets two players complete the same mission.
+- **`generateMissionsForPlayer` had never run**, because the auto-generate guard was unreachable once
+  the tutorial started pre-assigning a mission. Every mission in the database was a tutorial mission.
+  *Fixed.*
+- **Offers still do not reach players**: `createMission` provisions infrastructure per mission via an
+  AI-bound, rate-limited path, and the blob write-back sits at the end of the loop, all-or-nothing.
+  *Generation is no longer awaited inline; the all-or-nothing write-back is the open root cause.*
+- **~15 of 39 mission templates are impossible to complete**, from four argument-level bugs:
+  a target **user** id passed where a **server** id is compared; both `download` call sites passing
+  `fileId: ""`; a provisioning allow-list that omits types it already has handler arms for; and
+  boolean objectives authored with `target: 2` where the validator only warns.
+- **`skillPoints` and `unlocks` are shown to the player and never granted** (13 and 2 templates).
+  `reputation` always credits the neutral bucket regardless of faction.
+- **Six of nine mission producers never write the blob**, so everything the AI personas and the admin
+  panel create is unreachable.
+
+The revised fix order is in that document's §8: the argument bugs are hours of work and resurrect whole
+groups of missions, so they go **before** the structural dual-store cleanup, which belongs with
+Phase 3's `PlayerProgressRepository`.
+
+### Tier 1 — DONE 2026-08-31
+
+The four argument bugs above are fixed (M11 wrong id, M12 empty `fileId`, M14 target/`progressType`
+mismatch, M13 drifted provisioning gate). Gate harness **15/15**, U1 **11/11**, new
+`verify-mission-provisioning.ts` **5/5**, `tsc` 0, `eslint` 0 errors. Details and the two
+self-inflicted mistakes are in `MISSIONS_ARCHITECTURE.md` §7a.
+
+Two things worth carrying forward:
+
+- **M11 makes two objective types stricter, not just correct.** `install_backdoor` and `breach_server`
+  were "passing" only because an unbound `matchesEntity` returns true for *any* server. They now
+  require the right one. If they regress, that is the fix working, not breaking.
+- **The world inflates.** Mission provisioning creates a target server whenever it cannot find a
+  suitable one, so a handful of harness runs took the database from 38 servers to **114**, with 40
+  content jobs queued behind them. `connect` awaits `contentQueue.ensureReady()`, so a deep queue is
+  felt directly by players as a slow connect. Reuse existing servers before minting new ones —
+  same root as M2.
+
+Remaining: **Tier 2** (M16 ungranted `skillPoints`/`unlocks`, M17 reputation bucket, M3 `isBonus` in
+the completion gate, M4 the 1000× `timeLimit` unit mismatch) and **Tier 3** (M2 — the all-or-nothing
+blob write-back, which is what still keeps generated offers from reaching players).
+
+---
+
+## Shop / rig — read `SHOP_ARCHITECTURE.md` before touching G3
+
+**Written 2026-08-31**, before writing any G3 code, on the maintainer's instruction to stop going in
+circles and read the system first. It was the right call twice over.
+
+**G3 as scoped in this plan was wrong.** "All 8 `initComputerSpec` call sites omit the argument" is
+true, and it is the **last** of five links, every one of which is broken. Fixing only the argument
+would have changed nothing observable, and I would have reported G3 as done:
+
+1. The 9 hardware items are not purchasable — they exist only as `seed_*` rows the shop never lists.
+2. They cannot be equipped — seeded `category: "hardware"` maps to `MISC`, which is not equipable.
+3. Only one item per category can ever be equipped, so "more resources" was unreachable by design.
+4. `equippedItemNames` is never passed (the known link).
+5. The player could not see a change anyway — `free`/`top` show a hardcoded level-1 rig.
+
+**Root cause, and it explains most of the shop's defects: there are two disjoint item universes.**
+The 18-item in-memory `SHOP_CATALOG` (synced to the table at boot) and the `seed_*` rows. Every
+**action** resolves through the catalog; only **display** reads the table. So a seeded item is
+visible in `scripts`, and `buy`/`sell`/`use`/`equip` all reject it.
+
+Headline findings beyond G3:
+
+- **`crack.protected` cannot be used by anyone.** The matcher looks for `"quantum charge"`; the item
+  is `"Quantum Decryptor Charge"`. The player is told *"Requires a Quantum Decryptor Charge"* while
+  holding one — and `use quantum_charge` destroys the 7500-credit item for no effect.
+- **Every example item id in the shop help text is fictional.** `port_scanner`, `firewall`,
+  `health_pack`, `stealth_module` — none of the 18 real ids. `man buy` teaches a failing command.
+- **Item effects are displayed and never applied**, by two different summation rules that disagree.
+  Equipping is cosmetic; the only real coupling is *ownership* gating hack tool bonuses.
+- **The whole `MemoryService` session lifecycle is dead code** — `initializeSession` and
+  `cleanupSession` have zero callers, so four per-user maps leak for the server's lifetime and an
+  active trace's CPU/RAM drain is permanent.
+- The web client intercepts `shop`/`scripts`/`equipment` into GUI dialogs **and discards the
+  arguments**, so the server's own help examples cannot reach the server from a browser.
+
+Design decisions taken (maintainer, this session): hardware is **installed, not equipped** — and
+because it is non-consumable with `maxStack: 1`, ownership *is* installation, so this needs no new
+schema; and `SHOP_CATALOG` becomes the **only** source of truth, with the seeded block deleted. One
+sub-decision is open (supersede-with-trade-in vs. stack) and is written up in §7.
+
+Full defect register (S1-S25) and the proposed fix order are in that document.
+
+### Shop Tier 1 — DONE 2026-08-31
+
+The three string mismatches (S1, S5, S15) are fixed and verified against a live database.
+`crack.protected` now resolves the charge by catalog **id**; the shop help's example ids are all real;
+the darknet `rare_script` reward looks up by id and warns instead of failing silently. Runtime proof
+that S15 was real: the old `findFirst({ name: "zero_day_exploit" })` returns **NULL** against the live
+DB while the id lookup returns the row named `"Zero-Day Exploit"`.
+
+New `scripts/verify-shop-contract.ts` (5/5) closes the bug *class* — every string that must resolve to
+an item is checked statically, including a ban on name-substring matching. **Each check was
+negative-tested** by reintroducing its bug and confirming the FAIL, and the script throws rather than
+passing vacuously if any extraction yields zero items.
+
+**D2 needs correcting before G3 lands:** "delete the seeded `shopItems` block" would break the only
+working item effect in the game. Six of the 19 seeded rows are live persona tokens
+(`tokenConsumption.ts` gates persona messaging on them, `missionService` drops them, the darknet
+`aida_token` reward grants one). They must **move into `SHOP_CATALOG`**, not be deleted. Live count:
+37 `ShopItem` rows = 18 catalog + 19 seeded.
+
+### G3 — DONE 2026-08-31
+
+Hardware changes the rig. **`scripts/verify-g3-hardware.ts` 19/19** over the real socket path, plus
+`verify-shop-contract.ts` 10/10; gate 15/15, U1 11/11, mission provisioning 5/5 all still green.
+
+9 hardware parts + 6 persona tokens moved into `SHOP_CATALOG` (4 software duplicates dropped); new
+`HARDWARE` and `TOKEN` categories; ownership *is* installation; supersession with a 50% trade-in
+**inside the purchase transaction**; one `refreshComputerSpec` helper replacing the omission at all
+nine call sites; a new `specs` command and a refresh before every process readout (closing S10, without
+which the feature would still have looked inert); `reconcileShopItems` running at **boot as well as
+seed**, since existing databases will never be reseeded.
+
+Measured on a level-30 player: RAM 640 → 704 on tier 1, then **768 on tier 2 — not 832**, with
+`Traded in RAM Module Mk1 (+250 credits)` and a net spend of 1750.
+
+**The harness failed 13/19 on its first run and both causes were worth having.** Four orphaned
+`seed_*` rows survived because the reconcile only deleted ids in its rename map — it now sweeps every
+unreferenced one and skips those a player still holds, since the FK defaults to `Restrict`. And my own
+harness left the test player at level 1, so a tier-2 purchase was *correctly* refused; the assertions
+are now deltas from a measured baseline rather than absolutes.
+
+**Correction: S20 in `SHOP_ARCHITECTURE.md` was wrong.** Reseeding would not have thrown on the
+`ShopItem` FK — `seed.ts` deletes `inventoryItem` first. The stale-`upsert` half was real and is now
+moot.
+
+Still open and untouched by this: S3/S4 item effects, S6/S7 client intercept and shop search, S8/S9
+dead session lifecycle and permanent trace drain, S11 idle resource updates, S12/S13 unique constraint
+and unvalidated grant, S14, S16, S23.
+
+---
+
+## Method learnings — these change HOW the remaining phases should be run
+
+Written 2026-08-31 after Phase 0 + Phase 1 + the U-series. These are not tasks; they are the
+patterns that actually produced results, and the traps that actually cost time. Read before
+starting any later phase.
+
+**1. Each fix reveals the next layer. Never treat a subsystem as fixed because its own test passes.**
+Five instances this session: G1 was masked by G2; S2 by G3; G3's reward path by inventory filtering;
+the tutorial's key route by objective crediting; and `hack` itself by ownerless servers. In every
+case the *first* fix was correct and the feature still did not work. The practical rule: after
+fixing something, run the whole player-visible flow, not the unit you touched.
+
+**2. Verify by execution, and give every negative assertion a positive control.**
+Static reading missed all three U1 defects and would have missed the ownerless-server P0 entirely.
+Worse, my own harnesses produced *vacuous passes* twice — "hidden file absent" passed against empty
+output, and "fallback delivered" passed because the AI answered a junk prompt. A negative assertion
+without a positive control is not a test. Phase 7's test suite should encode this.
+
+**3. `getService<any>` erases contracts, and there are 53 left.**
+The `onFactionServerHacked` arity bug — a single object passed to a 4-positional method, silently
+throwing for months — survived precisely because its call site was `getService<any>`. The typed call
+site two functions away was correct. Current count: **53 `getService<any>` vs 46 typed resolves.**
+Every one is a place where a signature change fails at runtime instead of at build time. Converting
+them is cheap, mechanical, and belongs in Phase 5 (it *is* the arity-bug work) rather than waiting
+for Phase 7's architecture pass.
+
+**4. Fix the bug class, not the instance you tripped over.**
+I removed one `as any` from the mission-integration path, then reintroduced the identical pattern in
+`networkCommands` a few edits later — in the same session, having just written the lesson down. The
+audit caught it, not me. Whenever a fix is described as "the `X` pattern was wrong", grep for `X`
+before closing the item.
+
+**5. Invisible fallbacks are the real AI problem, and it is now measurable.**
+Phase 6b hypothesised that AI quality complaints were mostly silent fallbacks rather than model
+quality. Confirmed in miniature: an NPC reaction fell back to hand-written text and **the entire run
+emitted one log line — mine.** `safeAI`'s failure path logged nothing, even at `debug`. The
+`usedAi` flag added in `npcReactionService` is the pattern to generalise across the 41+ `safeAI`
+call sites. Until that lands, every "the AI is bad" report is unfalsifiable.
+
+**6. Documentation rots numerically, and the knowledge file needs auditing too.**
+An audit of PLAN.md against code found all 17 Phase 0/G assertions correct — but PROJECT_KNOWLEDGE,
+which I had *not* audited, claimed 61 models against 66, listed 30 migrations that no longer existed,
+omitted five models, and described `User.role` without `npc` while npc-role accounts owned every NPC
+server. Line-number citations also drift whenever later work edits the same file. Prefer symbol names
+over line numbers; re-derive counts rather than copying them forward.
+
+**7. Tuning against a broken subsystem is the most expensive mistake available.**
+U2's premise was wrong because the thing it wanted to re-tune was never connected to the thing that
+broke. G4's fix would have locked players out of their own home servers. The `hack` skill gate was
+calibrated against a command that could not reach 44 of 59 servers. **Before tuning any number,
+verify the mechanism it feeds is live** — and prefer measuring the current effect over reasoning
+about it (U2's measurement showed `securityLevel` has only 6 distinct player-visible values across
+its 1–10 range).
+
+**8. Prefer removing a bug class to mitigating it.**
+Phase 0 mitigated the `shared/types.js` shadowing by pinning Vite's `resolve.extensions`. The
+ambiguity itself — `shared/types.ts` coexisting with `shared/types/index.ts` — survived until this
+session, when deleting the redundant barrel removed the possibility entirely. Same shape as the
+soft-gate work: the hard gate was redundant with a system that already degraded gracefully.
+
+---
+
+## Phase 2 — Tooling & deploy (1 day)
+
+**Decision (2026-08-30): no automated tests until the game design settles.** The codebase is
+still changing shape too fast for tests coupled to internals to hold their value.
+
+Consequences, recorded honestly so this is a deliberate trade and not an accident:
+- **Phase 7's safety net is restored by decision 3**, not lost — characterization tests are written
+  *at* Phase 7, black-box, against then-current behaviour. The gap is Phases 0–6b, which are
+  verified manually.
+- The static gate below therefore carries more weight than it normally would. Keep it strict.
+- Manual verification only works if it's written down — hence `VERIFY.md` below. Without it, "test
+  by playing" degrades into "test the thing I just changed."
+- `A3`'s socket-contract check is worth having as a **build-time script** rather than a test —
+  it's a static diff of emitted vs. subscribed event names, not a behavioural test, and it
+  catches all 11 dead listeners for ~30 lines.
+
+- [x] **A7 — DONE 2026-08-31.** `npm test` was failing outright: `jest.config.js` referenced
+      `src/__tests__/setup.ts`, deleted back in Phase 0. Removed the `test` script and the config.
+      Kept the jest devDependencies — Phase 7 needs them, and the misleading signal was the script.
+- [~] **A3 — check WRITTEN 2026-08-31, violations part-fixed.** `scripts/check-socket-contract.ts`,
+      at the REPO ROOT because `server/scripts/` is gitignored and CI runs on a clean clone.
+
+      Key design point: the server has 98 `.emit(` calls but only 60 are socket emissions — the rest
+      are EventEmitter service events. Diffing all of them would report ~38 false positives and the
+      check would be ignored. It also throws rather than passing vacuously if either regex matches
+      nothing.
+
+      **It found 16 violations, and the first classification was WRONG in a way that nearly cost
+      working code.** I reported 14 as "dead client listeners" and recommended deleting them. The
+      maintainer pushed back and asked whether they were for unimplemented features. They were not
+      dead at all — they split three ways:
+      - **3 needed only a BRIDGE**: the server raised the event on the EventEmitter bus, the client
+        handler existed, and nothing forwarded it to the socket.
+      - **11 are NAME DRIFT** against an event the server does emit (`system:announcement` ↔
+        `system:broadcast`, `discovery:made` ↔ `server:discovered`, plus `hack`/`mission`/`process`
+        fan-outs where the counts differ 4:1 and 1:6).
+      - **0 genuinely dead.**
+
+      The check's wording caused the error — it said "no server emission" when it meant "no SOCKET
+      emission". Now split into "exists but unbridged" vs "never emitted under this name".
+
+      **DONE:** `rewards:xp_granted` and `rewards:credits_granted` bridged in `index.ts` and given
+      real notification bodies. Their empty bodies were justified by "shown in command output", which
+      stopped being true once rewards began arriving asynchronously (background process completion,
+      mission hooks, dungeon payouts) — players were earning XP and credits with **no feedback at
+      all**. Contract check: unbridged 3 → 1. `svelte-check` 0 errors.
+
+      **NOT bridged, deliberately:** `process:failed`. `processStateService.failProcess()` has **zero
+      callers**, so the event never fires — bridging it would be a bridge to nowhere. Wire
+      `failProcess` where processes actually fail (→ **Phase 5**, with the other process defects),
+      then bridge it.
+
+      **RECONCILED 2026-08-31 — 16 violations down to 10.** Checked PAYLOAD COMPATIBILITY before
+      touching any name, which mattered: of the four pairs that looked like clean renames, only two
+      were.
+
+      *True renames (payloads verified compatible):*
+      - `system:announcement` → `system:broadcast` — the admin `broadcast` command sends
+        `{message, from, timestamp}` and the handler reads `data.message`. **Admin broadcasts had
+        never reached a single player.**
+      - `game:state_update` → `game:event` — `{type, message, timestamp}`, compatible.
+
+      *Looked like renames, would have introduced visible bugs:*
+      - `message:error` → `message:result`: the real event is an ACK carrying `{success, error}` and
+        it fires on SUCCESS too. A rename would have popped "Message error: undefined" on every
+        message successfully sent. Handler rewritten to fire only when `success === false` and read
+        `data.error`.
+      - `discovery:made` → `server:discovered`: handler read `data.title`; the server sends
+        `{count, subnet, servers[]}` with no title, so a rename would have rendered "New discovery:
+        undefined". Rewritten to summarise ("Discovered 3 servers on 10.10.10.0/24") and name the
+        first few IPs.
+
+      **DEFERRED TO PHASE 7** (with the typed socket contract) — 7 listeners that are *shape*
+      mismatches, not renames, and would otherwise be reconciled twice:
+      `hack:attempted`/`hack:successful`/`hack:blocked`/`hack:error` (4 client handlers vs the
+      server's single `hack:result`), `mission:updated` (1 vs the server's six mission events),
+      `faction:event` (vs `faction:contest_started`/`contest_resolved`), `server:file_modified`
+      (vs `server:updated`/`server:alert`). Each needs a decision about which side changes shape.
+
+      **Also still open:** `process:failed` (unbridged — but `failProcess()` has no callers, so fix
+      that in Phase 5 first) and the 2 orphan client sends `join:room`/`leave:room`, which the server
+      never handles — decide whether rooms are a feature or the sends should go.
+
+      **CI consequence:** the gate cannot be green at 0 violations without the Phase 7 work, so CI
+      should start with a baseline of these 10 and fail on anything NEW.
+- [x] **O4 — DONE 2026-08-31.** `.github/workflows/ci.yml`, three jobs, every step run locally
+      first. **server**: `npm ci` → `prisma generate` → `tsc --noEmit` → `eslint` → audit.
+      `prisma generate` is ordered before `tsc` deliberately — without it `tsc` fails with confusing
+      "has no exported member" errors rather than a clear cause. **client**: `svelte-check` →
+      production build (which also exercises the `VITE_API_URL` guard) → audit. Audit is
+      `--omit=dev --audit-level=high`; both workspaces report 0 vulnerabilities today.
+      **socket-contract** runs with `continue-on-error: true` — visible but non-blocking while its 10
+      known violations wait on Phase 7 (see the gate note below). Three separate lockfiles, so each
+      workspace installs independently; this is not an npm workspace.
+      **NOT YET OBSERVED RUNNING ON GITHUB** — `npm ci` on a clean runner is the likeliest divergence.
+- [→] **MOVED to "Go live" below (decisions 13 & 14):** migration adoption, and the
+      `Dockerfile`/`docker-compose.yml` work.
+- [x] **DONE 2026-08-31.** `client/.env.example` documents `VITE_API_URL` and `VITE_SOCKET_URL`,
+      and `vite.config.ts` throws on a production build when `VITE_API_URL` is unset. Verified BOTH
+      directions: it fails without the var and still builds with it. This matters because the value
+      is baked in at BUILD time — without the guard a production bundle silently ships pointing at
+      `http://localhost:3001` and fails with opaque connection errors in the browser.
+- [x] **Manual verification checklist — DONE 2026-08-31.** `VERIFY.md`: 7 sections, ~45 checks
+      (setup → register → tutorial → missions/shop/hack/files → skill gates → recently-changed →
+      reconnect), plus a "known broken, do not report" table so a run does not re-discover the
+      backlog. Every command referenced was checked to exist — which caught one: there is **no
+      `tutorial` command**, the tutorial is surfaced through missions and Architect mail.
+      §5 exists specifically for work that typechecks and passes its static check but has never been
+      observed in a browser — currently the reward-notification bridges, the `system:broadcast` and
+      `server:discovered` renames, the `message:result` rewrite, and `crack.protected`.
+
+**Gate:** CI green on the four static checks (`tsc`, `eslint`, `svelte-check`,
+`npm audit --audit-level=high`); `VERIFY.md` playthrough passes by hand.
+
+The socket contract check runs in CI and is **visible but non-blocking** while its 10 known
+violations wait on Phase 7's typed contract — 7 of them are shape mismatches, not renames. Flip it to
+blocking the moment Phase 7 lands. A permanently-red gate teaches you to ignore the gate, which is how
+those mismatches accumulated in the first place.
+
+Note the harnesses in `server/scripts/verify-*.ts` stay **gitignored and local** by maintainer
+decision (single machine, dev-only), so CI cannot run them. `scripts/check-socket-contract.ts` is at
+the repo root and IS committed — it is build infrastructure, not a dev utility.
+
+---
+
+## Phase 3 — Data model (2–3 days)
+
+One migration regeneration carries all of it, since data is disposable.
+
+### Start-of-phase survey — 2026-09-01
+
+**The gate below is STALE and must be rewritten.** It reads *"`prisma migrate deploy` works on an
+empty DB"*, which contradicts D2/decision 14: there are no migrations and won't be until go-live.
+`migrate deploy` cannot work without them. The real gate is `db push` from `schema.prisma` + seed,
+with migration adoption moved to the Go-live bucket.
+
+**Pre-flight data check (constraints can fail on existing rows, so this ran first):**
+
+| Constraint | Blocking rows today |
+|---|---|
+| `@@unique([userId, shopItemId])` on `InventoryItem` (D7) | **0** — safe to add |
+| `credits >= 0` CHECK (D4) | **0** — safe to add |
+| `@@unique([serverId, parentId, name])` on `FileSystemNode` (D7) | **1 — must be cleaned first** |
+
+The one blocker is itself evidence for the fix: server "Phantom Probe Node" (AI-provisioned, not a
+player home) has **two `home` directories created in the same second**, each with one child — a
+concurrent-provisioning race, exactly what the constraint prevents. Clean up the duplicate (merge
+children, drop one) as part of landing D7, and check whether `serverContentService` can provision the
+same server twice.
+
+**Suggested order** (largest-risk last, and each independently verifiable):
+1. ✅ **DONE 2026-09-23.** Schema constraints + indexes + FKs (D7, D9, D10, R8's column, K's tables)
+   — one `db push`. D4's CHECK is the one exception and stays open by decision (see D4 below).
+   R8's column was described here as "inert alone"; that was wrong about the *bug* — see R8.
+   **Gate: `verify-phase3-schema.ts` 18/18**, every constraint proven to reject with a positive
+   control beside it.
+2. ✅ **DONE 2026-09-23** for `D10` connections and `D6`; the `D9/D10` **N+1s are still open**,
+   as is D7's `upsert` conversion.
+   **Gate: `verify-phase3-d6-fragment-race.ts` 8/8 (negative-tested)**, plus the full existing suite
+   green against a live server — tutorial 11/11, gate 15/15, P0 4/4, G3 19/19, shop 10/10,
+   provisioning 5/5, `tsc` 0, eslint 0.
+3. ✅ **DONE 2026-09-23.** `PlayerProgressRepository` (D4/D5/D8). The "27 distinct writers" was an
+   undercount — there were **43** write sites across 22 files; 24 moved onto the repository and the
+   19 left are accounted for individually below.
+   **Gate: `verify-phase3-progress-repo.ts` 26/26 with negative controls that reproduce the audit's
+   own numbers (−200 credits, hacking 101).**
+4. ✅ **DONE 2026-09-23.** `D3` missionProgress blob → `PlayerMission` + `PlayerMissionObjective`.
+   Both passes complete: all 64 call sites on the repository, storage moved, backfilled.
+   **Gate: `verify-phase3-d3-mission-lock.ts` 22/22.**
+
+
+**Scoping (decided 2026-08-30):** the game is a shared world with mostly-solo play, *plus*
+contested objectives, PvP, and contests. So concurrency work is prioritized by **what is actually
+contested**, not blanket-hardened:
+
+- **Contested by design → full priority:** key fragments (D6 — two players cracking the same
+  fragment is a *designed* interaction, and both currently "win"), server contests, PvP hacking,
+  faction warfare.
+- **Self-racing → full priority regardless of player count:** D3's `missionProgress` race is
+  **not** player-vs-player — it's player-vs-*background-timer*. The 15-minute expiry sweep and the
+  mission generator race the player themselves, so it fires in single-player. Same for D8's
+  uncapped `fragment.crack` skill farm and D4's two-tabs double-spend.
+- **Genuinely rare → correctness-only, no locking gymnastics:** cross-player writes to unrelated
+  rows.
+
+Net effect: the `PlayerProgressRepository` and the fragment/contest fixes stay at the top; the
+broader locking work relaxes.
+
+- [x] **D2** RESOLVED 2026-08-31 — **by deciding NOT to have migrations yet.**
+      First I rebuilt them: the old state was a 1798-line `0001_baseline` that had **never been
+      applied** (the schema was actually maintained with `db push`), so I generated a single
+      `0001_init` from `schema.prisma` via `migrate diff` and applied it with `migrate reset`, which
+      also reseeded. That worked — `migrate status` reported "Database schema is up to date!".
+
+      **Then the maintainer chose to defer migrations until there is a live database, and that is the
+      better call.** A single baseline is just "create all 66 tables", which is exactly what
+      `db push` already does from `schema.prisma`; migrations only earn their keep by evolving a
+      database you cannot drop, and there is no such database pre-launch. The decisive argument is
+      that **half-adoption is the real hazard, and this repo had already proved it** — 30 migrations
+      documented by name, a baseline never applied, and the live schema maintained by `db push`.
+      Committed-but-unmaintained migrations are worse than none because they look authoritative.
+
+      So: `prisma/migrations/` deleted, and the `_prisma_migrations` bookkeeping table dropped so the
+      database sits in a pure `db push` state with no phantom history to inherit later.
+      Scripts now match the real workflow — `db:push`, and `db:reset` =
+      `db push --force-reset && seed`. `db:deploy` was **removed**: `migrate deploy` cannot work
+      without migrations, and leaving it would have been a trap.
+      `.gitignore` keeps `!server/prisma/migrations/**/*.sql` ready so the blanket `*.sql` rule can't
+      swallow migrations the day they're adopted.
+
+      Also corrected a factual error in my own Phase 0 D1 note, which claimed the blanket `*.sql`
+      rule meant "a fresh clone could not provision a database at all". **It always could**, from
+      `schema.prisma`. What ignoring migrations actually costs is deploy history.
+
+      **Verified:** `prisma validate` passes, `db push` reports "already in sync", `tsc` 0.
+      **Not verified:** the destructive `db:reset` path — the run was blocked by a safety check. The
+      `--force-reset` flag is confirmed present in prisma 5.22.0 and both halves are individually
+      known-good, but run it once before relying on it.
+
+- [x] **R8 — DONE 2026-09-23. The column landed ALONE, and the "inert" warning below was wrong.**
+      `PlayerProgress.skillPoints Int @default(0)` is in `schema.prisma` and applied. The note below
+      says landing the column without Phase 8's skill economy "leaves it inert" — that is true of the
+      *economy*, but **not of the bug**: the column's absence was breaking a statement that runs
+      today. Verified at runtime, not reasoned: replaying the exact
+      `darknetDungeonService` `intel_package` statement (`experience: {increment}` and
+      `skillPoints: {increment}` in one `data` object) now commits and **the XP actually lands** —
+      0 → 5000 and 0 → 2 on a real row, restored afterwards. Before the column, that whole `update`
+      threw and `safeExecute` ate it, taking the XP with the skill points.
+      Re-confirmed by grep at the same time: this is still the **only** Prisma write of the field.
+      `missionService.ts:1091` and `storyMissionService.ts:368` build plain JS reward objects, and
+      `missionService.ts:1172` / `missionCommands.ts:416` only render strings — so missions still
+      award no skill points and nothing spends them. **That half is Phase 8** and the column is
+      documented in the schema as such, so nobody wires an economy to it by accident.
+      **(original note follows)** **Sharpened 2026-08-31 — the original wording was too broad.** `skillPoints` is genuinely absent
+      from `schema.prisma`, and 28 code sites mention it, but **mission rewards only ever *display* it**
+      (`missionService.ts:1148`, `missionCommands.ts:370`) — they never write it, so missions are fine.
+      There is exactly **one** Prisma write: `darknetDungeonService.ts:1147-1149`, the `intel_package`
+      dungeon reward, which spreads `skillPoints: { increment }` into the **same `data` object** as
+      `experience: { increment: data.xp || 0 }`. Prisma rejects the unknown column, the whole update
+      throws, and `safeExecute` swallows it — so the XP is lost with it. That part of the original
+      claim was right.
+      **It fails 100% of the time it fires**, not intermittently: the reward pool hardcodes
+      `skillPoints: 2` on `intel_package` (`:122`), so the field is always present. With weight 4 of 22
+      total, roughly **18% of DarkNet dungeon conquests currently grant nothing at all** — no XP, no
+      skill points — after a full multi-hop dungeon run.
+      **This item is only the column.** The design it serves now lives in Phase 8 →
+      "SKILL ECONOMY" (missions award *defined* points, e.g. +10 hacking; levelling awards *free*
+      points the player assigns). Level-up currently grants nothing and nothing spends points, so
+      landing the column alone leaves it inert — do the two together.
+- [~] **D7 — constraints LANDED 2026-09-01; `upsert` conversion still open.**
+      Both uniques are in `schema.prisma` and applied via `db push`, and both were proven to REJECT a
+      violating write (P2002) with a positive control showing a non-duplicate insert still succeeds —
+      present in `pg_indexes` is not the same as enforcing.
+
+      **A real duplicate had to be merged first**, and it justifies the constraint: the AI-provisioned
+      server "Phantom Probe Node" held **two `/home` directories created in the same second**, each
+      with a different child — concurrent provisioning. Children were re-parented onto the survivor
+      rather than cascaded away. Worth checking whether `serverContentService` can provision one
+      server twice; the duplicate is a symptom, not just dirty data.
+
+      **Caveat recorded in the schema:** `parentId` is nullable and Postgres treats NULLs as distinct,
+      so the FileSystemNode constraint does **not** cover two same-named ROOT nodes on one server. If
+      those ever appear it needs a partial index on `(serverId, name) WHERE parent_id IS NULL`.
+
+      **`upsert` conversion — DONE 2026-09-23.** The plan called
+      `architectInterventionExecutor.ts:705` "the known one". There were **39**: 7 `inventoryItem` +
+      32 `fileSystemNode`. All 7 inventory sites and 17 filesystem sites are converted; the rest are
+      accounted for individually below.
+
+      **The work was classification, not mechanical conversion** — a duplicate is not always
+      something to merge:
+      - **MERGE** where re-running is the intent: provisioning, content injection, dungeon
+        regeneration, reward grants. These re-run by design (`ContentQueueService` retries,
+        `ensureReady` can be driven by two players connecting at once), so a row another run just
+        created is expected.
+      - **ERROR** where the player must know: `touch`, `mkdir` and `cp` now report
+        `FILE_EXISTS` / `DIRECTORY_EXISTS` / `DESTINATION_EXISTS` on a lost race instead of a generic
+        failure. An upsert there would silently overwrite a file the player never asked to replace —
+        and `cp` had **no name check at all**, so it was creating silent duplicates before the
+        constraint existed.
+
+      **Two player-visible defects found by classifying, not by the constraint:**
+      - **`defenseCommands.ts` decoys charged and failed.** The honeypot's decoy names are fixed
+        strings (`admin_passwords.db` among them) and the cleanup only removes rows already marked
+        `isDecoy`, so a genuine file the player had downloaded under that name collided. There was no
+        try/catch there *or in either caller*, so the P2002 escaped to `commandProcessor`'s outermost
+        handler as "Command execution failed" — **after `purchaseDefense` had already committed the
+        5000-credit charge in its own transaction**.
+      - **`serverContentService`'s bare `catch` was building the duplicate roots.** It was written to
+        mean "FileService is not registered" but swallowed *every* failure, so a part-way
+        `initializeFileSystem` was misread as "DI unavailable" and execution fell through to the
+        standalone path, which built a SECOND root. The unique index cannot catch that. Resolution
+        failure and initialisation failure are now told apart.
+
+      **Roots needed a different mechanism.** `@@unique([serverId, parentId, name])` does not cover
+      root nodes — `parentId` is null and Postgres treats NULLs as distinct — and Prisma types the
+      compound's `parentId` as non-nullable, so an upsert on that key is *impossible*. The two
+      provisioning paths that matter (`fileService.initializeFileSystem`,
+      `serverContentService.ensureBaseFilesystem`) now give the root a **deterministic id**
+      (`root_<serverId>`), which makes the PRIMARY KEY do the work: a concurrent creator collides
+      there and resolves to the existing row. No schema change, and the preceding `findFirst` still
+      handles roots created earlier, which carry cuids.
+
+      **Deliberately NOT converted, each checked:**
+      - `routes/auth.ts` ×4 — inside one `$transaction` against a server created two statements
+        earlier; every parent is brand new, so a collision is unreachable.
+      - `routes/adminApi/servers.ts:267` and `contentDraftService.ts:324` — already surface as a
+        **409 UNIQUE_CONSTRAINT** via `formatServerError`, which is the right answer: an admin
+        creating or approving a colliding name should see the conflict, not silently clobber.
+      - **5 darknet root creates + `contentDraftService:239` + `personaService:944`** — all root
+        nodes, all guarded by a `findFirst`, all on transient dungeon/draft servers that are torn
+        down and regenerated, all inside `safeExecute`. **Residual hazard, recorded not hidden:** the
+        real fix is a partial unique index on `(serverId, name) WHERE parent_id IS NULL`, which needs
+        raw SQL — so, exactly like D4's CHECK, it lands **with migration adoption** rather than as a
+        `db execute` the next `db push --force-reset` would silently drop.
+- [ ] **D4** Add a `credits >= 0` CHECK constraint.
+      **Note 2026-09-01:** Prisma's schema language has no CHECK support, so this needs raw SQL. With
+      migrations deferred to go-live, a `db execute` CHECK would be silently dropped by the next
+      `db push --force-reset`, leaving a constraint everyone believes exists. Either land it WITH
+      migration adoption, or rely on the application-level guard — which is what
+      `PlayerProgressRepository.spendCredits` (below) is for, and is the more useful fix anyway.
+- [~] **D9 — Mission indexes DONE 2026-09-23; `take` limits still open** (they move to the
+      unbounded-query item in step 2).
+      Three composite indexes, **derived from the predicates actually present in `src/`**, not from
+      the audit's two-item sketch. Every call site is cited in a comment above them in
+      `schema.prisma` so the next person can tell whether an index still has a consumer:
+      - `[assignedTo, type, status]` — 5 tutorial/token sites use some prefix of exactly this triple;
+        `achievementService.ts:155` and `factionService.ts:516` filter `assignedTo + status` and ride
+        the leading column. This replaces the audit's suggested `Mission(assignedTo)`, which the
+        composite's leftmost prefix already covers — a separate single-column index would be dead weight.
+      - `[status, difficulty]` — the D9 headline (`missionService.ts:1431`, no `take`, seq scan + sort).
+      - `[factionId, status]` — `factionService.ts:632`.
+      **Existence is not use.** `EXPLAIN` on the headline query (with `enable_seqscan` off, because
+      the table is only 216 rows today and Postgres would correctly seq-scan it regardless) confirms
+      the planner picks `missions_status_difficulty_idx`. Recorded honestly: at current data volume
+      these indexes change nothing measurable — they are for the continuously-growing table the audit
+      describes, and the table is growing (216 missions already).
+- [x] **D10 (FKs) — DONE 2026-09-23.** All four tables constrained, plus the two Bounty columns the
+      audit did not enumerate.
+      **Checked the live data first** — 0 orphans across all 7 candidate columns
+      (14 access keys, 95 connections, 82 discovered links, 0 bounties, 91 users), so nothing had to
+      be cleaned.
+      **`onDelete` is `Cascade`, and that choice is load-bearing rather than cosmetic.** The audit
+      said "no code deletes a `User` today"; **that is false** — `prisma/npcOwnership.ts:201` deletes
+      duplicate NPC accounts during identity reconciliation, and `prisma/seed.ts:499` does a
+      `user.deleteMany()`. Under the default `Restrict` the FKs would have turned that merge into a
+      hard failure. (The seed happens to delete all four tables before users, so it was safe either
+      way — but only by ordering, not by design.) Bounty keeps its optional columns alive instead:
+      `claimedByUserId` and `serverId` are `SetNull`, so a bounty survives losing its claimer.
+      **Proven to enforce**, not merely present: every FK rejects an orphan insert with P2003, each
+      paired with a positive control inserting a valid row. `bounties.issuedByFactionId` needed no
+      data check — `hackService.ts:2161` sources it from `GameServer.factionId`, which already had a
+      FK to `Faction`.
+- [x] **K — `KnowledgeTopic` + `PlayerKnowledge` tables — DONE 2026-09-23**
+      (`KNOWLEDGE_DESIGN.md` §2). Schema only; nothing reads them yet and the gameplay wiring
+      (redaction engine v2, `codex`, `analyze` routing) stays in Phase 8. Landed as designed,
+      including the `@@unique([userId, topicId])` and both `onDelete: Cascade`s the design doc added
+      specifically to avoid repeating D7/D10. Verified: the unique rejects a second row for the same
+      pair (P2002) and deleting a topic cascades its `PlayerKnowledge` rows away.
+      Absence of a row is level 0, so there is deliberately no level-0 value.
+- [x] **D4/D5/D8 — `PlayerProgressRepository` — DONE 2026-09-23.**
+      `server/src/repositories/playerProgressRepository.ts`, registered as a DI singleton and exposed
+      on `CommandContext` as `context.playerProgress` so a command module does not have to reach for
+      `db.client` to award anything.
+
+      **The count was 43, not 27** — 43 write sites across 22 files. 24 moved onto the repository;
+      the 19 that remain are deliberate and each was read to confirm it:
+      **10** are `missionProgress` blob writes (that is D3, below), **4** create the row,
+      **3** are legitimately outside the repository's remit (admin arbitrary edit, backup restore's
+      whole-row splat, the achievements array), and **2** are increments I added with a comment
+      saying why (`repNeutral`, `skillPoints`).
+
+      **The design rule: every mutation is one statement whose correctness does not depend on a value
+      read earlier.** Where Prisma cannot express that, it drops to raw SQL rather than computing the
+      clamp in JS.
+      - `spendCredits` puts the balance test in the WHERE clause of the decrement, so the rowcount
+        IS the authorization result and there is no window between deciding and acting. This
+        replaced `shopService`'s `findUnique` re-read that sat under a comment claiming it
+        "prevent[ed] race conditions" — a plain SELECT in a READ COMMITTED transaction takes no row
+        lock, so it never did.
+      - `addSkill` clamps with `GREATEST(0, LEAST(100, col + delta))` **inside the UPDATE**, so the
+        clamp reads the row version it writes. The column name comes from a closed whitelist map,
+        which is also the injection guard for the one interpolation raw SQL requires.
+      - `addExperience` increments and returns, then raises `level` only
+        `where: { level: { lt: newLevel } }` — monotonic, so a racing grant cannot lower it.
+
+      **Found while doing it, not in the audit: `level` was written by exactly ONE code path.**
+      `missionService.grantRewards` raised it; everywhere else it was only ever set to 1 at row
+      creation. XP from `hackService`, `darknetDungeonService`, `messageEncryptionService` and
+      `fileAccessCommands` never recomputed it, so a player who only hacked would accumulate
+      experience and stay level 1 — which gates their CPU/RAM/bandwidth, their mission difficulty
+      band and their shop access. **Measured before escalating: it has never bitten.** The highest
+      real XP total in the DB is 80 and level 2 needs 100, and 0 players are behind their implied
+      level. Every non-level-1 row is a harness player levelled directly by a script.
+      Also deduplicated the level curve: `calculateLevel` had two identical private copies
+      (`missionService`, `missionGenerator`) and is now one exported `levelForExperience`.
+
+      **CORRECTION to my own note earlier in this session:** I wrote that `traceService`'s stealth
+      decrement "had no floor". It does — `Math.min(2, progress.stealth)`. It is racy in the same
+      way as the caps (JS arithmetic over an earlier read), not unfloored. Fixed in the repository
+      doc comment too.
+
+      **Gate: `verify-phase3-progress-repo.ts` 26/26, with negative controls.** Each race runs the
+      operation N times with `Promise.all` against one row. The two negative controls run the OLD
+      patterns and assert they still break — they reproduce the audit's exact numbers, **−200
+      credits** and **hacking 101**. Without them every positive assertion could have been passing
+      because the harness failed to interleave at all.
+      Server boots to listening; full suite green (tutorial 11/11, gate 15/15, P0 4/4, G3 19/19,
+      shop 10/10, provisioning 5/5, schema 18/18, D6 8/8); `tsc` 0, eslint 0.
+
+- [ ] **NEW, found during the repository work — filed to Phase 5, NOT fixed here (decision 11).**
+      `hackService.ts:1973` calls `traceService.initiateTrace(attackerId, serverId, evidenceLevel)`
+      with **3 arguments against a 4-parameter signature**
+      (`targetId, initiatedBy, serverId, evidenceLevel`). So `serverId` receives the evidence level
+      and `evidenceLevel` is `undefined`; `ActiveTrace.serverId` has a FK to `GameServer`, which
+      rejects it. **Observed in the boot log** as `Failed to initiate trace {"serverId":100}` — 100
+      being the evidence level, not a server id. The trace countermeasure on that rung has therefore
+      never worked.
+      It survived because the call site is `getService<any>(TRACE_SERVICE)` — **the third recorded
+      instance of `any` erasing a signature in this codebase**, after `onFactionServerHacked` and the
+      `(missionIntegration as any)` casts. Typing the call site IS the fix, which is exactly what
+      Phase 5's R5 item is for. The sibling call at `hackService.ts:1270` passes all four correctly.
+- [~] **D3 — PASS 1 STARTED 2026-09-23. `PlayerMissionRepository` exists and the expiry sweep is
+      converted; the other ~60 call sites are not yet.**
+
+      **Scoped first, and it is bigger than the one-line item suggests:** 64 touchpoints across 7
+      files (`missionService` 37, `tutorialService` 7, `storyMissionService` 7, `missionGenerator` 7,
+      `aiAgentTools` 3, `missionCommands` 2, `auth` 1) — and unlike the `PlayerProgressRepository`
+      work, **there is no seam**: every single one inlines `(progress.missionProgress as any) || {}`
+      and rewrites the whole blob.
+
+      **Shape confirmed against the live DB, not the type.** 89 of 101 players hold missions, max 6
+      each, max 3.6 KB; 285 mission entries carrying
+      `missionId / userId / status / startedAt / objectives` (202 also `expiresAt / completedAt`);
+      415 objectives carrying `id / type / target / current / completed / description` (+`metadata`
+      on 326). Statuses in use: `active` 181, `available` 75, `completed` 29.
+
+      **Two passes, because a direct swap would mean two sources of truth at every intermediate
+      state.** Pass 1 puts a repository over the EXISTING blob — a pure refactor, no schema change —
+      which gives the blob one writer and closes the races. Pass 2 swaps the repository's internals
+      to `PlayerMission` + `PlayerMissionObjective` and backfills; its blast radius is one file.
+
+      **The serialisation is a QUEUE, not the `sessionLocks` pattern this item suggested extending.**
+      That one *rejects* when contended, which for a mission update means silently dropping a reward
+      — the defect, not the fix. `mutate`/`mutateAll` chain per user so a contender waits.
+
+      **PASS 1 IS COMPLETE — all 64 sites converted.** Every read and write of the blob now goes
+      through the repository. What is left touching `missionProgress` directly is **three row
+      CREATIONS** (`auth.ts:103`, `missionService.ts:407`, `tutorialService.ts:998`) and a handful of
+      comments — creation is `PlayerProgress`'s concern and has no blob to race with.
+
+      Per method, and each one is a distinct race that is now closed:
+      - `checkExpiredMissions` — **the headline**. Loaded every player's blob with a bare
+        `findMany()` (no `where`/`select`/`take`, four JSON blobs per player), then per player
+        awaited an audit-log write *and* a `mission.update` before writing its stale copy back. Now
+        one critical section per player, **and the side effects moved out of it** — they were what
+        made the window two round trips wide. A lock alone would have serialised a still-wide window.
+      - `completeMission` — the **double-reward** site. The `"already completed"` guard and the
+        status flip were separate steps, so the sweep's stale write could revert `completed` to
+        `active`, after which the guard passed a second time and rewards were paid again. Now one
+        atomic claim: exactly one caller can transition the mission, so exactly one can pay.
+        Ordered claim-then-pay deliberately — D5's downside (crash ⇒ complete, unpaid) is real but
+        strictly better than pay-first, which is repeatable and therefore exploitable.
+      - `updateObjective` — the hottest mutation, driven by every credited event.
+      - `acceptMission` — two concurrent accepts both saw `available` and both wrote `active`, the
+        second also resetting `startedAt` and moving the expiry window.
+      - `missionGenerator` — **the worst stale snapshot in the codebase**: it merged into a
+        `progress` read at the top of `generateMissionsForPlayer`, *before* the template loop and
+        minutes of AI generation, wiping everything the player did meanwhile. `mutateAll` re-reads
+        inside the lock.
+      - `abandonMission`, `expireMission`, `isObjectiveCompleted`, `getPlayerMissions`,
+        `assignMission`, `tutorialService`, `storyMissionService`, `aiAgentTools`.
+
+      **Two design points worth keeping:**
+      - **The lock is a QUEUE, not the `sessionLocks` pattern this item suggested extending.** That
+        one *rejects* when contended; for a mission update that silently drops a reward — the defect,
+        not the fix.
+      - **Reentrancy throws rather than hanging.** The mutex is not reentrant, so a callback calling
+        back in would wait on a lock it already holds — a permanent hang for that player, with no
+        error and no log. Every callback is synchronous today, but nothing enforced that, so there is
+        now an `AsyncLocalStorage` guard. It had to be `AsyncLocalStorage`: **the first version used a
+        plain `Set` of held users and its own harness caught it** — a Set cannot tell re-entry from a
+        legitimately queued concurrent caller, which is the entire point of the queue.
+
+      **Gate: `verify-phase3-d3-mission-lock.ts` 13/13, negative-tested.** The two negative controls
+      run the old inline shape and still lose updates — a concurrent pair loses one entirely, and the
+      old sweep overwrites a player's `completed` with `expired`. Full suite green against a live
+      server, including `verify-tutorial-altpath` 11/11, which drives objective crediting end-to-end
+      over real sockets. Boot clean: 0 error lines, 0 reentrancy errors.
+
+      **PASS 2 IS COMPLETE — storage now lives in real tables.**
+      `PlayerMission` + `PlayerMissionObjective`, backfilled, with the repository's internals swapped
+      behind an unchanged external contract — so **pass 2 changed no caller**, which is exactly what
+      the two-pass split was for.
+
+      **Schema, derived from the measured data.** `target`/`current` are split into typed columns
+      (`targetCount`/`currentCount`, `targetFlag`/`currentFlag`, plus defensive `*Text`) rather than
+      stored as `Json`, and that is load-bearing: a numeric column is what makes the relative
+      increment below expressible at all. Which pair is live is decided by the runtime type of
+      `target`, mirroring G1. `position` preserves the authored order the array gave for free.
+
+      **The FK found a real problem.** 78 of 299 blob entries (26%) pointed at `Mission` rows that no
+      longer existed. Every one was `active`, none `completed`, and all were **already
+      non-functional** — `completeMission` calls `getMission` first and throws "Mission not found",
+      so they could never progress. The backfill skips and reports them rather than dropping them
+      silently, and `onDelete: Cascade` means the class cannot accumulate again.
+      Backfill: **221 missions / 316 objectives migrated, 78 skipped**, idempotent on re-run, with
+      round-trip assertions on status and objective count. The blob is deliberately **not cleared** —
+      it stays as a reversible fallback until this has run a while.
+
+      **The two things pass 1 structurally could not do, both now done:**
+      - **The sweep is one indexed query.** `findExpired` is
+        `where: { status: "active", expiresAt: { lt: now } }` against `@@index([status, expiresAt])`.
+        Pass 1 still scanned every player because that predicate is not expressible over a JSON map.
+      - **Objective credits are RELATIVE.** `incrementObjective` is a single
+        `UPDATE … SET current_count = current_count + n` with completion recomputed in the same
+        statement (sticky, per G1). The ~18 callers in `missionIntegration` that computed
+        `objective.current + n` from a read outside any lock now pass the delta to a new
+        `creditObjective`. **Measured by the harness's negative control: the old absolute-from-a-read
+        shape lands 1 of 25 concurrent credits.** A 96% loss rate under contention — worse than the
+        audit implied, and nothing a lock around the write could have recovered.
+
+      **Gate: `verify-phase3-d3-mission-lock.ts` 22/22**, covering the pass-1 lock behaviour, the
+      pass-2 increments and sweep query, and a round-trip proving count/boolean objectives and their
+      ORDER survive the storage change. Full suite green, `tsc` 0, eslint 0, boot clean.
+
+      **TWO HARNESSES BROKE, and neither was a code regression — both were reaching behind the
+      app's API.** `verify-tutorial-altpath` and `verify-gate-phase1` seeded missions by writing
+      `playerProgress.missionProgress` directly and read results back from it, so a storage change
+      broke them for reasons unrelated to what they assert. Both now go through the repository, the
+      same way the game does, and both are green again (11/11 and 15/15). Worth keeping as a lesson:
+      **a harness coupled to storage tests the storage, not the behaviour** — and the first instinct
+      ("tutorial is flaky under load", which the notes even licensed) would have buried a real signal.
+- [x] **D6 — DONE 2026-09-23.** The false "serializable reads" comment is gone and
+      `changeFragmentOwnership` now does a real compare-and-set: a new `expectedHolderId` parameter
+      goes into the `updateMany` WHERE (`null` for a claim, the victim for a steal, the sender for a
+      transfer), so the loser matches **0 rows** instead of overwriting the winner. On a 0-rowcount
+      it re-reads and re-runs the *caller's own* `validate`, so the loser gets the accurate message
+      ("currently held by X") rather than a generic error.
+      Fixed in the **shared helper**, which covers all three operations — claim, steal and transfer
+      — not just the claim the audit named. That is the "where else does this pattern live?" question
+      paying off: steal and transfer had the identical read-then-blind-write.
+      **Proven by a real race, and NEGATIVE-TESTED.**
+      `scripts/verify-phase3-d6-fragment-race.ts` drives the actual service (not raw SQL) with two
+      concurrent `claimFragment` calls: **8/8**. Then the CAS was removed and the harness re-run — it
+      reported exactly the audit's symptoms: **2 winners, 2 discovery records, and the loser's
+      `StoryProgress` counter inflated to 1**. Restored and re-verified 8/8, with the file diffed
+      byte-for-byte against its pre-test backup. Without that step the harness could have been
+      passing vacuously.
+- [x] **D10 (connections) — DONE 2026-09-23. The live data contradicted the audit, and the real
+      defect was worse.**
+      The audit described an increment/decrement mismatch. Measured first, per the standing rule:
+      **`currentConnections` was 0 on servers holding 33–38 active rows** — under-counting, the
+      opposite direction. And **95 of 95 `ServerConnection` rows were active** with `disconnectedAt`
+      null on every single one, every player holding 3 simultaneously.
+      Three separate faults, only the first of which the audit saw:
+      1. **`connect <ip>` never closed the connection being left.** `connectPlayerToServer` does call
+         `disconnectPlayerFromServer`, but that only touches `gameStateManager`'s **in-memory**
+         session — `serverService.disconnectFromServer` is the only thing that writes the rows, and
+         it is reached only from `disconnect` and `connect home`. So ordinary traversal leaked a row
+         per hop, forever. `connectToServer` now deactivates the player's other active rows; the
+         session model is one server at a time (`session.currentServerId` is singular), and there is
+         no per-terminal connect path, so that is the correct invariant.
+      2. **`currentConnections` had TWO writers with incompatible models**, both running on the same
+         connect: `serverService`'s `{increment: 1}` delta and `gameStateManager`'s absolute
+         `= serverState.activeConnections`. The absolute write runs last and won — and
+         `serverStates` is an in-memory Map that starts empty on every boot, which is why the stored
+         value was 0. The delta arithmetic the audit flagged never even got to matter. Both paths
+         now call a derive-from-rows helper, so it cannot drift.
+         **Recorded honestly: this value is display-only.** `maxConnections` is not enforced
+         anywhere — `networkCommands` and `adminCommands` only render `current/max` — so the drift
+         was cosmetic and locked nobody out.
+      3. **`fragment.steal` could run against a server the player had left.**
+         `fragmentCommands.ts:324` was `findFirst({ userId, isActive: true })` with **no `serverId`
+         and no `orderBy`** — "any active row, in whatever order Postgres returns it". Safe only if a
+         player had one active row, and they had three. It now binds to `session.currentServerId`.
+         This is the concrete form of the audit's "phantom access": the arbitrary row carried its own
+         stored `accessLevel` past the `>= 5` gate.
+      **Data repaired** by `scripts/fix-dangling-connections.ts` (idempotent): 95 active → 38, one
+      per user, 57 stale rows closed, counts re-derived on 4 servers. It asserts that
+      **"previously hacked" history survives** (95 → 95 rows with `accessLevel > 0`) — the three
+      sites that check it (`networkTopologyService` :732/:754, `playerInfoCommands` :984) filter on
+      `accessLevel > 0` *without* `isActive`, so deactivating is safe. Those are deliberately
+      historical and were **not** changed.
+      **Verified against real traffic, not just unit-level.** `verify-tutorial-altpath` (which hops
+      Home → Internet Exchange → Gateway → Firewall) still reports **11/11**, and afterwards each of
+      the 7 harness users shows `3 hops / 1 active connection`, zero users with more than one active
+      row, and **zero `currentConnections` drift across all 166 servers**. Positive control: 61 rows
+      carry a fresh `disconnectedAt`, so the traversal really happened and the new close path really
+      ran.
+- [~] **D9/D10 — the three N+1s. Re-checked 2026-09-23; the list was STALE.**
+      - **`ls` (`fileService.ts:193`) — ALREADY FIXED**, by Phase 1's N2 work, not by this phase.
+        Child counts are batched into one `groupBy(["parentId"])` and `canRead` is handed the
+        already-loaded row instead of an id it would re-fetch. Nothing to do; this entry was just
+        never ticked.
+      - **Boot provisioning — THERE IS NO BOOT N+1. Both copies were DEAD CODE; deleted
+        2026-09-23.** Checked callers before touching either, which is the whole point:
+        `provisionAllUnpopulatedServers` and `provisionAllNetworkServers` both had **zero callers**
+        anywhere in the repo — routes, scripts and `prisma/` included — and the only surviving
+        mention was a comment in `contentQueueService` saying it *replaced* the first one. The live
+        boot path is `ContentQueueService.enqueueAllUnpopulated()` (`index.ts:507`), and it
+        **already** batches the counts into a single `groupBy(["serverId"])`. So the queue rewrite
+        had fixed this N+1 some time ago and left two orphans holding the old pattern.
+        Deleted rather than optimised — 94 lines — because both were `public`, invitingly named, and
+        contained the exact anti-pattern. This codebase has already been bitten by a dead method that
+        read as live (`setSocketIO()`, zero callers, 21 stranded socket emits including
+        `player:levelup`). Optimising them would have been the "index dead code" trap the D9 survey
+        warned about, one item earlier in this very list.
+      - **Expiry sweep (`missionService.checkExpiredMissions`) — REAL, OPEN, but do it WITH D3.**
+        It is not an N+1: it is `playerProgress.findMany()` with no `where`, `select` or `take`,
+        pulling four JSON blobs per player every 15 minutes. Confirmed live — `startExpirationChecker`
+        is called from `index.ts:539` and the boot log reports it. **Optimising it now means doing it
+        twice**: D3 moves objective state out of the blob into `PlayerMissionObjective`, at which
+        point this query is replaced by an indexed `where` on the new table rather than tuned.
+- [x] **D9 (non-Mission indexes) — DONE 2026-09-23, deliberately SMALL.** Six more, each on a table
+      that grows without bound *and* a path that is per-command or per-connect:
+      `FileSystemNode([parentId])` (`ls` batches children as `groupBy(["parentId"])`, which cannot
+      use the existing `[serverId, parentId]`), `ServerConnection([serverId, isActive])`,
+      `GameEvent([timestamp])` (**that table had no index at all** and is sorted on every socket
+      connect), `HackLog([targetId])` (history is an `OR` over attacker/target and only attacker was
+      indexed), `Message([recipientId, timestamp])`, `GameServer([factionId])`.
+      Every one cites its call sites in a `schema.prisma` comment.
+- [→] **D9 — full index survey done, REST DEFERRED, and the reason is measurement.** A systematic
+      pass over all 56 models and every Prisma call site in `src/` produced **~70 candidate missing
+      indexes**. They were not all added, on purpose:
+      **the live database is tiny** — `audit_logs` 1294 rows, `file_system_nodes` 221,
+      `missions` 216, `users` 91, and nothing else above 70. At that size an index is pure write
+      overhead with no measurable read benefit, and 70 of them would be churn that Phase 7's
+      refactor would then have to carry. The six above were taken because their tables grow without
+      bound with play; the rest should be revisited **when a table's row count justifies it**, not
+      from a static reading of predicates.
+      Findings worth keeping from the survey, none acted on here:
+      - Several hot predicates are **not indexable as written**, so an index would not have helped
+        anyway: `username`/`url`/`name` lookups using `mode: "insensitive"` defeat their own
+        `@unique` btree (`aliasCommands.ts:132`, `fragmentCommands.ts:281`,
+        `referenceValidationService.ts:78,619`); `homeIp: { startsWith: "10." }` and
+        `ipAddress: { startsWith: … }` are LIKE-prefix scans; `hackCommands.ts:736` matches
+        `OR: [{ ipAddress }, { name }]` where `name` is unindexed.
+      - `leaderboardService.ts:94` sorts **all** of `PlayerProgress` by level with **no `take`**.
+      - `backdoorService.cleanupExpired()` and `eventService.getEventsByType`/`getGlobalEvents` have
+        **zero callers** — index them and you index dead code.
+
+**Gate (rewritten 2026-09-01 — the original was stale).** It read *"`prisma migrate deploy` works on
+an empty DB"*, which cannot happen: D2/decision 14 removed migrations until go-live, so
+`migrate deploy` has nothing to deploy. Adopting migrations just to satisfy a gate would reintroduce
+exactly the half-adopted state D2 was written to end.
+
+**Gate — rewritten again 2026-09-23, because the 09-01 text predated everything this phase built.**
+It asked for the concurrency legs to be checked "by hand… two browser tabs". They are now covered by
+harnesses that do strictly more: each drives the real service, runs N operations with `Promise.all`,
+and carries a **negative control that reproduces the old failure**. Two browser tabs cannot
+demonstrate that a race is *reproducible* — which is the only thing that makes the passing assertion
+mean anything. The three legs it named map exactly onto what shipped:
+
+| 09-01 text | now covered by |
+|---|---|
+| two tabs buying at exact-credit balance | `verify-phase3-progress-repo.ts` — 10 concurrent spends against 550c settle at 5 winners / 50c left; negative control lands **−200** |
+| two accounts cracking the same fragment | `verify-phase3-d6-fragment-race.ts` — 8/8; negative control reproduces **2 winners, 2 discovery rows, inflated loser counter** |
+| `fragment.crack` looped past skill 100 | `verify-phase3-progress-repo.ts` — an uncapped-style +20 loop stops at 100; negative control reaches **101** |
+
+**Gate status:**
+- [x] `npx prisma validate` passes.
+- [x] `npx prisma db push` reports the schema in sync from `schema.prisma`.
+- [x] **Provisioning from empty verified on a THROWAWAY database**, not the dev one —
+      `createdb aida_gate_scratch` → `db push --force-reset` → **70 tables**, all four Phase 3 tables,
+      **18 FKs**, all five Phase 3 unique indexes and all ten D9 performance indexes present from
+      `schema.prisma` alone; scratch dropped, dev data confirmed intact. This is the leg D2 recorded
+      as *"not verified — the run was blocked by a safety check"*, and doing it on a scratch database
+      proves the same property without destroying 134 users and the D3 backfill.
+- [ ] **`npm run db:reset` end-to-end (push --force-reset **+ seed**) — STILL UNVERIFIED.** The
+      `db push` half is now proven above; running `prisma/seed.ts` is blocked in this environment by
+      the same safety check D2 hit. **Owner: maintainer** — run it once against a scratch database
+      before relying on `db:reset`. What it would prove that the above does not: that the seed still
+      completes against the Phase 3 schema. Two specific risks to watch, both reasoned but unproven:
+      the seed's `deleteMany` cascade order now interacts with the new FKs (`mission.deleteMany()`
+      cascades `player_missions`, `user.deleteMany()` cascades four more tables), and the seed writes
+      no mission state at all — checked — so a fresh world starts with empty
+      `player_missions`, which is correct but has never been observed booting.
+- [x] Constraints present in the live schema **and proven to reject a violating write**, each with a
+      positive control — `verify-phase3-schema.ts` 18/18.
+- [x] Concurrency verified by harness with negative controls — see the table above.
+
+**Full suite at the gate:** `verify-phase3-schema` 18/18, `verify-phase3-progress-repo` 26/26,
+`verify-phase3-d3-mission-lock` 22/22, `verify-phase3-d6-fragment-race` 8/8, `verify-gate-phase1`
+15/15, `verify-tutorial-altpath` 11/11, `verify-g3-hardware` 19/19, `verify-shop-contract` 10/10,
+`verify-p0-fixes` 4/4, `verify-mission-provisioning` 5/5. `tsc` 0, eslint 0, server boots with **0
+error-level lines**.
+
+**Deferred out of the gate by decision, not forgotten:** `take` limits on unbounded `findMany`
+(measurement argument — the largest gameplay table is ~220 rows), D4's `credits >= 0` CHECK, and the
+`FileSystemNode` partial root index. The last two both need raw SQL, which the next
+`db push --force-reset` would silently drop — so both land **with migration adoption** at go-live.
+`PlayerProgressRepository.spendCredits` is the working guard for D4 in the meantime.
+
+---
+
+## Phase 4 — Security (1–2 days)
+
+- [ ] **S1** Move authorization into `connectPlayerToServer` so the socket path and the command
+      path both inherit `checkServerAccess` + the handshake. Delete the duplicated gate in
+      `networkCommands.ts`.
+- [ ] **S3** Real ban enforcement: track sockets per user, force-close server-side on ban/kick,
+      and invalidate the auth cache entry. Change `io.emit` → `io.to(user:<id>)` so the ban
+      reason stops broadcasting to everyone.
+- [ ] **S9** Move the socket rate limiter from per-socket to per-user; cap concurrent sockets per
+      user and per IP; add `io.use()` connection-level auth so unauthenticated sockets are closed,
+      not just ignored.
+- [ ] **S8** Make `NODE_ENV` explicit — fail fast at boot if unset in a non-dev context, so the
+      `/admin` panel and `sameSite: "none"` can't leak into production by default.
+- [ ] **S11 — `checkServerAccess` fails OPEN on an unknown `accessMethod`.**
+      `networkTopologyService.ts` (:~756) ends its switch with
+      `default: return { allowed: true, reason: "Default access." }`. Not currently reachable from
+      seeded data (schema default is `"hackable"`; all 27 seeded values are valid), **but** the
+      `create_server` agent tool and `serverContentService` can write arbitrary strings — an
+      AI-generated server with a typo'd or invented `accessMethod` becomes freely accessible to
+      everyone. Fail closed. *(Found while reviewing the uncommitted work; not in the original audit.)*
+- [ ] **S10** `story <arcId>` ownership filter; `report file` permission check + `parentId` scoping.
+- [ ] **S10** Move the auth cache lookup *after* expiry validation; pin `algorithms: ["HS256"]`
+      on all four `jwt.verify` sites; delete the dead `hashPassword`; use `config.BCRYPT_ROUNDS`
+      in `adminCommands.ts:719`.
+- [ ] **A9** De-duplicate the censorship block (3× verbatim) into one helper — and make it **fail
+      closed**, not silently open.
+- [ ] **O5** `TRUST_PROXY`: validate the value; document the deployment requirement.
+
+**Gate:** verified by hand (decision 2) — emitting `server:connect` for an unowned server is
+rejected; a banned user's live socket actually dies; per-user rate limits hold across two open
+sockets on one account. Add each to `VERIFY.md`.
+
+---
+
+## Phase 5 — Reliability & correctness
+
+- [ ] **P5-NEW — `serverService`'s socket emits are all dead: `setSocketIO()` has ZERO callers.**
+      Found 2026-09-01 by running VERIFY.md §5.3. `serverService.io` is `private io = null` with a
+      `setSocketIO()` setter nothing ever calls, so **9 emit sites across 6 event names**
+      (`server:discovered`, `server:alert`, `server:created`, `server:deleted`, `server:updated`,
+      `server:disconnected`) can never reach a client.
+      Confirmed by driving a real subnet sweep (`scan 10.10.10`): the process runs to completion and
+      no `server:discovered` arrives, with a 30s poll ruling out timing.
+      **Check the same for `missionIntegration.setSocketIO` / `missionService.setSocketIO`** — I found
+      no caller for those either, which would explain why `mission:accepted`/`completed`/`abandoned`
+      all show up as "emitted but never heard" in the contract check.
+      **FIXED 2026-09-01 (the io half):** `serverService` and `missionService` now take
+      `@inject(SOCKET_IO)` in their constructors instead of relying on a setter nobody called —
+      `memoryService` already proved the pattern and `SOCKET_IO` was registered in the container all
+      along. A setter that must be remembered is a setter that gets forgotten. `missionService` had
+      **12** stranded emits including `player:levelup`, which the client answers with a sound and an
+      urgent notification that had therefore never once fired.
+
+      **STILL BROKEN — a SECOND defect, found by re-running the check after the io fix:**
+      `server:discovered` still does not arrive, because `serverService.discoverServers()` is called
+      only from the **fallback** branch of `handleSubnetSweep`
+      (`networkCommands.ts:453`, under `// ── Fallback: instant sweep (no resource system) ──` at
+      `:327`). The real path spawns a background process at `:283` and returns at `:324`, so whenever
+      `memoryService` exists — i.e. always — discovery never runs. Fix: call `discoverServers` from
+      the sweep's `onComplete` (`:289`), not only in the fallback. **Not attempted yet** — it changes
+      sweep behaviour and deserves its own verification pass.
+
+      **This also limits `scripts/check-socket-contract.ts`:** it proves a `.emit()` *exists*, not that
+      it can *fire*. A service holding a null `io` passes the check while being just as dead as a name
+      mismatch. Worth a follow-up check that every service with socket emits actually receives `io`.
+ (2–3 days)
+
+- [x] **R5 (partial)** `onFactionServerHacked` — **FIXED 2026-08-31** (as a prerequisite for U3d;
+      see that item). A single object was being passed to a 4-positional method, so the faction AI
+      never learned about any intrusion. It survived because its call site was
+      `getService<any>` while the *correct* call site two functions away was typed.
+      **Still open, and now counted:** `initiateTrace`, plus **53 remaining `getService<any>`**
+      against 46 typed resolves (measured 2026-08-31 — the original estimate of 45 was low).
+      Each is a place a signature change fails at runtime instead of at build time.
+      Two lessons from doing part of this:
+      - Typing the call sites is not cleanup, it **is** the arity-bug fix. Hunting individual arity
+        mismatches by inspection cannot scale to 53 blind spots; converting the resolves makes the
+        compiler find them.
+      - I fixed one `as any` and then reintroduced the identical pattern in `networkCommands` in the
+        same session; an audit caught it, not me. So do this as **one mechanical sweep**, not
+        opportunistically, and grep for the pattern before closing the item.
+- [ ] **NEW (found 2026-08-31) — skill awards on hack are inverted, via a wrong-argument bug.**
+      `hackService.ts:1371` passes `successRate` into `awardExperience`'s parameter named
+      `difficulty`. Since `successRate` is clamped 0.05–0.95, `ceil(difficulty * 2)` yields +1 for a
+      hard hack and **+2 for an easy one** — the reward curve runs backwards, and stealth (`* 1.5`)
+      has the same inversion. Both are `number`, so the compiler cannot see it: this is the arity-bug
+      family in its most invisible form. Fix belongs with the Phase 8 SKILL ECONOMY work (which
+      redefines the award anyway); recorded here because it is a correctness defect independent of
+      that design, and because it is the concrete argument for **naming units in parameter types**
+      (`SuccessRate` / `Difficulty` branded types) rather than passing bare `number`s between
+      services.
+- [ ] **R4** `traceService.ts:166` — make trace completion reachable; `trace.evade` should matter.
+- [ ] **R6** Session lifecycle: call the socket-aware `handleDisconnect(socketId)`, rebind
+      `session.socketId` on re-auth, rejoin rooms.
+- [ ] **R7** Fix the `timeLimit` seconds-vs-ms mismatch (pick ms, one conversion point), and make
+      the reward multipliers actually vary — `stealthScore`, `efficiencyScore`, and
+      `bonusObjectives` are all currently constant.
+- [ ] **R9** Encryption data-loss cluster: don't clear `isEncrypted` while ciphertext remains;
+      surface the generated key on `encrypt`; check `finalResult.success` before deleting the
+      backup; align the crack branch with `DECRYPTION_FAILED`; fix provisioned files that are
+      marked encrypted with no key.
+- [ ] **R10** Async `crypto.scrypt` in `fileService` and `messageEncryptionService`. Consider
+      AES-256-GCM for authenticated encryption.
+- [ ] **R11** Filesystem: recursive `cp` naming, `mv` ancestor-cycle check, ancestor permission
+      checks, `rm -r` vs `isProtected`, enforce the `faction` bit and `others` on directories.
+- [ ] **R12** Progression: tutorial-abandon guard, `mission:failed` as a real Node event, epoch
+      transition activation, `startTutorial` lock, `maxAttempts` persistence, `exploit`/`backdoor`/
+      `rootkit` routed through the same minigame layers as `hack`, relative-path resolution
+      against the *active* terminal, traceroute hop-masking, honest download results, the
+      double-award of hack XP, and the inverted difficulty→skill relationship.
+- [ ] **R13** Client: the `getSocket()`-after-`reconnect()` bug (restores hack alerts), the
+      `NotificationPanel` TypeError, `MailDialog`'s undeclared `successMsg`, the unread-count
+      inflation, unbounded `newMailNotifications`, reconnect state reconciliation, the duplicate
+      reconnect loop, the badge's two owners, Ctrl+C double-handling, silent API failures,
+      `refreshToken` re-arming, and the `critical`/`urgent` priority mismatch.
+- [ ] **O9** Stop all timers on shutdown (`TraceService`, `CommandProcessor`, Architect, dungeon
+      expiry).
+- [ ] **Uncommitted / K7** `contentRedaction.ts:102` — increment `redactionCount` before the
+      `cryptoSkill >= 50` branch so the `[N sections redacted]` footer doesn't vanish for the most
+      invested players. **Do this now** — it's live in the working tree and it's one line.
+      The rest of that file is superseded by `KNOWLEDGE_DESIGN.md`; don't invest further in it.
+
+- [ ] **AI spend is unbudgeted for event-driven generation (found 2026-08-31).**
+      `aiSchedulerService`'s `AI_MAX_ACTIONS_PER_DAY` (default 3, per persona) is checked **only** in
+      `processScheduledAction`, so it budgets *autonomous* activity only. Event-driven generation —
+      `personaService` faction mail, `darknetDiscoveryService` story beats,
+      `architectInterventionExecutor`, and the persona mail queue — passes through no volume budget at
+      all. That is **deliberate** for player-initiated replies (a player who writes in must get an
+      answer; see the invariant documented in `aiSchedulerService.canTakeAction`) and those are bounded
+      structurally instead: one pending reply per sender→player (coalescing), the per-recipient flood
+      limit, and the concurrency throttle. But **nothing bounds token *spend*** on the non-reply
+      event-driven paths. If cost matters, the ceiling belongs at those generation sites, not at
+      delivery — the removed global 20/day message cap failed precisely because it sat after the spend
+      had already happened.
+
+**Gate:** the client survives a server restart mid-hack without losing state; traces complete;
+encryption round-trips without data loss.
+
+---
+
+## Phase 6 — AI hardening (2 days)
+
+- [ ] **R14** Retry queue reentrancy guard; stop dropping the in-flight entry on overflow.
+- [ ] **R14** Make `SLOT_TIMEOUT_MS` exceed the worst-case slot hold, or cap the retry chain so
+      the two are consistent.
+- [ ] **R14** Per-user AI quota + cooldown on `key.contact`; move it off the synchronous command
+      path so one player can't stall global content generation.
+- [ ] **S5** Constrain the Architect loop: scope `search_files` to non-player content (or tag
+      player-authored text as untrusted), add an allow-list so `get_server_access_keys` /
+      `get_ai_personas` output can never reach generated file content, and **validate intervention
+      `data` against a schema with bounded rewards** instead of `as any`.
+- [ ] **S6** Sanitize prompt history, not just the current turn; extend `sanitizeForPrompt` to all
+      ~25 prompt-construction sites.
+- [ ] **S7** Sanitize moderation input; validate `safe` as a real boolean; **fail closed**;
+      moderate *before* broadcasting a reply, not after.
+- [ ] **R14** `validateContentPlan`: cap array lengths and path depth, reject `..`, route through
+      `pathSanitizer`. Add null-element guards to the three validators missing them.
+- [ ] **R14** Observability: stop hardcoding `silent: true` in `safeAI`; mark fallback content so
+      an outage is visible; expose `getMetrics()`/`checkHealth()` on a route.
+- [ ] **R14** Bound the agent-loop prompt (token budget, truncate old rounds).
+- [ ] **R14** `forumService.ts:1334` `handleNPCReply` — sanitize before wiring it up (currently
+      zero callers, so this is free to fix now).
+- [ ] **U3 — Validate `accessMethod` from AI output against an enum.** Pairs with S11: fixing the
+      fail-open `default` closes the hole, but AI-created servers should also be *rejected* at the
+      validator rather than silently written with an invented access method. Same class as the
+      unbounded `reward` cast in S5.
+- [ ] **U4 — Hold the AI message cap increase until the queue is fixed.** The uncommitted work
+      raises the per-player daily cap from **5 → 20** (`messageService.ts`). Against
+      `MAX_CONCURRENT_REQUESTS = 2`, `MAX_QUEUE_DEPTH = 30`, and a `SLOT_TIMEOUT_MS` that is
+      already shorter than the worst-case slot hold, that is **4× the demand on a system that
+      currently fails by arithmetic**. Shipping it before the reentrancy guard and timeout fix
+      would raise the fallback rate — i.e. it would make *"AI content is disappointing"* measurably
+      worse, not better. Land the queue fixes first, then raise the cap, then re-measure.
+
+**Gate:** AI outage is visible in logs and on the health endpoint; injected file content cannot
+produce an intervention with out-of-range rewards.
+
+---
+
+## Phase 6b — AI content *quality* (2–3 days)
+
+Distinct from Phase 6, which is reliability and security. This is about the output being
+**disappointing** — a stated top-2 pain point. Core hypothesis:
+
+> Much of the disappointing content was **never AI-generated**, or *was* generated fine and then
+> **silently discarded**.
+
+**The hypothesis is now confirmed in miniature (2026-08-31).** An NPC intrusion reaction fell back to
+hand-written text, and **the entire run emitted one log line — mine.** `safeAI`'s failure path logged
+nothing at all, even at `debug` level, so there was no way to tell generation had failed. That is the
+whole problem in one instance: not bad output, but *invisible* absence of output.
+Two concrete starting points, both already in the tree:
+- `npcReactionService.composeMessage` logs an explicit `usedAi` boolean. **Generalise exactly that
+  across the 41+ `safeAI` call sites** — it is the cheapest possible fallback-rate meter and it turns
+  "the AI is bad" from unfalsifiable into measurable.
+- One observed quality symptom, separate from the plumbing: a *successful* generation came back purple
+  and repetitive ("there is no escape", "do not expect mercy", "the price will be paid"). Worth a
+  prompt/model look **after** the meter exists, not before.
+Also note `expectedFormat` must mirror what the validator actually reads — a mismatch is precisely how
+good output gets discarded. `npcReactionService` and `storyMissionService` are the two known-correct
+examples to copy.
+
+**Order matters — do not tune prompts or swap models before steps 1–3.** You cannot evaluate
+quality while fallbacks are invisible and validators are dropping valid output.
+
+- [ ] **Step 1 — Measure first.** `safeAI` hardcodes `silent: true` → failures log at `debug` while
+      production runs at `info`, so they are never logged. `aiFallbacks.ts` returns in-character
+      prose with **no marker** (only `tutorialService.ts:606` tags its fallback). Instrument call
+      count / success / failure / fallback-served / validator-rejected, add a dev-mode marker to all
+      fallback content, then play for an hour and read the numbers.
+- [ ] **Step 2 — Fix the plumbing that forces fallbacks** (overlaps Phase 6). `SLOT_TIMEOUT_MS`
+      (120 s) is shorter than the worst-case slot hold (~363 s), so with `MAX_CONCURRENT_REQUESTS = 2`
+      waiters fail **by arithmetic**, not under stress. Plus the retry queue's missing reentrancy
+      guard spawns ~12 overlapping chains per slow call.
+- [ ] **Step 3 — Fix validators discarding good output.** `validateStoryArcPlan` filters on
+      `s.description` while the prompt asks for `narrativeBrief` → every step dropped → *"AI failed
+      to generate story arc"* regardless of response quality. `successBranch` is kept only when
+      `typeof === "string"` but the prompt emits a number → all branching discarded. **Audit every
+      validator against the prompt that feeds it** — this is an untyped field-name contract and two
+      are already broken.
+- [ ] **Step 4 — Re-evaluate the model.** `AI_MODEL` was downgraded to `nemotron-3-nano:30b`
+      because `nemotron-3-super:120b` was "too slow for complex prompts." Given step 2, that
+      slowness may have been the slot config rather than the model — the quality ceiling may be
+      self-imposed. Re-test the larger model once the concurrency config is correct.
+- [ ] **Step 5 — Prompt quality**, only once the above is measurable: few-shot examples, tighter
+      output schemas, per-content-type tuning, bound the agent loop's growing history
+      (`aiAgentTools.ts:695`) which dilutes instructions across 6 rounds.
+- [ ] Consider **hand-authoring the vertical slice** and using AI for breadth rather than the
+      critical path.
+
+**Gate:** fallback rate is measured and known; story arcs actually generate; you can tell AI output
+from template output at a glance.
+
+---
+
+## Phase 7 — Architecture (1–2 weeks)
+
+**Testing (revised 2026-08-30):** tests *are* written for this phase — but **at** Phase 7, not
+now. They are **characterization tests**: written against the behaviour as it exists immediately
+before each refactor, to prove the refactor changed nothing. That sidesteps the earlier objection
+(tests coupled to internals that are about to move) because these are written after the design has
+settled and are deliberately black-box — they pin observable command/socket behaviour, not
+internal structure.
+
+Write them per-refactor, immediately before touching the code:
+- Before the CommandContext decomposition — pin the observable output of a representative command
+  from each of the 17 modules.
+- Before the `hackService` split — pin the scoring functions across a matrix of inputs.
+- Before the `forumService` / `serverContentService` splits — pin their public service methods.
+- The socket contract check from Phase 2 already covers the event-map refactor.
+
+
+- [ ] **A3** Typed socket contract: `ServerToClientEvents`/`ClientToServerEvents` in `shared/`,
+      generic `Socket` on both sides. Delete or wire up the 11 dead listeners; fix the
+      `authenticated`/`authentication:complete` handshake mismatch.
+      **Concrete instance to fix with it (U5, verified still open 2026-08-31):**
+      `command:result.output` is `string | string[]` — `networkCommands.ts:802` sends
+      `output: challenge.displayText` (an array) while everything else sends a rendered string, and
+      `client/src/services/socket.ts:767` passes it unnormalised into
+      `addOutputLine(_, text: string, _)`. Cosmetic in the transcript (the puzzle itself renders
+      correctly via the dedicated panel), but the no-target-tab fallback at `socket.ts:780` calls
+      `data.output.substring(0, 100)`, **which throws on an array**. A typed contract makes this a
+      compile error rather than a latent crash — it is the best small justification for doing A3.
+      Note also that the U1 harness had to reimplement the client's auth handshake by hand
+      (`emit("authenticated", cb)` then wait for the ack) to drive commands at all; a typed contract
+      would let harnesses and the client share that shape instead of duplicating it.
+- [ ] **A2** Reconcile the 8 duplicated `shared/types` definitions; make `shared/` the single
+      source of truth. Fix `MissionStatus` (`in_progress` is a phantom; `abandoned` is undeclared)
+      and the notification priority enum.
+- [ ] **A4** Decompose `CommandContext`: per-module interfaces instead of 26 services + raw
+      Prisma handed to every command. Remove `db.client` from `CommandContext` and migrate the
+      **170 direct Prisma calls** in command modules onto services.
+- [ ] **A4** Delete the 60 s DI cache (it's a no-op over singletons and caches `undefined` on
+      failure).
+- [ ] **A5** Break the 48-module cycle: make `commandModules/interface.ts:21` type-only (closes 36
+      cycles), remove the 7 static `di/container` imports, convert the 58 pointless
+      `await import("../di/tokens")` calls to static imports, replace the 11 raw-string
+      `getService` calls with `TOKENS`.
+- [ ] **A8** Split the oversized modules — extract `serverContentService`'s 1,473 lines of
+      module-scope data; move `missionTemplatePool`'s 1,911-line array to JSON/DB; split
+      `forumService` (the proxy network is a separate domain); split `hackService` into
+      session-store / scoring / countermeasures; extract `Terminal.svelte`'s CSS and break up the
+      295-line `handleSubmit`.
+- [ ] **A8** Introduce `authService` — move the auth domain out of `routes/auth.ts` (561 lines,
+      security-critical, currently unreachable without an HTTP request).
+- [ ] **A8** Break up `index.ts`'s 438-line `initialize()`; consolidate the two
+      `mission:completed` listeners; type the 18 `(data: any)` handlers.
+- [ ] **A9** Remaining duplication: profile builder, `probeRows`, the two content-plan
+      persistence paths, `di/serviceRegistry.ts` (0 callers).
+- [ ] **A10** Delete ~2,150 lines of dead code and the 29 dead `gameBalance` constants (tuning
+      that file currently does nothing).
+
+**Gate:** CI green, characterization tests green, `VERIFY.md` playthrough unchanged. No feature
+regressions — this phase is behaviour-preserving by definition.
+
+---
+
+## Phase 8 — Feature completion & improvement
+
+Things the game *advertises* but doesn't do. These are the highest-value additions because the
+UI, copy, and data already exist — only the behaviour is missing.
+
+- [ ] **SKILL ECONOMY — two award channels (maintainer decision 2026-08-31).**
+      *Missions grant **defined** skill points (e.g. +10 hacking); levelling up grants **free** points
+      the player assigns themselves.* This is the missing half of R8 — the column is absent, but the
+      deeper problem is that the whole economy is inert.
+
+      **What exists today:**
+      - `PlayerProgress.skillPoints` is **not in the schema** at all (R8).
+      - Level-up IS detected (`missionService.ts:1106-1126`) but **grants nothing** — it sets `level`,
+        emits an event and a "Level Up!" toast, and that is all.
+      - **Nothing anywhere spends skill points.** Zero call sites.
+      - `MissionReward.skillPoints?: number` is a **bare number with no skill named**, so it cannot
+        express "+10 hacking". Eight mission templates already set it (`skillPoints: 1..5`), and the
+        dungeon `intel_package` reward sets 2.
+      - Skills are `Int` 0–100; `hackService` already clamps with
+        `Math.min(gain, 100 - progress.hacking)` — reuse that, don't invent a second rule.
+
+      **Shape this implies:**
+      1. Add `PlayerProgress.skillPoints Int @default(0)` — the **free/unallocated** pool.
+      2. Add a **directed** reward field, e.g. `skillGains?: Partial<Record<SkillName, number>>`, so a
+         mission can award `{ hacking: 10 }`. Keep the existing bare `skillPoints` meaning *free*
+         points, which makes the dungeon `intel_package` correct as-written and avoids rewriting
+         every template at once.
+      3. Grant free points on level-up at `missionService.ts:1107` — the one place level-up is
+         detected.
+      4. **Add a spend path.** `skills` is view-only today. Without an allocate command the free pool
+         is exactly as inert as `skillPoints` is now — this is the step that makes the design real
+         rather than another dead column.
+      5. Convert the eight templates' bare `skillPoints` to themed `skillGains` (a hacking mission
+         awards hacking), leaving generic windfalls as free points.
+      6. Clamp directed gains at 100 and fix R8's crash in the same pass.
+
+      **Magnitudes (maintainer, refined 2026-08-31):** award **1–2 points**, for **mission completion
+      and successful hack attempts**, scaled by **relative difficulty** — the gap between the player's
+      skill and the difficulty of what they attempted. (The earlier "+10" was only an example.)
+
+      **This turned up a live bug, and it changes the implementation.**
+      `hackService.ts:1371` calls `awardExperience(attackerId, successRate, result.success, mult)`.
+      The parameter is **named `difficulty`** but receives **`successRate`**, a probability clamped to
+      0.05–0.95. So `baseHackGain = ceil(difficulty * 2)` actually computes `ceil(successRate * 2)`:
+
+      | successRate | current award |
+      |---|---|
+      | 0.05–0.50 (hard for you) | **+1** hacking |
+      | 0.51–0.95 (easy for you) | **+2** hacking |
+
+      Two consequences. First, hacks *already* award 1–2 points — the magnitude the maintainer asked
+      for, reached **by accident**. Second, it is **exactly inverted**: an easy hack pays double a hard
+      one. TypeScript cannot catch this because both values are `number` — the same family as the
+      arity bugs, but more invisible (see Method learnings §3).
+
+      **The good news: the relative measure already exists.** `successRate` is computed from the
+      player's hacking skill, the target's forensics, server security, tools and encryption
+      (`calculateHackParameters`), so it *is* skill-relative. It needs its polarity corrected and a
+      zero band — not a new difficulty-minus-skill calculation.
+
+      Proposed shape (constants in `gameBalance.ts`, tune freely):
+      - `successRate >= 0.85` → **0 points**. Trivial for you.
+      - `0.50 <= successRate < 0.85` → **1 point**.
+      - `successRate < 0.50` → **2 points**. Genuinely hard for you.
+      - Cap the final award at 2 **after** `xpMultiplier` — a full breach multiplies by 1.5, which
+        would otherwise yield 3.
+
+      This self-limits with no extra bookkeeping: as skill rises, `successRate` on a fixed target
+      rises, so awards decay to 0 automatically.
+
+      **The zero band is not optional.** At 1 point per successful hack with no floor, a player farms
+      the Training Firewall ~90 times to max a skill. Any design here needs a trivial-attempt cutoff.
+
+      **Decision needed on failures.** Failure currently awards a flat `+1` hacking, and that is
+      **load-bearing** — it is the learn-by-failing loop U3's soft gates rely on. Zeroing it
+      reintroduces the chicken-and-egg. Suggested: apply the same relative rule, so failing a *hard*
+      target still teaches (+1) while failing an easy one does not. Missions granting defined points
+      also now provide an independent path out of the early game, so failure rewards no longer have to
+      carry that alone.
+
+      **Missions** have no `successRate`, so they need their own normalization — mission `difficulty`
+      is 1–10 while skills are 0–100. Simplest consistent rule: compare `difficulty * 10` against the
+      player's level in the *named* skill and use the same three bands.
+
+      Settle these alongside U2b/U3c so the early-game curve is tuned **once** rather than three
+      times.
+
+- [ ] **A10** **Item effects are dead code.** `hackingBonus`, `successRateIncrease`,
+      `detectionReduction` are read by nothing. The 10,000-credit Quantum Decryptor's
+      "+60 hacking, +25% success" changes zero gameplay. Wire equipment bonuses into
+      `calculateHackParameters`, and reconcile the two disagreeing bonus getters (owned vs equipped).
+      **Sharpened 2026-08-31** — this is S3/S4 in `SHOP_ARCHITECTURE.md`, and the shape is now known:
+      the two getters are `shopService.getPlayerBonuses` (whole inventory, **ignores** `isEquipped`)
+      and `inventoryService.getEquipmentBonuses` (equipped only). Each has exactly one caller, and
+      both are display. `xpMultiplier`/`creditsMultiplier` are initialised to `1.0` and never touched.
+      G3 did **not** touch this: hardware bypasses the effects system entirely and feeds the rig
+      directly, so item *stat* bonuses remain 100% decorative.
+- [ ] **R12** **Fragment skill gates are decorative** — the advertised `[Hacking 50]`,
+      `[Stealth 30]`, `[Crypto 20]` requirements are never read. Enforce them.
+- [x] **R12 — lookup DONE 2026-08-31.** `crack.protected` now resolves the charge by catalog **id**
+      (`QUANTUM_CHARGE_ITEM_ID`), so the 7,500-credit item works. Verified against the live DB: the
+      old `.includes("quantum charge")` could never match `"Quantum Decryptor Charge"`.
+      `scripts/verify-shop-contract.ts` bans name-substring item lookups outright, so the bug class
+      is closed rather than the instance. **Still open here:** the item has no *effect* beyond
+      removing protection, and `use quantum_charge` still consumes it for nothing (S3).
+- [ ] **R4** Make tracing a real mechanic now that completion is reachable — consequences on
+      completion, meaningful `trace.evade` counterplay.
+- [ ] **G7** Story arcs: with generation and persistence fixed, restore branching
+      (`successBranch` is currently discarded because the validator expects a string and the
+      prompt emits a number).
+- [ ] **O7** Observability: replace `morgan` with `pino-http` (one log format), add request
+      IDs, a `/metrics` endpoint, and split liveness from readiness so a slow DB doesn't get the
+      pod killed.
+- [ ] **A6** **Decide on scale-out.** All 53 services hold mutable in-process state
+      (`rateLimitMap`, `nextPid`, `allocatedIPs`, `sessionLocks`, hack cooldowns), so the server
+      cannot run more than one instance today. Either:
+      - **(a)** move that state to Redis — the `redis` dependency is already installed and unused; or
+      - **(b)** document single-instance as a supported constraint and drop `redis`.
+      Recommend (b) until there's real load; (a) is a week of work with no current payoff.
+- [ ] `.env.example` regenerated from the real read-set; fix the
+      `DB_POOL_SIZE`/`DATABASE_POOL_SIZE` mismatch; delete dead `LOG_FILE_PATH`.
+- [ ] **K — Knowledge & redaction system** (`KNOWLEDGE_DESIGN.md`). Turns content redaction from a
+      per-read filter into real progression: earned state persists, minigames become the earn
+      mechanic, and `codex` makes it visible. **Adds no new minigame code** — it routes the three
+      existing generators (`fileAccessMinigameGenerator`, `hackMinigameGenerator`,
+      `connectionChallengeGenerator`) by topic tier. Rollout in §8; hard anti-frustration rules in
+      §6 (never gate the critical path).
+- [ ] **A7** Extend the Phase 7 characterization tests into a real suite now that the design has
+      settled — this is the point where decision 2 expires and normal testing resumes.
+- [ ] **U5 — Decide whether `whois` should expose another player's credit balance.** The
+      uncommitted rework of `whois` (now a resource-consuming background process) appears to add a
+      `Credits:` line to the panel. In a game with PvP and bounties that is arguably *good* design
+      — it lets you pick a mark — but it is a deliberate information-disclosure choice, not an
+      accident, and it should be made on purpose. If kept, consider gating it behind a
+      social-engineering or networking skill threshold so recon has a cost.
+- [ ] Client a11y: the 25 `svelte-check` warnings (keyboard handlers, ARIA roles on click targets).
+
+---
+
+## Go live — deploy, Docker, migrations (not before it is needed)
+
+**Created 2026-08-31 by decisions 13 & 14.** These items share one trigger and only one: **a database
+whose data cannot be dropped.** Until then they have no consumers and would only pin assumptions that
+Phase 7's refactor is going to churn.
+
+- [ ] **Adopt migrations.** Currently NONE exist — no `server/prisma/migrations` directory, nothing
+      tracked, no `db:deploy`, and `db:reset` is still `prisma db push --force-reset`. (An earlier
+      note claiming a `0001_init` baseline was rebuilt is **false**; corrected 2026-08-31.)
+      `npx prisma migrate dev --name init` generates and applies a baseline from `schema.prisma`; for
+      an already-populated database use `migrate diff --from-empty --to-schema-datamodel` plus
+      `migrate resolve --applied`. **Adopting the files is only half of it** — also switch the
+      workflow off `db push`, restore `db:deploy` (`prisma migrate deploy`), and re-point `db:reset`
+      at `migrate reset --force`. Keeping migrations without switching the workflow is the exact
+      failure this repo already had.
+- [ ] **Dockerfiles + `docker-compose.yml`** (server + client + Postgres). Maintainer wants the real
+      deploy path, not dev convenience: multi-stage builds, pinned base image, non-root user,
+      healthcheck, production Vite build served as static assets, named volume for Postgres.
+      Deliberately deferred out of Phase 2 — a deploy artifact that is never deployed is unverified
+      by construction, and Phase 7 changes the DI graph, `CommandContext` and four service modules,
+      i.e. exactly the build output and start command a Dockerfile pins.
+- [ ] Pin the client's `VITE_*` build vars in the image (the `.env.example` and the build-time guard
+      ship earlier, in Phase 2).
+- [ ] Decide the deploy target and whether CI builds/pushes images.
+
+**Gate:** a clean clone builds and runs the stack from `docker compose up`, against a migrated
+database, with no `db push` anywhere in the path.
+
+---
+
+## Phase 9 — Console realism
+
+The game's whole premise is a terminal, so anything that breaks shell muscle memory breaks
+immersion harder here than a missing feature would elsewhere.
+
+**You already own most of the substrate.** A process table with real PIDs, `kill`/`pkill`/
+`nice`/`renice`/`ps`/`top`, CPU/RAM/bandwidth costs per process, a permission model with
+owner/others/faction plus an `rwx` formatter, hidden files via `ls -a`, per-user variable storage
+(`ExpressionEngine`), aliases, and multi-tab terminals. Most of what follows is exposing
+machinery that exists rather than building new systems.
+
+### The reframe: your injection blocklist is blocking your own best feature
+
+`validators.ts:244` `validateCommand` rejects `|`, `;[\s]*rm`, `$(`, and backticks as "command
+injection." **There is no shell anywhere in this codebase** — verified: zero `child_process`,
+`exec`, `execSync`, or `spawn` in all of `server/src`. Commands are dispatched through a registry
+to TypeScript methods operating on a virtual filesystem in Postgres.
+
+So that blocklist defends against a threat that cannot occur, and the price is exactly the
+features that would make a hacking game's terminal feel real: pipes, chaining, and substitution.
+The correct model is to **parse them as syntax** in a real tokenizer — never as a string handed to
+a shell, because nothing is ever handed to a shell.
+
+### Tier 1 — the "this feels fake" tells
+
+- [ ] **Path and argument tab completion.** Today `Tab` completes only command *names*, from a
+      hardcoded `KNOWN_COMMANDS` array in `Terminal.svelte` (client-side). It never completes a
+      path. `cd doc<Tab>` is the single most ingrained shell reflex there is, and it does nothing.
+      Needs a server-side completion endpoint (socket event) returning candidates for the current
+      cwd, plus **context-aware** completion: `connect <Tab>` → known IPs, `cat <Tab>` → files in
+      cwd, `buy <Tab>` → shop item IDs, `kill <Tab>` → live PIDs. Highest-impact item in this phase.
+- [ ] **A real tokenizer: quoting and escaping.** `commandProcessor.ts:311` is
+      `trimmed.split(/\s+/)`. Any filename containing a space is permanently unreachable —
+      `cat "system logs.txt"` cannot be expressed. Replace with a proper lexer handling `'…'`,
+      `"…"`, `\` escapes, and `--` end-of-options. **This is a prerequisite for everything else in
+      this phase**, and it also fixes G8 (flags consumed as paths) at the root instead of
+      per-command.
+- [ ] **Pipes.** `cat passwd | grep root`, `ls | wc -l`, `scan | grep gateway`. The most thematic
+      missing feature in the game. Requires a pipeline executor and a convention for commands to
+      accept stdin. Pairs with the text utilities below — pipes are worthless without them.
+- [ ] **Redirection.** `scan > targets.txt`, `cat log >> notes.txt`, writing into the virtual FS
+      you already have. Combined with pipes this produces genuinely emergent play: harvest →
+      filter → save → upload → exfiltrate.
+- [ ] **Streaming output.** Commands currently return one atomic blob when finished. Real consoles
+      emit lines as they happen. A `hack` that prints each layer as it breaks, or a `scan` that
+      lists hosts as it finds them, *feels* alive in a way a delayed dump never does. You already
+      have the socket and the process system — this is wiring, not architecture.
+
+### Tier 2 — strong realism, moderate cost
+
+- [ ] **Job control.** `command &` to background, plus `jobs`, `fg`, `bg`, and Ctrl+Z. You already
+      have PIDs, a process table, `kill`, and `nice`/`renice` — this is mostly surface, and it
+      makes the CPU/RAM/bandwidth economy legible instead of invisible.
+- [ ] **Exit codes and `$?`**, which then enable `&&` and `||` chaining. Commands already return
+      `{success}` — it just isn't exposed or composable.
+- [ ] **Globbing.** `rm log_*`, `cat *.conf`, `download data_??.dat`. Expand in the FS layer where
+      `resolvePath` already walks the tree.
+- [ ] **Text utilities that make pipes worth having:** `grep` (the hacker verb), `wc`, `head`,
+      `tail`, `sort`, `uniq`, `find`, `diff`, `stat`. Cheap to implement against the virtual FS,
+      and each one multiplies the value of the pipe work.
+- [ ] **Readline keybindings:** Ctrl+A/E (line start/end), Ctrl+W (delete word), Ctrl+K (kill to
+      end), Alt+B/F (word nav), **Ctrl+R reverse history search**. Key map settled by decision 6 —
+      see `SHELL_DESIGN.md` §12.1.
+- [ ] **`man` pages**, distinct from `help`: SYNOPSIS / DESCRIPTION / OPTIONS / EXAMPLES per
+      command. Strong flavor, and a natural place to hide lore.
+- [ ] **Paging** — `less`/`more`, and `-- More --` truncation on long `cat` output instead of
+      dumping 500 lines into scrollback.
+- [ ] **Masked password input.** `decrypt <file>` should prompt with hidden input rather than
+      taking the key as an argument. Currently keys are typed inline, which means they land in
+      **command history in plaintext** — a realism win and a genuine leak fix in one change.
+- [ ] **`chmod` / `chown`.** The permission model and `rwx` formatter already exist; exposing them
+      turns home-server hardening into actual gameplay.
+
+### Tier 3 — depth for advanced players
+
+- [ ] **Environment variables and a customizable prompt.** `export`, `env`, `$USER`, `$PWD`,
+      `$PS1`. `ExpressionEngine` already stores per-user typed variables — that's the substrate.
+- [ ] **`.aidarc` startup file** on the player's home server, executed on login to set aliases and
+      env. Extremely thematic: players customize their own rig, and it's a natural late-tutorial
+      beat.
+- [ ] **Shell scripting.** Write a `.sh` in the virtual FS, `run script.sh`. Note `.env.example`
+      already declares `SCRIPT_EXECUTION_TIMEOUT_MS` and `SCRIPT_MEMORY_LIMIT_MB` — someone
+      planned this once. With the tokenizer, pipes, variables, and exit codes from Tiers 1–2,
+      most of the work is already done by the time you get here.
+- [ ] **SSH-flavored connect ceremony:** host-key warning on first connect, MOTD banner,
+      `Last login: <time> from <ip>`. Nearly free, disproportionate atmosphere.
+- [ ] `cd -`, `~` expansion, `pushd`/`popd`; symlinks; `du`/`df`; ANSI color and cursor control;
+      terminal bell; copy/paste via Ctrl+Shift+C/V.
+
+### Navigation: `cd`, `ls`, moving around a server
+
+Ten concrete defects (N1–N10) are catalogued in **`SHELL_DESIGN.md` §10a**, with fixes ordered by
+payout. The two that matter most:
+
+- **`cd` costs one DB query per file in the target directory** — it validates by calling
+  `listDirectory`, which permission-checks every child (`fileService.ts:193`). Navigation is
+  literally slow, and it scales with how interesting the directory is.
+- **`ls` prints one entry per line inside a drawn box** — a 30-file directory is 30+ lines where a
+  real `ls` gives 4 dense columns.
+
+Plus: `cd ~` resolves to `/home/{userId}` (a cuid) when homes are `/home/{username}`; **three
+conflicting meanings of `~`** across `helpers.resolvePath` and `handleChangeDirectory`; bare `cd`
+goes to `/` instead of home; `cd` announces success where real shells are silent; and there is no
+`tree` and no `find` at all.
+
+**Presentation rule:** boxes for things read once (`whois`, `probe`, briefings); dense text for
+things read constantly (`ls`, `cd`, `pwd`). Keep `ls -l` boxed — that one *is* a report.
+
+**Good news:** the prompt is already `username@server:cwd$` (`Terminal.svelte:1479`). Orientation is
+solved; don't change it.
+
+### Keybindings — DECIDED (decision 6)
+
+**Shell semantics win when the input has focus; app shortcuts move to `Ctrl+Shift+*`.** Full key
+map in `SHELL_DESIGN.md` §12.1. Ctrl+C becomes cancel/SIGINT only, which also fixes R13. Ship a
+one-time notice on first launch so the remap isn't silently surprising.
+
+### Already-catalogued bugs that are really console-realism bugs
+
+Fixing these buys immersion directly; they're scheduled earlier in this plan and are worth
+recognizing as part of this theme:
+- **G8** — `ls -l`, `rm -r`, `cp -r` all fail (flags taken as the path). The loudest tell in the
+  game today. The Tier 1 tokenizer is the root fix.
+- **R12** — `cd` writes `session.currentDirectory` but relative paths in the crack commands
+  resolve against `terminals[0].currentDirectory`, so `cd /data` then `crack vault.enc` fails.
+  This breaks the most basic shell mental model there is.
+- **R13** — Ctrl+C double-handling (above).
+
+### Suggested order
+
+Tokenizer → completion → text utilities → pipes/redirection → streaming → job control →
+readline/keys → man/paging → env/rc/scripting. The tokenizer genuinely gates the rest; almost
+everything else composes once it exists.
+
+---
+
+## Effort summary
+
+| Phase | Focus | Est. | Gated on |
+|---|---|---|---|
+| 0 | Unblock | ½ day | — |
+| 1 | Playable game | 1–2 days | 0 |
+| 2 | Tooling + deploy | 1 day | 1 |
+| 3 | Data model | 2–3 days | 2 |
+| 4 | Security | 1–2 days | 2 |
+| 5 | Reliability | 2–3 days | 2 |
+| 6 | AI hardening (reliability/security) | 2 days | 2 |
+| 6b | AI content quality | 2–3 days | steps 2–3 overlap Phase 6 |
+| 7 | Architecture | 1–2 weeks | 2 + its own characterization tests |
+| 8 | Features | ongoing | 7 |
+| 9 | Console realism + shell | 1–2 weeks | 1 — **Tier 1 tokenizer runs *as* G8, inside Phase 1** |
+
+Phases 3–6 are independent of each other and can be reordered freely once Phase 2 lands.
+
+**Phase 9 is not gated on 3–8.** Per decision 7 its Tier 1 tokenizer *is* the G8 fix, so it starts
+inside Phase 1 rather than after it. Everything downstream of the tokenizer (completion, pipes,
+streaming) can then proceed in parallel with Phases 3–6.
+
+**Phase 6b step 1 should start early** — it's half a day of instrumentation that then gathers data
+passively while other phases proceed.
+
+---
+
+## Standing rules for this work
+
+- Update `PROJECT_KNOWLEDGE.toon` after each phase; delete entries from `@audit_2026_08_30` as
+  they're fixed rather than accumulating a changelog.
+- No phase merges without CI green (once Phase 2 lands).
+- Verify against a running server, not just `tsc`. Every gate above names a behaviour to observe.
+- **No feature loss.** Phase 7 is behaviour-preserving; if a refactor would drop a capability,
+  it stops and gets raised instead.
