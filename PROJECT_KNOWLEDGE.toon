@@ -2508,3 +2508,32 @@
     "Discriminating assertions matter here specifically: a trace ending 'expired' and one ending 'completed' BOTH end, so 'the trace is no longer active' would have passed before the fix. Every check names the terminal state."
   ]
 }
+
+
+@phase5_p5new_discovery {
+  @summary [
+    "The PLAN ENTRY WAS WRONG on every specific, and reading the code is the only reason the right thing got fixed. Trusting it would have 'fixed' a function that did not have the bug."
+    "Entry claimed: discoverServers is reachable only from handleSubnetSweep's dead fallback, so server:discovered never arrives."
+    "Source says: handleSubnetSweep never calls discoverServers in EITHER branch (both call scanByPartialIp); discoverServers has one caller, legacyScan, in the ADJACENCY scan; and the server:discovered emit was already moved onto scanByPartialIp in a75383d, which the entry predates."
+    "Verified end-to-end: scan 198.51.100 delivers server:discovered {count:35} to a real connected client."
+  ]
+
+  @what_was_actually_broken [
+    "spawnBackgroundProcess returns null ONLY when memoryService is absent, and MEMORY_SERVICE is registered unconditionally — so the background branch always returns first and the synchronous branch below it is DEAD."
+    "That dead synchronous branch is the one holding `if (results.length === 0) return legacyScan(...)`. So the fallback from 'topology found nothing' to legacy subnet discovery existed in source and could never run: a player on a server with no topology links got 'No unknown servers found' and nothing else, and discoverServers + server:discovered were dead code."
+    "Fixed by splitting legacyScan into legacyScan (CommandResult) + legacyScanOutput (string), and calling the latter from the background onComplete when adjacency is empty."
+    "Evidence: scripts/verify-phase5-p5new-discovery.ts 11/11, negative-controlled."
+  ]
+
+  @harness_lessons [
+    "TWO harness bugs, both the same species: asserting the state I could SEE instead of the state the CODE READS."
+    "(1) Deleted serverLink rows and asserted the DB was empty — but getAdjacentServers reads through a 30s per-server cache (ADJ_CACHE_TTL = 30), so the service still saw a neighbour."
+    "(2) After waiting the cache out it STILL saw one, because gameStateManager.createSession calls createHomeLink as a 'fallback if registration missed it' — AUTHENTICATING RE-CREATED THE LINKS THE TEST HAD JUST DELETED. The system self-heals the exact state the test constructs, so the strip must happen AFTER the healing step (authenticate -> strip -> wait cache -> scan)."
+    "The server DEBUG log ('discoverNeighbors returned results {count:1}') is what exposed both. When a behavioural test fails, read what the server saw before touching the code."
+  ]
+
+  @still_open [
+    "server:alert, server:created, server:deleted, server:updated, server:disconnected have NO client listener at all — 5 of serverService's 6 event names emit into the void. Unlike server:discovered nothing is waiting for them, so wiring them is a feature decision, not a repair."
+    "Legacy subnet discovery from a PLAYER HOME is near-useless: homes get random 10.x.y.z and each is essentially alone in its /16, so discoverServers scoped to that /16 finds nothing. The fallback only helps on a non-home server in a populated subnet."
+  ]
+}

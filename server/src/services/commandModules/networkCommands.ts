@@ -206,12 +206,30 @@ export class NetworkCommandsModule implements CommandModule {
               }
             } catch { /* non-critical */ }
 
+            // P5-NEW: fall back to legacy subnet discovery when topology
+            // finds nothing.
+            //
+            // The synchronous branch below already does this, and is
+            // unreachable — `spawnBackgroundProcess` returns null only when
+            // `memoryService` is missing, and it is registered
+            // unconditionally, so this background path always wins. The
+            // consequence was that a player on a server with no topology links
+            // got "No unknown servers found" and nothing else, while the
+            // fallback meant to rescue them sat in dead code — taking
+            // `discoverServers` and its `server:discovered` event down with it.
             const currentServer =
               await context.services.serverService.getServer(currentServerId);
-            const output = this.formatScanResults(
-              results,
-              currentServer?.name || currentServerId,
-            );
+            const output =
+              results.length === 0
+                ? await this.legacyScanOutput(
+                    context,
+                    currentServerId,
+                    scanLevel,
+                  )
+                : this.formatScanResults(
+                    results,
+                    currentServer?.name || currentServerId,
+                  );
             if (context.io) {
               context.io.to(`player:${context.userId}`).emit("command:result", {
                 success: true,
@@ -444,6 +462,30 @@ export class NetworkCommandsModule implements CommandModule {
     currentServerId: string,
     scanLevel: number,
   ): Promise<CommandResult> {
+    return successResult(
+      await this.legacyScanOutput(context, currentServerId, scanLevel),
+    );
+  }
+
+  /**
+   * The legacy IP-proximity discovery, as a rendered string.
+   *
+   * P5-NEW: split out of `legacyScan` so the BACKGROUND scan path can use it
+   * too. The synchronous branch falls back to this when topology adjacency
+   * returns nothing — but that branch is unreachable, because
+   * `spawnBackgroundProcess` only returns null when `memoryService` is absent
+   * and MEMORY_SERVICE is registered unconditionally. So the fallback existed
+   * in the source and could never run: a player standing on a server with no
+   * topology links was told "No unknown servers found" while the legacy
+   * subnet discovery that was supposed to rescue them sat behind a dead
+   * branch. That also made `discoverServers` — and the `server:discovered`
+   * event it emits — dead code.
+   */
+  private async legacyScanOutput(
+    context: CommandContext,
+    currentServerId: string,
+    scanLevel: number,
+  ): Promise<string> {
     const currentServer =
       await context.services.serverService.getServer(currentServerId);
     const fromIp = currentServer?.ipAddress;
@@ -458,7 +500,7 @@ export class NetworkCommandsModule implements CommandModule {
     );
 
     if (servers.length === 0) {
-      return successResult(`Scanning ${subnet}... No unknown servers found.\nTry 'connect <ip>' to reach a different network, then scan again.`);
+      return `Scanning ${subnet}... No unknown servers found.\nTry 'connect <ip>' to reach a different network, then scan again.`;
     }
 
     const columns: Column[] = [
@@ -481,7 +523,7 @@ export class NetworkCommandsModule implements CommandModule {
     const lines = [`Subnet Scan: ${subnet} (Level ${scanLevel})`, ""];
     lines.push(...table(columns, rows, footer));
 
-    return successResult(redactSensitiveContent(render(lines)));
+    return redactSensitiveContent(render(lines));
   }
 
   // ==================== SERVERS ====================

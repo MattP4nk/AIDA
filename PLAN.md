@@ -251,6 +251,62 @@ the harness itself: R4-d originally shared a player with R4-b/c and inherited
 its leaked consumer, so its verdict was really about the previous block. Given
 its own player. Full suite: 18 harnesses, **209 checks, 0 failures.**
 
+
+### Phase 5 P5-NEW — the entry's conclusion was right; its diagnosis was wrong
+
+**Reading the code contradicted the plan entry on every specific.** The entry
+says `discoverServers()` is reachable only from the dead no-resource fallback
+of `handleSubnetSweep`. In the current source:
+
+- `handleSubnetSweep` never calls `discoverServers` in **either** branch — both
+  call `scanByPartialIp`.
+- `discoverServers` has exactly one caller, `legacyScan`, in the **adjacency**
+  scan, not the sweep.
+- The `server:discovered` emit was already moved onto `scanByPartialIp` — the
+  live sweep path — back in **a75383d**, which this entry predates. Verified
+  end-to-end over a real socket: `scan 198.51.100` delivers
+  `server:discovered { count: 35 }` to a connected client.
+
+Had the entry been trusted, the "fix" would have gone into a function that did
+not have the bug.
+
+**What was actually still broken**, found by mapping reachability rather than
+reading the note: `spawnBackgroundProcess` returns null *only* when
+`memoryService` is absent, and `MEMORY_SERVICE` is registered unconditionally
+— so the background branch always returns first and the synchronous branch
+below it is dead. That synchronous branch is the one holding
+`if (results.length === 0) return legacyScan(...)`. So **the fallback from
+"topology found nothing" to legacy subnet discovery existed in the source and
+could never run**: a player standing on a server with no topology links was
+told "No unknown servers found" and nothing else, and `discoverServers` plus
+its `server:discovered` event were dead code.
+
+Fixed by splitting `legacyScan` into `legacyScan` (returns `CommandResult`) and
+`legacyScanOutput` (returns the rendered string), and calling the latter from
+the background `onComplete` when adjacency comes back empty — the same
+prescription the entry gave, applied to the handler that actually needed it.
+
+Evidence: `scripts/verify-phase5-p5new-discovery.ts` **11/11**, negative-
+controlled (reverting the fallback turns both part-2 checks red, with the
+distinguishing message "No unknown servers found").
+
+**Two harness bugs on the way, both the same species — asserting the state I
+could see instead of the state the code reads:**
+1. Deleted the `serverLink` rows and asserted the DB was empty, but
+   `getAdjacentServers` reads through a 30 s per-server cache
+   (`ADJ_CACHE_TTL`), so the service still returned a neighbour.
+2. After waiting the cache out it STILL returned one — because
+   `gameStateManager.createSession` calls `createHomeLink` as a "fallback if
+   registration missed it", so **authenticating re-created the very links the
+   test had just deleted**. The system self-heals the exact state the test was
+   constructing, so the strip has to happen *after* the healing step.
+
+Also still true and worth recording: `server:alert`, `server:created`,
+`server:deleted`, `server:updated` and `server:disconnected` have **no client
+listener at all** — five of `serverService`'s six event names are emitted into
+the void. Unlike `server:discovered`, nothing is waiting for them, so wiring
+them up is a feature decision rather than a repair.
+
 ## Decisions log
 
 Recorded so the plan stays internally consistent as it evolves.
