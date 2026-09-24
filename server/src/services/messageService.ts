@@ -291,6 +291,39 @@ export class MessageService {
         },
       });
 
+      // S7(d): moderate BEFORE the recipient is told — ORDERING, not just
+      // awaiting.
+      //
+      // The first attempt at this fix replaced the fire-and-forget IIFE *in
+      // place*, which left it sitting after `deliverMessageRealtime` and the
+      // `message:new_mail` broadcast. That made the call blocking without
+      // making it protective: the recipient's client had already rendered the
+      // content, and `isHidden` only ever suppressed a later re-fetch. Moving
+      // the call is the entire point; awaiting it where it stood just added
+      // latency. Anything asserting this must assert POSITION.
+      const moderation = await moderateBeforePublish(
+        filteredContent,
+        this.logger,
+        async (reason) => {
+          await prisma.message.update({ where: { id: message.id }, data: { isHidden: true } });
+          this.io?.to(`user:${senderId}`).emit("moderation:flagged", {
+            type: "message",
+            id: message.id,
+            reason,
+          });
+        },
+      );
+
+      // Blocked content is never delivered or broadcast. The row stays (hidden)
+      // so moderation decisions remain auditable.
+      if (moderation.verdict === "unsafe") {
+        return {
+          success: false,
+          message: "Message blocked by content policy",
+          data: { messageId: message.id, delivered: false, isEncrypted },
+        };
+      }
+
       // Try immediate delivery via Socket.IO
       const delivered = await this.deliverMessageRealtime(
         message.id,
@@ -353,26 +386,6 @@ export class MessageService {
           // Hook errors should not break message sending
         }
       }
-
-      // S7(d): moderation now runs BEFORE the recipient is told.
-      //
-      // It used to be fire-and-forget, started three steps after the message
-      // was persisted, delivered over Socket.IO and broadcast — so `isHidden`
-      // only ever suppressed a later re-fetch. The recipient's client had
-      // already rendered the content; hiding it afterwards protected nobody.
-      //
-      // Agreed policy: `unsafe` is blocked outright; an absent verdict
-      // (AI down, illegible answer, or slower than the delivery bound) still
-      // delivers and is re-checked in the background, so an AI outage does not
-      // become a messaging outage.
-      await moderateBeforePublish(filteredContent, this.logger, async (reason) => {
-        await prisma.message.update({ where: { id: message.id }, data: { isHidden: true } });
-        this.io?.to(`user:${senderId}`).emit("moderation:flagged", {
-          type: "message",
-          id: message.id,
-          reason,
-        });
-      });
 
       return {
         success: true,

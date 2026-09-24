@@ -59,11 +59,28 @@ export async function moderateBeforePublish(
   const result = await aiService.moderateForDelivery(content);
 
   if (result.verdict === "unsafe") {
-    // Deliberately NOT wrapped in a swallowing catch. If hiding fails we must
-    // know: the old `catch {}` here meant a failed hide looked identical to
-    // approved content.
-    await applyUnsafe(result.reason);
-    logger.warn({ reason: result.reason }, "S7: content blocked by moderation");
+    // REVIEW: the failure is LOGGED LOUDLY but must not propagate.
+    //
+    // Letting it throw was the wrong call: `applyUnsafe` is a Prisma update,
+    // and a transient error or a P2025 (row deleted concurrently) unwound out
+    // of the publish path entirely — skipping mission hooks and reputation,
+    // telling the caller the whole operation failed for content that WAS
+    // persisted, and inviting a retry that duplicates it. Worse, the row was
+    // left with `isHidden` still false: an unsafe verdict plus a failed hide
+    // failed OPEN, which is the exact outcome this gate exists to prevent.
+    //
+    // Returning "unsafe" regardless is what matters — the caller suppresses
+    // delivery either way, so the content does not reach anyone even if the
+    // flag did not persist.
+    try {
+      await applyUnsafe(result.reason);
+      logger.warn({ reason: result.reason }, "S7: content blocked by moderation");
+    } catch (err) {
+      logger.error(
+        { err, reason: result.reason },
+        "S7: content judged UNSAFE but could not be hidden — delivery still suppressed",
+      );
+    }
     return { verdict: "unsafe" };
   }
 

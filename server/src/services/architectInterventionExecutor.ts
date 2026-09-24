@@ -30,7 +30,7 @@ import type { PersonaService } from "./personaService";
 import type { StoryProgressionService } from "./storyProgressionService";
 import type EventService from "./eventService";
 import type MissionService from "./missionService";
-import { boundMissionRewards, boundMissionDifficulty, rewardsWereClamped } from "../utils/missionRewards";
+import { boundMissionRewardsWithReport, boundMissionDifficulty } from "../utils/missionRewards";
 
 // ═══════════════════════════════════════════════════════════════════
 // Types
@@ -617,11 +617,11 @@ export class ArchitectInterventionExecutor {
       xp: difficulty * 100,
       credits: difficulty * 50,
     };
-    const reward = boundMissionRewards(proposedReward);
+    const { rewards: reward, clamped } = boundMissionRewardsWithReport(proposedReward);
 
-    if (rewardsWereClamped(proposedReward, reward)) {
+    if (clamped.length > 0) {
       this.logger.warn(
-        { proposed: proposedReward, granted: reward, title },
+        { proposed: proposedReward, granted: reward, fields: clamped, title },
         "S5c: Architect proposed out-of-range mission rewards — clamped",
       );
     }

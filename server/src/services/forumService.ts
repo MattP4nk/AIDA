@@ -501,7 +501,12 @@ export class ForumService extends EventEmitter {
 
       const [posts, total] = await Promise.all([
         prisma.post.findMany({
-          where: { forumId },
+          // S7 review: posts must filter `isHidden` like replies already do
+          // (:572, :2035, :2041). Without it, moderation "blocking" a post only
+          // suppressed the socket notification — the post still rendered for
+          // every player on the next `forum list`, so the whole gate was inert
+          // on the read path.
+          where: { forumId, isHidden: false },
           skip,
           take: limit,
           orderBy: [
@@ -658,18 +663,11 @@ export class ForumService extends EventEmitter {
         },
       });
 
-      // Emit event
-      if (this.io) {
-        this.io.to(`forum:${forumId}`).emit("forum:new-post", {
-          postId: post.id,
-          title: post.title,
-          author: member.handle,
-        });
-      }
-
-      // S7(d): moderate BEFORE the post is visible to anyone else. See the
-      // note in messageService.sendPrivateMessage — same policy, same reason.
-      await moderateBeforePublish(
+      // S7(d): moderate BEFORE the broadcast — ORDERING, not just awaiting.
+      // The first attempt replaced the fire-and-forget IIFE in place, which
+      // left it *after* `forum:new-post`, so every subscriber had already
+      // rendered the post. See messageService.sendPrivateMessage.
+      const moderation = await moderateBeforePublish(
         `${filteredTitle}\n${filteredContent}`,
         this.logger,
         async (reason) => {
@@ -682,12 +680,27 @@ export class ForumService extends EventEmitter {
         },
       );
 
+      // Emit event — skipped entirely for blocked content.
+      if (this.io && moderation.verdict !== "unsafe") {
+        this.io.to(`forum:${forumId}`).emit("forum:new-post", {
+          postId: post.id,
+          title: post.title,
+          author: member.handle,
+        });
+      }
+
       // Notify AI personas of forum activity (knowledge pipeline)
       const forumRecord = await prisma.forum.findUnique({
         where: { id: forumId },
         select: { factionId: true },
       });
-      this.emit("forum:post_created", {
+      // S7 review: the knowledge pipeline must respect the verdict as well.
+      // `forum:post_created` is consumed by personaService, which ingests the
+      // post and can spawn NPC reactions — so blocked content was being
+      // laundered into generated world content and read back by other players.
+      // Guarding only the socket emit fixed the notification and left the
+      // laundering path open.
+      if (moderation.verdict !== "unsafe") this.emit("forum:post_created", {
         forumId,
         postId: post.id,
         userId,
@@ -1431,6 +1444,7 @@ YOUR POST TITLE: "${stripPromptBoundaries(post.title, 200)}"`;
       const posts = await prisma.post.findMany({
         where: {
           forumId,
+          isHidden: false, // S7 review: search must not surface blocked posts
           OR: [
             {
               title: {
@@ -1981,18 +1995,8 @@ YOUR POST TITLE: "${stripPromptBoundaries(post.title, 200)}"`;
         },
       });
 
-      // Emit event
-      if (this.io) {
-        this.io.to(`forum:${forumId}`).emit("forum:new-reply", {
-          postId,
-          replyId: reply.id,
-          author: member.handle,
-        });
-      }
-
-      // S7(d): moderate BEFORE the reply is visible. Same policy as
-      // createPost and sendPrivateMessage — see utils/moderationGate.ts.
-      await moderateBeforePublish(filteredContent, this.logger, async (reason) => {
+      // S7(d): moderate BEFORE the broadcast — see createPost.
+      const moderation = await moderateBeforePublish(filteredContent, this.logger, async (reason) => {
         await prisma.postReply.update({ where: { id: reply.id }, data: { isHidden: true } });
         this.io?.to(`user:${userId}`).emit("moderation:flagged", {
           type: "reply",
@@ -2000,6 +2004,23 @@ YOUR POST TITLE: "${stripPromptBoundaries(post.title, 200)}"`;
           reason,
         });
       });
+
+      // Emit event — skipped entirely for blocked content.
+      if (this.io && moderation.verdict !== "unsafe") {
+        this.io.to(`forum:${forumId}`).emit("forum:new-reply", {
+          postId,
+          replyId: reply.id,
+          author: member.handle,
+        });
+      }
+
+      // REVIEW: a blocked reply must not earn progress either. Guarding only
+      // the broadcast left `onForumActivity` crediting forum mission
+      // objectives for content moderation had just rejected — a player could
+      // farm objectives with material that never became visible.
+      if (moderation.verdict === "unsafe") {
+        return reply;
+      }
 
       // Track for mission objectives
       if (this.missionIntegration) {
@@ -2403,6 +2424,7 @@ YOUR POST TITLE: "${stripPromptBoundaries(post.title, 200)}"`;
 
       const where = {
         forumId,
+        isHidden: false, // S7 review: blocked posts stay out of tag listings too
         tags: {
           has: tag,
         },

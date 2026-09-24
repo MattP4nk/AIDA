@@ -3615,6 +3615,51 @@ them individually before trusting a "NO SUMMARY" as a failure.
       `sendAIMessage`, so the Architect's `send_message` intervention is covered
       (`architectInterventionExecutor.ts:398`) but `generatePersonaReply` is not.
 
+### Phase 6 code review (decision 15) — 12 findings, 9 of them in this phase's own fixes
+
+The pattern from Phase 5 repeated, harder. Three fixes were **defeatable or inert**, and the
+harnesses that certified them were all structural.
+
+**Critical — the prompt-injection defence was bypassable.** `BOUNDARY_TAG_RE` stripped in a single
+pass, and *deleting a match splices its neighbours*: `</user_<user_message>message>` lost its inner
+tag and reconstituted a working `</user_message>`, putting the payload **outside** the container the
+model was told to distrust. That defeated all of S6c and S5a. Stripping now runs to a **fixpoint**
+(sound: each changing pass strictly shortens). Reproduced before and after.
+
+**Critical — S7's ordering fix never happened.** I replaced the fire-and-forget IIFE *in place*,
+which left moderation sitting **after** `deliverMessageRealtime` and the `new_mail`/`forum:new-post`
+/`forum:new-reply` broadcasts. The call became blocking without becoming protective, and three
+commits plus PLAN.md claimed the opposite — CLAUDE.md shape #8, written by me. Moderation now
+precedes delivery at all three sites, unsafe content is never delivered, and **the harness asserts
+POSITION**, which is the only thing that distinguishes the fixed version from the broken one.
+
+**Critical — forum moderation was inert on reads.** Replies filtered `isHidden` in three queries;
+posts filtered it in **none**. Blocking a post suppressed a notification and nothing else — it still
+rendered for every player. Fixed in `getPosts`, `searchPosts` and the tag listing. The
+`forum:post_created` knowledge-pipeline emit was also ungated, laundering blocked content into
+generated world content; blocked replies additionally still earned mission credit.
+
+**Retry-on-timeout was silently killed by R14a.** `requestTimeout` and `SLOT_TIMEOUT_MS` are both
+120s, so an attempt running to a full timeout consumes the entire budget and no retry follows: three
+attempts became one for the dominant failure mode. Kept — retrying a 120s timeout inside a 120s hold
+is arithmetically impossible and doing it anyway is what starved the queue — but now **documented as
+a deliberate trade and logged when it bites**, rather than being an accident.
+
+Also fixed: `/health` was an unauthenticated, unrate-limited amplifier firing an **unbounded** fetch
+at the AI provider per request (now 3s-aborted and 10s-cached — a hung provider would otherwise have
+made the liveness probe the liveness failure); `budgetConversation` returned the **whole** history
+when `tailBudget <= 0`, because `slice(-0)` is the identity; the `unsafe` branch propagated a failed
+hide, unwinding the publish path and leaving the row visible — an unsafe verdict that **failed
+open**; and the moderation re-check gave up silently on an illegible verdict, which is precisely the
+case that produced `unavailable` in the first place.
+
+**Method note.** Every one of these passed a green harness. The common shape: *structural checks
+prove a symbol exists, never that it runs in the right place, in the right order, or at all.*
+Ordering now has positional assertions; the sanitizer has nested-payload regressions; the clamp
+reporter is bounded from both sides. Also worth recording: a Python edit script that raised
+mid-way printed its success lines and then **discarded every edit** at the final write — the "✓"
+output was a lie until the file was re-read.
+
 **Gate:** AI outage is visible in logs and on the health endpoint; injected file content cannot
 produce an intervention with out-of-range rewards.
 

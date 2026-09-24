@@ -70,11 +70,22 @@ export interface BoundedMissionRewards {
  * arithmetic silently and only disappears at the `> 0` guard, which reads as
  * "no reward" instead of "malformed reward".
  */
-function boundedNumber(raw: unknown, max: number, fallback = 0): number {
+function boundedNumber(
+  raw: unknown,
+  max: number,
+  fallback = 0,
+): { value: number; clamped: boolean } {
   const n = typeof raw === "number" ? raw : Number(raw);
-  if (!Number.isFinite(n)) return fallback;
-  if (n <= 0) return 0;
-  return Math.floor(Math.min(n, max));
+  // Review: a value that was PRESENT but unusable counts as clamped. The
+  // previous reporter gated on `Number.isFinite(raw)`, so `{credits: "a lot"}`
+  // — the most malformed input, and the likeliest AI garbage — was silently
+  // zeroed with no warning at all. CLAUDE.md shape #5: a guard that guards
+  // nothing, blind to exactly the case it existed for.
+  if (!Number.isFinite(n)) {
+    return { value: fallback, clamped: raw !== undefined && raw !== null };
+  }
+  if (n <= 0) return { value: 0, clamped: n < 0 };
+  return { value: Math.floor(Math.min(n, max)), clamped: n > max };
 }
 
 function boundedStringArray(raw: unknown, max: number): string[] {
@@ -90,7 +101,10 @@ function boundedStringArray(raw: unknown, max: number): string[] {
  * old row written before these bounds existed. Total function: every input
  * yields a valid reward object.
  */
-export function boundMissionRewards(raw: unknown): BoundedMissionRewards {
+export function boundMissionRewardsWithReport(raw: unknown): {
+  rewards: BoundedMissionRewards;
+  clamped: string[];
+} {
   const r = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
 
   // `xp` is the field the payout reads (missionService.MissionRewards), but
@@ -98,28 +112,38 @@ export function boundMissionRewards(raw: unknown): BoundedMissionRewards {
   // silently zeroing a reward authored against the other shape.
   const xpRaw = r.xp ?? r.experience;
 
+  const xp = boundedNumber(xpRaw, MAX_MISSION_XP);
+  const credits = boundedNumber(r.credits, MAX_MISSION_CREDITS);
+  const reputation = boundedNumber(r.reputation, MAX_MISSION_REPUTATION);
+  const skillPoints = boundedNumber(r.skillPoints, MAX_MISSION_SKILL_POINTS);
+  const items = boundedStringArray(r.items, MAX_MISSION_ITEMS);
+  const unlocks = boundedStringArray(r.unlocks, MAX_MISSION_ITEMS);
+
+  const clamped: string[] = [];
+  if (xp.clamped) clamped.push("xp");
+  if (credits.clamped) clamped.push("credits");
+  if (reputation.clamped) clamped.push("reputation");
+  if (skillPoints.clamped) clamped.push("skillPoints");
+  if (Array.isArray(r.items) && r.items.length > items.length) clamped.push("items");
+  if (Array.isArray(r.unlocks) && r.unlocks.length > unlocks.length) clamped.push("unlocks");
+
   return {
-    xp: boundedNumber(xpRaw, MAX_MISSION_XP),
-    credits: boundedNumber(r.credits, MAX_MISSION_CREDITS),
-    items: boundedStringArray(r.items, MAX_MISSION_ITEMS),
-    reputation: boundedNumber(r.reputation, MAX_MISSION_REPUTATION),
-    skillPoints: boundedNumber(r.skillPoints, MAX_MISSION_SKILL_POINTS),
-    unlocks: boundedStringArray(r.unlocks, MAX_MISSION_ITEMS),
+    rewards: {
+      xp: xp.value,
+      credits: credits.value,
+      items,
+      reputation: reputation.value,
+      skillPoints: skillPoints.value,
+      unlocks,
+    },
+    clamped,
   };
 }
 
-/** True when bounding would change the value — for logging a rejected blob. */
-export function rewardsWereClamped(raw: unknown, bounded: BoundedMissionRewards): boolean {
-  const r = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
-  const rawXp = Number(r.xp ?? r.experience);
-  const rawCredits = Number(r.credits);
-  return (
-    (Number.isFinite(rawXp) && Math.floor(Math.max(0, rawXp)) !== bounded.xp) ||
-    (Number.isFinite(rawCredits) && Math.floor(Math.max(0, rawCredits)) !== bounded.credits)
-  );
+export function boundMissionRewards(raw: unknown): BoundedMissionRewards {
+  return boundMissionRewardsWithReport(raw).rewards;
 }
 
-/** Clamp difficulty to the 1-10 scale; non-numeric input falls back to 3. */
 export function boundMissionDifficulty(raw: unknown, fallback = 3): number {
   const n = typeof raw === "number" ? raw : Number(raw);
   if (!Number.isFinite(n)) return fallback;

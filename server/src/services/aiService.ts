@@ -108,6 +108,8 @@ export class AIService {
   private readonly MIN_ATTEMPT_MS = 5_000;
   /** S7: hard bound on moderation when it sits on a delivery path. */
   private readonly MODERATION_DELIVERY_TIMEOUT_MS = 10_000;
+  /** Health probes are liveness checks, not generation — keep them short. */
+  private readonly HEALTH_PROBE_TIMEOUT_MS = 3_000;
   /** R14: guards processRetryQueue against overlapping interval ticks. */
   private retryQueueProcessing = false;
   private retryTimer: NodeJS.Timeout | null = null;
@@ -262,7 +264,26 @@ export class AIService {
       // synthetic error — the call silently became a no-op that had never
       // touched the API. Whatever the budget, we try once; only retries have
       // to justify themselves against the remaining time.
+      //
+      // REVIEW — THE DELIBERATE TRADE, stated because it was previously only
+      // implicit: `requestTimeout` and `SLOT_TIMEOUT_MS` are both 120s, so an
+      // attempt that runs to a FULL TIMEOUT consumes the entire budget and no
+      // retry follows. Retry-on-timeout is therefore gone; retry-on-fast-error
+      // (connection refused, HTTP 429) is intact, because those leave budget.
+      //
+      // That is the right trade rather than an oversight. Retrying a 120s
+      // timeout inside a 120s hold is arithmetically impossible, and doing it
+      // anyway is exactly what starved the queue before R14a: a holder sat on
+      // one of two slots for 380s while every waiter gave up at 120s. A timed
+      // out generation still recovers — just not inline — via the caller's
+      // fallback plus `queueForRetry`. The alternative (shortening
+      // `requestTimeout` so two attempts fit) would fail the legitimately slow
+      // cloud generations those 120s were chosen for.
       if (i > 0 && remaining < this.MIN_ATTEMPT_MS) {
+        this.logger.warn(
+          { attempt: i + 1, remaining, budgetMs },
+          "AI retry skipped — the slot budget cannot fund another attempt",
+        );
         throw lastError ?? new Error("AI retry budget exhausted");
       }
 
@@ -703,11 +724,26 @@ export class AIService {
         systemPrompt,
         async (response) => {
           const match = response.match(/\{.*\}/s);
-          if (!match) return;
+          if (!match) {
+            // REVIEW: log it. The entry has already been removed from the
+            // queue by processRetryQueueOnce, so returning quietly means the
+            // content stays published forever with no record that its
+            // re-check gave up — a silent permanent fail-open.
+            this.logger.warn("S7: moderation re-check returned no JSON — content stays published unchecked");
+            return;
+          }
           try {
             const parsed = JSON.parse(match[0]) as Record<string, unknown>;
             const safe = readModerationVerdict(parsed.safe);
-            if (safe === null) return; // still illegible — leave it be
+            if (safe === null) {
+              // Illegible is precisely what produced `unavailable` in the
+              // first place, so this is the likely path, not the rare one.
+              this.logger.warn(
+                { raw: JSON.stringify(parsed.safe) },
+                "S7: moderation re-check verdict still illegible — content stays published unchecked",
+              );
+              return;
+            }
             const reason =
               typeof parsed.reason === "string" && parsed.reason.trim()
                 ? parsed.reason.trim().slice(0, 500)
@@ -747,10 +783,20 @@ export class AIService {
   public async checkHealth(): Promise<boolean> {
     return (await safeExecute({
       fn: async () => {
-        const response = await fetch(`${this.apiUrl}/api/tags`, {
-          headers: this.getHeaders(),
-        });
-        return response.ok;
+        // R14c review: bound the probe. Without a signal this inherits the
+        // default fetch timeout, so a hung Ollama leaves every /health request
+        // pending — turning a liveness probe into a queue of stuck sockets.
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), this.HEALTH_PROBE_TIMEOUT_MS);
+        try {
+          const response = await fetch(`${this.apiUrl}/api/tags`, {
+            headers: this.getHeaders(),
+            signal: controller.signal,
+          });
+          return response.ok;
+        } finally {
+          clearTimeout(timer);
+        }
       },
       context: "AI health check",
       logger: this.logger,

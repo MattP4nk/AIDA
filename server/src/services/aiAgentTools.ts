@@ -762,7 +762,11 @@ export function budgetConversation(
   const head = originalPrompt.slice(0, Math.min(originalPrompt.length, Math.floor(maxChars * 0.25)));
   const marker = "\n\n[... earlier rounds elided to stay within the prompt budget ...]\n\n";
   const tailBudget = maxChars - head.length - marker.length;
-  const tail = history.slice(-Math.max(tailBudget, 0));
+  // REVIEW: `slice(-Math.max(tailBudget, 0))` returns the WHOLE string when
+  // tailBudget <= 0, because -0 === 0 and `slice(0)` is the identity — so the
+  // function handed back more than it was given, unbudgeted. Reachable for any
+  // maxChars < 80, which is exactly what a harness proving trimming would pass.
+  const tail = tailBudget > 0 ? history.slice(-tailBudget) : "";
 
   return head + marker + tail;
 }
