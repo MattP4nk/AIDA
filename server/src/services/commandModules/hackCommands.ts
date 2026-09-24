@@ -1093,11 +1093,16 @@ export class HackCommandsModule implements CommandModule {
     const success = Math.random() < finalChance;
 
     if (success) {
-      // Decrypt the file
-      await context.db.client.fileSystemNode.update({
-        where: { id: crackSession.fileId },
-        data: { isEncrypted: false, encryptionKey: null },
-      });
+      // R9: decrypt, then clear. One implementation, in fileService, so the
+      // harness exercises this exact sequence rather than re-deriving it.
+      const unlocked = await context.fileService.unlockCrackedFile(
+        crackSession.fileId,
+      );
+      if (!unlocked) {
+        return errorResult(
+          "Cipher broken, but the payload did not decode. The file is unchanged.",
+        );
+      }
 
       // Award XP
       const xpGain = 5 + (crackSession.challenge.difficulty * 2) + (isCorrect ? 5 : 0);

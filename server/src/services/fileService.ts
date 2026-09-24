@@ -369,7 +369,20 @@ export class FileService {
 
       // Handle encryption
       if (file.isEncrypted) {
-        if (!decryptionKey && file.encryptionKey) {
+        // R9: a file marked encrypted with NO key is LOCKED, not corrupt.
+        //
+        // World provisioning writes story files with `isEncrypted: true` and
+        // plaintext content and no key — 85 of 85 encrypted files in the dev
+        // database were in this state. The old code fell through to
+        // `decryptContent(plaintext, null)`, which throws "Invalid encrypted
+        // content format", so `cat` answered DECRYPTION_FAILED. Worse, the
+        // crack router keys on `error === "ENCRYPTED"`, so those files were
+        // ALSO uncrackable and the content was unreachable by any means.
+        //
+        // Reporting ENCRYPTED for both shapes is what makes them crackable,
+        // and is honest: from the player's side they are the same thing — a
+        // file you cannot read yet.
+        if (!decryptionKey) {
           return {
             success: false,
             message: "File is encrypted. Decryption key required.",
@@ -382,10 +395,12 @@ export class FileService {
         }
 
         try {
-          content = await this.decryptContent(
-            content,
-            decryptionKey || file.encryptionKey!,
-          );
+          // `decryptionKey` is guaranteed non-null here by the guard above.
+          // Prefer the STORED key when there is one: a locked-but-unencrypted
+          // file has plaintext content and nothing to decrypt.
+          content = file.encryptionKey
+            ? await this.decryptContent(content, decryptionKey)
+            : content;
         } catch (err) {
           return {
             success: false,
@@ -1576,6 +1591,72 @@ export class FileService {
   /**
    * Decrypt content using AES-256-CBC
    */
+  /**
+   * R9 — turn a cracked file into readable plaintext, atomically.
+   *
+   * The crack flow used to do `{ isEncrypted: false, encryptionKey: null }`
+   * and nothing else: it destroyed the only key to content it left encrypted,
+   * then labelled that ciphertext as plaintext. A "successful" crack was the
+   * operation that made the file permanently unreadable.
+   *
+   * Lives here, not in the command module, so the decrypt-then-clear sequence
+   * has ONE implementation that the verification harness exercises directly —
+   * a test that re-implements the sequence proves only that the author can do
+   * it twice.
+   *
+   * Two shapes arrive here. A genuinely encrypted file has a stored key and
+   * ciphertext. A provisioned "locked" story file has neither — its content is
+   * already plaintext and only the flag needs clearing. Returns false without
+   * touching the row if decryption fails, because a half-converted file is
+   * exactly what made the original bug unrecoverable.
+   */
+  public async unlockCrackedFile(fileId: string): Promise<boolean> {
+    const node = await prisma.fileSystemNode.findUnique({
+      where: { id: fileId },
+      select: { content: true, encryptionKey: true },
+    });
+    if (!node) return false;
+
+    let plaintext = node.content ?? "";
+    if (node.encryptionKey) {
+      try {
+        plaintext = await this.decryptContent(plaintext, node.encryptionKey);
+      } catch (err) {
+        this.logger.error(
+          { err, fileId },
+          "Crack succeeded but decryption failed — file left untouched",
+        );
+        return false;
+      }
+    }
+
+    await prisma.fileSystemNode.update({
+      where: { id: fileId },
+      data: {
+        content: plaintext,
+        size: plaintext.length,
+        isEncrypted: false,
+        encryptionKey: null,
+      },
+    });
+    return true;
+  }
+
+  /**
+   * R9 — decrypt ciphertext with a known key.
+   *
+   * Public because the crack flow must turn a cracked file's ciphertext into
+   * plaintext before clearing its `isEncrypted` flag. It previously cleared
+   * the flag and destroyed the key WITHOUT decrypting, which is how a
+   * successful crack produced permanently unreadable content.
+   */
+  public async decryptWithKey(
+    encryptedContent: string,
+    key: string,
+  ): Promise<string> {
+    return this.decryptContent(encryptedContent, key);
+  }
+
   private async decryptContent(
     encryptedContent: string,
     key: string,

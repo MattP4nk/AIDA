@@ -474,9 +474,16 @@ export class FileCommandsModule implements CommandModule {
         return errorResult(`Encryption failed: ${createResult.message}`);
       }
 
-      // 3. Delete original and rename temp to original path
+      // 3. Replace the original with the encrypted copy.
+      //
+      // R9: the temp file is the ONLY surviving copy between the delete below
+      // and a successful re-create, and it used to be deleted BEFORE
+      // `finalResult.success` was checked. If the final write failed, the
+      // original was already gone and the staging copy went with it — the file
+      // was destroyed by the command meant to protect it. Verify first, and
+      // keep the staging copy as a recovery point when the write fails.
       await context.fileService.deleteNode(serverId, context.userId, path);
-      // Move temp file to original path by creating final and deleting temp
+
       const finalResult = await context.fileService.createFile(
         serverId,
         context.userId,
@@ -485,7 +492,16 @@ export class FileCommandsModule implements CommandModule {
         true,
         password,
       );
-      // Clean up temp file
+
+      if (!finalResult.success) {
+        return errorResult(
+          `Encryption failed while writing ${path}. Your data is NOT lost — ` +
+            `the encrypted copy is at ${tempPath}. Rename it back with ` +
+            `'mv ${tempPath} ${path}'.`,
+        );
+      }
+
+      // Only now is the staging copy redundant.
       try {
         await context.fileService.deleteNode(
           serverId,
@@ -493,11 +509,28 @@ export class FileCommandsModule implements CommandModule {
           tempPath,
         );
       } catch {
-        // Ignore - temp file cleanup is best-effort
+        // Best-effort: a leftover temp file is untidy, not harmful.
       }
 
-      if (!finalResult.success) {
-        return errorResult(`Encryption partially failed - check file: ${path}`);
+      // R9: SURFACE THE KEY.
+      //
+      // With no password the service generates a random key and stores it on
+      // the row — and `readFile` refuses to decrypt unless the caller supplies
+      // one. So encrypting without a password used to make the file unreadable
+      // to its own owner, who was never told the key and could only get the
+      // content back by cracking their own file.
+      const issuedKey = finalResult.data?.encryptionKey;
+      if (!password && issuedKey) {
+        return successResult(
+          [
+            `File encrypted: ${filename}`,
+            "",
+            `  KEY: ${issuedKey}`,
+            "",
+            "  Store this key. It is required to read the file back:",
+            `    cat ${filename} --key=${issuedKey}`,
+          ].join("\n"),
+        );
       }
 
       return successResult(`File encrypted: ${filename}`);

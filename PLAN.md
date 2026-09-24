@@ -507,6 +507,54 @@ author's model of the system, not the system. The review is not a formality
 after the tests pass — it is the step that catches what the tests were shaped
 to miss.
 
+
+### Phase 5 R9 — the encryption data-loss cluster
+
+Unusually, **all five plan claims held** — and two were worse than written.
+Verified against source before any change, per the standing rule.
+
+1. **A successful crack destroyed the file.** It set
+   `{ isEncrypted: false, encryptionKey: null }` and never touched the content
+   — throwing away the only key to data it left encrypted, then labelling that
+   ciphertext as plaintext. The operation the player *wins* was the one that
+   made the file permanently unreadable. Now decrypts first, and leaves the row
+   completely untouched if decryption fails, because a half-converted file is
+   what made the original unrecoverable.
+2. **`encrypt` never showed the generated key.** With no password the service
+   mints one, stores it, and `readFile` then refuses to decrypt unless the
+   caller supplies a key — so encrypting your own file made it unreadable to
+   you, recoverable only by cracking it. The key is now printed with the
+   command to read it back.
+3. **`encrypt` could delete both copies.** The original was deleted, the final
+   write attempted, the staging copy deleted, and only *then* was
+   `finalResult.success` checked. A failed write destroyed the file outright.
+   Success is now verified before the staging copy is removed, and a failure
+   tells the player exactly where their data is and how to restore it.
+4. **Locked story files were unreadable AND uncrackable** — the worst of the
+   five. World provisioning writes files with `isEncrypted: true`, plaintext
+   content and no key: **85 of 85** encrypted files in the dev database. The
+   read path fell through to `decryptContent(plaintext, null)`, which throws,
+   so `cat` answered `DECRYPTION_FAILED`; and the crack router only routes on
+   `error === "ENCRYPTED"`, so `crack` skipped them too. Every authored
+   "classified" file in the game was unreachable by any means. A no-key
+   encrypted file now reports ENCRYPTED — honest from the player's side (a file
+   you cannot read yet) and, crucially, crackable.
+5. Claim 4's "align the crack branch with DECRYPTION_FAILED" turned out to be
+   the same defect as (4), approached from the other end; fixing the read path
+   aligned the router without touching it.
+
+**Altitude note:** the decrypt-then-clear sequence lives in
+`fileService.unlockCrackedFile`, not in the command module — because the first
+version of the harness *re-implemented* that sequence and therefore passed with
+the product code reverted. A test that redoes the work proves only that the
+author can do it twice. Moving it to one implementation is what let the harness
+exercise the real path.
+
+Evidence: `scripts/verify-phase5-r9-encryption.ts` **14/14**, negative-
+controlled on both the crack path (reverting leaves ciphertext behind) and the
+read guard (reverting restores DECRYPTION_FAILED). Full suite 22 harnesses,
+**268 checks, 0 failures.**
+
 ## Decisions log
 
 Recorded so the plan stays internally consistent as it evolves.
