@@ -11,7 +11,11 @@ export interface Notification {
   message: string;
   timestamp: Date;
   read: boolean;
-  priority: "low" | "normal" | "high" | "urgent";
+  // R13: matches shared/types NotificationPriority (LOW|NORMAL|HIGH|CRITICAL).
+  // The client used "urgent", which the server never sends — so every
+  // server-emitted CRITICAL notification failed each priority comparison and
+  // rendered as an ordinary one.
+  priority: "low" | "normal" | "high" | "critical";
   data?: any;
   action?: {
     label: string;
@@ -60,6 +64,14 @@ export const notificationsByType = derived(notifications, ($notifications) => {
 // ==================== NOTIFICATION SERVICE ====================
 
 class NotificationService {
+  /**
+   * R13: declared. `requestDesktopPermission` assigned `this.desktopEnabled`
+   * on a field that did not exist, so the permission result was written to an
+   * implicit property nothing ever read — desktop notifications could never be
+   * gated on it.
+   */
+  private desktopEnabled = false;
+
   private maxNotifications = 50;
 
   constructor() {
@@ -120,7 +132,7 @@ class NotificationService {
     });
 
     // Play sound via sound service based on priority
-    if (notification.priority === "urgent") {
+    if (notification.priority === "critical") {
       sound.alert();
     } else if (notification.priority === "high") {
       sound.notification();
@@ -282,7 +294,7 @@ export function getNotificationIcon(type: Notification["type"]): string {
 
 export function getNotificationColor(priority: Notification["priority"]): string {
   switch (priority) {
-    case "urgent":
+    case "critical":
       return "#ff0000";
     case "high":
       return "#ff6600";

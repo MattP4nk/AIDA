@@ -1213,8 +1213,19 @@
             return;
         }
 
-        // Ctrl+C - Cancel input
+        // Ctrl+C — cancel input, UNLESS the player is copying a selection.
+        //
+        // R13: this unconditionally called `preventDefault()`, and Ctrl+C is
+        // also the copy shortcut — so selecting output and pressing Ctrl+C
+        // suppressed the copy and wrote "^C" instead. Real terminals resolve it
+        // the same way: with a selection Ctrl+C copies, without one it
+        // interrupts.
         if (event.ctrlKey && event.key === "c") {
+            const selection = window.getSelection()?.toString() ?? "";
+            if (selection.length > 0) {
+                // Let the browser copy; do not preventDefault.
+                return;
+            }
             event.preventDefault();
             addCommandLine(inputValue + "^C");
             inputValue = "";

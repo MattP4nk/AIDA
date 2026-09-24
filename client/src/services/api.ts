@@ -58,6 +58,17 @@ class ApiClient {
     this.refreshTimer = setTimeout(() => this.refreshToken(), this.REFRESH_INTERVAL_MS);
   }
 
+  /**
+   * R13 — ALWAYS re-arm the timer.
+   *
+   * `scheduleRefresh` arms a one-shot `setTimeout`, and this re-armed it only
+   * inside the success branch. So a single transient failure — a dropped
+   * request, a 500, or any response missing `success`/`token` — permanently
+   * stopped token refresh for the rest of the session, and the player was
+   * silently logged out when the token reached its natural expiry. The retry
+   * belongs in `finally`: a failed refresh is a reason to try again at the
+   * next interval, not a reason to stop trying.
+   */
   private async refreshToken(): Promise<void> {
     if (!authenticated) return;
     try {
@@ -66,11 +77,16 @@ class ApiClient {
       if (data.success && data.token) {
         authToken = data.token;
         await this.fetchCsrfToken();
-        this.scheduleRefresh();
+      } else {
+        console.warn("Token refresh returned no token — will retry");
       }
-    } catch {
-      // Refresh failed — session will expire naturally, user re-authenticates
-      console.warn("Token refresh failed — session may expire");
+    } catch (error) {
+      console.warn("Token refresh failed — will retry", error);
+    } finally {
+      // Re-arm regardless of outcome, but only while still authenticated:
+      // `logout` clears `authenticated`, and a timer that outlives the session
+      // would keep polling `/auth/refresh` forever.
+      if (authenticated) this.scheduleRefresh();
     }
   }
 
@@ -312,32 +328,28 @@ class ApiClient {
 
   // ==================== USER METHODS ====================
 
-  async getCurrentUser(): Promise<any> {
-    try {
-      const response = await this.get("/users/profile");
-      return response.data || response;
-    } catch (error) {
-      console.warn("getCurrentUser not implemented yet");
-      return null;
-    }
-  }
 
-  async updateProfile(userData: any): Promise<any> {
-    try {
-      const response = await this.put("/users/profile", userData);
-      return response.data || response;
-    } catch (error) {
-      console.warn("updateProfile not implemented yet");
-      return null;
-    }
-  }
 
+  /**
+   * R13 — report what actually failed.
+   *
+   * This (and two now-deleted siblings) swallowed every error and logged
+   * "not implemented yet" regardless of cause. The server has no `users`
+   * route at all, so that diagnosis is right for a 404 — and wrong for an
+   * expired session, a 500 or a dropped connection, which all looked
+   * identical to the caller and to anyone reading the console.
+   */
   async getUserStats(): Promise<any> {
     try {
       const response = await this.get("/users/stats");
       return response.data || response;
     } catch (error) {
-      console.warn("getUserStats not implemented yet");
+      const status = (error as { status?: number })?.status;
+      if (status === 404) {
+        console.warn("getUserStats: /users/stats is not implemented server-side");
+      } else {
+        console.error("getUserStats failed", error);
+      }
       return null;
     }
   }

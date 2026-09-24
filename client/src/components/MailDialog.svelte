@@ -5,6 +5,7 @@
     import { terminalService } from "../services/terminal";
     import { newMailNotifications } from "../services/socketStores";
     import { currentUser } from "../stores/gameState";
+    import { notificationService } from "../services/notifications";
 
     // ==================== PROPS ====================
 
@@ -255,8 +256,18 @@
                 `mail report ${messageId} ${reason.trim()}`,
             );
             if (response.success) {
-                successMsg = "Report submitted. Thank you.";
-                setTimeout(() => (successMsg = ""), 3000);
+                // R13: route the confirmation through the notification service
+                // the rest of the app already uses. `successMsg` was assigned
+                // to an UNDECLARED variable (a ReferenceError in a Svelte
+                // module, so submitting a report crashed the dialog on the
+                // SUCCESS path) and, even once declared, was never rendered
+                // anywhere — the player would still have been told nothing.
+                notificationService.add({
+                    type: "system",
+                    title: "Report submitted",
+                    message: "Thank you — the report has been sent.",
+                    priority: "normal",
+                });
             } else {
                 error = response.output?.toString() || "Failed to submit report";
             }

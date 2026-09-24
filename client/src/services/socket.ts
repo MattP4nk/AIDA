@@ -154,11 +154,27 @@ class SocketService {
     }
   }
 
-  public reconnect(): void {
+  /**
+   * R13 — reconnect and RESOLVE once the socket exists.
+   *
+   * This returned `void` while `disconnect()` nulls `this.socket`
+   * synchronously and `connect()` was deferred 100ms. So a caller doing
+   *
+   *     socketService.reconnect();
+   *     const socket = socketService.getSocket();   // always null
+   *
+   * always took the `if (socket)` false branch — which in `App.svelte` is the
+   * whole authentication-wait block, including the listeners attached inside
+   * it. Awaiting the returned promise makes `getSocket()` meaningful again.
+   */
+  public reconnect(): Promise<Socket | null> {
     this.disconnect();
-    setTimeout(() => {
-      this.connect();
-    }, 100);
+    return new Promise((resolve) => {
+      setTimeout(() => {
+        this.connect();
+        resolve(this.socket);
+      }, 100);
+    });
   }
 
   // ==================== CLEANUP ====================
@@ -273,9 +289,11 @@ class SocketService {
     });
 
     this.on("message:new_mail", (data: any) => {
-      newMailNotifications.update((list) => {
-        return [data, ...list];
-      });
+      // R13: bounded. This grew without limit for the life of the session —
+      // every mail ever received stayed in memory, and the MailDialog
+      // subscriber re-rendered the whole list each time. `gameEvents` a few
+      // lines above already caps at 50; mail simply never adopted it.
+      newMailNotifications.update((list) => [data, ...list].slice(0, 50));
     });
 
     // Was listening for "message:error", which the server never emits. The real
@@ -400,7 +418,7 @@ class SocketService {
           type: "game",
           title: "Fragment Stolen",
           message: data.message || `Your fragment "${data.name}" has been stolen!`,
-          priority: "urgent",
+          priority: "critical",
         });
       }
     });
@@ -432,7 +450,7 @@ class SocketService {
           type: "game",
           title: "Endgame Unlocked",
           message: data.message || "All 9 AIDA fragments collected. Use 'endgame' to choose.",
-          priority: "urgent",
+          priority: "critical",
         });
       }
     });
@@ -448,7 +466,7 @@ class SocketService {
           type: "game",
           title: "Endgame Completed",
           message: "A player has made their final choice about AIDA. The net will never be the same.",
-          priority: "urgent",
+          priority: "critical",
         });
       }
     });
@@ -666,7 +684,7 @@ class SocketService {
           type: "game",
           title: "Level Up!",
           message: `You reached level ${data.newLevel || data.level}!`,
-          priority: "urgent",
+          priority: "critical",
           data,
         });
       }
@@ -680,7 +698,7 @@ class SocketService {
     // got XP and credits with no feedback at all.
     //
     // Low priority on purpose: this is a confirmation, not an interruption. The
-    // level-up handler above stays "urgent" because that one IS an event.
+    // level-up handler above stays "critical" because that one IS an event.
     this.on("rewards:xp_granted", async (data: any) => {
       const amount = data?.xpGained ?? 0;
       if (amount <= 0) return;
@@ -719,7 +737,7 @@ class SocketService {
           type: "game",
           title: "Achievement Unlocked!",
           message: `${data.name}: ${data.description}`,
-          priority: "urgent",
+          priority: "critical",
           data,
         });
       }

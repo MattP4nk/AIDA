@@ -927,6 +927,67 @@ epoch, and I had to restore it afterwards. A negative control that exercises a
 destructive path leaves real damage; worth building such controls against a
 disposable fixture in future rather than the seeded world.
 
+
+### Phase 5 R13 (pass 1) — client
+
+**Verification limit, stated up front:** there is no client test harness, so
+these are verified by `svelte-check`, by reading, and by a production build —
+not by driving a browser. Behavioural proof is weaker here than anywhere else
+in Phase 5, and the fixes are written to be obviously-correct rather than
+clever because of it.
+
+The baseline was **not** clean: `npm run check` reported 18 errors. Most are one
+deliberate build-time guard (`VITE_API_URL is not set`) repeating per file —
+environmental noise, not defects. Isolating the genuine ones left **four**, all
+inside R13's own scope. All four are now gone, and the client builds.
+
+**Fixed:**
+
+1. **`getSocket()` after `reconnect()` always returned null.** `reconnect()`
+   called `disconnect()` — which nulls `this.socket` synchronously — then
+   deferred `connect()` by 100 ms. `App.svelte` called `getSocket()` on the very
+   next line, so `if (socket)` was **always** false and the entire
+   authentication-wait block, including every listener attached inside it, was
+   skipped on every reconnect. `reconnect()` now returns a promise that resolves
+   with the socket, and the caller awaits it.
+2. **`successMsg` was assigned but never declared** — a `ReferenceError` in a
+   Svelte module, thrown on the report-submitted **success** path. And once
+   declared it was still rendered nowhere, so the player would have been told
+   nothing anyway. Routed through the notification service the rest of the app
+   already uses.
+3. **`notification.action.handler()` was called unconditionally**, but `handler`
+   is optional — the server-sent form carries `command` instead. Every
+   server-originated actionable notification threw.
+4. **`desktopEnabled` was assigned on a field that did not exist**, so the
+   desktop-permission result went to an implicit property nothing read.
+5. **`critical` vs `urgent`: the client's whole priority vocabulary was wrong.**
+   `shared/types` declares `NotificationPriority = LOW|NORMAL|HIGH|CRITICAL` and
+   the server emits `CRITICAL` — while the client's type was
+   `low|normal|high|"urgent"`. So every critical server notification failed
+   every comparison: no urgent styling, no red colour, no emphasis, no persist.
+   The highest-severity alerts rendered as routine ones. Client aligned to the
+   shared enum (5 client-originated priorities updated with it).
+6. **`newMailNotifications` grew without bound** for the life of the session,
+   while `gameEvents` twelve lines above already caps at 50. Bounded to match.
+7. **Ctrl+C suppressed copy.** The handler called `preventDefault()`
+   unconditionally, so selecting output and pressing Ctrl+C wrote `^C` instead
+   of copying. Now selection-aware, the way real terminals resolve it.
+8. **`refreshToken` only re-armed on success.** `scheduleRefresh` arms a
+   one-shot timer; a single transient failure — a dropped request, a 500, any
+   response missing `token` — permanently stopped token refresh, and the player
+   was silently logged out at the token's natural expiry. Re-arms in `finally`,
+   guarded on still being authenticated so it cannot outlive a logout.
+9. **Silent API failures**: three methods swallowed every error and logged
+   "not implemented yet" regardless of cause. The server has no `users` route
+   at all, so that is right for a 404 and wrong for a 401, a 500 or a dropped
+   connection. Two of the three had **zero callers** and were deleted; the
+   surviving one distinguishes 404 from a real failure.
+
+**Remaining for pass 2:** unread-count inflation, the notification badge's two
+owners, the duplicate reconnect loop, and reconnect state reconciliation. These
+four are interrelated — they all concern who owns notification/connection state
+— and deserve reading together rather than being picked off individually.
+
 ## Decisions log
 
 Recorded so the plan stays internally consistent as it evolves.

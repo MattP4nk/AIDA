@@ -55,8 +55,12 @@
             data: notification.data,
         });
 
-        // Execute action if available
-        if (notification.action) {
+        // R13: `handler` is OPTIONAL on a notification action — the server-sent
+        // form carries `command` instead, for the terminal to fill in. Calling
+        // it unconditionally threw "notification.action.handler is not a
+        // function" on every server-originated actionable notification, which
+        // is the majority of them.
+        if (notification.action?.handler) {
             notification.action.handler();
         }
     }
@@ -230,7 +234,7 @@
                                 </button>
                             </div>
                             <div class="notif-message">{notification.message}</div>
-                            {#if notification.priority === "high" || notification.priority === "urgent"}
+                            {#if notification.priority === "high" || notification.priority === "critical"}
                                 <div class="notif-priority {notification.priority}">
                                     {notification.priority.toUpperCase()}
                                 </div>

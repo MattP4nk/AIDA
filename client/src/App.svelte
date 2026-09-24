@@ -52,10 +52,11 @@
     async function initializeSocketAndTerminals() {
         try {
             // Ensure we have a fresh socket connection with auth token
-            socketService.reconnect();
-
-            // Wait for authentication to complete on the server using acknowledgment pattern
-            const socket = socketService.getSocket();
+            // R13: AWAIT the reconnect. `reconnect()` nulls the socket
+            // synchronously and reconnects on a timer, so the `getSocket()`
+            // below used to run against a null socket every single time and
+            // the entire authentication-wait block was skipped.
+            const socket = await socketService.reconnect();
             if (socket) {
                 await new Promise<void>((resolve, reject) => {
                     const timeout = setTimeout(() => {

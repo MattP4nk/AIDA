@@ -14,7 +14,7 @@
         low: 4000,
         normal: 5000,
         high: 8000,
-        urgent: 0, // urgent persists until dismissed
+        critical: 0, // critical persists until dismissed
     };
 
     interface ToastItem {
@@ -122,7 +122,7 @@
 
     function getAccentColor(priority: string): string {
         switch (priority) {
-            case "urgent": return "#ff4444";
+            case "critical": return "#ff4444";
             case "high": return "#ffaa00";
             case "normal": return "#00cc33";
             case "low": return "#006622";
@@ -148,7 +148,7 @@
                 class="toast"
                 class:entering={toast.entering}
                 class:leaving={toast.leaving}
-                class:urgent={toast.notification.priority === "urgent"}
+                class:urgent={toast.notification.priority === "critical"}
                 style="border-left-color: {getAccentColor(toast.notification.priority)}"
                 on:click={() => handleClick(toast)}
             >
