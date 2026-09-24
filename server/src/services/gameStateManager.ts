@@ -288,6 +288,61 @@ class GameStateManager extends EventEmitter {
     return this.activeConnections.get(socketId);
   }
 
+  /**
+   * R6 — bind a newly authenticated socket to the user's existing session.
+   *
+   * `handleAuthentication` only ever called `createSession`, and only when no
+   * session existed. Every other authenticating socket was left unbound:
+   * `session.socketId` still named the socket that created the session,
+   * `activeConnections` never learned the new id, and nothing rejoined the
+   * `server:<id>` room. That was survivable while a session died with its
+   * socket — but Phase 4 deliberately keeps the session alive while the user
+   * has other sockets, so `session.socketId` can now name a CLOSED socket
+   * while the player is still playing.
+   *
+   * Returns the session so the caller can rejoin rooms from it.
+   */
+  public attachSocket(
+    userId: string,
+    socketId: string,
+  ): PlayerSession | undefined {
+    const session = this.playerSessions.get(userId);
+    if (!session) return undefined;
+
+    if (session.socketId !== socketId) {
+      this.activeConnections.delete(session.socketId);
+      session.socketId = socketId;
+    }
+    this.activeConnections.set(socketId, userId);
+    session.lastActivity = new Date();
+    return session;
+  }
+
+  /**
+   * R6 — unbind a closing socket.
+   *
+   * `destroySession` deletes `activeConnections[session.socketId]`, which is
+   * the wrong key whenever the socket that closed is not the bound one, so
+   * the map leaked an entry per extra socket. When the bound socket is the
+   * one closing and the user still has others, the binding is moved to a
+   * survivor rather than left dangling.
+   */
+  public detachSocket(
+    userId: string,
+    socketId: string,
+    survivingSocketId?: string,
+  ): void {
+    this.activeConnections.delete(socketId);
+
+    const session = this.playerSessions.get(userId);
+    if (!session || session.socketId !== socketId) return;
+
+    if (survivingSocketId) {
+      session.socketId = survivingSocketId;
+      this.activeConnections.set(survivingSocketId, userId);
+    }
+  }
+
   public updateLastActivity(userId: string): void {
     const session = this.playerSessions.get(userId);
     if (session) {
@@ -675,11 +730,18 @@ class GameStateManager extends EventEmitter {
       serverState.activeConnections = serverState.connectedPlayers.length;
       serverState.lastUpdate = new Date();
 
-      // Join socket room
-      const socket = this.io.sockets.sockets.get(session.socketId);
-      if (socket) {
-        socket.join(`server:${serverId}`);
-      }
+      // R6: join the server room with ALL of the user's sockets, not the one
+      // `session.socketId` happens to name.
+      //
+      // `session.socketId` is written once at session creation and never
+      // rebound, so it goes stale the moment a player reconnects or opens a
+      // second tab — and `io.sockets.sockets.get(<dead id>)` is `undefined`,
+      // which this code silently treated as "nothing to do". The player then
+      // sat on a server receiving none of its room broadcasts.
+      // `socketsJoin` over the user room is indifferent to which socket is
+      // "the" socket, which is the property we actually want now that
+      // MAX_SOCKETS_PER_USER permits four.
+      await this.io.in(`user:${userId}`).socketsJoin(`server:${serverId}`);
 
       // Broadcast to others on server
       this.io.to(`server:${serverId}`).emit("server:user_connected", {
@@ -752,11 +814,11 @@ class GameStateManager extends EventEmitter {
           await this.syncServerConnectionCount(serverId);
         }
 
-        // Leave socket room
-        const socket = this.io.sockets.sockets.get(session.socketId);
-        if (socket) {
-          socket.leave(`server:${serverId}`);
-        }
+        // R6: leave with ALL of the user's sockets — see the join side. A
+        // single-socket `leave` would also have left the player's other tabs
+        // in the room, still receiving broadcasts for a server they are no
+        // longer on.
+        await this.io.in(`user:${userId}`).socketsLeave(`server:${serverId}`);
 
         // Broadcast to others on server
         this.io.to(`server:${serverId}`).emit("server:user_disconnected", {
@@ -1283,12 +1345,17 @@ Tips:
   /**
    * Clean up session on disconnect
    */
-  public async handleDisconnect(socketId: string): Promise<void> {
-    const userId = this.activeConnections.get(socketId);
-    if (userId) {
-      await this.destroySession(userId);
-    }
-  }
+  // R6: `handleDisconnect(socketId)` was REMOVED, not wired up.
+  //
+  // The plan's R6 item said to "call the socket-aware handleDisconnect
+  // (socketId)". Reading it showed it only resolved the userId from
+  // `activeConnections` and called `destroySession(userId)` — exactly what
+  // the socket layer already does, minus the `isLastSocket` guard added in
+  // Phase 4. So calling it would have DESTROYED a session that the user's
+  // other tabs were still using: the prescription was a regression, not a
+  // fix. Per-socket bookkeeping lives in `attachSocket`/`detachSocket`
+  // instead, and session teardown stays in the socket layer where the
+  // last-socket question can be answered.
 
   /**
    * Full cleanup - destroy all sessions and stop timer

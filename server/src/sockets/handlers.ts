@@ -415,6 +415,13 @@ export function setupSocketHandlers(io: SocketIOServer): void {
       // `removeFromIndex` deletes the key when the set empties, so this is
       // "was that the user's last socket?".
       const isLastSocket = !userSockets.has(userId);
+
+      // R6: unbind this socket. If it was the one the session was bound to
+      // and the user still has others, hand the binding to a survivor —
+      // otherwise the session would keep naming a closed socket.
+      const survivor = userSockets.get(userId)?.values().next().value;
+      services.gameStateManager.detachSocket(userId, socket.id, survivor);
+
       handleDisconnect(socket, services, isLastSocket);
     });
   });
@@ -486,6 +493,20 @@ async function handleAuthentication(
         socket.id,
         socket.handshake.address,
       );
+    }
+
+    // R6: bind THIS socket to the session, and put it back in the room for
+    // whatever server the player is on.
+    //
+    // The reuse path above did neither. A second tab — or a reconnect that
+    // found the session still alive — left `session.socketId` naming the old
+    // socket, never registered in `activeConnections`, and never rejoined
+    // `server:<currentServerId>`. The player was on a server as far as the
+    // session was concerned, while receiving none of that server's
+    // broadcasts.
+    const session = gameStateManager.attachSocket(userId, socket.id);
+    if (session?.currentServerId) {
+      socket.join(`server:${session.currentServerId}`);
     }
 
     // Mark player as online

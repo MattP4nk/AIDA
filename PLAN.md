@@ -307,6 +307,61 @@ listener at all** — five of `serverService`'s six event names are emitted into
 the void. Unlike `server:discovered`, nothing is waiting for them, so wiring
 them up is a feature decision rather than a repair.
 
+
+### Phase 5 R6 — session/socket binding (one claim was a trap)
+
+Checked all three claims against source first. Two held; one would have caused
+a regression.
+
+**Claim 1 — "call the socket-aware `handleDisconnect(socketId)`" — REJECTED,
+and the method deleted.** It only resolved the userId from
+`activeConnections` and called `destroySession(userId)` — exactly what the
+socket layer already does, *minus* the `isLastSocket` guard added in Phase 4.
+Wiring it up would have destroyed a session the user's other tabs were still
+using, i.e. re-introduced the bug Phase 4 had just fixed. A zero-caller method
+whose name suggests it is the right thing to call is a trap, so it is gone
+rather than left for the next reader.
+
+**Claim 2 — rebind `session.socketId` — CONFIRMED.** It was written once in
+`createSession` and never again. **Claim 3 — rejoin rooms — CONFIRMED.**
+`handleAuthentication`'s reuse branch joined only `user:`/`player:`.
+
+Both come from the same three lines: if a session already existed,
+authentication bound nothing. The new socket was absent from
+`activeConnections`, `session.socketId` still named the socket that created
+the session, and nothing rejoined `server:<currentServerId>`.
+
+**Phase 4 is what turned this from latent into live.** Sessions now
+deliberately survive while the user holds other sockets, so `session.socketId`
+can name a CLOSED socket while the player keeps playing — and both room
+operations did `io.sockets.sockets.get(deadId)`, got `undefined`, and treated
+that as "nothing to do". A player who closed the tab that happened to create
+the session kept playing on a server while receiving none of its broadcasts.
+
+Fixes:
+- Room join/leave now use `io.in(\`user:<id>\`).socketsJoin/socketsLeave`, so
+  they cover **all** of a user's sockets and no longer depend on which socket
+  is "the" socket. A single-socket `leave` would equally have left the other
+  tabs in the room of a server they had left.
+- `attachSocket(userId, socketId)` binds each authenticating socket (rebinds
+  `socketId`, fixes `activeConnections`, returns the session so the caller can
+  rejoin `server:<id>`).
+- `detachSocket(userId, socketId, survivingSocketId?)` removes the *closing*
+  socket — `destroySession` deleted `activeConnections[session.socketId]`,
+  the wrong key whenever the closing socket was not the bound one, leaking an
+  entry per extra socket — and hands the binding to a survivor.
+
+Evidence: `scripts/verify-phase5-r6-session.ts` **4/4**, negative-controlled:
+reverting R6 turns exactly the two R6 assertions red while both positive
+controls stay green.
+
+**Harness note.** The first draft asserted on `server:user_disconnected`,
+having *assumed* the room broadcast preceded the room removal. Source says the
+opposite — `socketsLeave` runs first, so the leaving player's own sockets are
+already out of the room. Rebuilt on `server:user_connected`, where
+`socketsJoin` verifiably precedes the broadcast and `io.to(room)` does not
+exclude the sender. Room membership is not otherwise observable from a client.
+
 ## Decisions log
 
 Recorded so the plan stays internally consistent as it evolves.
