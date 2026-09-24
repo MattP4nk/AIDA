@@ -41,6 +41,39 @@ interface QueuedRequest {
   createdAt: number;
 }
 
+/**
+ * S7: the outcome of a moderation attempt.
+ *
+ * `unavailable` is deliberately NOT a boolean. The old signature returned
+ * `{ safe: true, reason: "Moderation service unavailable" }` for every
+ * failure, so an outage was indistinguishable from an approval at the call
+ * site — and all three callers treated it as approval.
+ */
+export type ModerationResult =
+  | { verdict: "safe"; reason?: undefined }
+  | { verdict: "unsafe"; reason: string }
+  | { verdict: "unavailable"; reason: string };
+
+/**
+ * Read a model's `safe` field. Returns null when it cannot be read.
+ *
+ * Small models routinely answer with the STRING "false" rather than the
+ * boolean, which the old `as boolean` cast made truthy — the single most
+ * consequential bug in this file, because it published exactly the content
+ * the moderator had just flagged. Strings are normalised explicitly; anything
+ * unrecognised returns null so the caller treats it as "no verdict" rather
+ * than guessing.
+ */
+export function readModerationVerdict(raw: unknown): boolean | null {
+  if (typeof raw === "boolean") return raw;
+  if (typeof raw === "string") {
+    const s = raw.trim().toLowerCase();
+    if (s === "true" || s === "yes" || s === "safe") return true;
+    if (s === "false" || s === "no" || s === "unsafe") return false;
+  }
+  return null;
+}
+
 @injectable()
 export class AIService {
   private apiUrl: string;
@@ -68,6 +101,8 @@ export class AIService {
   private readonly RETRY_MAX_AGE_MS = 10 * 60 * 1000; // Drop requests older than 10 min
   /** Shortest attempt worth starting — below this, fail rather than half-try. */
   private readonly MIN_ATTEMPT_MS = 5_000;
+  /** S7: hard bound on moderation when it sits on a delivery path. */
+  private readonly MODERATION_DELIVERY_TIMEOUT_MS = 10_000;
   /** R14: guards processRetryQueue against overlapping interval ticks. */
   private retryQueueProcessing = false;
   private retryTimer: NodeJS.Timeout | null = null;
@@ -537,37 +572,149 @@ export class AIService {
     }
   }
 
-  /** AI-powered content moderation. Wired into messageService.sendPrivateMessage() and forumService.createPost()/createReply(). */
-  public async moderate(
-    content: string,
-  ): Promise<{ safe: boolean; reason?: string }> {
+  /**
+   * AI-powered content moderation.
+   *
+   * S7. Returns a THREE-STATE verdict, because the old boolean conflated two
+   * completely different situations — "the moderator judged this safe" and
+   * "the moderator never ran" — and every caller read the second as the first.
+   *
+   * What was wrong, all four verified against source:
+   *
+   *  (a) `content` went in as the raw user prompt, so the text being judged
+   *      was itself an injection vector into its own judge. (The "filtered"
+   *      string callers pass is `censorshipService` word replacement — not
+   *      prompt sanitization.)
+   *  (b) `parsed.safe as boolean` is a COMPILE-TIME cast with no runtime
+   *      check, and callers tested truthiness (`if (!modResult.safe)`). A
+   *      model emitting the *string* `"false"` — which small models do
+   *      constantly — is truthy, so flagged content PUBLISHED.
+   *  (c) Four separate fail-open returns. The only fail-closed path was
+   *      accidental: a missing `safe` key is `undefined`, which is falsy.
+   *  (d) Ordering — see the call sites.
+   *
+   * The distinction that fixes (b) and (c) together: a verdict is only
+   * honoured when it is actually legible. Anything else is `unavailable`,
+   * which callers must handle explicitly rather than mistake for consent.
+   */
+  public async moderate(content: string): Promise<ModerationResult> {
     const systemPrompt = `Review the following content for safety violations.
     Flag if it contains: illegal content, hate speech, personal information, exploits, or spam.
     Respond ONLY with a JSON object: { "safe": boolean, "reason": string | null }`;
 
+    // (a) The judged text is wrapped before it reaches its own judge.
+    const { sanitizeForPrompt } = await import("../utils/aiPromptSanitizer");
+
     return (await safeExecute({
-      fn: async () => {
-        const result = await this.generateResponse(content, systemPrompt, '{ "safe": true|false, "reason": "string|null" }');
+      fn: async (): Promise<ModerationResult> => {
+        const result = await this.generateResponse(
+          sanitizeForPrompt(content),
+          systemPrompt,
+          '{ "safe": true|false, "reason": "string|null" }',
+        );
         if (!result.success) {
-          return { safe: true, reason: "Moderation service unavailable" };
+          return { verdict: "unavailable", reason: result.error || "AI request failed" };
         }
 
         const jsonMatch = result.response.match(/\{.*\}/s);
-        if (jsonMatch) {
-          const parsed = JSON.parse(jsonMatch[0]);
-          const reason = (parsed.reason as string) || undefined;
-          if (reason) {
-            return { safe: parsed.safe as boolean, reason };
-          }
-          return { safe: parsed.safe as boolean };
+        if (!jsonMatch) {
+          return { verdict: "unavailable", reason: "Moderator returned no JSON object" };
         }
 
-        return { safe: true };
+        const parsed = JSON.parse(jsonMatch[0]) as Record<string, unknown>;
+        const safe = readModerationVerdict(parsed.safe);
+        const reason =
+          typeof parsed.reason === "string" && parsed.reason.trim()
+            ? parsed.reason.trim().slice(0, 500)
+            : undefined;
+
+        // An illegible verdict is NOT consent. This is the (b) fix: the
+        // string "false" now reads as false instead of as truthy.
+        if (safe === null) {
+          return {
+            verdict: "unavailable",
+            reason: `Moderator verdict was not legible: ${JSON.stringify(parsed.safe)}`,
+          };
+        }
+
+        return safe
+          ? { verdict: "safe" }
+          : { verdict: "unsafe", reason: reason || "Content policy violation" };
       },
       context: "Moderate content",
       logger: this.logger,
-      fallback: { safe: true, reason: "Moderation service unavailable" } as { safe: boolean; reason?: string },
-    })()) ?? { safe: true, reason: "Moderation service unavailable" };
+      fallback: { verdict: "unavailable", reason: "Moderation service unavailable" } as ModerationResult,
+    })()) ?? { verdict: "unavailable", reason: "Moderation service unavailable" };
+  }
+
+  /**
+   * Moderate with a hard wall-clock bound, for use ON a delivery path.
+   *
+   * S7(d): moderation now gates delivery, so its latency is felt by the
+   * sender. `generateResponse` may legitimately take up to SLOT_TIMEOUT_MS
+   * (120s) once queueing is counted, which is far too long to hold a message
+   * send. Past this bound the answer is `unavailable` — which, per the agreed
+   * policy, means deliver and re-check rather than block.
+   */
+  public async moderateForDelivery(
+    content: string,
+    timeoutMs = this.MODERATION_DELIVERY_TIMEOUT_MS,
+  ): Promise<ModerationResult> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<ModerationResult>((resolve) => {
+      timer = setTimeout(
+        () => resolve({ verdict: "unavailable", reason: `Moderation exceeded ${timeoutMs}ms` }),
+        timeoutMs,
+      );
+      timer.unref?.();
+    });
+
+    try {
+      return await Promise.race([this.moderate(content), timeout]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Re-moderate content that was delivered without a verdict.
+   *
+   * Rides the existing retry queue (fixed in R14a — before that, overlapping
+   * ticks could fire `onSuccess` several times for one entry, which here
+   * would mean hiding a post repeatedly and spamming its author).
+   */
+  public queueModerationRecheck(
+    content: string,
+    onVerdict: (result: ModerationResult) => void | Promise<void>,
+  ): void {
+    const systemPrompt = `Review the following content for safety violations.
+    Flag if it contains: illegal content, hate speech, personal information, exploits, or spam.
+    Respond ONLY with a JSON object: { "safe": boolean, "reason": string | null }`;
+
+    void (async () => {
+      const { sanitizeForPrompt } = await import("../utils/aiPromptSanitizer");
+      this.queueForRetry(
+        sanitizeForPrompt(content),
+        systemPrompt,
+        async (response) => {
+          const match = response.match(/\{.*\}/s);
+          if (!match) return;
+          try {
+            const parsed = JSON.parse(match[0]) as Record<string, unknown>;
+            const safe = readModerationVerdict(parsed.safe);
+            if (safe === null) return; // still illegible — leave it be
+            const reason =
+              typeof parsed.reason === "string" && parsed.reason.trim()
+                ? parsed.reason.trim().slice(0, 500)
+                : "Content policy violation";
+            await onVerdict(safe ? { verdict: "safe" } : { verdict: "unsafe", reason });
+          } catch {
+            /* unparseable on re-check — the content simply stays visible */
+          }
+        },
+        '{ "safe": true|false, "reason": "string|null" }',
+      );
+    })();
   }
 
   public async summarize(content: string): Promise<string> {

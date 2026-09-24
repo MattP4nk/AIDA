@@ -3443,17 +3443,34 @@ encryption round-trips without data loss.
       on turn N and letting it be replayed bare on turn N+1. `playerUsername` (:1392) is unsanitized
       too. Same shape in `forumService.ts:1304-1310`, where the replayed "memory" is itself
       AI-extracted from earlier player text — a *persistent* injection channel, not a per-turn one.
-- [ ] **S7** Sanitize moderation input; validate `safe` as a real boolean; **fail closed**;
-      moderate *before* broadcasting. **All four legs verified FALSE 2026-09-24 (`aiService.ts:447-477`):**
-      (a) `content` is passed raw as the prompt — the text being judged is itself an injection vector
-      into the judge; the "filtered" callers pass is `censorshipService` word-replacement, not prompt
-      sanitization. (b) `parsed.safe as boolean` is a compile-time cast with **no runtime check**, and
-      consumers test truthiness — so a model emitting the *string* `"false"` is truthy and the content
-      **publishes**. (c) Four separate fail-open returns (`safe: true` on AI failure, on no-JSON, on
-      parse throw, on nullish). The only fail-closed case is accidental: a missing `safe` key is
-      falsy. (d) Moderation is **fire-and-forget at `messageService.ts:357`, three steps after the
-      message is persisted (:270), delivered over Socket.IO (:294) and broadcast (:312)** — the
-      recipient has already rendered it; `isHidden` only suppresses later re-fetches.
+- [x] **S7 DONE 2026-09-24 — moderation.** All four legs were false; fixed together because they
+      share one cause: a boolean that meant two different things.
+      - **The verdict published what it flagged.** `parsed.safe as boolean` was a compile-time cast
+        with no runtime check, and all three callers tested truthiness (`if (!modResult.safe)`).
+        Small models routinely answer with the **string** `"false"` — which is truthy — so the
+        moderator flagged content and the system published it anyway. `moderate()` now returns a
+        three-state `ModerationResult`, and `readModerationVerdict` normalises `"false"/"no"/"unsafe"`
+        explicitly; anything unrecognised is `null`, i.e. **no verdict**, never consent.
+      - **An outage read as unanimous approval.** Four separate paths returned `{ safe: true }` on
+        failure. `unavailable` is now a distinct state the compiler forces every caller to handle —
+        changing the return type is what *found* all three call sites.
+      - **The judged text went into its own judge raw.** Now wrapped with `sanitizeForPrompt`. (The
+        "filtered" string callers passed is `censorshipService` word replacement, not prompt
+        sanitization — an easy thing to mistake for protection.)
+      - **Moderation ran after delivery.** It was `void (async () => …)` started three steps *after*
+        the content was persisted, delivered over Socket.IO and broadcast, so `isHidden` only ever
+        suppressed a later re-fetch — the recipient's client had already rendered it. All three sites
+        now `await` a single gate, `utils/moderationGate.ts`.
+      - **Agreed policy (maintainer, 2026-09-24):** `unsafe` blocks before anyone sees it;
+        `unavailable` publishes and queues a background re-check, so an AI outage does not become a
+        messaging outage. A 10s `moderateForDelivery` bound keeps AI latency off the send path —
+        without it the send could have blocked for `SLOT_TIMEOUT_MS`. This fail-open is deliberate
+        and **narrower than what it replaces**, where even an explicit "unsafe" could fail open.
+      - The hide action is deliberately **not** wrapped in a swallowing `catch`: the old
+        `catch { }` meant a failed hide was indistinguishable from approved content.
+      - `scripts/verify-phase6-s7-moderation.ts` — 29 checks driving real model responses
+        (adversarial strings, missing keys, non-JSON), negative-controlled.
+
 - [ ] **R14** `validateContentPlan`: cap array lengths and path depth, reject `..`, route through
       `pathSanitizer`. Add null-element guards to the three validators missing them.
 - [ ] **R14** Observability: stop hardcoding `silent: true` in `safeAI`; mark fallback content so

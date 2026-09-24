@@ -47,6 +47,7 @@ import {
 } from "../utils/tokenConsumption";
 import { generateAvatar, getCompactAvatar } from "../utils/asciiAvatars";
 import type { AvatarInfo } from "../../../shared/types";
+import { moderateBeforePublish } from "../utils/moderationGate";
 
 // ==================== TYPES ====================
 
@@ -353,23 +354,25 @@ export class MessageService {
         }
       }
 
-      // Async content moderation (non-blocking — message created first, hidden if flagged)
-      void (async () => {
-        try {
-          const { getService } = await import("../di/container");
-          const { AI_SERVICE } = await import("../di/tokens");
-          const aiService = getService<AIService>(AI_SERVICE);
-          const modResult = await aiService.moderate(filteredContent);
-          if (!modResult.safe) {
-            await prisma.message.update({ where: { id: message.id }, data: { isHidden: true } });
-            this.io?.to(`user:${senderId}`).emit("moderation:flagged", {
-              type: "message",
-              id: message.id,
-              reason: modResult.reason || "Content policy violation",
-            });
-          }
-        } catch { /* moderation unavailable — content stays visible */ }
-      })();
+      // S7(d): moderation now runs BEFORE the recipient is told.
+      //
+      // It used to be fire-and-forget, started three steps after the message
+      // was persisted, delivered over Socket.IO and broadcast — so `isHidden`
+      // only ever suppressed a later re-fetch. The recipient's client had
+      // already rendered the content; hiding it afterwards protected nobody.
+      //
+      // Agreed policy: `unsafe` is blocked outright; an absent verdict
+      // (AI down, illegible answer, or slower than the delivery bound) still
+      // delivers and is re-checked in the background, so an AI outage does not
+      // become a messaging outage.
+      await moderateBeforePublish(filteredContent, this.logger, async (reason) => {
+        await prisma.message.update({ where: { id: message.id }, data: { isHidden: true } });
+        this.io?.to(`user:${senderId}`).emit("moderation:flagged", {
+          type: "message",
+          id: message.id,
+          reason,
+        });
+      });
 
       return {
         success: true,

@@ -27,8 +27,8 @@ import type { FactionKnowledgeService } from "./factionKnowledgeService";
 import { validateForumPosts, validateForumReply } from "../utils/aiOutputValidator";
 import { fallbackForumPost } from "../utils/aiFallbacks";
 
-import type { AIService } from "./aiService";
 import type { ReputationEngine } from "./reputationEngine";
+import { moderateBeforePublish } from "../utils/moderationGate";
 /**
  * ForumService - Underground forum networks and darkweb system
  *
@@ -667,23 +667,20 @@ export class ForumService extends EventEmitter {
         });
       }
 
-      // Async content moderation (non-blocking — post created first, hidden if flagged)
-      void (async () => {
-        try {
-          const { getService } = await import("../di/container");
-          const { AI_SERVICE } = await import("../di/tokens");
-          const aiService = getService<AIService>(AI_SERVICE);
-          const modResult = await aiService.moderate(`${filteredTitle}\n${filteredContent}`);
-          if (!modResult.safe) {
-            await prisma.post.update({ where: { id: post.id }, data: { isHidden: true } });
-            this.io?.to(`user:${userId}`).emit("moderation:flagged", {
-              type: "post",
-              id: post.id,
-              reason: modResult.reason || "Content policy violation",
-            });
-          }
-        } catch { /* moderation unavailable */ }
-      })();
+      // S7(d): moderate BEFORE the post is visible to anyone else. See the
+      // note in messageService.sendPrivateMessage — same policy, same reason.
+      await moderateBeforePublish(
+        `${filteredTitle}\n${filteredContent}`,
+        this.logger,
+        async (reason) => {
+          await prisma.post.update({ where: { id: post.id }, data: { isHidden: true } });
+          this.io?.to(`user:${userId}`).emit("moderation:flagged", {
+            type: "post",
+            id: post.id,
+            reason,
+          });
+        },
+      );
 
       // Notify AI personas of forum activity (knowledge pipeline)
       const forumRecord = await prisma.forum.findUnique({
@@ -1973,23 +1970,16 @@ YOUR POST TITLE: "${post.title}"`;
         });
       }
 
-      // Async content moderation (non-blocking — reply created first, hidden if flagged)
-      void (async () => {
-        try {
-          const { getService } = await import("../di/container");
-          const { AI_SERVICE } = await import("../di/tokens");
-          const aiService = getService<AIService>(AI_SERVICE);
-          const modResult = await aiService.moderate(filteredContent);
-          if (!modResult.safe) {
-            await prisma.postReply.update({ where: { id: reply.id }, data: { isHidden: true } });
-            this.io?.to(`user:${userId}`).emit("moderation:flagged", {
-              type: "reply",
-              id: reply.id,
-              reason: modResult.reason || "Content policy violation",
-            });
-          }
-        } catch { /* moderation unavailable */ }
-      })();
+      // S7(d): moderate BEFORE the reply is visible. Same policy as
+      // createPost and sendPrivateMessage — see utils/moderationGate.ts.
+      await moderateBeforePublish(filteredContent, this.logger, async (reason) => {
+        await prisma.postReply.update({ where: { id: reply.id }, data: { isHidden: true } });
+        this.io?.to(`user:${userId}`).emit("moderation:flagged", {
+          type: "reply",
+          id: reply.id,
+          reason,
+        });
+      });
 
       // Track for mission objectives
       if (this.missionIntegration) {
