@@ -194,9 +194,12 @@ class MissionService extends EventEmitter {
           title: data.title,
           description: data.description,
           type: data.type,
-          difficulty: data.difficulty,
+          // S5c: backstop. Every mission creator lands here, so bounding at
+          // this single write point covers the Architect, the generators, and
+          // anything added later — no caller can persist an unbounded reward.
+          difficulty: boundMissionDifficulty(data.difficulty),
           requiredSkills: (data.requiredSkills ?? {}) as any,
-          reward: data.reward as any,
+          reward: boundMissionRewards(data.reward) as any,
           timeLimit: data.timeLimit ?? null,
           targetServerId: data.targetServerId ?? null,
           targetUserId: data.targetUserId ?? null,
@@ -1282,10 +1285,14 @@ class MissionService extends EventEmitter {
     performance: PerformanceMetrics,
   ): MissionRewards {
     try {
-      const baseRewards = (mission.reward as unknown as MissionRewards) || {
-        xp: 100,
-        credits: 50,
-      };
+      // S5c: bound the stored blob before it is multiplied.
+      //
+      // This was `mission.reward as unknown as MissionRewards` — a cast, so a
+      // row written before these bounds existed (or edited by hand) arrives
+      // unchecked. It matters that this runs BEFORE the multiplier: JS coerces
+      // in `baseRewards.credits * multiplier`, so the STRING "1000000000"
+      // would multiply happily and never trip a `typeof` check downstream.
+      const baseRewards: MissionRewards = boundMissionRewards(mission.reward);
 
       // Calculate multipliers based on performance
       let multiplier = 1.0;
@@ -1328,15 +1335,19 @@ class MissionService extends EventEmitter {
       // Bonus objectives — now able to vary, see `bonusObjectivesCompleted`.
       multiplier += performance.bonusObjectivesCompleted * 0.1;
 
-      // Apply multiplier
-      const finalRewards: MissionRewards = {
+      // Apply multiplier, then bound AGAIN — the multiplier reaches ~2.35x
+      // (1.0 + 0.5 time + 0.15 efficiency + 0.2 baseline + 0.1 per bonus
+      // objective), so clamping only the stored value would leave the amount
+      // actually granted unbounded by that factor. This is the last point
+      // before `grantRewards` calls addCredits/addExperience.
+      const finalRewards: MissionRewards = boundMissionRewards({
         xp: Math.floor(baseRewards.xp * multiplier),
         credits: Math.floor(baseRewards.credits * multiplier),
-        items: baseRewards.items || [],
-        reputation: baseRewards.reputation || 0,
-        skillPoints: baseRewards.skillPoints || 0,
-        unlocks: baseRewards.unlocks || [],
-      };
+        items: baseRewards.items,
+        reputation: baseRewards.reputation,
+        skillPoints: baseRewards.skillPoints,
+        unlocks: baseRewards.unlocks,
+      });
 
       return finalRewards;
     } catch (error) {
@@ -1827,6 +1838,7 @@ import { MISSION_SERVICE } from "../di/tokens";
 import { missionExpiresAt, missionTimeLimitMs } from "../utils/missionTime";
 import { requiredObjectivesComplete } from "../utils/missionCompletion";
 import { BASELINE_COMPLETION_BONUS } from "../config/gameBalance";
+import { boundMissionRewards, boundMissionDifficulty } from "../utils/missionRewards";
 export const missionService = new Proxy({} as MissionService, {
   get(_target, prop) {
     const instance = container.resolve(MISSION_SERVICE as any);

@@ -3411,8 +3411,29 @@ encryption round-trips without data loss.
       path so one player can't stall global content generation.
 - [ ] **S5** Constrain the Architect loop: scope `search_files` to non-player content (or tag
       player-authored text as untrusted), add an allow-list so `get_server_access_keys` /
-      `get_ai_personas` output can never reach generated file content, and **validate intervention
-      `data` against a schema with bounded rewards** instead of `as any`.
+      `get_ai_personas` output can never reach generated file content.
+      - [x] **S5c DONE 2026-09-24 — bounded rewards.** `Mission.reward` is a Json column written from
+        AI output and the path had **four casts and no schema**: the validator keeps only `type`
+        (`data: i.data` passthrough), the executor did `data.reward as Record<string, unknown>`,
+        `createMission` did `reward: data.reward as any`, and the payout re-cast it as
+        `mission.reward as unknown as MissionRewards` before `grantRewards` paid it out guarded only
+        by `> 0`. `data.reward = { credits: 1e9 }` was stored and granted **in full**. Reachable, not
+        hypothetical — the agent loop reads player-authored files and forum posts unsanitized (S5a).
+        - New `utils/missionRewards.ts` is the single bound, applied at **three** layers: the AI
+          entry point, the `createMission` write (so every creator is covered, not just the
+          Architect), and — critically — **inside `calculateRewards`, both before and after the
+          multiplier**. Clamping only the stored value would have left the granted amount unbounded
+          by the ~2.35x multiplier (1.0 + 0.5 time + 0.15 efficiency + 0.2 baseline + 0.1 per bonus).
+        - **Type confusion was a second hole the audit missed:** the payout computes
+          `baseRewards.credits * multiplier`, and JS coerces — so the *string* `"1000000000"`
+          multiplied numerically and would pass any `typeof === "number"` check placed downstream.
+          Values are coerced and range-checked, not trusted.
+        - **Bounds are derived, not invented.** `missionTemplatePool.ts:1559-1561` is the richest
+          hand-authored mission (`credits {base:50000, perLevel:1000}`, `xp {base:10000,
+          perLevel:100}`); even at an implausible level 200 that is 250k credits stored and ~587k
+          granted. Caps sit above that, so **no legitimate mission is altered** — the harness asserts
+          that from both sides, because a cap that quietly nerfs the endgame is its own bug.
+        - `scripts/verify-phase6-s5c-rewards.ts` — 30 checks, negative-controlled.
 - [ ] **S6** Sanitize prompt history, not just the current turn. **Re-verified 2026-09-24 — the
       "~25 sites" figure is an undercount: there are 37 AI invocation sites (34 generation +
       3 moderation), and `sanitizeForPrompt` is used at only 5 prompts / 6 invocations.**

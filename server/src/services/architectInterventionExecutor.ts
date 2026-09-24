@@ -30,6 +30,7 @@ import type { PersonaService } from "./personaService";
 import type { StoryProgressionService } from "./storyProgressionService";
 import type EventService from "./eventService";
 import type MissionService from "./missionService";
+import { boundMissionRewards, boundMissionDifficulty, rewardsWereClamped } from "../utils/missionRewards";
 
 // ═══════════════════════════════════════════════════════════════════
 // Types
@@ -603,11 +604,27 @@ export class ArchitectInterventionExecutor {
     }
 
     const missionType = (data.type as string) ?? "story";
-    const difficulty = (data.difficulty as number) ?? 3;
-    const reward = (data.reward as Record<string, unknown>) ?? {
+
+    // S5c: the Architect's proposed numbers are AI output — bound them.
+    //
+    // These were `data.difficulty as number` and `data.reward as Record<...>`:
+    // compile-time casts over a Json blob the validator passes through
+    // untouched (`aiOutputValidator.ts` keeps only `type`). Nothing between
+    // here and `addCredits` checked a range, so a response carrying
+    // `reward: { credits: 1e9 }` was written and later granted in full.
+    const difficulty = boundMissionDifficulty(data.difficulty);
+    const proposedReward = data.reward ?? {
       xp: difficulty * 100,
       credits: difficulty * 50,
     };
+    const reward = boundMissionRewards(proposedReward);
+
+    if (rewardsWereClamped(proposedReward, reward)) {
+      this.logger.warn(
+        { proposed: proposedReward, granted: reward, title },
+        "S5c: Architect proposed out-of-range mission rewards — clamped",
+      );
+    }
     const factionId = data.factionId as string | undefined;
 
     const missionService = await this.getMissionService();
@@ -616,7 +633,7 @@ export class ArchitectInterventionExecutor {
       description,
       type: missionType,
       difficulty,
-      reward: reward as any,
+      reward,
       createdBy: "architect",
       issuedBy: "The Architect",
       objectives: [
