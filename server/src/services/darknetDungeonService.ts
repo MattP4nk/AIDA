@@ -14,7 +14,13 @@ import { injectable, inject } from "tsyringe";
 import type { Logger } from "pino";
 import crypto from "crypto";
 import { safeExecute } from "../utils/safeExecute";
-import { LOGGER, AI_SERVICE, EVENT_SERVICE } from "../di/tokens";
+import {
+  LOGGER,
+  AI_SERVICE,
+  EVENT_SERVICE,
+  PLAYER_PROGRESS_REPOSITORY,
+} from "../di/tokens";
+import type PlayerProgressRepository from "../repositories/playerProgressRepository";
 import { db } from "../database/client";
 import { resolveNpcOwnerId } from "../../prisma/npcOwnership";
 import type { AIService } from "./aiService";
@@ -205,6 +211,8 @@ export class DarkNetDungeonService {
     @inject(LOGGER) private logger: Logger,
     @inject(AI_SERVICE) private aiService: AIService,
     @inject(EVENT_SERVICE) private eventService: EventService,
+    @inject(PLAYER_PROGRESS_REPOSITORY)
+    private playerProgress: PlayerProgressRepository,
   ) {}
 
   // ─────────────────────────────────────────────────────────────────
@@ -444,8 +452,21 @@ export class DarkNetDungeonService {
           }
 
           // Create hidden .signal directory
-          const hiddenDir = await db.client.fileSystemNode.create({
-            data: {
+          // D7: dungeon regeneration re-plants clues on servers that may
+          // already carry them, so merge. Unguarded before, and the whole block
+          // sits in a `safeExecute` with no rethrow — a P2002 was swallowed and
+          // that hop's clue silently never appeared, leaving an unsolvable
+          // dungeon with no error anywhere.
+          const hiddenDir = await db.client.fileSystemNode.upsert({
+            where: {
+              serverId_parentId_name: {
+                serverId: server.id,
+                parentId: rootDir.id,
+                name: ".signal",
+              },
+            },
+            update: {},
+            create: {
               serverId: server.id,
               name: ".signal",
               type: "directory",
@@ -462,8 +483,23 @@ export class DarkNetDungeonService {
             totalHops,
           );
 
-          await db.client.fileSystemNode.create({
-            data: {
+          // D7: re-planting must refresh the clue, not fail — the next hop's
+          // IP changes when a dungeon regenerates, so a stale trace file would
+          // point players at a server that no longer exists.
+          await db.client.fileSystemNode.upsert({
+            where: {
+              serverId_parentId_name: {
+                serverId: server.id,
+                parentId: hiddenDir.id,
+                name: `trace_${index}.dat`,
+              },
+            },
+            update: {
+              content: clueContent,
+              isEncrypted: index > 1,
+              size: clueContent.length,
+            },
+            create: {
               serverId: server.id,
               name: `trace_${index}.dat`,
               type: "file",
@@ -541,8 +577,21 @@ export class DarkNetDungeonService {
         "████████████████████████████████████████████",
       ].join("\n");
 
-      const file = await db.client.fileSystemNode.create({
-        data: {
+      // D7: the payload carries the reward for THIS dungeon, so a regenerated
+      // vault must overwrite it. Unguarded before, and the throw propagated all
+      // the way up through generateDungeon into a safeExecute — the servers,
+      // links and files were already committed but no DarkNetInstance row was
+      // written, orphaning the whole dungeon invisibly.
+      const file = await db.client.fileSystemNode.upsert({
+        where: {
+          serverId_parentId_name: {
+            serverId: vaultServerId,
+            parentId: rootDir.id,
+            name: "vault_payload.enc",
+          },
+        },
+        update: { content, size: content.length, isEncrypted: true, isProtected: true },
+        create: {
           serverId: vaultServerId,
           name: "vault_payload.enc",
           type: "file",
@@ -1076,35 +1125,28 @@ Respond ONLY with JSON:
         });
 
         if (shopItem) {
-          const existing = await db.client.inventoryItem.findFirst({
-            where: { userId, shopItemId: shopItem.id },
+          // D7: atomic. The `findFirst` and the write were separated by an
+          // await, so two conquests landing together both saw no row and both
+          // created — a hidden duplicate before `@@unique([userId, shopItemId])`
+          // (readers use `findFirst`, so the extra row was invisible stock) and
+          // a P2002 after it.
+          await db.client.inventoryItem.upsert({
+            where: { userId_shopItemId: { userId, shopItemId: shopItem.id } },
+            create: {
+              userId,
+              shopItemId: shopItem.id,
+              quantity: 1,
+              source: "server_loot",
+            },
+            update: { quantity: { increment: 1 } },
           });
-
-          if (existing) {
-            await db.client.inventoryItem.update({
-              where: { id: existing.id },
-              data: { quantity: { increment: 1 } },
-            });
-          } else {
-            await db.client.inventoryItem.create({
-              data: {
-                userId,
-                shopItemId: shopItem.id,
-                quantity: 1,
-                source: "server_loot",
-              },
-            });
-          }
         }
       } else if (instance.rewardType === "rare_script") {
         const data = instance.rewardData as any;
         const credits: number = data.credits || 10000;
 
         // Grant credits
-        await db.client.playerProgress.update({
-          where: { userId },
-          data: { credits: { increment: credits } },
-        });
+        await this.playerProgress.addCredits(userId, credits);
 
         // Grant script item if one exists in the shop.
         //
@@ -1128,46 +1170,41 @@ Respond ONLY with JSON:
           }
 
           if (scriptItem) {
-            const existing = await db.client.inventoryItem.findFirst({
-              where: { userId, shopItemId: scriptItem.id },
+            // D7: atomic — see the aida_token branch above.
+            await db.client.inventoryItem.upsert({
+              where: { userId_shopItemId: { userId, shopItemId: scriptItem.id } },
+              create: {
+                userId,
+                shopItemId: scriptItem.id,
+                quantity: 1,
+                source: "server_loot",
+              },
+              update: { quantity: { increment: 1 } },
             });
-
-            if (existing) {
-              await db.client.inventoryItem.update({
-                where: { id: existing.id },
-                data: { quantity: { increment: 1 } },
-              });
-            } else {
-              await db.client.inventoryItem.create({
-                data: {
-                  userId,
-                  shopItemId: scriptItem.id,
-                  quantity: 1,
-                  source: "server_loot",
-                },
-              });
-            }
           }
         }
       } else if (instance.rewardType === "credits_cache") {
         const amount: number = (instance.rewardData as any).amount || 10000;
 
-        await db.client.playerProgress.update({
-          where: { userId },
-          data: { credits: { increment: amount } },
-        });
+        await this.playerProgress.addCredits(userId, amount);
       } else if (instance.rewardType === "intel_package") {
         const data = instance.rewardData as any;
 
-        await db.client.playerProgress.update({
-          where: { userId },
-          data: {
-            experience: { increment: data.xp || 0 },
-            ...(data.skillPoints
-              ? { skillPoints: { increment: data.skillPoints } }
-              : {}),
-          },
-        });
+        // R8/D5: these used to be one `update` that ALSO carried
+        // `skillPoints: { increment }` against a column that did not exist, so
+        // Prisma rejected the whole statement and `safeExecute` swallowed it —
+        // the XP went down with the skill points on ~18% of dungeon conquests.
+        // The column landed in Phase 3 step 1; splitting them also means the XP
+        // now goes through `addExperience` and recomputes `level`.
+        if (data.xp > 0) {
+          await this.playerProgress.addExperience(userId, data.xp);
+        }
+        if (data.skillPoints > 0) {
+          await db.client.playerProgress.updateMany({
+            where: { userId },
+            data: { skillPoints: { increment: data.skillPoints } },
+          });
+        }
       }
       },
       context: "Grant dungeon reward",
@@ -1323,8 +1360,21 @@ Respond ONLY with JSON:
               const shouldHide = depthTierCopy !== "gateway" && Math.random() < 0.4;
               const shouldEncrypt = (depthTierCopy === "deep" || depthTierCopy === "vault") && Math.random() < 0.5;
 
-              await db.client.fileSystemNode.create({
-                data: {
+              // D7: the loop iterates an AI-supplied `result.files[]`, and two
+              // entries can sanitize to the same name — a collision the model
+              // decides, not the code. Unguarded before, and the retry-queue
+              // callback only logs a warning, so one duplicate name silently
+              // dropped every remaining file for that server.
+              await db.client.fileSystemNode.upsert({
+                where: {
+                  serverId_parentId_name: {
+                    serverId: sId,
+                    parentId: rootDir.id,
+                    name: `ai_${fileName}`,
+                  },
+                },
+                update: { content: fileContent, size: fileContent.length },
+                create: {
                   serverId: sId,
                   name: `ai_${fileName}`,
                   type: "file",
@@ -1376,8 +1426,18 @@ Respond ONLY with JSON:
             (depthTier === "deep" || depthTier === "vault") &&
             Math.random() < 0.5;
 
-          await db.client.fileSystemNode.create({
-            data: {
+          // D7: `theme.fileTypes` can repeat a name across the prompt's three
+          // slots, and re-populating a server is expected. Merge.
+          await db.client.fileSystemNode.upsert({
+            where: {
+              serverId_parentId_name: {
+                serverId: server.id,
+                parentId: rootDir.id,
+                name: fileName,
+              },
+            },
+            update: { content, size: content.length },
+            create: {
               serverId: server.id,
               name: fileName,
               type: "file",
@@ -1456,8 +1516,18 @@ Respond ONLY with JSON:
     ].join("\n");
 
     const fileName = theme.fileTypes[0] ?? "recovered_data.log";
-    await db.client.fileSystemNode.create({
-      data: {
+    // D7: the fallback runs when AI content failed, on a server that may
+    // already hold a file of this name from an earlier attempt. Merge.
+    await db.client.fileSystemNode.upsert({
+      where: {
+        serverId_parentId_name: {
+          serverId,
+          parentId: rootDir.id,
+          name: fileName,
+        },
+      },
+      update: { content: fallbackContent, size: fallbackContent.length },
+      create: {
         serverId,
         name: fileName,
         type: "file",

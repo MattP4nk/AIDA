@@ -616,8 +616,13 @@ const SHOP_CATALOG: ShopItem[] = [
 
 import { injectable, inject } from "tsyringe";
 import type { Logger } from "pino";
-import { LOGGER, MISSION_INTEGRATION_SERVICE } from "../di/tokens";
+import {
+  LOGGER,
+  MISSION_INTEGRATION_SERVICE,
+  PLAYER_PROGRESS_REPOSITORY,
+} from "../di/tokens";
 import type MissionIntegrationService from "./missionIntegration";
+import type PlayerProgressRepository from "../repositories/playerProgressRepository";
 
 /**
  * ShopService - Manages shop, inventory, and economy
@@ -629,6 +634,8 @@ class ShopService extends EventEmitter {
 
   constructor(
     @inject(LOGGER) private logger: Logger,
+    @inject(PLAYER_PROGRESS_REPOSITORY)
+    private playerProgress: PlayerProgressRepository,
     @inject(MISSION_INTEGRATION_SERVICE)
     missionIntegrationService?: MissionIntegrationService,
   ) {
@@ -902,26 +909,27 @@ class ShopService extends EventEmitter {
       const item = this.catalog.get(itemId);
       if (!item) return false;
 
-      const existing = await prisma.inventoryItem.findFirst({
-        where: { userId, shopItemId: itemId },
+      // D7: atomic. `findFirst` then create-or-update was separated by an
+      // await, so two grants landing together both saw no row and both created
+      // — a hidden duplicate before `@@unique([userId, shopItemId])`, a P2002
+      // after it. The stack ceiling is kept, but applied to the row the upsert
+      // actually writes rather than to a quantity read a moment earlier.
+      await prisma.inventoryItem.upsert({
+        where: { userId_shopItemId: { userId, shopItemId: itemId } },
+        create: {
+          userId,
+          shopItemId: itemId,
+          quantity: Math.min(quantity, item.maxStack),
+          source: "shop",
+        },
+        update: { quantity: { increment: quantity } },
       });
-
-      if (existing) {
-        const newQty = Math.min(existing.quantity + quantity, item.maxStack);
-        await prisma.inventoryItem.update({
-          where: { id: existing.id },
-          data: { quantity: newQty },
-        });
-      } else {
-        await prisma.inventoryItem.create({
-          data: {
-            userId,
-            shopItemId: itemId,
-            quantity: Math.min(quantity, item.maxStack),
-            source: "shop",
-          },
-        });
-      }
+      // Clamp to maxStack in the database, so a concurrent grant cannot push
+      // the total past the ceiling between the increment and a JS check.
+      await prisma.inventoryItem.updateMany({
+        where: { userId, shopItemId: itemId, quantity: { gt: item.maxStack } },
+        data: { quantity: item.maxStack },
+      });
 
       this.emit("item:added", { userId, itemId, quantity });
       return true;
@@ -1084,38 +1092,55 @@ class ShopService extends EventEmitter {
       const tradedIn: Array<{ name: string; refund: number }> = [];
 
       await prisma.$transaction(async (tx) => {
-        // Re-check credits inside transaction to prevent race conditions
-        const freshProgress = await tx.playerProgress.findUnique({
-          where: { userId },
-          select: { credits: true },
-        });
-        if (!freshProgress || freshProgress.credits < totalCost) {
+        // ── D4: the check IS the write ─────────────────────────────────────
+        // This used to be a `findUnique` re-read followed by a separate
+        // `update`, under a comment claiming it prevented race conditions. It
+        // did not: a plain SELECT inside a READ COMMITTED transaction takes no
+        // row lock, so two concurrent buyers both re-read the same balance,
+        // both passed, and the balance went negative with both items granted —
+        // the exact scenario the audit measured at -200 credits.
+        // `spendCredits` puts the balance test in the WHERE clause of the
+        // decrement, so a loser matches zero rows and cannot proceed.
+        // The `tx` argument is load-bearing: without it the statement would run
+        // on a different connection, OUTSIDE this transaction, and the rollback
+        // below would not take the charge with it.
+        const spend = await this.playerProgress.spendCredits(userId, totalCost, tx);
+        if (!spend.ok) {
           throw new Error("Insufficient credits (concurrent purchase detected)");
         }
+        newCredits = spend.balance;
 
-        await tx.playerProgress.update({
-          where: { userId },
-          data: { credits: { decrement: totalCost } },
+        // D7: a real upsert, as the comment already claimed. Being inside a
+        // transaction did NOT make the old check-then-create safe — under READ
+        // COMMITTED two concurrent purchases both see no row and both insert,
+        // and one gets P2002 now that `@@unique([userId, shopItemId])` exists.
+        await tx.inventoryItem.upsert({
+          where: { userId_shopItemId: { userId, shopItemId: itemId } },
+          create: {
+            userId,
+            shopItemId: itemId,
+            quantity,
+            source: "shop",
+          },
+          update: { quantity: { increment: quantity } },
         });
 
-        // Upsert inventory item
-        const existing = await tx.inventoryItem.findFirst({
-          where: { userId, shopItemId: itemId },
+        // The STACK CAP has to be enforced here too, not only by the
+        // `getItemQuantity` check before the transaction. That check is a
+        // read-then-act with an await before the write — exactly the shape the
+        // credit half of this same function stopped using when it moved to
+        // `spendCredits`. Two concurrent purchases of a `maxStack: 1` item both
+        // read quantity 0, both pass, and both increment: the player is charged
+        // twice and holds 2 of a single-slot item. Rejecting inside the
+        // transaction rolls the charge back with it.
+        const held = await tx.inventoryItem.findUniqueOrThrow({
+          where: { userId_shopItemId: { userId, shopItemId: itemId } },
+          select: { quantity: true },
         });
-        if (existing) {
-          await tx.inventoryItem.update({
-            where: { id: existing.id },
-            data: { quantity: { increment: quantity } },
-          });
-        } else {
-          await tx.inventoryItem.create({
-            data: {
-              userId,
-              shopItemId: itemId,
-              quantity,
-              source: "shop",
-            },
-          });
+        if (held.quantity > item.maxStack) {
+          throw new Error(
+            `Cannot carry more than ${item.maxStack} of this item`,
+          );
         }
 
         // ── Hardware supersession, inside the SAME transaction ──
@@ -1158,11 +1183,14 @@ class ShopService extends EventEmitter {
             }
 
             if (refundTotal > 0) {
-              await tx.playerProgress.update({
-                where: { userId },
-                data: { credits: { increment: refundTotal } },
-              });
-              newCredits += refundTotal;
+              // Inside the purchase transaction on purpose: a follow-up step
+              // would charge for the upgrade and pay no refund on a crash
+              // between the two (see SHOP_ARCHITECTURE.md §7b).
+              newCredits = await this.playerProgress.addCredits(
+                userId,
+                refundTotal,
+                tx,
+              );
             }
           }
         }
@@ -1277,12 +1305,13 @@ class ShopService extends EventEmitter {
         }
 
         // Add credits
-        const progress = await tx.playerProgress.update({
-          where: { userId },
-          data: { credits: { increment: sellPrice } },
-        });
+        const newCredits = await this.playerProgress.addCredits(
+          userId,
+          sellPrice,
+          tx,
+        );
 
-        return { success: true as const, newCredits: progress.credits };
+        return { success: true as const, newCredits };
       });
 
       if (!result.success) {

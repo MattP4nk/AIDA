@@ -414,13 +414,23 @@ const TOOLS: ToolDefinition[] = [
         orderBy: { timestamp: "desc" },
       });
 
-      const progress = await prisma.playerProgress.findUnique({
-        where: { userId: user.id },
-        select: { missionProgress: true },
-      });
-      const missions = progress?.missionProgress
-        ? Object.values(progress.missionProgress as any).filter((m: any) => m.status === "active").slice(0, 5)
-        : [];
+      // D3: read-only, but it MUST go through the repository anyway. Pass 2
+      // moves the mission data out of `playerProgress.missionProgress`
+      // entirely, and any reader still going direct would silently start
+      // returning nothing — the failure mode being a tool that quietly reports
+      // "no active missions" to the AI rather than an error anyone would see.
+      //
+      // Typed, not `getService<any>`: an untyped lookup here is exactly what
+      // hid the `onFactionServerHacked` arity bug and still hides the
+      // `initiateTrace` one.
+      const { getService } = await import("../di/container");
+      const { PLAYER_MISSION_REPOSITORY } = await import("../di/tokens");
+      const playerMissions = getService<
+        import("../repositories/playerMissionRepository").PlayerMissionRepository
+      >(PLAYER_MISSION_REPOSITORY);
+      const missions = (await playerMissions.list(user.id))
+        .filter((m) => m.status === "active")
+        .slice(0, 5);
 
       return { ...user, recentHacks, activeMissions: missions };
     },

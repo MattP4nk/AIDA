@@ -2,7 +2,8 @@ import { EventEmitter } from "events";
 import { injectable, inject } from "tsyringe";
 import { Logger } from "pino";
 import { db } from "../database/client";
-import { LOGGER } from "../di/tokens";
+import { LOGGER, PLAYER_PROGRESS_REPOSITORY } from "../di/tokens";
+import type PlayerProgressRepository from "../repositories/playerProgressRepository";
 
 /**
  * TraceService — Manages active trace-backs against hackers who left evidence.
@@ -39,7 +40,11 @@ const CLEANUP_AGE_DAYS = 7;
 class TraceService extends EventEmitter {
   private _progressTimer: NodeJS.Timeout | null = null;
 
-  constructor(@inject(LOGGER) private logger: Logger) {
+  constructor(
+    @inject(LOGGER) private logger: Logger,
+    @inject(PLAYER_PROGRESS_REPOSITORY)
+    private playerProgress: PlayerProgressRepository,
+  ) {
     super();
     this._startProgressLoop();
     this.logger.info("TraceService initialised — progress loop started");
@@ -348,15 +353,12 @@ class TraceService extends EventEmitter {
         "Evasion attempt processed",
       );
 
-      // Deduct stealth XP cost (floor at 0)
-      const stealthDecrement = Math.min(2, progress.stealth);
-      if (stealthDecrement > 0) {
-        await db.client.playerProgress.update({
-          where: { userId },
-          data: {
-            stealth: { decrement: stealthDecrement },
-          },
-        });
+      // Deduct stealth XP cost. The floor used to be `Math.min(2, progress.stealth)`
+      // computed here from a read taken earlier in this function — correct for
+      // one caller, but two concurrent evasions at stealth 1 both computed 1 and
+      // both decremented, landing on -1. The repository floors inside the UPDATE.
+      if (progress.stealth > 0) {
+        await this.playerProgress.addSkill(userId, "stealth", -2);
       }
 
       if (evaded) {

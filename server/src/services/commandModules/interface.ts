@@ -3,6 +3,7 @@ import { PrismaClient } from "@prisma/client";
 import { Server as SocketIOServer } from "socket.io";
 
 // Use type-only imports to avoid circular dependency issues
+import type PlayerProgressRepository from "../../repositories/playerProgressRepository";
 import type FileService from "../fileService";
 import type ShopService from "../shopService";
 import type MissionService from "../missionService";
@@ -41,6 +42,13 @@ export interface CommandContext {
   commandHistory: Map<string, Command[]>;
   gameStateManager: GameStateManager;
   modules: CommandModule[];
+  /**
+   * Phase 3 (D4/D5/D8) — the ONLY sanctioned way for a command module to write
+   * `player_progress`. Reaching past this to `context.db.client.playerProgress`
+   * reintroduces the unclamped skill gains and check-then-spend credit races
+   * this repository exists to make unrepresentable.
+   */
+  playerProgress: PlayerProgressRepository;
   services: {
     shopService: ShopService;
     missionService: MissionService;

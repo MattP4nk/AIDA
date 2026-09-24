@@ -9,7 +9,9 @@ import {
   CACHE_SERVICE,
   MISSION_INTEGRATION_SERVICE,
   FACTION_KNOWLEDGE_SERVICE,
+  PLAYER_PROGRESS_REPOSITORY,
 } from "../di/tokens";
+import type PlayerProgressRepository from "../repositories/playerProgressRepository";
 import type { CacheService } from "./cacheService";
 import type MissionIntegrationService from "./missionIntegration";
 import type { FactionKnowledgeService } from "./factionKnowledgeService";
@@ -127,6 +129,8 @@ class ServerService {
   constructor(
     @inject(LOGGER) private logger: Logger,
     @inject(CACHE_SERVICE) private cacheService: CacheService,
+    @inject(PLAYER_PROGRESS_REPOSITORY)
+    private playerProgress: PlayerProgressRepository,
     @inject(MISSION_INTEGRATION_SERVICE)
     missionIntegrationService?: MissionIntegrationService,
     @inject(FACTION_KNOWLEDGE_SERVICE)
@@ -537,10 +541,9 @@ class ServerService {
 
         const newDiscoveries = servers.length;
         if (newDiscoveries > 0) {
-          await this.prisma.playerProgress.update({
-            where: { userId },
-            data: { serversDiscovered: { increment: newDiscoveries } },
-          }).catch(() => {});
+          await this.playerProgress
+            .incrementCounter(userId, "serversDiscovered", newDiscoveries)
+            .catch(() => {});
         }
 
         return servers.map((server) => ({
@@ -683,6 +686,37 @@ class ServerService {
         };
       }
 
+      // ── D10: close the connection the player is leaving ──────────────────
+      // A player is on exactly ONE server at a time: `session.currentServerId`
+      // is singular and `connectPlayerToServer` unconditionally disconnects the
+      // previous one. But that in-memory disconnect never touched these ROWS —
+      // `disconnectFromServer` is the only thing that does, and `connect <ip>`
+      // never called it. So every hop left the previous server's row
+      // `is_active`, and they accumulated forever. Measured on the live DB
+      // before this fix: 95 of 95 rows active, `disconnected_at` null on every
+      // one, and every player holding 3 simultaneously "active" servers.
+      //
+      // That is what made `fragment.steal`'s unscoped `findFirst({ isActive })`
+      // able to pick a server the player was not standing on.
+      //
+      // The servers being LEFT need their count resynced too. Only
+      // `syncConnectionCount(server.id)` ran below, so the abandoned server kept
+      // a phantom occupant until some unrelated player happened to connect to
+      // or disconnect from it — which directly contradicted this method's own
+      // claim that the derived count "cannot drift".
+      const leaving = await this.prisma.serverConnection.findMany({
+        where: { userId, isActive: true, serverId: { not: server.id } },
+        select: { serverId: true },
+        distinct: ["serverId"],
+      });
+      await this.prisma.serverConnection.updateMany({
+        where: { userId, isActive: true, serverId: { not: server.id } },
+        data: { isActive: false, disconnectedAt: new Date() },
+      });
+      for (const { serverId: leftId } of leaving) {
+        await this.syncConnectionCount(leftId);
+      }
+
       // Create or update connection
       const existingConnection = await this.prisma.serverConnection.findFirst({
         where: {
@@ -693,12 +727,22 @@ class ServerService {
       });
 
       if (existingConnection) {
-        // Update existing connection
+        // The body of this update used to be entirely commented out, which is
+        // why reconnecting kept a STALE accessLevel. Take the max rather than
+        // overwriting: `canAccessServer` derives a level from skill vs
+        // encryption, while `hackService` writes an EARNED one — a plain
+        // assignment would silently demote a player who had hacked their way to
+        // a higher level than travelling there grants.
+        const mergedAccess = Math.max(
+          existingConnection.accessLevel,
+          accessCheck.accessLevel,
+        );
         await this.prisma.serverConnection.update({
           where: { id: existingConnection.id },
           data: {
-            // connectedAt: new Date(), // Keep original connectedAt
-            // sessionData: { accessLevel: accessCheck.accessLevel } as any, // Update session data if needed
+            accessLevel: mergedAccess,
+            sessionData: { accessLevel: mergedAccess } as any,
+            // connectedAt deliberately NOT refreshed — it is the arrival time.
           },
         });
       } else {
@@ -714,15 +758,8 @@ class ServerService {
         });
       }
 
-      // Update server connection count
-      await this.prisma.gameServer.update({
-        where: { id: server.id },
-        data: {
-          currentConnections: {
-            increment: 1,
-          },
-        },
-      });
+      // D10: derive the count instead of incrementing it. See syncConnectionCount.
+      await this.syncConnectionCount(server.id);
 
       // Invalidate cache
       this.cacheService.del(`server:${server.id}`);
@@ -828,15 +865,8 @@ class ServerService {
             },
           });
 
-          // Decrement server connections
-          await this.prisma.gameServer.update({
-            where: { id: serverId },
-            data: {
-              currentConnections: {
-                decrement: 1,
-              },
-            },
-          });
+          // D10: derive, don't decrement. See syncConnectionCount.
+          await this.syncConnectionCount(serverId);
 
           // Audit log
           await this.auditLog(userId, "SERVER_DISCONNECTED", {
@@ -1213,6 +1243,41 @@ class ServerService {
    * @param serverId - Server ID
    * @returns Connection count
    */
+  /**
+   * D10 — make `GameServer.currentConnections` derived state with ONE writer.
+   *
+   * It previously had two writers running on the same `connect`, with
+   * incompatible models:
+   *   - this service, `{ increment: 1 }` / `{ decrement: 1 }` (a delta), and
+   *   - `gameStateManager`, `= serverState.activeConnections`, an ABSOLUTE
+   *     write from an in-memory Map that starts empty on every boot.
+   *
+   * The absolute write runs last in the connect flow, so it won. That is why
+   * the live DB showed `current_connections = 0` on servers holding 33-38
+   * active connection rows: the process had restarted and the in-memory map had
+   * forgotten. Two writers, one amnesiac, and the delta arithmetic the audit
+   * flagged never even got to matter.
+   *
+   * Counting is cheap and cannot drift, so both paths now call this.
+   *
+   * NOTE this is a DISPLAY value: `maxConnections` is not enforced anywhere
+   * (`networkCommands` and `adminCommands` only render `current/max`), so the
+   * drift was cosmetic — it did not lock anyone out.
+   */
+  public async syncConnectionCount(serverId: string): Promise<void> {
+    await safeExecute({
+      fn: async () => {
+        const count = await this.getActiveConnectionCount(serverId);
+        await this.prisma.gameServer.update({
+          where: { id: serverId },
+          data: { currentConnections: count },
+        });
+      },
+      context: "Sync server connection count",
+      logger: this.logger,
+    })();
+  }
+
   private async getActiveConnectionCount(serverId: string): Promise<number> {
     return (await safeExecute({
       fn: () => this.prisma.serverConnection.count({

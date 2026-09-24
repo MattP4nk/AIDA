@@ -39,7 +39,9 @@ import {
   MISSION_SERVICE,
   MESSAGE_SERVICE,
   LOGGER,
+  PLAYER_MISSION_REPOSITORY,
 } from "../di/tokens";
+import type PlayerMissionRepository from "../repositories/playerMissionRepository";
 
 // ═══════════════════════════════════════════════════════════════════
 // Types
@@ -291,6 +293,8 @@ export class TutorialService {
     // No AI_SERVICE dependency any more: generation moved to
     // PersonaMailQueueService, which owns both the delay and the retry policy.
     @inject(LOGGER) private logger: Logger,
+    @inject(PLAYER_MISSION_REPOSITORY)
+    private playerMissions: PlayerMissionRepository,
   ) {}
 
   // ─────────────────────────────────────────────────────────────────
@@ -960,15 +964,17 @@ export class TutorialService {
         data: { assignedTo: userId, status: "active" },
       });
 
-      // Upsert the player's missionProgress to include this mission
+      // Upsert the player's missionProgress to include this mission.
+      // D3: the update path goes through the repository so registering a
+      // tutorial step cannot clobber a concurrent objective credit — which is a
+      // real sequence here, since step mail and the player's own commands
+      // arrive together during onboarding.
       const progress = await this.prisma.playerProgress.findUnique({
         where: { userId },
+        select: { userId: true },
       });
 
-      const missionProgress =
-        (progress?.missionProgress as Record<string, any>) || {};
-
-      missionProgress[mission.id] = {
+      const playerMission = {
         missionId: mission.id,
         userId,
         status: "active",
@@ -982,17 +988,15 @@ export class TutorialService {
         expiresAt: null,
       };
 
-      if (progress) {
-        await this.prisma.playerProgress.update({
-          where: { userId },
-          data: { missionProgress: missionProgress as any },
-        });
-      } else {
+      // D3 pass 2: create the row FIRST, then write the mission through the
+      // repository. Seeding `missionProgress` in the `create` would put the
+      // tutorial's first step in a column nothing reads any more — the step
+      // would be invisible and the tutorial unstartable for that player.
+      if (!progress) {
         // First-time player — create the progress record
         await this.prisma.playerProgress.create({
           data: {
             userId,
-            missionProgress: missionProgress as any,
             experience: 0,
             level: 1,
             credits: 0,
@@ -1002,6 +1006,7 @@ export class TutorialService {
           },
         });
       }
+      await this.playerMissions.put(userId, mission.id, playerMission as never);
 
       this.logger.info(
         {

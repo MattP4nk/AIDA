@@ -160,9 +160,16 @@ export class DynamicContentService {
         }
       }
 
-      // Create new file
-      await this.prisma.fileSystemNode.create({
-        data: {
+      // D7: the existence check above filters `type: "file"`, so a DIRECTORY of
+      // the same name slips past it and hits the unique instead. Injected
+      // content is authored and re-runnable, so merge rather than fail the
+      // whole injection.
+      await this.prisma.fileSystemNode.upsert({
+        where: {
+          serverId_parentId_name: { serverId, parentId, name: fileName },
+        },
+        update: {},
+        create: {
           serverId,
           parentId,
           name: fileName,
@@ -203,8 +210,15 @@ export class DynamicContentService {
       });
 
       if (!dir) {
-        dir = await this.prisma.fileSystemNode.create({
-          data: {
+        // D7: same shape — the lookup filters `type: "directory"`, so a FILE of
+        // that name collides. Upsert also covers a concurrent injection having
+        // created the directory since the `findFirst` above.
+        dir = await this.prisma.fileSystemNode.upsert({
+          where: {
+            serverId_parentId_name: { serverId, parentId: currentId, name: part },
+          },
+          update: {},
+          create: {
             serverId,
             parentId: currentId,
             name: part,

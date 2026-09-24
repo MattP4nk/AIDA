@@ -298,8 +298,18 @@ export class ContentDraftService {
         if (found) {
           parent = found;
         } else {
-          parent = await this.prisma.fileSystemNode.create({
-            data: {
+          // D7: merge. Intermediate directories are incidental scaffolding —
+          // the lookup filters `type: "directory"` so a file of that name
+          // collides, and two drafts approved together race each other. The
+          // FILE create below is deliberately left as a hard failure: an admin
+          // approving a draft that would overwrite an existing file should see
+          // the conflict (it surfaces as a 409), not silently clobber it.
+          parent = await this.prisma.fileSystemNode.upsert({
+            where: {
+              serverId_parentId_name: { serverId, parentId: parent!.id, name: dir },
+            },
+            update: {},
+            create: {
               serverId,
               parentId: parent!.id,
               name: dir,

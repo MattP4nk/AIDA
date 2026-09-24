@@ -269,10 +269,12 @@ export class FileAccessCommandsModule implements CommandModule {
 
       // Award forensics XP
       try {
-        await context.db.client.playerProgress.update({
-          where: { userId: context.userId },
-          data: { forensics: { increment: 5 + sweepSession.challenge.difficulty } },
-        });
+        // D8 — previously uncapped.
+        await context.playerProgress.addSkill(
+          context.userId,
+          "forensics",
+          5 + sweepSession.challenge.difficulty,
+        );
       } catch { /* non-critical */ }
 
       activeSweepSessions.delete(context.userId);

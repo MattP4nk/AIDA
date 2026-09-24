@@ -15,10 +15,12 @@ import { Logger } from "pino";
 import {
   LOGGER,
   MISSION_INTEGRATION_SERVICE,
+  PLAYER_PROGRESS_REPOSITORY,
   PROGRESS_SERVICE,
 } from "../di/tokens";
 import type MissionIntegrationService from "./missionIntegration";
 import type ProgressService from "./progressService";
+import type PlayerProgressRepository from "../repositories/playerProgressRepository";
 import {
   generateLayersForServer,
   generateCipherChallenge,
@@ -96,6 +98,8 @@ class HackService extends EventEmitter {
 
   constructor(
     @inject(LOGGER) private logger: Logger,
+    @inject(PLAYER_PROGRESS_REPOSITORY)
+    private playerProgress: PlayerProgressRepository,
     @inject(MISSION_INTEGRATION_SERVICE)
     missionIntegrationService?: MissionIntegrationService,
     @inject(PROGRESS_SERVICE) private progressService?: ProgressService,
@@ -2354,38 +2358,31 @@ class HackService extends EventEmitter {
   ): Promise<void> {
     await safeExecute({
       fn: async () => {
-        // Update attacker stats
-        const attackerProgress = await db.client.playerProgress.findUnique({
-          where: { userId: attackerId },
+        // Update attacker stats. The `findUnique`-then-`update` guard is gone:
+        // the repository's `updateMany` matches nothing when the row is absent,
+        // which is the same outcome without the extra round trip or the race
+        // between the two statements.
+        await this.playerProgress.incrementCounters(attackerId, {
+          successfulHacks: success ? 1 : 0,
+          failedHacks: success ? 0 : 1,
         });
-
-        if (attackerProgress) {
-          await db.client.playerProgress.update({
-            where: { userId: attackerId },
-            data: {
-              experience: {
-                increment: success ? 50 : 10,
-              },
-              successfulHacks: { increment: success ? 1 : 0 },
-              failedHacks: { increment: success ? 0 : 1 },
-            },
+        const xp = await this.playerProgress.addExperience(
+          attackerId,
+          success ? 50 : 10,
+        );
+        if (xp.leveledUp) {
+          this.emit("player:levelup", {
+            userId: attackerId,
+            newLevel: xp.level,
+            experience: xp.experience,
           });
         }
 
-        // Update target's security awareness (increase forensics slightly)
-        const targetProgress = await db.client.playerProgress.findUnique({
-          where: { userId: targetId },
-        });
-
-        if (targetProgress && success) {
-          await db.client.playerProgress.update({
-            where: { userId: targetId },
-            data: {
-              forensics: {
-                increment: Math.min(1, 100 - targetProgress.forensics),
-              },
-            },
-          });
+        // Update target's security awareness (increase forensics slightly).
+        // D8: was `Math.min(1, 100 - targetProgress.forensics)` from a separate
+        // read — the same JS-computed headroom as `awardExperience`.
+        if (success) {
+          await this.playerProgress.addSkill(targetId, "forensics", 1);
         }
       },
       context: "Update hack statistics",
@@ -2406,27 +2403,39 @@ class HackService extends EventEmitter {
   ): Promise<void> {
     await safeExecute({
       fn: async () => {
-        const progress = await db.client.playerProgress.findUnique({
-          where: { userId: attackerId },
-        });
-
-        if (!progress) return;
-
         const baseHackGain = success ? Math.ceil(difficulty * 2) : 1;
         const baseStealthGain = Math.ceil(difficulty * 1.5);
         const hackingGain = Math.ceil(baseHackGain * multiplier);
         const stealthGain = Math.ceil(baseStealthGain * multiplier);
 
-        await db.client.playerProgress.update({
-          where: { userId: attackerId },
-          data: {
-            hacking: { increment: Math.min(hackingGain, 100 - progress.hacking) },
-            stealth: { increment: Math.min(stealthGain, 100 - progress.stealth) },
-            experience: {
-              increment: Math.ceil((success ? 50 : 10) * multiplier),
-            },
-          },
+        // ── D8: the cap is the database's job ──────────────────────────────
+        // This was `increment: Math.min(gain, 100 - progress.hacking)` with
+        // `progress` read a few lines above, outside the write. Two completions
+        // at 99 both computed `min(gain, 1)` and produced 101 — reproduced in
+        // `verify-phase3-progress-repo.ts`'s negative control, which still
+        // lands on exactly 101 with the old code. `addSkill` clamps inside the
+        // UPDATE, so the read the clamp uses is the row version it writes.
+        // The `findUnique` this used to need is gone with it.
+        await this.playerProgress.addSkills(attackerId, {
+          hacking: hackingGain,
+          stealth: stealthGain,
         });
+
+        // D5 — experience through the repository so `level` is recomputed.
+        // It previously was not: `level` was raised by exactly one code path
+        // (`missionService.grantRewards`), so hack XP accumulated without ever
+        // levelling anyone up.
+        const xp = await this.playerProgress.addExperience(
+          attackerId,
+          Math.ceil((success ? 50 : 10) * multiplier),
+        );
+        if (xp.leveledUp) {
+          this.emit("player:levelup", {
+            userId: attackerId,
+            newLevel: xp.level,
+            experience: xp.experience,
+          });
+        }
       },
       context: "Award experience",
       logger: this.logger,

@@ -211,12 +211,16 @@ export class MissionIntegrationService {
           for (const objective of mission.objectives) {
             let shouldUpdate = false;
             let newProgress: number | string | boolean = objective.current;
+            // D3 pass 2: counts are credited as a DELTA, not an absolute
+            // computed from `objective.current` — that read sits outside any
+            // lock, so two concurrent credits collapsed into one.
+            let delta: number | null = null;
 
             const objType = objective.type as string;
 
             if (objType === "hack") {
               if (success) {
-                newProgress = (objective.current as number) + 1;
+                delta = 1;
                 shouldUpdate = true;
               }
             } else if (objType === "hack_target") {
@@ -226,12 +230,12 @@ export class MissionIntegrationService {
               }
             } else if (objType === "hack_stealth") {
               if (success && !detected) {
-                newProgress = (objective.current as number) + 1;
+                delta = 1;
                 shouldUpdate = true;
               }
             } else if (objType === "hack_method") {
               if (success && (objective as any).metadata?.method === method) {
-                newProgress = (objective.current as number) + 1;
+                delta = 1;
                 shouldUpdate = true;
               }
             } else if (objType === "gain_access") {
@@ -258,18 +262,27 @@ export class MissionIntegrationService {
                 // COUNT now, not boolean — see the registry note. Writing `true`
                 // meant Number(true)===1, so "plant 2 backdoors" could never
                 // finish.
-                newProgress = (objective.current as number) + 1;
+                delta = 1;
                 shouldUpdate = true;
               }
             }
 
             if (shouldUpdate) {
-              await this.missionService.updateObjective(
-                userId,
-                mission.missionId,
-                objective.id,
-                newProgress,
-              );
+              if (delta !== null) {
+                await this.missionService.creditObjective(
+                  userId,
+                  mission.missionId,
+                  objective.id,
+                  delta,
+                );
+              } else {
+                await this.missionService.updateObjective(
+                  userId,
+                  mission.missionId,
+                  objective.id,
+                  newProgress,
+                );
+              }
             }
           }
         }
@@ -371,6 +384,10 @@ export class MissionIntegrationService {
           for (const objective of mission.objectives) {
             let shouldUpdate = false;
             let newProgress: number | string | boolean = objective.current;
+            // D3 pass 2: counts are credited as a DELTA, not an absolute
+            // computed from `objective.current` — that read sits outside any
+            // lock, so two concurrent credits collapsed into one.
+            let delta: number | null = null;
 
             const objType = objective.type as string;
 
@@ -384,7 +401,7 @@ export class MissionIntegrationService {
               }
             } else if (objType === "steal_count") {
               if (operation === "download") {
-                newProgress = (objective.current as number) + 1;
+                delta = 1;
                 shouldUpdate = true;
               }
             } else if (objType === "upload_file") {
@@ -432,12 +449,21 @@ export class MissionIntegrationService {
             }
 
             if (shouldUpdate) {
-              await this.missionService.updateObjective(
-                userId,
-                mission.missionId,
-                objective.id,
-                newProgress,
-              );
+              if (delta !== null) {
+                await this.missionService.creditObjective(
+                  userId,
+                  mission.missionId,
+                  objective.id,
+                  delta,
+                );
+              } else {
+                await this.missionService.updateObjective(
+                  userId,
+                  mission.missionId,
+                  objective.id,
+                  newProgress,
+                );
+              }
             }
           }
         }
@@ -468,11 +494,15 @@ export class MissionIntegrationService {
           for (const objective of mission.objectives) {
             let shouldUpdate = false;
             let newProgress: number | string | boolean = objective.current;
+            // D3 pass 2: counts are credited as a DELTA, not an absolute
+            // computed from `objective.current` — that read sits outside any
+            // lock, so two concurrent credits collapsed into one.
+            let delta: number | null = null;
 
             const objType = objective.type as string;
 
             if (objType === "message") {
-              newProgress = (objective.current as number) + 1;
+              delta = 1;
               shouldUpdate = true;
             } else if (objType === "contact_player") {
               if (matchesEntity(objective, recipientId, "recipientId", "userId")) {
@@ -482,12 +512,21 @@ export class MissionIntegrationService {
             }
 
             if (shouldUpdate) {
-              await this.missionService.updateObjective(
-                userId,
-                mission.missionId,
-                objective.id,
-                newProgress,
-              );
+              if (delta !== null) {
+                await this.missionService.creditObjective(
+                  userId,
+                  mission.missionId,
+                  objective.id,
+                  delta,
+                );
+              } else {
+                await this.missionService.updateObjective(
+                  userId,
+                  mission.missionId,
+                  objective.id,
+                  newProgress,
+                );
+              }
             }
           }
         }
@@ -519,11 +558,15 @@ export class MissionIntegrationService {
           for (const objective of mission.objectives) {
             let shouldUpdate = false;
             let newProgress: number | string | boolean = objective.current;
+            // D3 pass 2: counts are credited as a DELTA, not an absolute
+            // computed from `objective.current` — that read sits outside any
+            // lock, so two concurrent credits collapsed into one.
+            let delta: number | null = null;
 
             const objType = objective.type as string;
 
             if (objType === "explore") {
-              newProgress = (objective.current as number) + 1;
+              delta = 1;
               shouldUpdate = true;
             } else if (objType === "connect_server") {
               if (matchesEntity(objective, serverId, "serverId")) {
@@ -532,7 +575,7 @@ export class MissionIntegrationService {
               }
             } else if (objType === "discover_server_type") {
               if ((objective as any).metadata?.serverType === serverType) {
-                newProgress = (objective.current as number) + 1;
+                delta = 1;
                 shouldUpdate = true;
               }
             } else if (objType === "infiltrate_network") {
@@ -561,12 +604,21 @@ export class MissionIntegrationService {
             }
 
             if (shouldUpdate) {
-              await this.missionService.updateObjective(
-                userId,
-                mission.missionId,
-                objective.id,
-                newProgress,
-              );
+              if (delta !== null) {
+                await this.missionService.creditObjective(
+                  userId,
+                  mission.missionId,
+                  objective.id,
+                  delta,
+                );
+              } else {
+                await this.missionService.updateObjective(
+                  userId,
+                  mission.missionId,
+                  objective.id,
+                  newProgress,
+                );
+              }
             }
           }
         }
@@ -598,12 +650,16 @@ export class MissionIntegrationService {
           for (const objective of mission.objectives) {
             let shouldUpdate = false;
             let newProgress: number | string | boolean = objective.current;
+            // D3 pass 2: counts are credited as a DELTA, not an absolute
+            // computed from `objective.current` — that read sits outside any
+            // lock, so two concurrent credits collapsed into one.
+            let delta: number | null = null;
 
             const objType = objective.type as string;
 
             if (objType === "forum_post") {
               if (activityType === "post") {
-                newProgress = (objective.current as number) + 1;
+                delta = 1;
                 shouldUpdate = true;
               }
             } else if (objType === "forum_reply") {
@@ -615,17 +671,26 @@ export class MissionIntegrationService {
                 shouldUpdate = true;
               }
             } else if (objType === "forum_interaction") {
-              newProgress = (objective.current as number) + 1;
+              delta = 1;
               shouldUpdate = true;
             }
 
             if (shouldUpdate) {
-              await this.missionService.updateObjective(
-                userId,
-                mission.missionId,
-                objective.id,
-                newProgress,
-              );
+              if (delta !== null) {
+                await this.missionService.creditObjective(
+                  userId,
+                  mission.missionId,
+                  objective.id,
+                  delta,
+                );
+              } else {
+                await this.missionService.updateObjective(
+                  userId,
+                  mission.missionId,
+                  objective.id,
+                  newProgress,
+                );
+              }
             }
           }
         }
@@ -657,6 +722,10 @@ export class MissionIntegrationService {
           for (const objective of mission.objectives) {
             let shouldUpdate = false;
             let newProgress: number | string | boolean = objective.current;
+            // D3 pass 2: counts are credited as a DELTA, not an absolute
+            // computed from `objective.current` — that read sits outside any
+            // lock, so two concurrent credits collapsed into one.
+            let delta: number | null = null;
 
             const objType = objective.type as string;
 
@@ -669,17 +738,26 @@ export class MissionIntegrationService {
                 shouldUpdate = true;
               }
             } else if (objType === "gain_xp") {
-              newProgress = (objective.current as number) + xpGained;
+              delta = xpGained;
               shouldUpdate = true;
             }
 
             if (shouldUpdate) {
-              await this.missionService.updateObjective(
-                userId,
-                mission.missionId,
-                objective.id,
-                newProgress,
-              );
+              if (delta !== null) {
+                await this.missionService.creditObjective(
+                  userId,
+                  mission.missionId,
+                  objective.id,
+                  delta,
+                );
+              } else {
+                await this.missionService.updateObjective(
+                  userId,
+                  mission.missionId,
+                  objective.id,
+                  newProgress,
+                );
+              }
             }
           }
         }
@@ -709,29 +787,42 @@ export class MissionIntegrationService {
 
           for (const objective of mission.objectives) {
             let shouldUpdate = false;
-            let newProgress: number | string | boolean = objective.current;
+            const newProgress: number | string | boolean = objective.current;
+            // D3 pass 2: counts are credited as a DELTA, not an absolute
+            // computed from `objective.current` — that read sits outside any
+            // lock, so two concurrent credits collapsed into one.
+            let delta: number | null = null;
 
             const objType = objective.type as string;
 
             if (objType === "earn_credits") {
               if (type === "earned") {
-                newProgress = (objective.current as number) + amount;
+                delta = amount;
                 shouldUpdate = true;
               }
             } else if (objType === "spend_credits") {
               if (type === "spent") {
-                newProgress = (objective.current as number) + amount;
+                delta = amount;
                 shouldUpdate = true;
               }
             }
 
             if (shouldUpdate) {
-              await this.missionService.updateObjective(
-                userId,
-                mission.missionId,
-                objective.id,
-                newProgress,
-              );
+              if (delta !== null) {
+                await this.missionService.creditObjective(
+                  userId,
+                  mission.missionId,
+                  objective.id,
+                  delta,
+                );
+              } else {
+                await this.missionService.updateObjective(
+                  userId,
+                  mission.missionId,
+                  objective.id,
+                  newProgress,
+                );
+              }
             }
           }
         }
@@ -763,6 +854,10 @@ export class MissionIntegrationService {
           for (const objective of mission.objectives) {
             let shouldUpdate = false;
             let newProgress: number | string | boolean = objective.current;
+            // D3 pass 2: counts are credited as a DELTA, not an absolute
+            // computed from `objective.current` — that read sits outside any
+            // lock, so two concurrent credits collapsed into one.
+            let delta: number | null = null;
 
             const objType = objective.type as string;
 
@@ -783,8 +878,7 @@ export class MissionIntegrationService {
                 eventType === "reputation_gain" &&
                 (objective as any).metadata?.factionId === factionId
               ) {
-                newProgress =
-                  (objective.current as number) + (metadata?.amount || 0);
+                delta = (metadata?.amount || 0);
                 shouldUpdate = true;
               }
             } else if (objType === "faction_mission") {
@@ -792,18 +886,27 @@ export class MissionIntegrationService {
                 eventType === "mission_complete" &&
                 (objective as any).metadata?.factionId === factionId
               ) {
-                newProgress = (objective.current as number) + 1;
+                delta = 1;
                 shouldUpdate = true;
               }
             }
 
             if (shouldUpdate) {
-              await this.missionService.updateObjective(
-                userId,
-                mission.missionId,
-                objective.id,
-                newProgress,
-              );
+              if (delta !== null) {
+                await this.missionService.creditObjective(
+                  userId,
+                  mission.missionId,
+                  objective.id,
+                  delta,
+                );
+              } else {
+                await this.missionService.updateObjective(
+                  userId,
+                  mission.missionId,
+                  objective.id,
+                  newProgress,
+                );
+              }
             }
           }
         }
@@ -1071,8 +1174,9 @@ export class MissionIntegrationService {
 
           for (const objective of mission.objectives) {
             if ((objective.type as string) !== "survive_trace") continue;
-            const newProgress = ((objective.current as number) || 0) + 1;
-            await this.missionService.updateObjective(userId, mission.missionId, objective.id, newProgress);
+            // D3 pass 2: credited as a DELTA — the old absolute was computed
+            // from an `objective.current` read outside any lock.
+            await this.missionService.creditObjective(userId, mission.missionId, objective.id, 1);
           }
         }
       },
@@ -1097,8 +1201,9 @@ export class MissionIntegrationService {
 
           for (const objective of mission.objectives) {
             if ((objective.type as string) !== "scan_subnet") continue;
-            const newProgress = ((objective.current as number) || 0) + 1;
-            await this.missionService.updateObjective(userId, mission.missionId, objective.id, newProgress);
+            // D3 pass 2: credited as a DELTA — the old absolute was computed
+            // from an `objective.current` read outside any lock.
+            await this.missionService.creditObjective(userId, mission.missionId, objective.id, 1);
           }
         }
       },
@@ -1128,8 +1233,9 @@ export class MissionIntegrationService {
             if ((objective.type as string) !== "report_intel") continue;
             const meta = (objective as any).metadata;
             if (!meta?.reportType || meta.reportType === reportType) {
-              const newProgress = ((objective.current as number) || 0) + 1;
-              await this.missionService.updateObjective(userId, mission.missionId, objective.id, newProgress);
+              // D3 pass 2: credited as a DELTA — the old absolute was computed
+            // from an `objective.current` read outside any lock.
+              await this.missionService.creditObjective(userId, mission.missionId, objective.id, 1);
             }
           }
         }

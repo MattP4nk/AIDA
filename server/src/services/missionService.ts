@@ -3,7 +3,16 @@ import { Mission } from "@prisma/client";
 import { db } from "../database/client";
 import { injectable, inject } from "tsyringe";
 import type { Logger } from "pino";
-import { CACHE_SERVICE, LOGGER, SOCKET_IO } from "../di/tokens";
+import {
+  CACHE_SERVICE,
+  LOGGER,
+  PLAYER_MISSION_REPOSITORY,
+  PLAYER_PROGRESS_REPOSITORY,
+  SOCKET_IO,
+} from "../di/tokens";
+import type PlayerProgressRepository from "../repositories/playerProgressRepository";
+import type PlayerMissionRepository from "../repositories/playerMissionRepository";
+import { NO_CHANGE } from "../repositories/playerMissionRepository";
 import type { CacheService } from "./cacheService";
 import { Server as SocketIOServer } from "socket.io";
 
@@ -115,6 +124,10 @@ class MissionService extends EventEmitter {
   constructor(
     @inject(LOGGER) private logger: Logger,
     @inject(CACHE_SERVICE) private cacheService: CacheService,
+    @inject(PLAYER_PROGRESS_REPOSITORY)
+    private playerProgress: PlayerProgressRepository,
+    @inject(PLAYER_MISSION_REPOSITORY)
+    private playerMissions: PlayerMissionRepository,
     // INJECTED. `setSocketIO()` was only ever called by
     // `missionIntegration.setSocketIO()`, which itself has ZERO callers — so
     // `this.io` was permanently null and all 12 socket emits here were dead:
@@ -340,11 +353,8 @@ class MissionService extends EventEmitter {
         where: { userId },
       });
 
-      if (progress) {
-        const missionProgress = (progress.missionProgress as any) || {};
-        if (missionProgress[missionId]) {
-          throw new Error("Mission is not available");
-        }
+      if (progress && (await this.playerMissions.has(userId, missionId))) {
+        throw new Error("Mission is not available");
       }
 
       if (mission.status !== "available") {
@@ -382,24 +392,21 @@ class MissionService extends EventEmitter {
       });
       this.cacheService.del(`mission:${missionId}`);
 
-      // Store player mission in progress (create progress record if missing)
-      const existingProgress = progress || { missionProgress: {} };
-      const missionProgress =
-        (existingProgress.missionProgress as Record<string, any>) || {};
-      missionProgress[missionId] = playerMission;
-
-      if (progress) {
-        await this.prisma.playerProgress.update({
-          where: { userId },
-          data: {
-            missionProgress: missionProgress as any,
-          },
-        });
-      } else {
+      // Store player mission in progress (create progress record if missing).
+      // D3: the update path goes through the repository so it is serialised
+      // against the player's other mission writes. The create path stays a
+      // direct `create` — there is no blob to race with when the row does not
+      // exist yet, and row creation is PlayerProgress's concern, not this
+      // repository's.
+      // D3 pass 2: the row must be created FIRST, then the mission written
+      // through the repository. Seeding `missionProgress` in the `create` would
+      // put it in a column nothing reads any more — the mission would be
+      // invisible to `getPlayerMissions` and `accept` would report "Mission not
+      // assigned to player" forever.
+      if (!progress) {
         await this.prisma.playerProgress.create({
           data: {
             userId,
-            missionProgress: missionProgress as any,
             experience: 0,
             level: 1,
             credits: 0,
@@ -409,6 +416,7 @@ class MissionService extends EventEmitter {
           },
         });
       }
+      await this.playerMissions.put(userId, missionId, playerMission as never);
 
       // Audit log
       await this.auditLog(userId, "MISSION_ASSIGNED", {
@@ -447,16 +455,10 @@ class MissionService extends EventEmitter {
     status?: MissionStatus,
   ): Promise<PlayerMission[]> {
     try {
-      const progress = await this.prisma.playerProgress.findUnique({
-        where: { userId },
-      });
-
-      if (!progress) {
-        return [];
-      }
-
-      const missionProgress = (progress.missionProgress as any) || {};
-      let playerMissions: PlayerMission[] = Object.values(missionProgress);
+      // D3: the whole-row `findUnique` is gone with the blob access — this only
+      // ever needed `missionProgress`, and the repository selects just that.
+      let playerMissions =
+        (await this.playerMissions.list(userId)) as unknown as PlayerMission[];
 
       // Filter by status if provided
       if (status) {
@@ -526,14 +528,21 @@ class MissionService extends EventEmitter {
     try {
       const progress = await this.prisma.playerProgress.findUnique({
         where: { userId },
+        select: { userId: true },
       });
 
       if (!progress) {
         throw new Error("Player progress not found");
       }
 
-      const missionProgress = (progress.missionProgress as any) || {};
-      const playerMission = missionProgress[missionId];
+      // ── D3: the whole check-and-flip is one critical section ───────────
+      // Read-check-mutate-write used to be four separate steps over a blob, so
+      // two concurrent accepts (a double-click, or a retried socket event) both
+      // read `available`, both passed the state check, and both wrote `active`
+      // — with the second also resetting `startedAt`, moving the expiry window.
+      // Inside `mutate` the second caller sees `active` and takes the
+      // idempotent no-op branch that was always intended.
+      let alreadyActive = false;
 
       // REVERTED 2026-08-31. A lazy "materialise the progress entry from the
       // Mission row" branch briefly lived here. It was wrong on two counts:
@@ -550,6 +559,7 @@ class MissionService extends EventEmitter {
       //
       // So this correctly stays a hard requirement: you can only accept a
       // mission that is already on offer TO YOU.
+      await this.playerMissions.mutate(userId, missionId, (playerMission) => {
       if (!playerMission) {
         throw new Error("Mission not assigned to player");
       }
@@ -557,7 +567,8 @@ class MissionService extends EventEmitter {
       // Accepting an already-active mission is a no-op, not an error — a
       // double-click or a retried socket event shouldn't fail.
       if (playerMission.status === "active") {
-        return;
+        alreadyActive = true;
+        return NO_CHANGE;
       }
 
       // The mission lifecycle is: available → active → completed/failed/expired.
@@ -583,14 +594,10 @@ class MissionService extends EventEmitter {
       // Update status
       playerMission.status = "active";
       playerMission.startedAt = new Date();
-
-      missionProgress[missionId] = playerMission;
-      await this.prisma.playerProgress.update({
-        where: { userId },
-        data: {
-          missionProgress: missionProgress as any,
-        },
+      return playerMission;
       });
+
+      if (alreadyActive) return;
 
       // Update mission in database
       await this.prisma.mission.update({
@@ -630,31 +637,31 @@ class MissionService extends EventEmitter {
     missionId: string,
   ): Promise<void> {
     try {
+      // Only `level` is needed from the row now — the blob comes from the
+      // repository. Kept as an explicit existence check so abandoning with no
+      // progress row still reports the same error it always did.
       const progress = await this.prisma.playerProgress.findUnique({
         where: { userId },
+        select: { level: true },
       });
 
       if (!progress) {
         throw new Error("Player progress not found");
       }
 
-      const missionProgress = (progress.missionProgress as any) || {};
-      const playerMission = missionProgress[missionId];
-
-      if (!playerMission) {
-        throw new Error("Mission not assigned to player");
-      }
-
-      // Update status
-      playerMission.status = "failed";
-      missionProgress[missionId] = playerMission;
-
-      await this.prisma.playerProgress.update({
-        where: { userId },
-        data: {
-          missionProgress: missionProgress as any,
+      // D3: serialised, so abandoning cannot race a concurrent completion and
+      // overwrite it with "failed".
+      const playerMission = await this.playerMissions.mutate(
+        userId,
+        missionId,
+        (stored) => {
+          if (!stored) {
+            throw new Error("Mission not assigned to player");
+          }
+          stored.status = "failed";
+          return stored;
         },
-      });
+      );
 
       // Update mission in database to make it available again
       await this.prisma.mission.update({
@@ -681,7 +688,7 @@ class MissionService extends EventEmitter {
       // Feedback: abandoned missions are important signal
       const mission = await this.getMission(missionId);
       if (mission) {
-        const timeActive = playerMission.startedAt
+        const timeActive = playerMission?.startedAt
           ? Math.round((Date.now() - new Date(playerMission.startedAt).getTime()) / 60000)
           : 0;
 
@@ -723,28 +730,44 @@ class MissionService extends EventEmitter {
     progress: number | string | boolean,
   ): Promise<void> {
     try {
-      const playerProgress = await this.prisma.playerProgress.findUnique({
-        where: { userId },
-      });
+      // ── D3: read-modify-write of the objective is one critical section ──
+      // This is the hottest blob mutation in the game — `missionIntegration`
+      // drives it from every credited event. It used to read the whole row,
+      // mutate a nested objective, and write the entire blob back, so two
+      // events landing together lost one another's progress completely.
+      //
+      // CAVEAT, recorded rather than hidden: callers pass an ABSOLUTE value
+      // computed from a `current` THEY read (see the note below), so their read
+      // is still outside this lock. Serialising here stops the blob write from
+      // clobbering unrelated missions, but two concurrent counters for the SAME
+      // objective can still collapse into one. Fixing that properly means
+      // making the increment relative, which is pass 2's conditional-update
+      // work — not something a lock here can reach.
+      type ObjectiveOutcome = {
+        current: number | string | boolean;
+        completed: boolean;
+        allCompleted: boolean;
+      };
+      // Held in a box: TypeScript cannot see assignments made inside the
+      // callback below, so a bare `let` would stay narrowed to `null` and the
+      // reads after `mutate` would not typecheck.
+      const outcome: { value: ObjectiveOutcome | null } = { value: null };
 
-      if (!playerProgress) {
-        throw new Error("Player progress not found");
-      }
-
-      const missionProgress = (playerProgress.missionProgress as any) || {};
-      const playerMission = missionProgress[missionId];
-
+      const objectiveResult = await this.playerMissions.mutate(
+        userId,
+        missionId,
+        (playerMission) => {
       if (!playerMission) {
         throw new Error("Mission not assigned to player");
       }
 
       if (playerMission.status !== "active") {
-        return; // Only update active missions
+        return NO_CHANGE; // Only update active missions
       }
 
       // Find and update objective
       const objective = playerMission.objectives.find(
-        (obj: MissionObjective) => obj.id === objectiveId,
+        (obj) => obj.id === objectiveId,
       );
       if (!objective) {
         throw new Error("Objective not found");
@@ -781,29 +804,35 @@ class MissionService extends EventEmitter {
           objective.completed || String(progress) === String(target);
       }
 
-      missionProgress[missionId] = playerMission;
-      await this.prisma.playerProgress.update({
-        where: { userId },
-        data: {
-          missionProgress: missionProgress as any,
+      outcome.value = {
+        current: objective.current,
+        completed: objective.completed,
+        allCompleted: playerMission.objectives.every((obj) => obj.completed),
+      };
+      return playerMission;
         },
-      });
+      );
+
+      // Nothing to report if the mission was not active.
+      const updated = outcome.value;
+      if (!updated || !objectiveResult) return;
 
       // Emit Socket.IO event
       if (this.io) {
         this.io.to(`player:${userId}`).emit("mission:objective:updated", {
           missionId,
           objectiveId,
-          progress: objective.current,
-          completed: objective.completed,
+          progress: updated.current,
+          completed: updated.completed,
         });
       }
 
-      // Check if all objectives completed
-      const allCompleted = playerMission.objectives.every(
-        (obj: MissionObjective) => obj.completed,
-      );
-      if (allCompleted) {
+      // Check if all objectives completed.
+      //
+      // MUST be outside the `mutate` callback: `completeMission` takes the same
+      // per-user lock, and the mutex is NOT reentrant — calling it from inside
+      // would deadlock the player permanently.
+      if (updated.allCompleted) {
         await this.completeMission(userId, missionId);
       }
     } catch (error) {
@@ -811,6 +840,121 @@ class MissionService extends EventEmitter {
       throw new Error(
         `Failed to update objective: ${error instanceof Error ? error.message : "Unknown error"}`,
       );
+    }
+  }
+
+  /**
+   * D7 — grant one of `shopItem` to a player, atomically and respecting the
+   * stack ceiling.
+   *
+   * Replaces two copies of `findFirst` → branch → `create`-or-`update`. The
+   * check and the write were separated by an await, so two rewards landing
+   * together both saw no row and both created: that used to leave a hidden
+   * duplicate (every reader resolves inventory with `findFirst`, so the second
+   * row was invisible stock — the player owned 2 and the game could see 1) and
+   * since `@@unique([userId, shopItemId])` landed it throws P2002 instead.
+   *
+   * Create-then-handle-conflict rather than `upsert`, because the cap makes the
+   * update conditional: a P2002 tells us the row exists, and the follow-up
+   * `updateMany` tops it up only `WHERE quantity < cap`. Both statements are
+   * atomic, and the ceiling is enforced by the database rather than computed
+   * from a quantity read a moment earlier.
+   */
+  private async grantInventoryItem(
+    userId: string,
+    shopItem: { id: string; isStackable: boolean; maxStack: number },
+    source: string,
+  ): Promise<void> {
+    // Non-stackable items cap at a single copy.
+    const cap = shopItem.isStackable ? Math.max(1, shopItem.maxStack) : 1;
+
+    try {
+      await this.prisma.inventoryItem.create({
+        data: { userId, shopItemId: shopItem.id, quantity: 1, source },
+      });
+    } catch (err) {
+      if ((err as { code?: string }).code !== "P2002") throw err;
+      // The player already holds it. Top up only if below the ceiling; a
+      // rowcount of 0 here means they were already at the cap.
+      await this.prisma.inventoryItem.updateMany({
+        where: { userId, shopItemId: shopItem.id, quantity: { lt: cap } },
+        data: { quantity: { increment: 1 } },
+      });
+    }
+  }
+
+  /**
+   * Credit a COUNT objective by a relative amount.
+   *
+   * D3 pass 2 — this is the half of the race a lock could never reach. Callers
+   * used to compute `objective.current + n` from a mission object they had
+   * loaded earlier and pass the ABSOLUTE result to `updateObjective`; that read
+   * sat outside any critical section, so two credits arriving together both
+   * computed the same base and one was silently lost. Serialising the write
+   * could not recover it — the information was already gone by then.
+   *
+   * `incrementObjective` is a single `UPDATE … SET current_count =
+   * current_count + n` with the completion recomputed in the same statement, so
+   * there is no read to lose. Completion is sticky, matching G1.
+   *
+   * Falls back to `updateObjective` when the objective is not a count (boolean
+   * objectives are not incrementable) so a mis-registered type degrades to the
+   * old behaviour rather than silently doing nothing.
+   */
+  public async creditObjective(
+    userId: string,
+    missionId: string,
+    objectiveId: string,
+    delta: number,
+  ): Promise<void> {
+    try {
+      const result = await this.playerMissions.incrementObjective(
+        userId,
+        missionId,
+        objectiveId,
+        delta,
+      );
+
+      if (!result) {
+        // `incrementObjective` returns null for THREE different reasons: the
+        // objective is not a count, the mission is not active, or there is no
+        // such objective. Only the first deserves a fallback.
+        //
+        // The fallback is restricted to BOOLEAN targets. It used to fire for
+        // anything non-numeric, which included the string-target case the
+        // schema deliberately keeps alive for AI-invented shapes — writing
+        // `true` into it, so `current` became the literal "true" and the
+        // objective could never again match its real string target. That turned
+        // "a new shape is a silent no-op" into "a new shape is silently
+        // corrupted".
+        const stored = await this.playerMissions.get(userId, missionId);
+        if (stored?.status !== "active") return;
+        const objective = stored.objectives.find((o) => o.id === objectiveId);
+        if (objective && typeof objective.target === "boolean") {
+          await this.updateObjective(userId, missionId, objectiveId, true);
+        }
+        return;
+      }
+
+      if (this.io) {
+        this.io.to(`player:${userId}`).emit("mission:objective:updated", {
+          missionId,
+          objectiveId,
+          progress: result.current,
+          completed: result.completed,
+        });
+      }
+
+      // Completion check runs OUTSIDE any lock — `completeMission` takes the
+      // per-user mutex and it is not reentrant.
+      if (
+        result.completed &&
+        (await this.playerMissions.allObjectivesComplete(userId, missionId))
+      ) {
+        await this.completeMission(userId, missionId);
+      }
+    } catch (error) {
+      this.logger.error({ err: error, userId, missionId, objectiveId }, "Error crediting objective");
     }
   }
 
@@ -827,23 +971,17 @@ class MissionService extends EventEmitter {
     objectiveId: string,
   ): Promise<boolean> {
     try {
-      const progress = await this.prisma.playerProgress.findUnique({
-        where: { userId },
-      });
-
-      if (!progress) {
-        return false;
-      }
-
-      const missionProgress = (progress.missionProgress as any) || {};
-      const playerMission = missionProgress[missionId];
+      // D3: read-only, so no lock needed — but it goes through the repository
+      // so the blob has exactly one reader too, which is what makes pass 2's
+      // storage swap a single-file change.
+      const playerMission = await this.playerMissions.get(userId, missionId);
 
       if (!playerMission) {
         return false;
       }
 
       const objective = playerMission.objectives.find(
-        (obj: MissionObjective) => obj.id === objectiveId,
+        (obj) => obj.id === objectiveId,
       );
       return objective ? objective.completed : false;
     } catch (error) {
@@ -868,23 +1006,56 @@ class MissionService extends EventEmitter {
         throw new Error("Mission not found");
       }
 
-      const progress = await this.prisma.playerProgress.findUnique({
+      // The payability guard must run BEFORE the claim. `grantRewards` still
+      // throws "Player progress not found", and with claim-then-pay that throw
+      // would land AFTER the mission was already marked completed on both rows
+      // — burning it with no rewards and no recovery ("Mission already
+      // completed" on retry). This guard is what makes that unreachable.
+      const payable = await this.prisma.playerProgress.findUnique({
         where: { userId },
+        select: { userId: true },
       });
-
-      if (!progress) {
+      if (!payable) {
         throw new Error("Player progress not found");
       }
 
-      const missionProgress = (progress.missionProgress as any) || {};
-      const playerMission = missionProgress[missionId];
+      // ── D3: CLAIM the completion atomically, before paying anything ─────
+      // This is the double-reward site. The `"already completed"` guard and the
+      // status flip used to be separate steps over a blob, so the expiry
+      // sweep's stale write could revert `completed` back to `active` — after
+      // which this guard passed a SECOND time and the rewards below were
+      // granted again. Inside `mutate` the check and the flip are one critical
+      // section, so exactly one caller can ever transition the mission and
+      // therefore exactly one can pay.
+      //
+      // Deliberately ordered claim-then-pay. D5 notes the downside honestly: a
+      // crash between them leaves the mission complete with rewards unpaid.
+      // The alternative — pay first — is strictly worse, because a crash there
+      // is repeatable and therefore exploitable. Making the pair genuinely
+      // atomic needs both sides in one transaction, which is pass 2's work.
+      const alreadyCompleted = { value: false };
+      const playerMission = await this.playerMissions.mutate(
+        userId,
+        missionId,
+        (stored) => {
+          if (!stored) {
+            throw new Error("Mission not assigned to player");
+          }
+          if (stored.status === "completed") {
+            alreadyCompleted.value = true;
+            return NO_CHANGE;
+          }
+          stored.status = "completed";
+          stored.completedAt = new Date();
+          return stored;
+        },
+      );
 
+      if (alreadyCompleted.value) {
+        throw new Error("Mission already completed");
+      }
       if (!playerMission) {
         throw new Error("Mission not assigned to player");
-      }
-
-      if (playerMission.status === "completed") {
-        throw new Error("Mission already completed");
       }
 
       // Calculate performance metrics
@@ -934,18 +1105,12 @@ class MissionService extends EventEmitter {
       // Calculate rewards
       const rewards = this.calculateRewards(mission, performance);
 
-      // Update mission status
-      playerMission.status = "completed";
-      playerMission.completedAt = new Date();
-      missionProgress[missionId] = playerMission;
-
-      await this.prisma.playerProgress.update({
-        where: { userId },
-        data: {
-          missionProgress: missionProgress as any,
-          missionsCompleted: { increment: 1 },
-        },
-      });
+      // The status flip already happened, atomically, in the claim above.
+      // The counter is now a SEPARATE statement — it can no longer ride the
+      // same write as the blob, because the blob write lives inside the lock.
+      // Accepted trade: a crash between them leaves a stat counter one short,
+      // which is strictly less bad than the double-reward the claim closes.
+      await this.playerProgress.incrementCounter(userId, "missionsCompleted");
 
       // Update mission in database
       await this.prisma.mission.update({
@@ -1000,10 +1165,21 @@ class MissionService extends EventEmitter {
       });
 
       // ═══ Mission Feedback — AI learns from outcomes ═══
-      // Grade the mission difficulty relative to the player
+      // Grade the mission difficulty relative to the player.
+      // Read AFTER `grantRewards` on purpose: the level may have just gone up,
+      // and grading against the pre-reward level would misreport the mission as
+      // harder than it was. Narrowed to the one column — the whole-row
+      // `findUnique` this replaces existed only to reach the blob.
+      const playerLevel =
+        (
+          await this.prisma.playerProgress.findUnique({
+            where: { userId },
+            select: { level: true },
+          })
+        )?.level ?? 1;
       const timeToCompleteMin = Math.round(timeElapsed / 60000);
       const expectedTimeMin = mission.difficulty * 5; // ~5 min per difficulty level as baseline
-      const levelDiffRatio = progress.level / Math.max(1, mission.difficulty);
+      const levelDiffRatio = playerLevel / Math.max(1, mission.difficulty);
 
       let difficultyGrade: "too_easy" | "appropriate" | "too_hard";
       if (levelDiffRatio > 2.5 || timeToCompleteMin < expectedTimeMin * 0.3) {
@@ -1020,7 +1196,7 @@ class MissionService extends EventEmitter {
         missionId,
         templateId: (mission as any).templateId || "unknown",
         userId,
-        playerLevel: progress.level,
+        playerLevel,
         missionDifficulty: mission.difficulty,
         missionType: mission.type,
         timeToCompleteMin,
@@ -1112,57 +1288,69 @@ class MissionService extends EventEmitter {
     rewards: MissionRewards,
   ): Promise<void> {
     try {
+      // ── D5: increments, not absolute writes ────────────────────────────
+      // This method used to read `progress` once and then write
+      // `experience = progress.experience + rewards.xp` and
+      // `credits = progress.credits + rewards.credits` — absolute values from a
+      // stale read, outside any transaction, while `hackService` concurrently
+      // issued `{ increment }` against the same row. A hack award landing
+      // between the read and the write was silently erased. Every field below
+      // is now a relative update, so concurrent grants add up instead of
+      // clobbering each other.
       const progress = await this.prisma.playerProgress.findUnique({
         where: { userId },
+        select: { userId: true },
       });
 
       if (!progress) {
         throw new Error("Player progress not found");
       }
 
-      // Update player progress with rewards
-      const updateData: any = {};
+      /** Level after the XP grant, for the `rewards:xp_granted` event below. */
+      let grantedLevel = 0;
+
+      if (rewards.credits > 0) {
+        await this.playerProgress.addCredits(userId, rewards.credits);
+      }
+
+      if (rewards.reputation) {
+        // Reputation is not a repository concern (it is per-faction and has its
+        // own service); increment it here rather than assigning from a stale read.
+        await this.prisma.playerProgress.updateMany({
+          where: { userId },
+          data: { repNeutral: { increment: rewards.reputation } },
+        });
+      }
 
       if (rewards.xp > 0) {
-        updateData.experience = progress.experience + rewards.xp;
+        // `addExperience` recomputes `level` from the POST-increment total and
+        // only ever raises it, so a racing grant cannot lower it. Note this
+        // method used to be the ONLY place `level` was written at all.
+        const xp = await this.playerProgress.addExperience(userId, rewards.xp);
+        grantedLevel = xp.level;
 
-        // Check for level up
-        const newLevel = this.calculateLevel(updateData.experience);
-        if (newLevel > progress.level) {
-          updateData.level = newLevel;
-
-          // Emit level up event + notification toast to client
+        if (xp.leveledUp) {
           if (this.io) {
             this.io.to(`player:${userId}`).emit("player:levelup", {
-              newLevel,
-              experience: updateData.experience,
+              newLevel: xp.level,
+              experience: xp.experience,
               userId,
             });
             this.io.to(`player:${userId}`).emit("notification", {
               type: "levelup",
               title: "Level Up!",
-              message: `You reached Level ${newLevel}!`,
+              message: `You reached Level ${xp.level}!`,
               severity: "success",
             });
           }
           // Emit for internal listeners (dynamic content, etc.)
-          this.emit("player:levelup", { userId, newLevel, experience: updateData.experience });
+          this.emit("player:levelup", {
+            userId,
+            newLevel: xp.level,
+            experience: xp.experience,
+          });
         }
       }
-
-      if (rewards.credits > 0) {
-        updateData.credits = progress.credits + rewards.credits;
-      }
-
-      if (rewards.reputation) {
-        // Add reputation to neutral faction by default
-        updateData.repNeutral = (progress.repNeutral || 0) + rewards.reputation;
-      }
-
-      await this.prisma.playerProgress.update({
-        where: { userId },
-        data: updateData,
-      });
 
       // Send reward notification toast
       if (this.io && (rewards.xp > 0 || rewards.credits > 0)) {
@@ -1200,31 +1388,7 @@ class MissionService extends EventEmitter {
               continue;
             }
 
-            // Check if player already has this item
-            const existing = await this.prisma.inventoryItem.findFirst({
-              where: { userId, shopItemId: shopItem.id },
-            });
-
-            if (existing && shopItem.isStackable) {
-              // Stack it up to maxStack
-              const newQty = Math.min(existing.quantity + 1, shopItem.maxStack);
-              if (newQty > existing.quantity) {
-                await this.prisma.inventoryItem.update({
-                  where: { id: existing.id },
-                  data: { quantity: newQty },
-                });
-              }
-            } else if (!existing) {
-              // Create new inventory entry
-              await this.prisma.inventoryItem.create({
-                data: {
-                  userId,
-                  shopItemId: shopItem.id,
-                  quantity: 1,
-                  source: "mission_reward",
-                },
-              });
-            }
+            await this.grantInventoryItem(userId, shopItem, "mission_reward");
 
             // Notify the player
             if (this.io) {
@@ -1251,7 +1415,7 @@ class MissionService extends EventEmitter {
         this.emit("rewards:xp_granted", {
           userId,
           skillName: "general",
-          newLevel: updateData.level || progress.level,
+          newLevel: grantedLevel,
           xpGained: rewards.xp,
         });
       }
@@ -1365,31 +1529,7 @@ class MissionService extends EventEmitter {
       return;
     }
 
-    // Check existing inventory
-    const existing = await this.prisma.inventoryItem.findFirst({
-      where: { userId, shopItemId: shopItem.id },
-    });
-
-    if (existing && existing.quantity >= (shopItem.maxStack || 5)) {
-      // Already at max stack — skip
-      return;
-    }
-
-    if (existing) {
-      await this.prisma.inventoryItem.update({
-        where: { id: existing.id },
-        data: { quantity: { increment: 1 } },
-      });
-    } else {
-      await this.prisma.inventoryItem.create({
-        data: {
-          userId,
-          shopItemId: shopItem.id,
-          quantity: 1,
-          source: "mission_reward",
-        },
-      });
-    }
+    await this.grantInventoryItem(userId, shopItem, "mission_reward");
 
     // Notify the player
     if (this.io) {
@@ -1455,56 +1595,56 @@ class MissionService extends EventEmitter {
    */
   public async checkExpiredMissions(): Promise<void> {
     try {
-      const allProgress = await this.prisma.playerProgress.findMany();
+      // ── D3: this method WAS the headline race ──────────────────────────
+      // It loaded every player's blob up front with a bare
+      // `playerProgress.findMany()` (no where/select/take, four JSON blobs per
+      // player), then per player awaited an audit-log write AND a
+      // `mission.update` BEFORE writing its copy back. That window is two round
+      // trips wide, and the player is racing it with their own commands: a
+      // mission completed inside it was reverted to `active` by the sweep's
+      // stale copy, after which the `"already completed"` guard passed a second
+      // time and **rewards were granted twice**.
+      //
+      // Two changes, and both matter:
+      //   1. the read-modify-write runs inside `mutateAll`, so it is one
+      //      critical section per player rather than a stale snapshot; and
+      //   2. the side effects (socket emit, audit log, mission row) moved OUT
+      //      of that section — they are what made the window wide, and none of
+      //      them needs to see the blob.
+      // Reproduced and pinned by `verify-phase3-d3-mission-lock.ts`, whose
+      // negative control still shows the old shape clobbering a completion.
+      // PASS 2: one indexed query replaces "read every player's blob and filter
+      // in JS". The pass-1 version already fixed the clobbering, but it still
+      // had to scan every player, because `status = active AND expiresAt < now`
+      // is not expressible as a predicate over a JSON map keyed by mission id.
+      const due = await this.playerMissions.findExpired(new Date());
 
-      const now = Date.now();
+      for (const { userId, missionId } of due) {
+        // Still through `mutate`, and still serialised: a player completing
+        // this exact mission right now must win or lose cleanly, not both.
+        // `NO_CHANGE` covers the case where they completed it between the query
+        // above and the lock below — then there is nothing to expire and no
+        // event to emit.
+        let expired = false;
+        await this.playerMissions.mutate(userId, missionId, (playerMission) => {
+          if (!playerMission || playerMission.status !== "active") return NO_CHANGE;
+          playerMission.status = "expired";
+          expired = true;
+          return playerMission;
+        });
 
-      for (const progress of allProgress) {
-        const missionProgress = (progress.missionProgress as any) || {};
-        let updated = false;
+        if (!expired) continue;
 
-        for (const missionId in missionProgress) {
-          const playerMission = missionProgress[missionId];
-
-          if (
-            playerMission.status === "active" &&
-            playerMission.expiresAt &&
-            new Date(playerMission.expiresAt).getTime() < now
-          ) {
-            playerMission.status = "expired";
-            updated = true;
-
-            // Emit Socket.IO event
-            if (this.io) {
-              this.io.to(`player:${progress.userId}`).emit("mission:expired", {
-                missionId,
-              });
-            }
-
-            // Audit log
-            await this.auditLog(progress.userId, "MISSION_EXPIRED", {
-              missionId,
-            });
-
-            // Update mission in database
-            await this.prisma.mission.update({
-              where: { id: missionId },
-              data: {
-                status: "available",
-                assignedTo: null,
-              },
-            });
-          }
+        // Side effects only after the lock is released — they are what made the
+        // original sweep's window two round trips wide.
+        if (this.io) {
+          this.io.to(`player:${userId}`).emit("mission:expired", { missionId });
         }
-
-        if (updated) {
-          await this.prisma.playerProgress.update({
-            where: { userId: progress.userId },
-            data: {
-              missionProgress: missionProgress as any,
-            },
-          });
-        }
+        await this.auditLog(userId, "MISSION_EXPIRED", { missionId });
+        await this.prisma.mission.update({
+          where: { id: missionId },
+          data: { status: "available", assignedTo: null },
+        });
       }
     } catch (error) {
       this.logger.error({ err: error }, "Error checking expired missions");
@@ -1518,29 +1658,14 @@ class MissionService extends EventEmitter {
    */
   public async expireMission(userId: string, missionId: string): Promise<void> {
     try {
-      const progress = await this.prisma.playerProgress.findUnique({
-        where: { userId },
-      });
-
-      if (!progress) {
-        throw new Error("Player progress not found");
-      }
-
-      const missionProgress = (progress.missionProgress as any) || {};
-      const playerMission = missionProgress[missionId];
-
-      if (!playerMission) {
-        throw new Error("Mission not assigned to player");
-      }
-
-      playerMission.status = "expired";
-      missionProgress[missionId] = playerMission;
-
-      await this.prisma.playerProgress.update({
-        where: { userId },
-        data: {
-          missionProgress: missionProgress as any,
-        },
+      // D3: serialised. Manually expiring a mission is the same race the sweep
+      // had — without the lock it could overwrite a completion in flight.
+      await this.playerMissions.mutate(userId, missionId, (playerMission) => {
+        if (!playerMission) {
+          throw new Error("Mission not assigned to player");
+        }
+        playerMission.status = "expired";
+        return playerMission;
       });
 
       // Update mission in database
@@ -1579,10 +1704,12 @@ class MissionService extends EventEmitter {
    * @param xp - Total XP
    * @returns Player level
    */
-  private calculateLevel(xp: number): number {
-    // Simple level calculation: level = floor(sqrt(xp / 100))
-    return Math.floor(Math.sqrt(xp / 100)) + 1;
-  }
+  // `calculateLevel` lived here as a private copy, with an identical twin in
+  // `missionGenerator`. The curve decides mission difficulty matching, shop
+  // `requiredLevel` gates and the player's base CPU/RAM/bandwidth, so two
+  // copies is two places for it to drift. It is now `levelForExperience` in
+  // `repositories/playerProgressRepository`, beside the only code that writes
+  // the column it derives.
 
   /**
    * Create audit log entry

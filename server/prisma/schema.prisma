@@ -80,6 +80,20 @@ model User {
   tracesInitiated       ActiveTrace[]    @relation("TraceInitiator")
   personaMessages       PersonaMessage[]
 
+  // Phase 3 / D10 — back-relations for the four tables whose user_id column had
+  // no foreign key at all.
+  accessKeys        ServerAccessKey[]
+  serverConnections ServerConnection[]
+  discoveredLinks   DiscoveredLink[]
+  bountiesAgainst   Bounty[]           @relation("BountyTarget")
+  bountiesClaimed   Bounty[]           @relation("BountyClaimer")
+
+  // Phase 3 / K — knowledge topics this player has earned (KNOWLEDGE_DESIGN.md §2)
+  knowledge PlayerKnowledge[]
+
+  // Phase 3 / D3 pass 2 — replaces the missionProgress JSON blob
+  playerMissions PlayerMission[]
+
   @@map("users")
 }
 
@@ -108,6 +122,16 @@ model PlayerProgress {
   credits        Int    @default(1000)
   level          Int    @default(1)
   experience     Int    @default(0)
+
+  // R8: unspent skill points. The column was MISSING while
+  // `darknetDungeonService` already wrote `skillPoints: { increment }` in the
+  // same `update` as `experience` — Prisma rejected the unknown column, the
+  // whole statement threw, and `safeExecute` swallowed it, so the XP went with
+  // it. `intel_package` hardcodes skillPoints: 2, so it failed 100% of the time
+  // it fired (~18% of DarkNet dungeon conquests granted nothing at all).
+  // NOTE: nothing SPENDS these yet and levelling does not grant them — the
+  // skill economy that gives them meaning is Phase 8.
+  skillPoints Int @default(0) @map("skill_points")
 
   // Skills (0-100)
   hacking      Int @default(10)
@@ -220,9 +244,14 @@ model GameServer {
   linksIn          ServerLink[]       @relation("LinkTarget")
   accessKeys       ServerAccessKey[]
   contentJobs      ContentJob[]
+  bounties         Bounty[] // D10
 
   @@index([ownerId])
   @@index([networkId])
+  // D9: ~12 sites filter on factionId — `dynamicContentService` on every game
+  // event, `personaActionService`/`aiSchedulerService` on the 30-minute persona
+  // timer, `resourceService` every 5 minutes, plus mission provisioning.
+  @@index([factionId])
   @@map("game_servers")
 }
 
@@ -236,6 +265,11 @@ model ServerAccessKey {
   sourceFileId String?  @map("source_file_id") // fileSystemNode ID of downloaded file that granted this key
   discoveredAt DateTime @default(now()) @map("discovered_at")
 
+  // D10: `userId` had no constraint, so a deleted account left keys behind that
+  // still granted access by id. Cascade, not Restrict: `prisma/npcOwnership.ts`
+  // deletes duplicate NPC accounts during identity reconciliation, and Restrict
+  // would turn that merge into a hard failure.
+  user   User       @relation(fields: [userId], references: [id], onDelete: Cascade)
   server GameServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
 
   @@unique([userId, serverId])
@@ -269,6 +303,23 @@ model FileSystemNode {
   parent   FileSystemNode?  @relation("FileHierarchy", fields: [parentId], references: [id], onDelete: Cascade)
   children FileSystemNode[] @relation("FileHierarchy")
 
+  // D7: no two entries with the same name in the same directory — the filesystem
+  // invariant every real OS enforces, and this one did not. Found violated in
+  // live data: an AI-provisioned server had TWO `/home` directories created in
+  // the same second by concurrent provisioning, each holding a different child.
+  //
+  // NOTE `parentId` is nullable (root nodes), and Postgres treats NULLs as
+  // distinct in a UNIQUE index — so this does NOT constrain two roots with the
+  // same name on one server. Root creation goes through provisioning, which is
+  // where the race was; if duplicate roots ever appear, this needs a partial
+  // index on (serverId, name) WHERE parent_id IS NULL.
+  @@unique([serverId, parentId, name])
+  // D9: `ls` batches its children lookup as
+  // `groupBy(["parentId"], { where: { parentId: { in: dirIds } } })`
+  // (`fileService.ts:184`), which leads with parentId — and Postgres cannot
+  // use `[serverId, parentId]` for a predicate that doesn't mention serverId.
+  // Per-command, on the largest gameplay table.
+  @@index([parentId])
   @@index([serverId, parentId])
   @@index([serverId, name])
   @@index([createdBy])
@@ -286,10 +337,16 @@ model ServerConnection {
   workingDirectory String    @default("/") @map("working_directory") // Directory on this server
   accessLevel      Int       @default(0) @map("access_level") // Access level achieved (0-10)
 
+  // D10: see ServerAccessKey — same missing constraint, same Cascade rationale.
+  user   User       @relation(fields: [userId], references: [id], onDelete: Cascade)
   server GameServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
 
   @@index([userId, serverId])
   @@index([userId, isActive])
+  // D9: `getActiveConnectionCount` (`serverService.ts`) counts by
+  // `{ serverId, isActive }` — serverId leads, and neither existing index does.
+  // This table grows one row per connect and is never pruned.
+  @@index([serverId, isActive])
   @@map("server_connections")
 }
 
@@ -316,6 +373,10 @@ model Message {
   reports   MessageReport[]
 
   @@index([recipientId, isRead])
+  // D9: `mail` (`messageService.ts:578/:642`) pages by `timestamp desc` within
+  // one recipient. `[recipientId, isRead]` serves the filter but leaves the
+  // sort to be done by hand on every page.
+  @@index([recipientId, timestamp])
   @@index([senderId])
   @@map("messages")
 }
@@ -700,7 +761,30 @@ model Mission {
   aiPersona AIPersona? @relation(fields: [issuedBy], references: [id])
   faction   Faction?   @relation(fields: [factionId], references: [id])
   storyArc  StoryArc?  @relation(fields: [storyArcId], references: [id], onDelete: SetNull)
+  /// D3 pass 2 — per-player copies of this mission.
+  playerCopies PlayerMission[]
 
+  // D9 — derived from the actual predicates in src/, not guessed. Postgres can
+  // use a multicolumn btree from its leading columns, so each of these covers
+  // several call sites:
+  //
+  //   [assignedTo, type, status]
+  //     tutorialService.ts:306,334  count({assignedTo, type})
+  //     tutorialService.ts:387      count({assignedTo, type, status})
+  //     tutorialService.ts:444      findMany({assignedTo, type}) orderBy createdAt
+  //     tutorialService.ts:582      findFirst({assignedTo, type, status in})
+  //     tokenConsumption.ts:221     count({assignedTo, type, status in})
+  //     achievementService.ts:155   count({assignedTo, status})        — [assignedTo] prefix
+  //     factionService.ts:516       count({assignedTo, factionId, status}) — [assignedTo] prefix
+  //   [status, difficulty]
+  //     missionService.ts:1431      findMany({status, difficulty gte/lte}) orderBy difficulty
+  //                                 — the D9 headline: no take, seq scan + sort
+  //     adminApi/missions.ts:19     findMany({status?, …})            — [status] prefix
+  //   [factionId, status]
+  //     factionService.ts:632       findMany({factionId, status}) orderBy createdAt
+  @@index([assignedTo, type, status])
+  @@index([status, difficulty])
+  @@index([factionId, status])
   @@index([storyArcId])
   @@map("missions")
 }
@@ -742,6 +826,10 @@ model GameEvent {
   isGlobal      Boolean  @default(false) @map("is_global")
   severity      String   @default("info") // EventSeverity enum
 
+  // D9: this table had NO index of any kind, and `eventService.ts:491`
+  // (`getUserEvents`) sorts it by timestamp on EVERY socket connect, via
+  // sockets/handlers.ts:276 -> broadcastStateUpdate -> getGameState.
+  @@index([timestamp])
   @@map("game_events")
 }
 
@@ -784,6 +872,11 @@ model HackLog {
   server   GameServer @relation(fields: [targetServerId], references: [id])
 
   @@index([attackerId])
+  // D9: `hackService.ts:2520/:2534` reads history as
+  // `OR: [{ attackerId: userId }, { targetId: userId }]`. `attackerId` was
+  // indexed and `targetId` was not, so the OR could not be served from indexes
+  // on both arms and fell back to a scan.
+  @@index([targetId])
   @@index([targetServerId])
   @@index([timestamp])
   @@map("hack_logs")
@@ -863,6 +956,7 @@ model Faction {
   warsDefending   FactionWar[]     @relation("WarDefender")
   playerAliases   PlayerAlias[]
   censorshipRules CensorshipRule[]
+  bountiesIssued  Bounty[] // D10
 
   // Knowledge base
   knowledge FactionKnowledge[]
@@ -1139,6 +1233,8 @@ model DiscoveredLink {
   discoveredAt DateTime @default(now()) @map("discovered_at")
   source       String // "scan" | "probe" | "traceroute" | "backdoor" | "mission"
 
+  // D10: see ServerAccessKey — same missing constraint, same Cascade rationale.
+  user User       @relation(fields: [userId], references: [id], onDelete: Cascade)
   link ServerLink @relation(fields: [linkId], references: [id], onDelete: Cascade)
 
   @@unique([userId, linkId])
@@ -1212,6 +1308,11 @@ model InventoryItem {
   user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   shopItem ShopItem @relation(fields: [shopItemId], references: [id])
 
+  // D7: one row per (player, item) — quantity is the only way to hold more.
+  // Without this, `architectInterventionExecutor` could create a SECOND row for an
+  // item a player already held, and since every reader uses `findFirst` the extra
+  // row silently hid stock: the player owned 2 and the game could only see 1.
+  @@unique([userId, shopItemId])
   @@index([userId])
   @@index([shopItemId])
   @@index([isEquipped])
@@ -1473,6 +1574,15 @@ model Bounty {
   stolenFileIds     Json?     @map("stolen_file_ids") // fileSystemNode IDs of downloaded files to delete
   createdAt         DateTime  @default(now()) @map("created_at")
 
+  // D10: every id column on this table was unconstrained. Cascade on the target
+  // (a bounty on a deleted account is meaningless) and on the issuing faction;
+  // SetNull on the optional columns so the bounty survives losing its claimer or
+  // the server the intrusion happened on.
+  target    User        @relation("BountyTarget", fields: [targetUserId], references: [id], onDelete: Cascade)
+  claimedBy User?       @relation("BountyClaimer", fields: [claimedByUserId], references: [id], onDelete: SetNull)
+  faction   Faction     @relation(fields: [issuedByFactionId], references: [id], onDelete: Cascade)
+  server    GameServer? @relation(fields: [serverId], references: [id], onDelete: SetNull)
+
   @@index([status])
   @@index([targetUserId])
   @@index([issuedByFactionId])
@@ -1653,4 +1763,159 @@ model PendingPersonaMail {
   @@index([status, deliverAt])
   @@index([recipientId])
   @@map("pending_persona_mail")
+}
+
+// ==================== KNOWLEDGE (KNOWLEDGE_DESIGN.md §2) ====================
+//
+// Schema only. Redaction today is a pure function of (content, skill,
+// isHomeServer) with NO record of what a player earned, so a reveal does not
+// persist — these two tables are what give it a memory. The gameplay wiring
+// (redaction engine v2, `codex`, `analyze` routing, download/decrypt grants) is
+// Phase 8; nothing reads these tables yet.
+
+/// A thing that can be hidden in text and then learned: an entity, a person, a
+/// location, an event. Replaces the regexes-in-code that `contentRedaction.ts`
+/// matches on today, so missions and story can reference a topic by slug.
+model KnowledgeTopic {
+  id    String @id @default(cuid())
+  /// "entity.aida", "person.emperor", "event.shattering"
+  slug  String @unique
+  /// Shown at level 1 in place of the term, e.g. "ENTITY".
+  label String
+  /// entity | classified | contact | location | event
+  category String
+  /// 1-5 — selects which existing minigame generator gates the reveal.
+  tier     Int    @default(1)
+  /// Regex sources matching this topic in text.
+  patterns String[]
+  /// Prose shown by `codex <slug>` once the topic is fully known.
+  codexEntry  String? @map("codex_entry") @db.Text
+  /// "hex" | "glitch" — how the unknown form is rendered.
+  revealStyle String  @default("hex") @map("reveal_style")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  knowledge PlayerKnowledge[]
+
+  @@index([tier])
+  @@index([category])
+  @@map("knowledge_topics")
+}
+
+/// What one player knows about one topic. Absence of a row IS level 0
+/// ("you don't know this exists"), which is why there is no level-0 value.
+model PlayerKnowledge {
+  id      String @id @default(cuid())
+  userId  String @map("user_id")
+  topicId String @map("topic_id")
+  /// 1 = category known ("[ENTITY]"), 2 = fully revealed.
+  level   Int    @default(1)
+  /// "minigame:cipher_storm" | "download" | "story" | "skill" | "trade"
+  source    String
+  /// fileId / serverId / missionId that granted it.
+  sourceRef String? @map("source_ref")
+
+  discoveredAt DateTime @default(now()) @map("discovered_at")
+
+  user  User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  topic KnowledgeTopic @relation(fields: [topicId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, topicId])
+  @@index([userId])
+  @@map("player_knowledge")
+}
+
+// ==================== PLAYER MISSION STATE (D3 pass 2) ====================
+//
+// Replaces the `PlayerProgress.missionProgress` JSON blob. The blob was the
+// root cause of D3: a whole-blob read-modify-write with no transaction, so two
+// writers lost each other's work entirely. Pass 1 put a repository in front of
+// it and serialised writes per user; pass 2 is the storage swap those tables
+// were always headed for.
+//
+// Shape derived from the live blob, not from the TypeScript type: 285 mission
+// entries carrying missionId/userId/status/startedAt/objectives (202 also
+// expiresAt/completedAt), and 415 objectives whose target/current are number
+// (302) or boolean (131) — never a string.
+
+/// One player's copy of one mission.
+model PlayerMission {
+  id          String    @id @default(cuid())
+  userId      String    @map("user_id")
+  missionId   String    @map("mission_id")
+  /// available | active | completed | failed | expired
+  status      String    @default("available")
+  startedAt   DateTime? @map("started_at")
+  completedAt DateTime? @map("completed_at")
+  expiresAt   DateTime? @map("expires_at")
+
+  /// Set only for story-arc steps (storyMissionService).
+  storyArcId String? @map("story_arc_id")
+  storyStep  Int?    @map("story_step")
+
+  /// Catch-all for per-copy extras. `completeMission` reads
+  /// `metadata.detectionCount` / `metadata.hintCount` for its performance
+  /// grading; nothing writes them yet, so it reads `{}` today. Kept so the
+  /// storage swap changes no behaviour.
+  metadata Json?
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user       User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // Cascade is the point, not a detail: 78 of 299 live blob entries (26%)
+  // pointed at Mission rows that no longer exist — all of them `active`, and
+  // all already non-functional, because `completeMission` throws on a missing
+  // Mission row. The blob had no way to notice. A real FK means deleting a
+  // mission now removes the players' copies instead of stranding them.
+  mission    Mission                  @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  objectives PlayerMissionObjective[]
+
+  @@unique([userId, missionId])
+  @@index([userId, status])
+  // The expiry sweep. This is what pass 1 could not do: over a JSON map keyed
+  // by mission id, "has an expired active mission" is not expressible as a
+  // predicate, so the sweep had to read every player's blob and filter in JS.
+  @@index([status, expiresAt])
+  @@map("player_missions")
+}
+
+/// One objective inside a player's copy of a mission.
+model PlayerMissionObjective {
+  id              String @id @default(cuid())
+  playerMissionId String @map("player_mission_id")
+  /// The authored objective id, e.g. "u1_breach". Unique within the mission.
+  objectiveId     String @map("objective_id")
+  type            String
+  description     String?
+
+  // target/current are split by TYPE rather than stored as Json, and that is
+  // load-bearing: it makes `currentCount` incrementable in SQL. Pass 1 could
+  // not fix the counter race because callers pass an ABSOLUTE value computed
+  // from a `current` they read outside the lock; a relative increment needs a
+  // numeric column.
+  //
+  // Which pair is in use is decided by which target is non-null, mirroring G1:
+  // progress semantics come from the runtime type of `target`, never from
+  // `type`.
+  targetCount  Int?     @map("target_count")
+  currentCount Int      @default(0) @map("current_count")
+  targetFlag   Boolean? @map("target_flag")
+  currentFlag  Boolean  @default(false) @map("current_flag")
+  /// Defensive only — zero string targets exist today, but G1 notes the AI
+  /// generator can invent objective shapes, and dropping the case would turn a
+  /// new one into a silent no-op.
+  targetText  String? @map("target_text")
+  currentText String? @map("current_text")
+
+  completed Boolean @default(false)
+  /// Entity ids for target matching live here, not in `target`. See G6.
+  metadata  Json?
+  /// Preserves the authored order, which the blob got from being an array.
+  position  Int     @default(0)
+
+  playerMission PlayerMission @relation(fields: [playerMissionId], references: [id], onDelete: Cascade)
+
+  @@unique([playerMissionId, objectiveId])
+  @@map("player_mission_objectives")
 }

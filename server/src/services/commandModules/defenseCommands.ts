@@ -1,4 +1,5 @@
 import { Command, CommandResult } from "../../../../shared/types";
+import type { Prisma } from "@prisma/client";
 import { CommandModule, CommandContext, CommandInfo } from "./interface";
 import { getSession, successResult, errorResult } from "./helpers";
 import {
@@ -426,13 +427,15 @@ export class DefenseCommandsModule implements CommandModule {
         return errorResult(`Already at firewall level ${progress.homeFirewall}.`);
       }
       const price = FIREWALL_PRICES[level]!;
-      if (progress.credits < price) {
-        return errorResult(`Not enough credits. Need ${price}c, have ${progress.credits}c.`);
-      }
-      await context.db.client.playerProgress.update({
-        where: { userId: context.userId },
-        data: { credits: { decrement: price }, homeFirewall: level },
-      });
+      const bought = await this.purchaseDefense(context, price, (tx) =>
+        tx.playerProgress
+          .updateMany({
+            where: { userId: context.userId, homeFirewall: { lt: level } },
+            data: { homeFirewall: level },
+          })
+          .then((r: { count: number }) => r.count),
+      );
+      if (!bought.ok) return errorResult(bought.message);
       // NOTE: We don't update GameServer.firewallLevel here — the defense layers are added
       // dynamically in hackService.initiateHackSession() based on homeFirewall level.
       // Changing the server's base firewallLevel would double-apply the defense.
@@ -451,13 +454,15 @@ export class DefenseCommandsModule implements CommandModule {
         return errorResult(`Already at vault level ${progress.homeVault}.`);
       }
       const price = VAULT_PRICES[level]!;
-      if (progress.credits < price) {
-        return errorResult(`Not enough credits. Need ${price}c, have ${progress.credits}c.`);
-      }
-      await context.db.client.playerProgress.update({
-        where: { userId: context.userId },
-        data: { credits: { decrement: price }, homeVault: level },
-      });
+      const bought = await this.purchaseDefense(context, price, (tx) =>
+        tx.playerProgress
+          .updateMany({
+            where: { userId: context.userId, homeVault: { lt: level } },
+            data: { homeVault: level },
+          })
+          .then((r: { count: number }) => r.count),
+      );
+      if (!bought.ok) return errorResult(bought.message);
       // Create vault directory on home server
       const session = getSession(context);
       if (session?.homeServerId) {
@@ -492,13 +497,15 @@ export class DefenseCommandsModule implements CommandModule {
         return errorResult(`Already at IDS level ${progress.homeIds}.`);
       }
       const price = IDS_PRICES[level]!;
-      if (progress.credits < price) {
-        return errorResult(`Not enough credits. Need ${price}c, have ${progress.credits}c.`);
-      }
-      await context.db.client.playerProgress.update({
-        where: { userId: context.userId },
-        data: { credits: { decrement: price }, homeIds: level },
-      });
+      const bought = await this.purchaseDefense(context, price, (tx) =>
+        tx.playerProgress
+          .updateMany({
+            where: { userId: context.userId, homeIds: { lt: level } },
+            data: { homeIds: level },
+          })
+          .then((r: { count: number }) => r.count),
+      );
+      if (!bought.ok) return errorResult(bought.message);
       const desc = level === 1 ? "Alert when hack completes" : level === 2 ? "Alert when hack starts" : "Alert on start + attacker IP";
       if (context.services.missionIntegrationService) {
         context.services.missionIntegrationService.onDefenseEvent(context.userId, "ids", level).catch(() => {});
@@ -510,13 +517,16 @@ export class DefenseCommandsModule implements CommandModule {
       if (progress.homeHoneypot) {
         return errorResult("Honeypot already installed.");
       }
-      if (progress.credits < HONEYPOT_PRICE) {
-        return errorResult(`Not enough credits. Need ${HONEYPOT_PRICE}c, have ${progress.credits}c.`);
-      }
-      await context.db.client.playerProgress.update({
-        where: { userId: context.userId },
-        data: { credits: { decrement: HONEYPOT_PRICE }, homeHoneypot: true },
-      });
+      // Boolean rather than a level, so the guard is `homeHoneypot: false`.
+      const bought = await this.purchaseDefense(context, HONEYPOT_PRICE, (tx) =>
+        tx.playerProgress
+          .updateMany({
+            where: { userId: context.userId, homeHoneypot: false },
+            data: { homeHoneypot: true },
+          })
+          .then((r: { count: number }) => r.count),
+      );
+      if (!bought.ok) return errorResult(bought.message);
       // Generate initial decoy files
       const session = getSession(context);
       if (session?.homeServerId) {
@@ -529,6 +539,56 @@ export class DefenseCommandsModule implements CommandModule {
     }
 
     return errorResult(`Unknown defense: ${defense}. Options: firewall, vault, ids, honeypot`);
+  }
+
+  /**
+   * D4 — buy one home-defense upgrade atomically.
+   *
+   * All four upgrades previously did the same unsafe thing: read `progress`
+   * once at the top of `handleUpgrade`, compare `credits` and the current level
+   * in JS, then `update` with `{ credits: { decrement: price }, <field>: level }`.
+   * Neither check took a lock and there was no transaction at all, so two
+   * concurrent `upgrade` commands could both pass the affordability check and
+   * charge the player twice — or both "upgrade" to the same level and charge
+   * twice for one upgrade.
+   *
+   * Both checks now live in WHERE clauses inside one transaction:
+   *   - `spendCredits` matches only if the balance still covers the price;
+   *   - `applyLevel` matches only if the stored level is still BELOW the one
+   *     being bought, which makes the upgrade idempotent under a double-submit.
+   * If the level guard matches nothing we throw, and the transaction takes the
+   * charge back with it — so the player is never billed for an upgrade that did
+   * not apply.
+   */
+  private async purchaseDefense(
+    context: CommandContext,
+    price: number,
+    applyLevel: (tx: Prisma.TransactionClient) => Promise<number>,
+  ): Promise<{ ok: true } | { ok: false; message: string }> {
+    const ALREADY_OWNED = "__already_owned__";
+    try {
+      return await context.db.client.$transaction(async (tx) => {
+        const spend = await context.playerProgress.spendCredits(
+          context.userId,
+          price,
+          tx,
+        );
+        if (!spend.ok) {
+          return {
+            ok: false as const,
+            message: `Not enough credits. Need ${price}c, have ${spend.balance}c.`,
+          };
+        }
+        const applied = await applyLevel(tx);
+        if (applied === 0) throw new Error(ALREADY_OWNED);
+        return { ok: true as const };
+      });
+    } catch (err) {
+      if (err instanceof Error && err.message === ALREADY_OWNED) {
+        return { ok: false, message: "That upgrade was already purchased." };
+      }
+      throw err;
+    }
   }
 
   // ── Helper: generate decoy files ──
@@ -571,8 +631,29 @@ export class DefenseCommandsModule implements CommandModule {
       const name = shuffled[i]!;
       const fakeContent = `[DECOY FILE — This file contains no real data]\n[Generated by honeypot defense system]\n${"0".repeat(50 + Math.floor(Math.random() * 200))}`;
 
-      await context.db.client.fileSystemNode.create({
-        data: {
+      // D7: upsert, and the failure mode this fixes is player-visible.
+      //
+      // The decoy names are fixed strings, and the cleanup above only removes
+      // files already marked `isDecoy` — so a genuine file the player
+      // downloaded under one of these names (`admin_passwords.db` is a
+      // plausible real loot name) collides. There was no try/catch here OR in
+      // either caller, so the P2002 escaped to `commandProcessor`'s outermost
+      // handler and became "Command execution failed" — after
+      // `purchaseDefense` had already committed the charge in its own
+      // transaction. The player paid 5000c and was told the install failed.
+      //
+      // Decoys are cosmetic, so colliding with a real file means: leave the
+      // real file alone and move on.
+      await context.db.client.fileSystemNode.upsert({
+        where: {
+          serverId_parentId_name: {
+            serverId: homeServerId,
+            parentId: dlDir.id,
+            name,
+          },
+        },
+        update: {},
+        create: {
           serverId: homeServerId,
           parentId: dlDir.id,
           name,

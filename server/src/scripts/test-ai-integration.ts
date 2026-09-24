@@ -6,6 +6,8 @@ import { MessageService } from "../services/messageService";
 import pino from "pino";
 import { CacheService } from "../services/cacheService";
 import MissionService from "../services/missionService";
+import PlayerProgressRepository from "../repositories/playerProgressRepository";
+import PlayerMissionRepository from "../repositories/playerMissionRepository";
 import { Server as SocketIOServer } from "socket.io";
 import http from "http";
 
@@ -48,12 +50,21 @@ async function testAIIntegration() {
 
   // 2. Test PersonaService with real persona
   console.log("\n2️⃣ Testing PersonaService...");
-  const missionService = new MissionService(logger, cacheService);
+  const missionService = new MissionService(
+    logger,
+    cacheService,
+    new PlayerProgressRepository(logger, prisma),
+    new PlayerMissionRepository(logger, prisma),
+  );
 
   // Create minimal SocketIO instance for MessageService and ForumService
   const httpServer = http.createServer();
   const io = new SocketIOServer(httpServer);
-  const messageService = new MessageService(logger, io);
+  const messageService = new MessageService(
+    logger,
+    io,
+    new PlayerProgressRepository(logger, prisma),
+  );
   const forumService = new (await import("../services/forumService")).default(
     io,
     logger,

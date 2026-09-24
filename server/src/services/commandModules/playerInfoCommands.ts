@@ -1052,10 +1052,10 @@ export class PlayerInfoCommandsModule implements CommandModule {
       });
 
       // Grant credits
-      await context.db.client.playerProgress.update({
-        where: { userId: context.userId },
-        data: { credits: { increment: bounty.rewardCredits } },
-      });
+      await context.playerProgress.addCredits(
+        context.userId,
+        bounty.rewardCredits,
+      );
 
       // Grant reputation with issuing faction
       try {

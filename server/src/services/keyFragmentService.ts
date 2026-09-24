@@ -199,6 +199,8 @@ export class KeyFragmentService extends EventEmitter {
           newOwnerId: userId,
           fragmentId,
           method,
+          // D6: a claim is only valid against an UNHELD fragment.
+          expectedHolderId: null,
           validate: async (fragment, tx) => {
             if (!fragment) {
               this.logger.warn(
@@ -308,6 +310,8 @@ export class KeyFragmentService extends EventEmitter {
           newOwnerId: attackerUserId,
           fragmentId,
           method: "steal",
+          // D6: a steal is only valid while the victim still holds it.
+          expectedHolderId: victimUserId,
           validate: async (fragment, _tx) => {
             if (!fragment) {
               return {
@@ -424,6 +428,8 @@ export class KeyFragmentService extends EventEmitter {
           newOwnerId: toUserId,
           fragmentId,
           method: "transfer",
+          // D6: a transfer is only valid while the sender still holds it.
+          expectedHolderId: fromUserId,
           validate: async (fragment, _tx) => {
             if (!fragment) {
               return {
@@ -995,6 +1001,13 @@ export class KeyFragmentService extends EventEmitter {
     newOwnerId: string;
     fragmentId: string;
     method: string;
+    /**
+     * D6 — who the caller's `validate` just proved holds the fragment: `null`
+     * for a claim of an unheld fragment, the victim for a steal, the sender for
+     * a transfer. This is the CAS comparand; the update only lands if the row
+     * still looks like this.
+     */
+    expectedHolderId: string | null;
     /** Called inside the transaction to validate the fragment can be transferred. Return an error result to abort. */
     validate: (fragment: any, tx: any) => Promise<{ ok: true } | { ok: false; result: any }>;
     /** Called inside the transaction after a successful update to build the success result. */
@@ -1002,12 +1015,11 @@ export class KeyFragmentService extends EventEmitter {
     /** Called after a successful transaction with the updated fragment for side effects. */
     onSuccess: (fragment: any) => Promise<void>;
   }): Promise<any> {
-    const { newOwnerId, fragmentId, method, validate, buildSuccess, onSuccess } = params;
+    const { newOwnerId, fragmentId, method, expectedHolderId, validate, buildSuccess, onSuccess } = params;
 
     // Use interactive transaction for atomicity — prevents race conditions
     // (e.g. two players claiming the same fragment simultaneously).
     const result = await this.prisma.$transaction(async (tx) => {
-      // Using findUnique inside a transaction provides serializable reads
       const fragment = await tx.keyFragment.findUnique({
         where: { id: fragmentId },
       });
@@ -1018,14 +1030,53 @@ export class KeyFragmentService extends EventEmitter {
         return { __aborted: true as const, ...validation.result };
       }
 
-      // Transfer ownership atomically
+      // ── D6: conditional update, not a blind one ──────────────────────────
+      // The comment that used to sit on the read above claimed "findUnique
+      // inside a transaction provides serializable reads". It does not — the
+      // default isolation level is READ COMMITTED and a plain SELECT takes no
+      // row lock. Two players cracking the same fragment both read
+      // `heldByUserId: null`, both passed validation, and both ran this update:
+      // one won the row but BOTH were told `{ claimed: true }`, both got a
+      // discovery record, and both had `updatePlayerCounters` inflate their
+      // `StoryProgress.swordFragments` — which can unlock the endgame early.
+      // Fragment contention is a DESIGNED interaction here, so this is a real
+      // path, not a theoretical one.
+      //
+      // `updateMany` with the expected holder in the WHERE makes this a
+      // compare-and-set: the row is matched and written in one statement, so
+      // the loser matches 0 rows instead of overwriting the winner.
       const now = new Date();
-      const updatedFragment = await tx.keyFragment.update({
-        where: { id: fragmentId },
+      const written = await tx.keyFragment.updateMany({
+        where: { id: fragmentId, heldByUserId: expectedHolderId },
         data: {
           heldByUserId: newOwnerId,
           heldSince: now,
         },
+      });
+
+      if (written.count === 0) {
+        // Somebody else changed the holder between our read and our write.
+        // Re-read and re-run the caller's own validation so the player gets the
+        // accurate message ("currently held by X") rather than a generic error.
+        const fresh = await tx.keyFragment.findUnique({ where: { id: fragmentId } });
+        const recheck = await validate(fresh, tx);
+        if (!recheck.ok) {
+          return { __aborted: true as const, ...recheck.result };
+        }
+        // Validation passes against the new state but our CAS still missed —
+        // treat as lost contention rather than retrying inside a transaction.
+        return {
+          __aborted: true as const,
+          claimed: false,
+          stolen: false,
+          transferred: false,
+          success: false,
+          message: "Another operation changed this fragment first. Try again.",
+        };
+      }
+
+      const updatedFragment = await tx.keyFragment.findUniqueOrThrow({
+        where: { id: fragmentId },
       });
 
       // Create historical discovery record (idempotent via upsert)

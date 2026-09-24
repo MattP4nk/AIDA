@@ -701,14 +701,28 @@ export class ArchitectInterventionExecutor {
       };
     }
 
-    // Create an inventory item for the user
-    const inventoryItem = await db.client.inventoryItem.create({
-      data: {
+    // D7: upsert, not create.
+    //
+    // This was an UNCONDITIONAL create with no existence check at all, so a
+    // player who already held the token got a SECOND row — and since every
+    // reader resolves inventory with `findFirst`, the extra row was invisible:
+    // the player owned 2 and the game could only ever see 1. That is the exact
+    // failure `@@unique([userId, shopItemId])` was added to make impossible,
+    // which also means this line would now throw P2002 instead.
+    //
+    // Granting a token the player already has should top up the stack, not
+    // fail an Architect story beat, so the merge is an increment.
+    const inventoryItem = await db.client.inventoryItem.upsert({
+      where: {
+        userId_shopItemId: { userId: targetId, shopItemId: resolvedItemId },
+      },
+      create: {
         userId: targetId,
         shopItemId: resolvedItemId,
         quantity: 1,
         source: "story_event",
       },
+      update: { quantity: { increment: 1 } },
     });
 
     await this.recordLedgerEvent(intervention, {

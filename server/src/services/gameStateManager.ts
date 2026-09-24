@@ -606,13 +606,12 @@ class GameStateManager extends EventEmitter {
         timestamp: new Date(),
       });
 
-      // Update database connection count
-      await db.client.gameServer.update({
-        where: { id: serverId },
-        data: {
-          currentConnections: serverState.activeConnections,
-        },
-      });
+      // D10: derive from the connection ROWS, not from `serverState`.
+      // `serverStates` is an in-memory Map rebuilt from scratch on every boot,
+      // so writing `activeConnections` here published a count that had
+      // forgotten everyone connected before the last restart — and it ran
+      // AFTER serverService's increment, so it silently overwrote it.
+      await this.syncServerConnectionCount(serverId);
 
         this.emit("player:connected_to_server", { userId, serverId });
         this.logger.info({ userId, serverId }, "User connected to server");
@@ -626,6 +625,23 @@ class GameStateManager extends EventEmitter {
     } finally {
       this.connectionLocks.delete(userId);
     }
+  }
+
+  /**
+   * D10 — `GameServer.currentConnections` is derived from the `ServerConnection`
+   * rows, never from this service's in-memory `serverStates` map. Mirrors
+   * `serverService.syncConnectionCount`; kept local rather than reaching across
+   * services because `gameStateManager` is constructed before the DI container
+   * has `serverService`.
+   */
+  private async syncServerConnectionCount(serverId: string): Promise<void> {
+    const count = await db.client.serverConnection.count({
+      where: { serverId, isActive: true },
+    });
+    await db.client.gameServer.update({
+      where: { id: serverId },
+      data: { currentConnections: count },
+    });
   }
 
   public async disconnectPlayerFromServer(userId: string): Promise<void> {
@@ -650,13 +666,8 @@ class GameStateManager extends EventEmitter {
             this.serverStates.delete(serverId);
           }
 
-          // Update database
-          await db.client.gameServer.update({
-            where: { id: serverId },
-            data: {
-              currentConnections: serverState.activeConnections,
-            },
-          });
+          // D10: derive from the connection rows — see the note on the connect side.
+          await this.syncServerConnectionCount(serverId);
         }
 
         // Leave socket room

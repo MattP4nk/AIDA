@@ -24,7 +24,9 @@ import {
   MISSION_INTEGRATION_SERVICE,
   FACTION_KNOWLEDGE_SERVICE,
   NETWORK_TOPOLOGY_SERVICE,
+  PLAYER_PROGRESS_REPOSITORY,
 } from "../di/tokens";
+import type PlayerProgressRepository from "../repositories/playerProgressRepository";
 import type { CacheService } from "./cacheService";
 import type MissionIntegrationService from "./missionIntegration";
 import type { FactionKnowledgeService } from "./factionKnowledgeService";
@@ -102,6 +104,8 @@ export class FileService {
     @inject(LOGGER) private logger: Logger,
     @inject(SOCKET_IO) _io: SocketIOServer,
     @inject(CACHE_SERVICE) private cacheService: CacheService,
+    @inject(PLAYER_PROGRESS_REPOSITORY)
+    private playerProgress: PlayerProgressRepository,
     @inject(MISSION_INTEGRATION_SERVICE)
     missionIntegrationService?: MissionIntegrationService,
     @inject(FACTION_KNOWLEDGE_SERVICE)
@@ -395,10 +399,11 @@ export class FileService {
       await this.logFileAccess(userId, serverId, file.id, "read");
 
       // Increment filesAccessed stat (fire-and-forget)
-      prisma.playerProgress.update({
-        where: { userId },
-        data: { filesAccessed: { increment: 1 } },
-      }).catch(() => {});
+      // Fire-and-forget telemetry. `updateMany` inside the repository means a
+      // player with no progress row is a no-op rather than a swallowed P2025.
+      this.playerProgress
+        .incrementCounter(userId, "filesAccessed")
+        .catch(() => {});
 
       // Track for mission objectives
       if (this.missionIntegration) {
@@ -622,6 +627,17 @@ export class FileService {
         },
       };
     } catch (error: any) {
+      // D7: losing the race to `@@unique([serverId, parentId, name])` means the
+      // file exists — the same answer the check above gives, so report it the
+      // same way instead of a generic failure. Deliberately NOT an upsert: two
+      // players racing `touch` must not silently overwrite each other's file.
+      if (error?.code === "P2002") {
+        return {
+          success: false,
+          message: `File already exists: ${path}`,
+          error: "FILE_EXISTS",
+        };
+      }
       this.logger.error({ err: error }, "Create file error");
       return {
         success: false,
@@ -836,6 +852,14 @@ export class FileService {
         },
       };
     } catch (error: any) {
+      // D7: see createFile — a lost race means it already exists.
+      if (error?.code === "P2002") {
+        return {
+          success: false,
+          message: `Directory already exists: ${path}`,
+          error: "DIRECTORY_EXISTS",
+        };
+      }
       this.logger.error({ err: error }, "Create directory error");
       return {
         success: false,
@@ -1073,6 +1097,18 @@ export class FileService {
         },
       };
     } catch (error: any) {
+      // D7: `copyNode` validates the source, the destination DIRECTORY and the
+      // permissions, but never that the destination NAME is free — so `cp` onto
+      // an existing path used to create a silent duplicate and now hits the
+      // unique. Deliberately reported, not merged: `cp` must not clobber a file
+      // the player did not ask to overwrite.
+      if (error?.code === "P2002") {
+        return {
+          success: false,
+          message: `Destination already exists: ${destPath}`,
+          error: "DESTINATION_EXISTS",
+        };
+      }
       this.logger.error({ err: error }, "Copy node error");
       return {
         success: false,
@@ -1185,6 +1221,18 @@ export class FileService {
         },
       };
     } catch (error: any) {
+      // D7: `mv` has the same collision semantics as `cp` and needs the same
+      // answer. `moveNode` never checks the destination NAME is free, so before
+      // the unique existed it silently created a duplicate, and after it the raw
+      // Prisma string ("Unique constraint failed on the fields: …") was handed
+      // straight to the player's terminal.
+      if (error?.code === "P2002") {
+        return {
+          success: false,
+          message: `Destination already exists: ${destPath}`,
+          error: "DESTINATION_EXISTS",
+        };
+      }
       this.logger.error({ err: error }, "Move node error");
       return {
         success: false,
@@ -1671,9 +1719,20 @@ export class FileService {
       });
 
       if (!root) {
-        // Create root directory
-        root = await prisma.fileSystemNode.create({
-          data: {
+        // D7: a DETERMINISTIC id makes the primary key close this race.
+        // `@@unique([serverId, parentId, name])` does not cover roots —
+        // `parentId` is null and Postgres treats NULLs as distinct — so the
+        // `findFirst` above is a check-then-create with an await before the
+        // write, and two concurrent initialisations both saw no root. That is
+        // how one AI-provisioned server ended up with two `/home` directories.
+        // Upserting on `root_<serverId>` means the loser collides on the PK and
+        // resolves to the winner's row instead of minting a second tree.
+        // The `findFirst` is kept because roots created before this have cuids.
+        root = await prisma.fileSystemNode.upsert({
+          where: { id: `root_${serverId}` },
+          update: {},
+          create: {
+            id: `root_${serverId}`,
             serverId,
             parentId: null,
             name: "/",
@@ -1717,10 +1776,18 @@ export class FileService {
         (d) => !existingDirNames.includes(d),
       );
 
-      // Create only missing directories
+      // Create only missing directories.
+      // D7: upsert, because `missingDirs` was computed before this loop and a
+      // concurrent initialiser can create the same directory in between —
+      // children ARE covered by the unique, so this now merges instead of
+      // throwing P2002.
       for (const dirName of missingDirs) {
-        await prisma.fileSystemNode.create({
-          data: {
+        await prisma.fileSystemNode.upsert({
+          where: {
+            serverId_parentId_name: { serverId, parentId: root.id, name: dirName },
+          },
+          update: {},
+          create: {
             serverId,
             parentId: root.id,
             name: dirName,

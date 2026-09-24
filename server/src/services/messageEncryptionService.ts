@@ -13,7 +13,8 @@ import { prisma } from "../database/client";
 import crypto from "crypto";
 import { Logger } from "pino";
 import { injectable, inject } from "tsyringe";
-import { LOGGER } from "../di/tokens";
+import { LOGGER, PLAYER_PROGRESS_REPOSITORY } from "../di/tokens";
+import type PlayerProgressRepository from "../repositories/playerProgressRepository";
 
 import type { MessageOperationResult, EncryptionResult } from "./messageService";
 
@@ -23,7 +24,11 @@ import type { MessageOperationResult, EncryptionResult } from "./messageService"
 export class MessageEncryptionService {
   private encryptionAlgorithm = "aes-256-cbc";
 
-  constructor(@inject(LOGGER) private logger: Logger) {}
+  constructor(
+    @inject(LOGGER) private logger: Logger,
+    @inject(PLAYER_PROGRESS_REPOSITORY)
+    private playerProgress: PlayerProgressRepository,
+  ) {}
 
   // ==================== ENCRYPTION ====================
 
@@ -292,13 +297,15 @@ export class MessageEncryptionService {
       if (success) {
         // Award XP for successful crack
         const xpGain = message.encryptionLevel! * 10;
-        await prisma.playerProgress.update({
-          where: { userId },
-          data: {
-            experience: { increment: xpGain },
-            cryptography: { increment: Math.min(2, message.encryptionLevel!) },
-          },
-        });
+        // D8 — the `Math.min(2, encryptionLevel)` here caps the GRANT, not the
+        // resulting skill, so cryptography had no 100 ceiling on this path at
+        // all. D5 — the XP now goes through the repository so `level` tracks it.
+        await this.playerProgress.addSkill(
+          userId,
+          "cryptography",
+          Math.min(2, message.encryptionLevel!),
+        );
+        await this.playerProgress.addExperience(userId, xpGain);
 
         // Actually decrypt the content using the stored encryption key
         const decryptResult = await this.decryptMessage(

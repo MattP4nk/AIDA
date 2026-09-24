@@ -1102,10 +1102,12 @@ export class HackCommandsModule implements CommandModule {
       // Award XP
       const xpGain = 5 + (crackSession.challenge.difficulty * 2) + (isCorrect ? 5 : 0);
       try {
-        await context.db.client.playerProgress.update({
-          where: { userId: context.userId },
-          data: { cryptography: { increment: xpGain } },
-        });
+        // D8 — previously uncapped.
+        await context.playerProgress.addSkill(
+          context.userId,
+          "cryptography",
+          xpGain,
+        );
       } catch { /* non-critical */ }
 
       activeFileCrackSessions.delete(context.userId);
@@ -1313,9 +1315,10 @@ export class HackCommandsModule implements CommandModule {
 
       // Award big XP
       try {
-        await context.db.client.playerProgress.update({
-          where: { userId: context.userId },
-          data: { cryptography: { increment: 25 }, hacking: { increment: 15 } },
+        // D8 — previously uncapped on both columns.
+        await context.playerProgress.addSkills(context.userId, {
+          cryptography: 25,
+          hacking: 15,
         });
       } catch { /* non-critical */ }
 

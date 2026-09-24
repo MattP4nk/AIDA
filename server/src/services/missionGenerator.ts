@@ -7,8 +7,11 @@ import {
   PERSONA_SERVICE,
   AI_SERVICE,
   SERVER_CONTENT_SERVICE,
+  PLAYER_MISSION_REPOSITORY,
 } from "../di/tokens";
+import type PlayerMissionRepository from "../repositories/playerMissionRepository";
 import MissionService from "./missionService";
+import { levelForExperience } from "../repositories/playerProgressRepository";
 import { PersonaService } from "./personaService";
 import { AIService } from "./aiService";
 import type { ServerContentService } from "./serverContentService";
@@ -67,6 +70,8 @@ export class MissionGeneratorService {
     @inject(MISSION_SERVICE) private missionService: MissionService,
     @inject(PERSONA_SERVICE) private personaService: PersonaService,
     @inject(AI_SERVICE) private aiService: AIService,
+    @inject(PLAYER_MISSION_REPOSITORY)
+    private playerMissions: PlayerMissionRepository,
     @inject(SERVER_CONTENT_SERVICE)
     serverContentService?: ServerContentService,
   ) {
@@ -169,39 +174,42 @@ export class MissionGeneratorService {
               where: { id: { in: missionIds } },
             });
 
-            const missionProgress =
-              (progress.missionProgress as Record<string, any>) || {};
+            // ── D3: the worst stale-snapshot in the codebase ─────────────
+            // This used to merge into `progress.missionProgress` — a snapshot
+            // taken at the TOP of generateMissionsForPlayer, before the
+            // template loop and the AI-backed generation that follows it. That
+            // is minutes of wall-clock on a cloud model, and writing the
+            // snapshot back wiped every mission acceptance, objective credit
+            // and completion the player made in the meantime.
+            //
+            // `mutateAll` re-reads inside the user's lock, so the merge happens
+            // against the CURRENT blob and only adds keys.
+            await this.playerMissions.mutateAll(userId, (blob) => {
+              for (const mission of missions) {
+                const objectives = (mission.objectives as unknown as any[]) || [];
 
-            for (const mission of missions) {
-              const objectives = (mission.objectives as unknown as any[]) || [];
-
-              missionProgress[mission.id] = {
-                missionId: mission.id,
-                userId,
-                status: "available",
-                objectives: objectives.map((obj: any) => ({
-                  ...obj,
-                  current:
-                    typeof obj.target === "number"
-                      ? 0
-                      : typeof obj.target === "boolean"
-                        ? false
-                        : "",
-                  completed: false,
-                })),
-                startedAt: null,
-                completedAt: null,
-                expiresAt: mission.timeLimit
-                  ? new Date(Date.now() + (mission.timeLimit as number) * 1000)
-                  : null,
-              };
-            }
-
-            await db.client.playerProgress.update({
-              where: { userId },
-              data: {
-                missionProgress: missionProgress as any,
-              },
+                blob[mission.id] = {
+                  missionId: mission.id,
+                  userId,
+                  status: "available",
+                  objectives: objectives.map((obj: any) => ({
+                    ...obj,
+                    current:
+                      typeof obj.target === "number"
+                        ? 0
+                        : typeof obj.target === "boolean"
+                          ? false
+                          : "",
+                    completed: false,
+                  })),
+                  startedAt: null,
+                  completedAt: null,
+                  expiresAt: mission.timeLimit
+                    ? new Date(Date.now() + (mission.timeLimit as number) * 1000)
+                    : null,
+                } as never;
+              }
+              return true;
             });
 
             this.logger.info(
@@ -832,8 +840,9 @@ Format as JSON:
   /**
    * Calculate player level from XP
    */
+  /** Delegates to the canonical curve — see `levelForExperience`. */
   private calculateLevel(xp: number): number {
-    return Math.floor(Math.sqrt(xp / 100)) + 1;
+    return levelForExperience(xp);
   }
 
   /**

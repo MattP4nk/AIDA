@@ -16,7 +16,13 @@
 import { injectable, inject } from "tsyringe";
 import type { Logger } from "pino";
 import { safeExecute, safeAI } from "../utils/safeExecute";
-import { LOGGER, AI_SERVICE, SERVER_CONTENT_SERVICE } from "../di/tokens";
+import {
+  LOGGER,
+  AI_SERVICE,
+  SERVER_CONTENT_SERVICE,
+  PLAYER_MISSION_REPOSITORY,
+} from "../di/tokens";
+import type PlayerMissionRepository from "../repositories/playerMissionRepository";
 import { db } from "../database/client";
 import type { AIService } from "./aiService";
 import type { ServerContentService } from "./serverContentService";
@@ -64,6 +70,8 @@ export class StoryMissionService {
   constructor(
     @inject(LOGGER) private logger: Logger,
     @inject(AI_SERVICE) private aiService: AIService,
+    @inject(PLAYER_MISSION_REPOSITORY)
+    private playerMissions: PlayerMissionRepository,
     @inject(SERVER_CONTENT_SERVICE) serverContentService?: ServerContentService,
   ) {
     this.serverContent = serverContentService || null;
@@ -454,16 +462,19 @@ export class StoryMissionService {
     // Written as "active" to match the tutorial path: a story step is pushed at
     // the player by the narrative, not browsed and accepted from a board.
     if (arc.assignedTo) {
+      // Existence check only — the blob itself now comes from the repository,
+      // so there is no reason to pull it over the wire here.
       const progress = await db.client.playerProgress.findUnique({
         where: { userId: arc.assignedTo },
-        select: { missionProgress: true },
+        select: { userId: true },
       });
 
       if (progress) {
-        const missionProgress =
-          (progress.missionProgress as Record<string, unknown>) || {};
-
-        missionProgress[mission.id] = {
+        // D3: a story step is pushed at the player by the narrative, so it can
+        // land at any moment — including mid-command. Going through the
+        // repository means registering it cannot clobber whatever the player
+        // was doing.
+        await this.playerMissions.put(arc.assignedTo, mission.id, {
           missionId: mission.id,
           userId: arc.assignedTo,
           status: "active",
@@ -479,12 +490,7 @@ export class StoryMissionService {
           expiresAt: mission.expiresAt?.toISOString() ?? null,
           storyArcId: arcId,
           storyStep: stepNumber,
-        };
-
-        await db.client.playerProgress.update({
-          where: { userId: arc.assignedTo },
-          data: { missionProgress: missionProgress as any },
-        });
+        } as never);
       } else {
         this.logger.warn(
           { arcId, missionId: mission.id, userId: arc.assignedTo },

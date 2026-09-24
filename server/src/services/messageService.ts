@@ -34,7 +34,9 @@ import {
   MISSION_INTEGRATION_SERVICE,
   AI_SERVICE,
   MESSAGE_ENCRYPTION_SERVICE,
+  PLAYER_PROGRESS_REPOSITORY,
 } from "../di/tokens";
+import type PlayerProgressRepository from "../repositories/playerProgressRepository";
 import { safeExecute } from "../utils/safeExecute";
 import type { MessageEncryptionService } from "./messageEncryptionService";
 import type MissionIntegrationService from "./missionIntegration";
@@ -132,6 +134,8 @@ export class MessageService {
   constructor(
     @inject(LOGGER) private logger: Logger,
     @inject(SOCKET_IO) private io: SocketIOServer,
+    @inject(PLAYER_PROGRESS_REPOSITORY)
+    private playerProgress: PlayerProgressRepository,
     @inject(MISSION_INTEGRATION_SERVICE)
     missionIntegrationService?: MissionIntegrationService,
     @inject(MESSAGE_ENCRYPTION_SERVICE)
@@ -318,10 +322,12 @@ export class MessageService {
       // The `.catch()` swallowed it in JS but Prisma still logged an error for
       // every persona mail delivered — noise that looked like a real fault.
       // updateMany matches zero rows silently, which is the intent here.
-      prisma.playerProgress.updateMany({
-        where: { userId: senderId },
-        data: { messagesSent: { increment: 1 } },
-      }).catch(() => {});
+      // `updateMany` semantics are why this is safe for persona senders, which
+      // legitimately have no PlayerProgress row — `update` used to throw P2025
+      // and log a Prisma error on every persona mail delivered.
+      this.playerProgress
+        .incrementCounter(senderId, "messagesSent")
+        .catch(() => {});
 
       // Track for mission objectives
       if (this.missionIntegration) {

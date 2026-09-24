@@ -58,6 +58,7 @@ import { COMMAND_RATE_LIMIT, COMMAND_RATE_WINDOW_MS } from "../config/gameBalanc
 
 import type ProgressService from "./progressService";
 import type GameStateManager from "./gameStateManager";
+import type PlayerProgressRepository from "../repositories/playerProgressRepository";
 import type FileService from "./fileService";
 import type ShopService from "./shopService";
 import type MissionService from "./missionService";
@@ -181,6 +182,9 @@ class CommandProcessor extends EventEmitter {
 
   private async buildCommandContext(userId: string, terminalCols?: number, userRole?: string): Promise<CommandContext> {
     const fileService = this.getCachedService<FileService>(TOKENS.FILE_SERVICE)!;
+    const playerProgress = this.getCachedService<PlayerProgressRepository>(
+      TOKENS.PLAYER_PROGRESS_REPOSITORY,
+    )!;
     const shopService = this.getCachedService<ShopService>(TOKENS.SHOP_SERVICE)!;
     const missionService = this.getCachedService<MissionService>(
       TOKENS.MISSION_SERVICE,
@@ -268,6 +272,7 @@ class CommandProcessor extends EventEmitter {
       commandHistory: this.commandHistory,
       gameStateManager: this.gameStateManager,
       modules: this.modules,
+      playerProgress,
       services: {
         shopService,
         missionService,
@@ -654,12 +659,13 @@ class CommandProcessor extends EventEmitter {
       this.emit("command:executed", { userId, command, result });
 
       // Increment command counter (fire-and-forget)
-      db.client.playerProgress.update({
-        where: { userId },
-        data: { commandsExecuted: { increment: 1 } },
-      }).catch((err) => {
-        this.logger.debug({ err, userId }, "Failed to increment commandsExecuted");
-      });
+      this.getCachedService<PlayerProgressRepository>(
+        TOKENS.PLAYER_PROGRESS_REPOSITORY,
+      )
+        ?.incrementCounter(userId, "commandsExecuted")
+        .catch((err) => {
+          this.logger.debug({ err, userId }, "Failed to increment commandsExecuted");
+        });
 
       // Log to database (async, don't wait)
       this.logCommandExecution(userId, command, result).catch((err) =>

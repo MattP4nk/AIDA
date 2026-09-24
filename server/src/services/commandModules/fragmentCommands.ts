@@ -320,10 +320,28 @@ export class FragmentCommandsModule implements CommandModule {
       return errorResult("Key fragment service unavailable.");
     }
 
-    // Check current server connection
+    // ── D10: bind to the server the player is ACTUALLY standing on ──────────
+    // This used to be `findFirst({ userId, isActive: true })` with no
+    // `serverId` and no `orderBy` — "any active row, in whatever order
+    // Postgres returns it". That was only ever safe if a player had exactly one
+    // active row, and they did not: `connect <ip>` never deactivated the row
+    // for the server being left, so the live DB had every player holding three
+    // at once. `fragment.steal` could therefore run against a server the player
+    // had left — carrying that server's stored accessLevel past the >= 5 check
+    // below. The session is the authority on where the player is.
+    const session = context.gameStateManager.getSession(context.userId);
+    const currentServerId = session?.currentServerId;
+    if (!currentServerId) {
+      return errorResult("Not connected to any server.");
+    }
     const connection = await context.db.client.serverConnection.findFirst({
-      where: { userId: context.userId, isActive: true },
+      where: {
+        userId: context.userId,
+        serverId: currentServerId,
+        isActive: true,
+      },
       include: { server: true },
+      orderBy: { connectedAt: "desc" },
     });
     if (!connection || !connection.server) {
       return errorResult("Not connected to any server.");
@@ -676,10 +694,12 @@ export class FragmentCommandsModule implements CommandModule {
 
       // Award XP
       try {
-        await context.db.client.playerProgress.update({
-          where: { userId: context.userId },
-          data: { hacking: { increment: 20 } },
-        });
+        // D8 — this was `increment: 20` with NO CAP AT ALL, and the audit
+        // called it out specifically: `fragment.crack`'s success chance is
+        // `0.4 + (hacking/100)*0.3` and is unclamped, so an uncapped +20 per
+        // success was an unbounded skill-farming loop. The repository clamps to
+        // 0..100 inside the UPDATE.
+        await context.playerProgress.addSkill(context.userId, "hacking", 20);
       } catch { /* non-critical */ }
 
       return {

@@ -1748,38 +1748,18 @@ export class ServerContentService {
     }
   }
 
-  /**
-   * Tier 3 helper: Provision all seeded servers that lack content.
-   * Called once on server startup.
-   */
-  public async provisionAllUnpopulatedServers(): Promise<void> {
-    const servers = await this.prisma.gameServer.findMany({
-      where: {
-        isPlayerHome: false,
-        type: { notIn: ["player_home"] },
-      },
-      select: { id: true, name: true },
-    });
-
-    let provisioned = 0;
-    for (const server of servers) {
-      const fileCount = await this.prisma.fileSystemNode.count({
-        where: { serverId: server.id, type: "file" },
-      });
-      if (fileCount <= 8) {
-        try {
-          await this.provisionServerContent(server.id, { skipAI: true });
-          provisioned++;
-        } catch (err) {
-          this.logger.warn({ err, serverId: server.id }, "Batch provision failed for server");
-        }
-      }
-    }
-
-    if (provisioned > 0) {
-      this.logger.info({ provisioned, total: servers.length }, "Batch provisioned unpopulated servers (Tier 1)");
-    }
-  }
+  // D9/D10 — `provisionAllUnpopulatedServers()` lived here and was the "boot
+  // provisioning N+1" the audit flagged (one `count()` per server inside the
+  // loop). It is DELETED rather than optimised, because it had ZERO callers:
+  // `ContentQueueService.enqueueAllUnpopulated()` replaced it — that is what
+  // `index.ts:507` actually calls on boot — and it already batches the counts
+  // into a single `groupBy(["serverId"])`. The N+1 was fixed by the queue
+  // rewrite; only this orphan still contained the pattern.
+  //
+  // Deleting beats leaving it: the method was `public`, invitingly named, and
+  // carried the exact anti-pattern. This codebase has already been bitten by
+  // dead methods that looked live (`setSocketIO()` had no callers and stranded
+  // 21 socket emits, `player:levelup` among them).
 
   /**
    * Build network context for a server — linked servers, employee roster, faction secrets.
@@ -1898,68 +1878,11 @@ export class ServerContentService {
     }
   }
 
-  /**
-   * Provision content for all servers in a network (or all unprovisioned servers).
-   * Useful after seeding to populate the entire game world.
-   */
-  public async provisionAllNetworkServers(
-    options: { networkId?: string; skipAI?: boolean; force?: boolean } = {},
-  ): Promise<{ provisioned: number; skipped: number; failed: number }> {
-    const where: any = {
-      isPlayerHome: false,
-      type: { not: "player_home" },
-    };
-    if (options.networkId) {
-      where.networkId = options.networkId;
-    }
-
-    const servers = await this.prisma.gameServer.findMany({
-      where,
-      select: { id: true, name: true },
-      orderBy: { name: "asc" },
-    });
-
-    let provisioned = 0;
-    let skipped = 0;
-    let failed = 0;
-
-    for (const server of servers) {
-      try {
-        const fileCount = await this.prisma.fileSystemNode.count({
-          where: { serverId: server.id, type: "file" },
-        });
-
-        if (fileCount > 8 && !options.force) {
-          skipped++;
-          continue;
-        }
-
-        await this.provisionServerContent(server.id, {
-          ...(options.skipAI != null ? { skipAI: options.skipAI } : {}),
-          ...(options.force != null ? { force: options.force } : {}),
-        });
-        provisioned++;
-
-        this.logger.info(
-          { serverName: server.name },
-          "Provisioned server content",
-        );
-      } catch (error) {
-        failed++;
-        this.logger.error(
-          { err: error, serverName: server.name },
-          "Failed to provision server",
-        );
-      }
-    }
-
-    this.logger.info(
-      { provisioned, skipped, failed },
-      "Network content provisioning complete",
-    );
-    return { provisioned, skipped, failed };
-  }
-
+  // D9/D10 — `provisionAllNetworkServers()` lived here and held the second
+  // copy of the boot-provisioning N+1 (a `count()` per server inside the
+  // loop). DELETED, not optimised: like its sibling above it had ZERO callers
+  // anywhere in the repo, including routes and scripts. Content provisioning
+  // goes through ContentQueueService now.
   /**
    * Provision infrastructure for a mission.
    *
@@ -2160,15 +2083,32 @@ export class ServerContentService {
 
     if (hasRoot) return;
 
-    // Try FileService first (works when full DI container is active)
+    // ── Try FileService first (works when the full DI container is active) ──
+    //
+    // The catch here used to be bare, and that is almost certainly how a server
+    // ended up with TWO root trees. It was written to mean "FileService is not
+    // registered", but it swallowed EVERY failure — so an
+    // `initializeFileSystem` that got part-way and then threw was misread as
+    // "DI unavailable", and execution fell through to the standalone path
+    // below, which built a SECOND root. The unique constraint cannot catch
+    // that, because roots have a null `parentId`.
+    //
+    // So the two cases are now told apart: a resolution failure falls through
+    // (that is what the fallback is for), and a real initialisation failure
+    // propagates instead of being papered over with a duplicate filesystem.
+    let fileService: { initializeFileSystem: (s: string, o: string) => Promise<void> } | null = null;
     try {
       const { getService } = await import("../di/container");
       const { FILE_SERVICE } = await import("../di/tokens");
-      const fileService = getService<any>(FILE_SERVICE);
+      fileService = getService(FILE_SERVICE);
+    } catch {
+      // FileService genuinely unavailable — fall through to the Prisma path.
+      fileService = null;
+    }
+
+    if (fileService) {
       await fileService.initializeFileSystem(serverId, ownerId);
       return;
-    } catch {
-      // FileService not available — create base filesystem directly via Prisma
     }
 
     // Standalone fallback: create root + standard directories via Prisma
@@ -2181,8 +2121,25 @@ export class ServerContentService {
       createdBy = anyUser?.id || ownerId;
     }
 
-    const root = await this.prisma.fileSystemNode.create({
-      data: {
+    // ── D7: this is the function that produced the observed duplicate ───────
+    // The `hasRoot` check above is a check-then-create with an await between
+    // it and the writes, so two concurrent provisioning calls both saw no root
+    // and both ran this. That is how the AI-provisioned "Phantom Probe Node"
+    // ended up with TWO `/home` directories created in the same second, each
+    // holding a different child — the violation that motivated the constraint.
+    //
+    // ROOT: `@@unique([serverId, parentId, name])` does NOT cover roots —
+    // `parentId` is null and Postgres treats NULLs as distinct — so an upsert
+    // on that key is impossible (Prisma types the compound's `parentId` as
+    // non-nullable). Instead the root gets a DETERMINISTIC id, which makes the
+    // PRIMARY KEY do the work: a concurrent creator collides there and the
+    // upsert resolves to the existing row. No schema change needed.
+    // The `hasRoot` early-return above still covers servers whose root predates
+    // this and therefore has a cuid.
+    const root = await this.prisma.fileSystemNode.upsert({
+      where: { id: `root_${serverId}` },
+      create: {
+        id: `root_${serverId}`,
         serverId,
         name: "/",
         type: "directory",
@@ -2191,12 +2148,17 @@ export class ServerContentService {
         size: 0,
         createdBy,
       },
+      update: {},
     });
 
     const baseDirs = ["etc", "home", "var", "tmp", "logs", "data"];
     for (const dir of baseDirs) {
-      await this.prisma.fileSystemNode.create({
-        data: {
+      // CHILDREN are covered by the unique, so this is a real upsert.
+      await this.prisma.fileSystemNode.upsert({
+        where: {
+          serverId_parentId_name: { serverId, parentId: root.id, name: dir },
+        },
+        create: {
           serverId,
           parentId: root.id,
           name: dir,
@@ -2206,6 +2168,7 @@ export class ServerContentService {
           size: 0,
           createdBy,
         },
+        update: {},
       });
     }
   }
@@ -2423,8 +2386,20 @@ export class ServerContentService {
         }
 
         try {
-          const node = await this.prisma.fileSystemNode.create({
-            data: {
+          // D7: upsert — content provisioning is re-entrant by design
+          // (ContentQueueService retries, and `ensureReady` can be driven by
+          // two players connecting at once), so an intermediate directory that
+          // another run just created is expected, not an error.
+          const node = await this.prisma.fileSystemNode.upsert({
+            where: {
+              serverId_parentId_name: {
+                serverId,
+                parentId: currentParentId,
+                name: part,
+              },
+            },
+            update: {},
+            create: {
               serverId,
               parentId: currentParentId,
               name: part,
@@ -2467,14 +2442,16 @@ export class ServerContentService {
         const parentId = await ensureDir(dirPath);
         if (!parentId) continue;
 
-        // Check if file already exists
-        const existingFile = await this.prisma.fileSystemNode.findFirst({
-          where: { serverId, parentId, name: fileName },
-        });
-        if (existingFile) continue;
-
-        await this.prisma.fileSystemNode.create({
-          data: {
+        // D7: the `findFirst` guard this replaces had an await before the
+        // write, so a concurrent provisioning run could slip a file in between.
+        // Provisioned content is authored, not player-owned, so re-running must
+        // leave the existing file alone rather than fail the whole plan.
+        await this.prisma.fileSystemNode.upsert({
+          where: {
+            serverId_parentId_name: { serverId, parentId, name: fileName },
+          },
+          update: {},
+          create: {
             serverId,
             parentId,
             name: fileName,

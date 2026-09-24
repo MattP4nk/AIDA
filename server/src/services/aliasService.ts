@@ -2,8 +2,13 @@ import { injectable, inject } from "tsyringe";
 import { PrismaClient } from "@prisma/client";
 import { Logger } from "pino";
 import { PlayerAliasInfo } from "../../../shared/types";
-import { LOGGER, MISSION_INTEGRATION_SERVICE } from "../di/tokens";
+import {
+  LOGGER,
+  MISSION_INTEGRATION_SERVICE,
+  PLAYER_PROGRESS_REPOSITORY,
+} from "../di/tokens";
 import type MissionIntegrationService from "./missionIntegration";
+import type PlayerProgressRepository from "../repositories/playerProgressRepository";
 
 const BASE_ALIAS_COST = 10000;
 const REPLACEMENT_MULTIPLIER = 3;
@@ -15,6 +20,8 @@ export default class AliasService {
   constructor(
     @inject("PrismaClient") private prisma: PrismaClient,
     @inject(LOGGER) private logger: Logger,
+    @inject(PLAYER_PROGRESS_REPOSITORY)
+    private playerProgress: PlayerProgressRepository,
     @inject(MISSION_INTEGRATION_SERVICE)
     missionIntegrationService?: MissionIntegrationService,
   ) {
@@ -46,22 +53,19 @@ export default class AliasService {
       return { success: false, message: "That alias name is already in use." };
     }
 
-    // Check if player has enough credits
-    const progress = await this.prisma.playerProgress.findFirst({
-      where: { userId },
-    });
-    if (!progress || progress.credits < cost) {
+    // D4 — charge atomically. This site previously read the balance, compared
+    // it in JS, then decremented in a SEPARATE statement with no transaction at
+    // all (the audit called it "same pattern, no transaction"), so two
+    // concurrent `alias create` commands could both pass the check and charge
+    // the player twice for one alias. The balance test now lives in the WHERE
+    // clause, so the decision and the write are the same statement.
+    const spend = await this.playerProgress.spendCredits(userId, cost);
+    if (!spend.ok) {
       return {
         success: false,
         message: `Insufficient credits. An alias costs ${cost} credits${existing ? " (replacement cost: 3x)" : ""}.`,
       };
     }
-
-    // Deduct credits
-    await this.prisma.playerProgress.update({
-      where: { userId },
-      data: { credits: { decrement: cost } },
-    });
 
     // Track credit spending for mission objectives
     if (this.missionIntegration) {

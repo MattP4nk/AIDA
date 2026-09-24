@@ -11,6 +11,10 @@ import { PrismaClient } from "@prisma/client";
 import { Server as SocketIOServer } from "socket.io";
 import { Logger } from "pino";
 
+// Repositories
+import PlayerProgressRepository from "../repositories/playerProgressRepository";
+import PlayerMissionRepository from "../repositories/playerMissionRepository";
+
 // Import all services
 import GameStateManager from "../services/gameStateManager";
 import ProgressService from "../services/progressService";
@@ -82,6 +86,16 @@ export function setupContainer(
   container.registerInstance(TOKENS.LOGGER, logger);
   container.registerInstance(TOKENS.SOCKET_IO, io);
   container.registerInstance(TOKENS.PRISMA_CLIENT, prismaClient);
+
+  // Repositories
+  container.registerSingleton(
+    TOKENS.PLAYER_PROGRESS_REPOSITORY,
+    PlayerProgressRepository,
+  );
+  container.registerSingleton(
+    TOKENS.PLAYER_MISSION_REPOSITORY,
+    PlayerMissionRepository,
+  );
 
   // Core Services
   container.registerSingleton(TOKENS.GAME_STATE_MANAGER, GameStateManager);
