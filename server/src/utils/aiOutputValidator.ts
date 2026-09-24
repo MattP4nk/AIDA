@@ -10,6 +10,7 @@
  */
 
 import logger from "../logger";
+import { isPathSafe } from "./pathSanitizer";
 import type { AIService } from "../services/aiService";
 
 // ═══════════════════════════════════════════════════════════════════
@@ -200,6 +201,53 @@ export interface ValidatedContentPlan {
   files: Array<{ path: string; content: string; isHidden?: boolean; isEncrypted?: boolean; isProtected?: boolean }>;
 }
 
+/**
+ * R14b bounds for AI-authored content plans.
+ *
+ * Deepest path in the seeded world is 3 segments, so 8 is generous. The point
+ * of a depth cap is not to match content but to stop a model emitting a
+ * thousand-segment path that `ensureDir` would walk one `upsert` at a time.
+ */
+const MAX_PLAN_DIRECTORIES = 100;
+const MAX_PLAN_FILES = 100;
+const MAX_PLAN_PATH_LENGTH = 512;
+const MAX_PLAN_PATH_DEPTH = 8;
+
+/**
+ * A path an AI proposed is acceptable to write.
+ *
+ * R14b: the whole check used to be `typeof d.path === "string" &&
+ * d.path.startsWith("/")`. No length bound, no depth bound, and no `..`
+ * rejection — despite `utils/pathSanitizer.ts` existing and being used by
+ * `fileService` (9x `isPathSafe`) and `commandModules/helpers.ts`. It simply
+ * was not applied on the AI path.
+ *
+ * `..` was mitigated only by accident: the filesystem is parentId-keyed, so a
+ * literal `..` becomes a directory NAMED `..` rather than escaping anywhere.
+ * That is a property of the storage layer, not a validation, and it would stop
+ * being true the moment anything resolved these paths against a real tree.
+ */
+function isAcceptablePlanPath(path: unknown): path is string {
+  if (typeof path !== "string") return false;
+  if (!path.startsWith("/")) return false;
+  if (path.length > MAX_PLAN_PATH_LENGTH) return false;
+
+  // Reject doubled separators outright. Stripping the leading slash below
+  // would otherwise turn "//evil" into "evil" and defeat isPathSafe's own
+  // `startsWith("//")` rule — the sanitizer would have caught it, but only if
+  // handed the path intact.
+  if (path.includes("//")) return false;
+
+  const segments = path.split("/").filter(Boolean);
+  if (segments.length === 0) return false;
+  if (segments.length > MAX_PLAN_PATH_DEPTH) return false;
+
+  // Reuse the existing checker rather than write a second traversal test.
+  // It rejects `..`, null bytes, `//` and drive letters; it expects a relative
+  // path, so the leading slash is stripped first.
+  return isPathSafe(path.slice(1));
+}
+
 export function validateContentPlan(parsed: any): ValidatedContentPlan | null {
   if (!parsed || typeof parsed !== "object") {
     logInvalid("ContentPlan", "not an object", parsed);
@@ -211,8 +259,12 @@ export function validateContentPlan(parsed: any): ValidatedContentPlan | null {
     return null;
   }
 
+  // R14b: `d &&` / `f &&` guard the element itself. Without it a null entry
+  // threw a TypeError OUT of the validator instead of returning null cleanly —
+  // so a malformed plan crashed its caller rather than being rejected.
   const directories = parsed.directories
-    .filter((d: any) => typeof d.path === "string" && d.path.startsWith("/"))
+    .filter((d: any) => d && isAcceptablePlanPath(d.path))
+    .slice(0, MAX_PLAN_DIRECTORIES)
     .map((d: any) => ({
       path: d.path,
       isHidden: Boolean(d.isHidden),
@@ -221,11 +273,12 @@ export function validateContentPlan(parsed: any): ValidatedContentPlan | null {
 
   const files = parsed.files
     .filter((f: any) =>
-      typeof f.path === "string" &&
-      f.path.startsWith("/") &&
+      f &&
+      isAcceptablePlanPath(f.path) &&
       typeof f.content === "string" &&
       f.content.trim().length > 0,
     )
+    .slice(0, MAX_PLAN_FILES)
     .map((f: any) => ({
       path: f.path,
       content: String(f.content).slice(0, 3000),
@@ -233,6 +286,16 @@ export function validateContentPlan(parsed: any): ValidatedContentPlan | null {
       isEncrypted: Boolean(f.isEncrypted),
       isProtected: Boolean(f.isProtected),
     }));
+
+  // Report truncation rather than silently dropping content: a plan arriving
+  // with 10k entries is a signal about the model, not routine.
+  if (parsed.directories.length > MAX_PLAN_DIRECTORIES || parsed.files.length > MAX_PLAN_FILES) {
+    logInvalid(
+      "ContentPlan",
+      `oversized plan truncated: ${parsed.directories.length} dirs / ${parsed.files.length} files ` +
+        `capped to ${MAX_PLAN_DIRECTORIES}/${MAX_PLAN_FILES}`,
+    );
+  }
 
   if (files.length === 0 && directories.length === 0) {
     logInvalid("ContentPlan", "all entries filtered out (empty paths or content)");
@@ -402,6 +465,8 @@ export function validateForumPosts(parsed: any): ValidatedForumPost[] | null {
 
   const valid = parsed
     .filter((p: any) =>
+      // R14b: `p &&` — a null element threw out of the validator.
+      p &&
       isNonEmptyString(p.authorHandle, 1) &&
       isNonEmptyString(p.title, 3) &&
       isNonEmptyString(p.content, 10),

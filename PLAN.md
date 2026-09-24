@@ -3514,8 +3514,30 @@ encryption round-trips without data loss.
       - `scripts/verify-phase6-s7-moderation.ts` — 29 checks driving real model responses
         (adversarial strings, missing keys, non-JSON), negative-controlled.
 
-- [ ] **R14** `validateContentPlan`: cap array lengths and path depth, reject `..`, route through
-      `pathSanitizer`. Add null-element guards to the three validators missing them.
+- [x] **R14b DONE 2026-09-24 — `validateContentPlan`.**
+      - **The whole path check was `typeof d.path === "string" && d.path.startsWith("/")`** — no
+        length bound, no depth bound, no `..` rejection — even though `utils/pathSanitizer.ts` exists
+        and `fileService` uses `isPathSafe` nine times. It was simply never applied on the AI path.
+        Now reuses `isPathSafe` rather than growing a second traversal check.
+      - **`..` was mitigated only by accident.** The filesystem is parentId-keyed, so a literal `..`
+        became a directory *named* `..` instead of escaping. That is a property of the storage layer,
+        not a validation, and it stops being true the moment anything resolves these paths against a
+        real tree.
+      - **Arrays were unbounded** — only per-item *content* was capped (`slice(0, 3000)`), so a plan
+        with 100k entries passed through whole and `applyContentPlanViaPrisma`'s `ensureDir` would
+        upsert once per segment of every one. Now capped at 100/100 with the truncation **logged**,
+        since an oversized plan is a signal about the model rather than routine.
+      - **Null elements threw out of the validator** instead of returning null, so a malformed plan
+        crashed its caller rather than being rejected. Guarded in `validateContentPlan` (both loops)
+        and `validateForumPosts`. (`validateArchitectEvaluation` and `validateStoryArcPlan` were
+        already guarded — the plan's "three validators" is really three *loops* across two.)
+      - **The harness caught a bug in my own predicate:** stripping *all* leading slashes before
+        calling `isPathSafe` turned `//evil` into `evil` and defeated the sanitizer's own
+        `startsWith("//")` rule. Doubled separators are now rejected outright and exactly one slash
+        is stripped. The sanitizer would have caught it — but only if handed the path intact.
+      - `scripts/verify-phase6-r14b-contentplan.ts` — 24 checks. Negative control against the
+        original predicate fails **15** of them. Bounded from both sides: a legitimate plan, and a
+        path at the depth limit, must still be **accepted** (deepest seeded path is 3 segments).
 - [x] **R14c DONE 2026-09-24 — observability. This was the phase gate.**
       - **`silent: true` was hardcoded AND absent from `SafeAIConfig`**, so no caller could change
         it: every AI failure logged at `debug` and lost its error code, producing no output at all at
