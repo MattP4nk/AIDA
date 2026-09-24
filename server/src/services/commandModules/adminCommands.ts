@@ -383,9 +383,14 @@ export class AdminCommandsModule implements CommandModule {
     // Destroy their session
     await context.gameStateManager.destroySession(user.id);
 
-    // Emit force disconnect via socket
+    // ── S3: target the user, and actually close their sockets ──────────
+    // This was `io.emit(...)` — a broadcast to EVERY connected client, so the
+    // whole server learned who was kicked and why. It also only *asked* the
+    // client to hang up; a modified or stale client simply kept its socket.
     if (context.io) {
-      context.io.emit("force:disconnect", { userId: user.id, reason });
+      context.io.to(`user:${user.id}`).emit("force:disconnect", { reason });
+      const { disconnectUserSockets } = await import("../../sockets/handlers");
+      disconnectUserSockets(context.io, user.id);
     }
 
     // Audit log
@@ -504,10 +509,13 @@ export class AdminCommandsModule implements CommandModule {
     // Kill session and force disconnect
     await context.gameStateManager.destroySession(user.id);
     if (context.io) {
-      context.io.emit("force:disconnect", {
-        userId: user.id,
-        reason: `Account banned: ${reason}`,
-      });
+      // S3: see the kick path — targeted emit, then a server-side close so the
+      // ban does not depend on the banned client choosing to comply.
+      context.io
+        .to(`user:${user.id}`)
+        .emit("force:disconnect", { reason: `Account banned: ${reason}` });
+      const { disconnectUserSockets } = await import("../../sockets/handlers");
+      disconnectUserSockets(context.io, user.id);
     }
 
     // Deactivate all sessions

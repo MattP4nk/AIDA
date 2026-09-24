@@ -2062,12 +2062,34 @@ error-level lines**.
       `connectPlayerToServer` own the row too, so session and database cannot disagree.
       *(Not fixed here — it is a behaviour change to the `connect home` path and wants its own
       verification.)*
-- [ ] **S3** Real ban enforcement: track sockets per user, force-close server-side on ban/kick,
-      and invalidate the auth cache entry. Change `io.emit` → `io.to(user:<id>)` so the ban
-      reason stops broadcasting to everyone.
-- [ ] **S9** Move the socket rate limiter from per-socket to per-user; cap concurrent sockets per
-      user and per IP; add `io.use()` connection-level auth so unauthenticated sockets are closed,
-      not just ignored.
+- [x] **S3 — DONE 2026-09-23.** Ban and kick now target the user and enforce server-side.
+      `io.emit("force:disconnect", { userId, reason })` — a broadcast telling **every connected
+      client** who was banned and why — became
+      `io.to(\`user:${id}\`).emit("force:disconnect", { reason })`, and the `userId` field is gone
+      from the payload because the room already scopes it. A new exported `disconnectUserSockets`
+      then closes the sockets server-side: emitting an event and trusting the client to hang up is
+      a suggestion, not enforcement, and an old or modified client simply ignored it.
+      Auth-cache invalidation was already correct — `invalidateAuthCacheForUser` existed and the ban
+      path already called it. Kick deliberately does **not** invalidate: a kick is not permanent.
+- [x] **S9 — DONE 2026-09-23. Three separate holes, not one.**
+      1. **Authentication ran per PACKET.** It was `socket.use()`, so a socket with no token
+         completed the handshake and stayed connected indefinitely, holding a descriptor, with its
+         packets merely rejected. Now `io.use()` authenticates during the handshake, so such a
+         socket is never established. This also makes `socket.data.user` available from the first
+         event, which is what lets the limits below be keyed by user at all.
+      2. **The rate limiters were per-SOCKET closures.** A second tab bought a second full
+         allowance, so every published limit really meant "N × however many sockets you open". They
+         are now shared per user and released when the user's last socket closes.
+      3. **Nothing capped how many sockets that was.** Now 4 per user and 12 per IP, with both
+         indexes dropping their key when they drain so neither grows with lifetime player count.
+      **Gate: `verify-phase4-s3-s9-sockets.ts` 9/9.** Tokenless and invalid-token handshakes are
+      refused (with a valid-token positive control, so the refusals cannot pass against a server
+      that is simply down); 7 opened sockets leave 4 live; spending the command budget on socket 1
+      leaves socket 2 fully throttled (5 throttled / 0 served, where per-socket limiters would have
+      served all 5); a banned player's live socket is closed; and a bystander receives zero
+      `force:disconnect` events.
+      Regression: tutorial 11/11, gate 15/15, P0 4/4, G3 19/19, shop 10/10, provisioning 5/5 — all
+      through the new handshake auth.
 - [ ] **S8** Make `NODE_ENV` explicit — fail fast at boot if unset in a non-dev context, so the
       `/admin` panel and `sameSite: "none"` can't leak into production by default.
 - [x] **S11 — DONE 2026-09-23. Now fails closed**, with a warning naming the offending value.

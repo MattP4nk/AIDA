@@ -66,7 +66,7 @@ export function hasSocketRole(socket: Socket, minimumRole: string): boolean {
 }
 
 /**
- * Simple per-socket sliding-window rate limiter.
+ * Sliding-window rate limiter.
  * Returns true if the event should be allowed, false if rate-limited.
  */
 function createSocketRateLimiter(maxEvents: number, windowMs: number) {
@@ -86,6 +86,93 @@ function createSocketRateLimiter(maxEvents: number, windowMs: number) {
   };
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// S9 — per-USER limits and connection caps
+// ═══════════════════════════════════════════════════════════════════
+//
+// The limiters used to be closures created inside `io.on("connection")`, i.e.
+// per SOCKET. Opening a second socket on the same account bought a second full
+// allowance, so every published limit was really "N x however many sockets you
+// care to open" — and nothing capped how many that was. Keying them by user,
+// and capping concurrent sockets, is what makes the numbers mean anything.
+
+/** Per-user event budgets, shared across all of that user's sockets. */
+interface UserLimiters {
+  command: () => boolean;
+  message: () => boolean;
+  terminal: () => boolean;
+  general: () => boolean;
+}
+
+const userLimiters = new Map<string, UserLimiters>();
+/** userId -> that user's live socket ids. */
+const userSockets = new Map<string, Set<string>>();
+/** client IP -> live socket ids, so one host cannot open unbounded sockets. */
+const ipSockets = new Map<string, Set<string>>();
+
+/** Most players use one tab; a few use two. Beyond this is abuse, not use. */
+const MAX_SOCKETS_PER_USER = 4;
+/** Generous enough for a shared NAT / household, tight enough to bound a flood. */
+const MAX_SOCKETS_PER_IP = 12;
+
+function limitersFor(userId: string): UserLimiters {
+  let limiters = userLimiters.get(userId);
+  if (!limiters) {
+    limiters = {
+      command: createSocketRateLimiter(20, 10_000), // 20 commands per 10s
+      message: createSocketRateLimiter(10, 10_000), // 10 messages per 10s
+      terminal: createSocketRateLimiter(10, 10_000), // 10 terminal ops per 10s
+      general: createSocketRateLimiter(30, 10_000), // 30 events per 10s
+    };
+    userLimiters.set(userId, limiters);
+  }
+  return limiters;
+}
+
+function addToIndex(map: Map<string, Set<string>>, key: string, socketId: string): number {
+  let set = map.get(key);
+  if (!set) {
+    set = new Set();
+    map.set(key, set);
+  }
+  set.add(socketId);
+  return set.size;
+}
+
+function removeFromIndex(map: Map<string, Set<string>>, key: string, socketId: string): void {
+  const set = map.get(key);
+  if (!set) return;
+  set.delete(socketId);
+  // Drop the key when it drains, so these maps cannot grow with lifetime player
+  // count the way memoryService's per-user maps do.
+  if (set.size === 0) map.delete(key);
+}
+
+/** The client's address, honouring the proxy header only when configured. */
+function clientIp(socket: Socket): string {
+  const fwd = socket.handshake.headers["x-forwarded-for"];
+  const first = Array.isArray(fwd) ? fwd[0] : fwd?.split(",")[0]?.trim();
+  return first || socket.handshake.address || "unknown";
+}
+
+/**
+ * S3 — force every live socket for a user to close, server-side.
+ *
+ * Exported because the ban/kick path needs it: emitting `force:disconnect` and
+ * trusting the client to hang up is not enforcement, it is a suggestion. A
+ * modified or simply old client keeps its socket and carries on.
+ */
+export function disconnectUserSockets(io: SocketIOServer, userId: string): number {
+  const ids = userSockets.get(userId);
+  if (!ids || ids.size === 0) return 0;
+  const count = ids.size;
+  // Snapshot: disconnecting mutates the set through the disconnect handler.
+  for (const socketId of [...ids]) {
+    io.sockets.sockets.get(socketId)?.disconnect(true);
+  }
+  return count;
+}
+
 /**
  * Set up all Socket.IO event handlers.
  * Called once during server initialization after the DI container is ready.
@@ -93,16 +180,77 @@ function createSocketRateLimiter(maxEvents: number, windowMs: number) {
 export function setupSocketHandlers(io: SocketIOServer): void {
   const services = resolveServices();
 
+  // ── S9: authenticate at CONNECTION time, and close what fails ──────────
+  //
+  // Authentication used to be `socket.use()`, which runs per PACKET: an
+  // unauthenticated socket completed the handshake and stayed connected
+  // indefinitely, merely having its packets rejected. It held a file
+  // descriptor, counted against nothing, and could sit there forever.
+  // `io.use()` runs during the handshake, so a socket with no valid token is
+  // never established at all.
+  //
+  // This also means `socket.data.user` exists from the first event, which is
+  // what lets the rate limits below be keyed by USER rather than by socket.
+  io.use(async (socket, next) => {
+    try {
+      const token = socket.handshake.auth?.token;
+      if (!token) return next(new Error("No authentication token provided"));
+
+      const user = await verifySocketToken(token);
+      if (!user) return next(new Error("Invalid authentication token"));
+
+      socket.data.user = user;
+      return next();
+    } catch (err) {
+      logger.warn({ err }, "Socket handshake authentication failed");
+      return next(new Error("Authentication failed"));
+    }
+  });
+
   io.on("connection", (socket) => {
-    logger.info({ socketId: socket.id }, "User connected");
+    const userId: string | undefined = socket.data.user?.id;
+    const ip = clientIp(socket);
 
-    // Per-socket rate limiters (events per window)
-    const commandRateLimit = createSocketRateLimiter(20, 10_000); // 20 commands per 10s
-    const messageRateLimit = createSocketRateLimiter(10, 10_000); // 10 messages per 10s
-    const terminalRateLimit = createSocketRateLimiter(10, 10_000); // 10 terminal ops per 10s
-    const generalRateLimit = createSocketRateLimiter(30, 10_000); // 30 events per 10s
+    // `io.use` guarantees this, but a future middleware change must not
+    // silently turn the caps below into no-ops.
+    if (!userId) {
+      logger.error({ socketId: socket.id }, "Authenticated socket with no user id — closing");
+      socket.disconnect(true);
+      return;
+    }
 
-    // ── Socket authentication middleware ──────────────────────────
+    // ── S9: concurrency caps ───────────────────────────────────────────
+    const perUser = addToIndex(userSockets, userId, socket.id);
+    const perIp = addToIndex(ipSockets, ip, socket.id);
+
+    if (perUser > MAX_SOCKETS_PER_USER || perIp > MAX_SOCKETS_PER_IP) {
+      logger.warn(
+        { userId, ip, perUser, perIp },
+        "Socket connection refused — concurrency cap reached",
+      );
+      socket.emit("connection:refused", {
+        reason:
+          perUser > MAX_SOCKETS_PER_USER
+            ? "Too many open sessions for this account."
+            : "Too many open sessions from this address.",
+      });
+      removeFromIndex(userSockets, userId, socket.id);
+      removeFromIndex(ipSockets, ip, socket.id);
+      socket.disconnect(true);
+      return;
+    }
+
+    logger.info({ socketId: socket.id, userId, perUser }, "User connected");
+
+    // Rate limiters are shared across ALL of this user's sockets (S9).
+    const limiters = limitersFor(userId);
+    const commandRateLimit = limiters.command;
+    const messageRateLimit = limiters.message;
+    const terminalRateLimit = limiters.terminal;
+    const generalRateLimit = limiters.general;
+
+    // Kept as defence in depth. `io.use` already authenticated this socket, so
+    // this now short-circuits on the first packet rather than doing work.
     setupAuthMiddleware(socket);
 
     // ── Authentication events ────────────────────────────────────
@@ -194,7 +342,15 @@ export function setupSocketHandlers(io: SocketIOServer): void {
     });
 
     // ── Disconnection ────────────────────────────────────────────
-    socket.on("disconnect", () => handleDisconnect(socket, services));
+    socket.on("disconnect", () => {
+      // S9: drop the socket from both indexes, and release the user's limiter
+      // once their last socket goes, so neither map grows with lifetime player
+      // count.
+      removeFromIndex(userSockets, userId, socket.id);
+      removeFromIndex(ipSockets, ip, socket.id);
+      if (!userSockets.has(userId)) userLimiters.delete(userId);
+      handleDisconnect(socket, services);
+    });
   });
 }
 
