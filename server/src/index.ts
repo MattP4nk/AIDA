@@ -8,31 +8,7 @@ import { config, validateConfig, CORS_ORIGINS } from "./config/environment";
 import { db } from "./database/client";
 import { reconcileShopItems } from "../prisma/reconcileShopItems";
 import { initializeContainer, getService } from "./di/container";
-import {
-  GAME_STATE_MANAGER,
-  PROGRESS_SERVICE,
-  IP_SERVICE,
-  EVENT_SERVICE,
-  SHOP_SERVICE,
-  PERSONA_SERVICE,
-  AI_SCHEDULER_SERVICE,
-  HACK_SERVICE,
-  MISSION_SERVICE,
-  MESSAGE_SERVICE,
-  RESOURCE_SERVICE,
-  WARFARE_SERVICE,
-  CENSORSHIP_SERVICE,
-  DYNAMIC_CONTENT_SERVICE,
-  STORY_MISSION_SERVICE,
-  ACHIEVEMENT_SERVICE,
-  TUTORIAL_SERVICE,
-  FACTION_SERVICE,
-  STORY_PROGRESSION_SERVICE,
-  FORUM_SERVICE,
-  ARCHITECT_INTERVENTION_EXECUTOR,
-  DARKNET_DUNGEON_SERVICE,
-  KEY_FRAGMENT_SERVICE,
-} from "./di/tokens";
+import { ACHIEVEMENT_SERVICE, AI_SCHEDULER_SERVICE, ARCHITECT_INTERVENTION_EXECUTOR, CENSORSHIP_SERVICE, CONTENT_DRAFT_SERVICE, CONTENT_QUEUE_SERVICE, DARKNET_DUNGEON_SERVICE, DYNAMIC_CONTENT_SERVICE, EPOCH_SCHEDULER_SERVICE, EVENT_SERVICE, FACTION_SERVICE, FORUM_SERVICE, GAME_STATE_MANAGER, HACK_SERVICE, IP_SERVICE, KEY_FRAGMENT_SERVICE, MESSAGE_SERVICE, MISSION_SERVICE, PERSONA_MAIL_QUEUE_SERVICE, PERSONA_SERVICE, PROGRESS_SERVICE, REFERENCE_VALIDATION_SERVICE, RESOURCE_SERVICE, SERVER_CONTENT_SERVICE, SHOP_SERVICE, STORY_MISSION_SERVICE, STORY_PROGRESSION_SERVICE, TUTORIAL_SERVICE, WARFARE_SERVICE } from "./di/tokens";
 
 import type GameStateManager from "./services/gameStateManager";
 import type ProgressService from "./services/progressService";
@@ -142,7 +118,6 @@ async function initialize(): Promise<void> {
   const { ContentDraftService } = await import("./services/contentDraftService");
   const { ReferenceValidationService } = await import("./services/referenceValidationService");
   const { EpochSchedulerService } = await import("./services/epochSchedulerService");
-  const { CONTENT_DRAFT_SERVICE, REFERENCE_VALIDATION_SERVICE, EPOCH_SCHEDULER_SERVICE } = await import("./di/tokens");
 
   const contentDraftService = getService<InstanceType<typeof ContentDraftService>>(CONTENT_DRAFT_SERVICE);
   const refValidation = getService<InstanceType<typeof ReferenceValidationService>>(REFERENCE_VALIDATION_SERVICE);
@@ -519,7 +494,6 @@ async function initialize(): Promise<void> {
 
   // Content generation queue — reliable pipeline for server content
   try {
-    const { CONTENT_QUEUE_SERVICE, SERVER_CONTENT_SERVICE } = await import("./di/tokens");
     const contentQueue = getService<import("./services/contentQueueService").ContentQueueService>(CONTENT_QUEUE_SERVICE);
     const contentService = getService<import("./services/serverContentService").ServerContentService>(SERVER_CONTENT_SERVICE);
     contentQueue.setServerContentService(contentService);
@@ -533,7 +507,6 @@ async function initialize(): Promise<void> {
   // Deferred persona mail — replies arrive after a human-plausible delay, and
   // generation happens when an item comes due so bursts spread over time.
   try {
-    const { PERSONA_MAIL_QUEUE_SERVICE } = await import("./di/tokens");
     const mailQueue =
       getService<import("./services/personaMailQueueService").PersonaMailQueueService>(
         PERSONA_MAIL_QUEUE_SERVICE,

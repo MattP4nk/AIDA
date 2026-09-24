@@ -30,6 +30,7 @@
  */
 import type { Logger } from "pino";
 import type { AIService } from "../services/aiService";
+import { AI_SERVICE } from "../di/tokens";
 
 /**
  * Moderate `content` and, if it is unsafe, run `applyUnsafe` before returning.
@@ -47,7 +48,6 @@ export async function moderateBeforePublish(
   let aiService: AIService | null = null;
   try {
     const { getService } = await import("../di/container");
-    const { AI_SERVICE } = await import("../di/tokens");
     aiService = getService<AIService>(AI_SERVICE);
   } catch (err) {
     logger.error({ err }, "S7: moderation service could not be resolved — publishing unmoderated");

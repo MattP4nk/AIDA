@@ -3866,10 +3866,35 @@ Write them per-refactor, immediately before touching the code:
       **170 direct Prisma calls** in command modules onto services.
 - [ ] **A4** Delete the 60 s DI cache (it's a no-op over singletons and caches `undefined` on
       failure).
-- [ ] **A5** Break the 48-module cycle: make `commandModules/interface.ts:21` type-only (closes 36
-      cycles), remove the 7 static `di/container` imports, convert the 58 pointless
-      `await import("../di/tokens")` calls to static imports, replace the 11 raw-string
-      `getService` calls with `TOKENS`.
+- [~] **A5 — PARTLY DONE 2026-09-24. The cycle is now MEASURABLE, and it is 14, not 48.**
+      - **The headline number was folklore.** "48-module cycle / closes 36 cycles" came from an
+        analysis nothing in the repo could reproduce — no madge, no dpdm, no eslint rule.
+        `scripts/verify-phase7-a5-cycles.ts` now parses every static **value** import in
+        `server/src` and runs Tarjan's SCC: **141 modules scanned, ONE cyclic component, 14 modules
+        in it.** Type-only and `await import()` edges are excluded on purpose — neither exists at
+        runtime, so counting them would overstate the problem and reward churn that changes nothing.
+        The detector carries a positive control (a synthetic 2-cycle), because a clean report from a
+        broken parser is the failure mode that matters.
+      - **The real cycle is the DI hub**, not the command modules:
+        `di/container` ⇄ `gameStateManager`, `commandProcessor`, `missionService`, `missionGenerator`,
+        `missionIntegration`, `personaService`, `personaActionService`, `personaMissionGenService`,
+        `aiSchedulerService`, `contestService`, `warfareService`, `censorshipService`,
+        `tutorialService`. `commandModules/interface.ts` is **not in it at all** — so PLAN's
+        "make interface.ts:21 type-only, closes 36 cycles" was wrong twice over: `:21` was already
+        `import type`, and the file is not part of any cycle.
+      - [x] `interface.ts` **:1-3** (not :21) converted to `import type` — hygiene, since a value
+        import of the shared barrel pulls a runtime module into a pure declaration file.
+      - [x] **64 dynamic `await import(di/tokens)` → static**, across 24 files. Genuinely pointless:
+        `di/tokens.ts` has zero imports and 60 plain-string exports, so there was never a cycle to
+        defer. Confirmed no effect on the cycle count, as expected.
+      - [x] **All raw-string `getService` calls → `TOKENS`.** The count was 13, not 11 — and two of
+        them were **multi-line**, which every single-line grep in this project had missed. The
+        harness caught them by reading whole files; my own grep did not.
+      - [ ] **Deferred to A4, deliberately:** the 7 services that statically import `di/container`
+        are what actually close the cycle. Their `getService` calls are real and synchronous, so
+        converting them means making those call sites async — that is the DI refactor A4 owns, not a
+        mechanical sweep. The budget in the harness (40) holds the line meanwhile.
+
 - [ ] **A8** Split the oversized modules — extract `serverContentService`'s 1,473 lines of
       module-scope data; move `missionTemplatePool`'s 1,911-line array to JSON/DB; split
       `forumService` (the proxy network is a separate domain); split `hackService` into

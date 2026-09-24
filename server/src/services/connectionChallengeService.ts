@@ -7,7 +7,7 @@
 
 import { injectable, inject } from "tsyringe";
 import type { Logger } from "pino";
-import { LOGGER } from "../di/tokens";
+import { LOGGER, MESSAGE_SERVICE } from "../di/tokens";
 import { prisma } from "../database/client";
 import type { ConnectionChallenge, ConnectionSessionInfo } from "../../../shared/types";
 import type MessageService from "./messageService";
@@ -202,7 +202,6 @@ export class ConnectionChallengeService {
 
       // Import messageService dynamically to avoid circular DI
       const { getService } = await import("../di/container");
-      const { MESSAGE_SERVICE } = await import("../di/tokens");
       const messageService = getService<MessageService>(MESSAGE_SERVICE);
 
       const result = await messageService.sendAIMessage(

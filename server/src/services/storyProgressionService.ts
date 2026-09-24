@@ -15,7 +15,7 @@
 
 import { injectable, inject } from "tsyringe";
 import type { Logger } from "pino";
-import { LOGGER, AI_SERVICE, EVENT_SERVICE } from "../di/tokens";
+import { AI_SERVICE, ARCHITECT_INTERVENTION_EXECUTOR, EVENT_SERVICE, LOGGER } from "../di/tokens";
 import { db } from "../database/client";
 import type { AIService } from "./aiService";
 import type EventService from "./eventService";
@@ -244,7 +244,6 @@ Routine hacks or mission completions usually don't.`;
     try {
       // Execute via the intervention executor
       const { getService } = await import("../di/container");
-      const { ARCHITECT_INTERVENTION_EXECUTOR } = await import("../di/tokens");
       const executor = getService<ArchitectInterventionExecutor>(ARCHITECT_INTERVENTION_EXECUTOR);
 
       await executor.execute({
@@ -450,7 +449,6 @@ Routine hacks or mission completions usually don't.`;
     let interventionOutcomes = "";
     try {
       const { getService } = await import("../di/container");
-      const { ARCHITECT_INTERVENTION_EXECUTOR } = await import("../di/tokens");
       const executor = getService<ArchitectInterventionExecutor>(ARCHITECT_INTERVENTION_EXECUTOR);
       if (executor?.checkInterventionOutcomes) {
         interventionOutcomes = await executor.checkInterventionOutcomes();

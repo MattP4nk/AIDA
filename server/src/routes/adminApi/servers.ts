@@ -6,6 +6,7 @@ import { resolveNpcOwnerId } from "../../../prisma/npcOwnership";
 
 import type { ReferenceValidationService } from "../../services/referenceValidationService";
 import { normalizeAccessMethod, accessMethodList, DEFAULT_ACCESS_METHOD } from "../../utils/accessMethod";
+import { REFERENCE_VALIDATION_SERVICE } from "../../di/tokens";
 const router = Router();
 
 // GET / — List servers with filtering and pagination
@@ -377,7 +378,6 @@ router.post("/:id/investigation-chain", asyncHandler(async (req: any, res: any) 
   if (!server) throw new NotFoundError("Server not found");
 
   const { getService } = await import("../../di/container");
-  const { REFERENCE_VALIDATION_SERVICE } = await import("../../di/tokens");
   const refService = getService<ReferenceValidationService>(REFERENCE_VALIDATION_SERVICE);
 
   const drafts = await refService.generateInvestigationChain(req.params.id, Number(depth), theme);

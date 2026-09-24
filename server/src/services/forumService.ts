@@ -16,12 +16,7 @@ import type { Server as SocketIOServer } from "socket.io";
 import { injectable, inject } from "tsyringe";
 import type { Logger } from "pino";
 import { safeExecute, safeAI } from "../utils/safeExecute";
-import {
-  SOCKET_IO,
-  MISSION_INTEGRATION_SERVICE,
-  LOGGER,
-  FACTION_KNOWLEDGE_SERVICE,
-} from "../di/tokens";
+import { AI_SERVICE, FACTION_KNOWLEDGE_SERVICE, KEY_FRAGMENT_SERVICE, LOGGER, MISSION_INTEGRATION_SERVICE, REPUTATION_ENGINE, SOCKET_IO } from "../di/tokens";
 import type MissionIntegrationService from "./missionIntegration";
 import type { FactionKnowledgeService } from "./factionKnowledgeService";
 import { validateForumPosts, validateForumReply } from "../utils/aiOutputValidator";
@@ -742,7 +737,6 @@ export class ForumService extends EventEmitter {
       await safeExecute({
         fn: async () => {
           const { getService } = await import("../di/container");
-          const { REPUTATION_ENGINE } = await import("../di/tokens");
           const reputationEngine = getService<ReputationEngine>(REPUTATION_ENGINE);
           await reputationEngine.onForumPost(userId, forumId);
         },
@@ -908,7 +902,6 @@ export class ForumService extends EventEmitter {
     let aiService: any;
     try {
       const { getService } = await import("../di/container");
-      const { AI_SERVICE } = await import("../di/tokens");
       aiService = getService(AI_SERVICE);
     } catch {
       throw new Error("AIService not available");
@@ -1286,7 +1279,6 @@ ${forum.description ? `Description: ${forum.description}` : ""}`;
       let aiService: any;
       try {
         const { getService } = await import("../di/container");
-        const { AI_SERVICE } = await import("../di/tokens");
         aiService = getService(AI_SERVICE);
       } catch {
         return; // AI not available, skip silently
@@ -1647,7 +1639,6 @@ YOUR POST TITLE: "${stripPromptBoundaries(post.title, 200)}"`;
           await safeExecute({
             fn: async () => {
               const { getService } = await import("../di/container");
-              const { REPUTATION_ENGINE } = await import("../di/tokens");
               const reputationEngine = getService<ReputationEngine>(REPUTATION_ENGINE);
               await reputationEngine.onCaughtByFaction(
                 userId,
@@ -1751,7 +1742,6 @@ YOUR POST TITLE: "${stripPromptBoundaries(post.title, 200)}"`;
           | null = null;
         try {
           const { getService } = await import("../di/container");
-          const { KEY_FRAGMENT_SERVICE } = await import("../di/tokens");
           keyFragmentService =
             getService<import("./keyFragmentService").KeyFragmentService>(
               KEY_FRAGMENT_SERVICE,

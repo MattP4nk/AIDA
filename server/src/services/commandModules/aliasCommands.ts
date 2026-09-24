@@ -1,6 +1,7 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
 import { successResult, errorResult } from "./helpers";
+import * as TOKENS from "../../di/tokens";
 
 export class AliasCommandsModule implements CommandModule {
   public category = "alias";
@@ -80,7 +81,7 @@ export class AliasCommandsModule implements CommandModule {
 
     const { getService } = await import("../../di/container");
     const aliasService =
-      getService<import("../aliasService").default>("AliasService");
+      getService<import("../aliasService").default>(TOKENS.ALIAS_SERVICE);
     const result = await aliasService.createAlias(context.userId, aliasName);
 
     return result.success
@@ -91,7 +92,7 @@ export class AliasCommandsModule implements CommandModule {
   private async handleDestroy(context: CommandContext): Promise<CommandResult> {
     const { getService } = await import("../../di/container");
     const aliasService =
-      getService<import("../aliasService").default>("AliasService");
+      getService<import("../aliasService").default>(TOKENS.ALIAS_SERVICE);
     const result = await aliasService.destroyAlias(context.userId);
 
     return result.success
@@ -102,7 +103,7 @@ export class AliasCommandsModule implements CommandModule {
   private async handleInfo(context: CommandContext): Promise<CommandResult> {
     const { getService } = await import("../../di/container");
     const aliasService =
-      getService<import("../aliasService").default>("AliasService");
+      getService<import("../aliasService").default>(TOKENS.ALIAS_SERVICE);
     const alias = await aliasService.getAlias(context.userId);
 
     if (!alias) {
@@ -139,7 +140,7 @@ export class AliasCommandsModule implements CommandModule {
 
     const { getService } = await import("../../di/container");
     const aliasService =
-      getService<import("../aliasService").default>("AliasService");
+      getService<import("../aliasService").default>(TOKENS.ALIAS_SERVICE);
     const result = await aliasService.attemptReveal(
       context.userId,
       targetUser.id,

@@ -14,12 +14,7 @@ import { injectable, inject } from "tsyringe";
 import type { Logger } from "pino";
 import crypto from "crypto";
 import { safeExecute } from "../utils/safeExecute";
-import {
-  LOGGER,
-  AI_SERVICE,
-  EVENT_SERVICE,
-  PLAYER_PROGRESS_REPOSITORY,
-} from "../di/tokens";
+import { AI_SERVICE, EVENT_SERVICE, FORUM_SERVICE, LOGGER, PLAYER_PROGRESS_REPOSITORY, STORY_PROGRESSION_SERVICE } from "../di/tokens";
 import type PlayerProgressRepository from "../repositories/playerProgressRepository";
 import { db } from "../database/client";
 import { resolveNpcOwnerId } from "../../prisma/npcOwnership";
@@ -747,7 +742,6 @@ Respond ONLY with JSON:
 
       // Lazy-load ForumService to avoid circular DI
       const { getService } = await import("../di/container");
-      const { FORUM_SERVICE } = await import("../di/tokens");
       const forumService = getService<ForumService>(FORUM_SERVICE);
 
       const post = await forumService.createAIPost(
@@ -823,7 +817,6 @@ Respond ONLY with JSON:
       // e. Record story ledger event (non-critical)
       try {
         const { getService } = await import("../di/container");
-        const { STORY_PROGRESSION_SERVICE } = await import("../di/tokens");
         const storyService = getService<StoryProgressionService>(STORY_PROGRESSION_SERVICE);
         await storyService.recordEvent({
           type: "fragment_found",

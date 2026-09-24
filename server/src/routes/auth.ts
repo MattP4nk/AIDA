@@ -8,7 +8,7 @@ import { config } from "../config/environment";
 import { authenticateToken, invalidateAuthCache, AUTH_COOKIE_NAME, AUTH_COOKIE_OPTIONS } from "../middleware/auth";
 import { asyncHandler } from "../middleware/setup";
 import { getService } from "../di/container";
-import { FACTION_SERVICE, IP_SERVICE } from "../di/tokens";
+import { FACTION_SERVICE, IP_SERVICE, NETWORK_TOPOLOGY_SERVICE } from "../di/tokens";
 import type { FactionService } from "../services/factionService";
 import type IPService from "../services/ipService";
 import { GameError, type AuthRequest, type AuthResponse, type User } from "../../../shared/types";
@@ -206,7 +206,6 @@ router.post(
 
       // Link home server to Internet Exchange (using ID from transaction, no re-query)
       try {
-        const { NETWORK_TOPOLOGY_SERVICE } = await import("../di/tokens");
         const topoService = getService<NetworkTopologyService>(NETWORK_TOPOLOGY_SERVICE);
         if (homeServerId) {
           await topoService.createHomeLink(homeServerId);

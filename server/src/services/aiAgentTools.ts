@@ -21,6 +21,7 @@ import { safeExecute } from "../utils/safeExecute";
 
 import type { ContentDraftService } from "./contentDraftService";
 import { stripPromptBoundaries } from "../utils/aiPromptSanitizer";
+import { CONTENT_DRAFT_SERVICE, PLAYER_MISSION_REPOSITORY } from "../di/tokens";
 // ═══════════════════════════════════════════════════════════════
 // Tool Definitions
 // ═══════════════════════════════════════════════════════════════
@@ -453,7 +454,6 @@ export const TOOLS: ToolDefinition[] = [
       // hid the `onFactionServerHacked` arity bug and still hides the
       // `initiateTrace` one.
       const { getService } = await import("../di/container");
-      const { PLAYER_MISSION_REPOSITORY } = await import("../di/tokens");
       const playerMissions = getService<
         import("../repositories/playerMissionRepository").PlayerMissionRepository
       >(PLAYER_MISSION_REPOSITORY);
@@ -534,7 +534,6 @@ export const TOOLS: ToolDefinition[] = [
     params: '{ name: string, ipAddress: string, type: "underground"|"corporate"|"government"|"tutorial", role: "gateway"|"router"|"workstation"|"database"|"email"|"firewall"|"dns", securityLevel: number (1-10), description?: string }',
     execute: async (_prisma, params) => {
       const { getService } = await import("../di/container");
-      const { CONTENT_DRAFT_SERVICE } = await import("../di/tokens");
       const draftService = getService<ContentDraftService>(CONTENT_DRAFT_SERVICE);
 
       const draft = await draftService.createDraft({
@@ -564,7 +563,6 @@ export const TOOLS: ToolDefinition[] = [
     params: '{ name: string, zone: string, description: string }',
     execute: async (_prisma, params) => {
       const { getService } = await import("../di/container");
-      const { CONTENT_DRAFT_SERVICE } = await import("../di/tokens");
       const draftService = getService<ContentDraftService>(CONTENT_DRAFT_SERVICE);
 
       const draft = await draftService.createDraft({
@@ -587,7 +585,6 @@ export const TOOLS: ToolDefinition[] = [
     params: '{ serverId: string, path: string, name: string, content: string, isHidden?: boolean }',
     execute: async (_prisma, params) => {
       const { getService } = await import("../di/container");
-      const { CONTENT_DRAFT_SERVICE } = await import("../di/tokens");
       const draftService = getService<ContentDraftService>(CONTENT_DRAFT_SERVICE);
 
       // Verify server exists
@@ -620,7 +617,6 @@ export const TOOLS: ToolDefinition[] = [
     params: '{ sourceId: string, targetId: string, linkType?: "lan"|"wan"|"vpn"|"backbone"|"hidden", latency?: number }',
     execute: async (_prisma, params) => {
       const { getService } = await import("../di/container");
-      const { CONTENT_DRAFT_SERVICE } = await import("../di/tokens");
       const draftService = getService<ContentDraftService>(CONTENT_DRAFT_SERVICE);
 
       const draft = await draftService.createDraft({
@@ -645,7 +641,6 @@ export const TOOLS: ToolDefinition[] = [
     params: '{ forumId: string, authorHandle: string, title: string, content: string }',
     execute: async (_prisma, params) => {
       const { getService } = await import("../di/container");
-      const { CONTENT_DRAFT_SERVICE } = await import("../di/tokens");
       const draftService = getService<ContentDraftService>(CONTENT_DRAFT_SERVICE);
 
       // Get a valid author ID (use first NPC user)

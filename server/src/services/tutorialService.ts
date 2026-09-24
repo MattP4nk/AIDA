@@ -34,13 +34,7 @@ import { Logger } from "pino";
 import MissionService from "./missionService";
 import MessageService from "./messageService";
 import { resolveAiPersonaUserId } from "../utils/aiUserIdentity";
-import {
-  PRISMA_CLIENT,
-  MISSION_SERVICE,
-  MESSAGE_SERVICE,
-  LOGGER,
-  PLAYER_MISSION_REPOSITORY,
-} from "../di/tokens";
+import { LOGGER, MESSAGE_SERVICE, MISSION_SERVICE, PERSONA_MAIL_QUEUE_SERVICE, PLAYER_MISSION_REPOSITORY, PRISMA_CLIENT } from "../di/tokens";
 import type PlayerMissionRepository from "../repositories/playerMissionRepository";
 
 // ═══════════════════════════════════════════════════════════════════
@@ -661,7 +655,6 @@ export class TutorialService {
       const staticHint = `${step.hint}\n\n— The Architect`;
 
       const { getService } = await import("../di/container");
-      const { PERSONA_MAIL_QUEUE_SERVICE } = await import("../di/tokens");
       const mailQueue =
         getService<import("./personaMailQueueService").PersonaMailQueueService>(
           PERSONA_MAIL_QUEUE_SERVICE,

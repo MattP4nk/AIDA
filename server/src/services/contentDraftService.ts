@@ -10,7 +10,7 @@ import "reflect-metadata";
 import { injectable, inject } from "tsyringe";
 import { PrismaClient } from "@prisma/client";
 import type { Logger } from "pino";
-import { PRISMA_CLIENT, LOGGER } from "../di/tokens";
+import { CONTENT_QUEUE_SERVICE, LOGGER, PRISMA_CLIENT } from "../di/tokens";
 import { resolveNpcOwnerId } from "../../prisma/npcOwnership";
 
 import type { ContentQueueService } from "./contentQueueService";
@@ -273,7 +273,6 @@ export class ContentDraftService {
     // Queue content provisioning
     try {
       const { getService } = await import("../di/container");
-      const { CONTENT_QUEUE_SERVICE } = await import("../di/tokens");
       const contentQueue = getService<ContentQueueService>(CONTENT_QUEUE_SERVICE);
       await contentQueue.enqueue(server.id, 5 /* NORMAL */);
     } catch { /* non-critical */ }

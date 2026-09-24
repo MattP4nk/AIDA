@@ -1,6 +1,11 @@
-import { Command, CommandResult } from "../../../../shared/types";
-import { PrismaClient } from "@prisma/client";
-import { Server as SocketIOServer } from "socket.io";
+// A5: type-only. All three are used purely as types here, but a VALUE import
+// of the shared barrel pulls in a runtime module (shared/types/index.ts
+// re-exports real consts such as ReservedPID) from what is otherwise a pure
+// declaration file imported by 20 others. PLAN pointed at line 21 — which was
+// already `import type` — and missed these three.
+import type { Command, CommandResult } from "../../../../shared/types";
+import type { PrismaClient } from "@prisma/client";
+import type { Server as SocketIOServer } from "socket.io";
 
 // Use type-only imports to avoid circular dependency issues
 import type PlayerProgressRepository from "../../repositories/playerProgressRepository";

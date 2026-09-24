@@ -4,6 +4,7 @@ import { asyncHandler } from "../../middleware/setup";
 import { NotFoundError, ValidationError } from "../../../../shared/types";
 
 import type { ContentDraftService } from "../../services/contentDraftService";
+import { CONTENT_DRAFT_SERVICE } from "../../di/tokens";
 const router = Router();
 
 // GET / — List drafts with filtering and pagination
@@ -61,7 +62,6 @@ router.get("/:id", asyncHandler(async (req: any, res: any) => {
 router.post("/:id/approve", asyncHandler(async (req: any, res: any) => {
   const { reviewNote } = req.body;
   const { getService } = await import("../../di/container");
-  const { CONTENT_DRAFT_SERVICE } = await import("../../di/tokens");
   const draftService = getService<ContentDraftService>(CONTENT_DRAFT_SERVICE);
 
   const { draft, resultId } = await draftService.approveDraft(

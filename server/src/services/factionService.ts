@@ -12,6 +12,7 @@ import { FactionStandingInfo, FactionRank } from "../../../shared/types";
 import { LOGGER, MISSION_INTEGRATION_SERVICE } from "../di/tokens";
 import type MissionIntegrationService from "./missionIntegration";
 import { safeExecute } from "../utils/safeExecute";
+import * as TOKENS from "../di/tokens";
 import {
   REPUTATION_MIN,
   REPUTATION_MAX,
@@ -75,7 +76,7 @@ export class FactionService extends EventEmitter {
         const { getService } = await import("../di/container");
         const darknetService = getService<
           import("./darknetDiscoveryService").default
-        >("DarkNetDiscoveryService");
+        >(TOKENS.DARKNET_DISCOVERY_SERVICE);
         showHidden = darknetService.hasDiscoveredDarkNet(userId);
       } catch {
         /* Not available */
@@ -155,7 +156,7 @@ export class FactionService extends EventEmitter {
             const { getService } = await import("../di/container");
             const darknetService = getService<
               import("./darknetDiscoveryService").default
-            >("DarkNetDiscoveryService");
+            >(TOKENS.DARKNET_DISCOVERY_SERVICE);
             if (!darknetService.hasDiscoveredDarkNet(userId)) {
               return { success: false, message: "Faction not found." };
             }

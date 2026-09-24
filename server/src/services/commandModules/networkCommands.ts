@@ -4,6 +4,7 @@ import logger from "../../logger";
 import { spawnBackgroundProcess, successResult, errorResult, refreshComputerSpec } from "./helpers";
 import { redactSensitiveContent } from "../../utils/contentRedaction";
 import type { ContentQueueService } from "../contentQueueService";
+import { CONTENT_QUEUE_SERVICE } from "../../di/tokens";
 import {
   validateIPAddress,
   validateServerId,
@@ -196,7 +197,6 @@ export class NetworkCommandsModule implements CommandModule {
             // Pre-warm discovered servers via content queue
             try {
               const { getService } = await import("../../di/container");
-              const { CONTENT_QUEUE_SERVICE } = await import("../../di/tokens");
               const contentQueue = getService<ContentQueueService>(CONTENT_QUEUE_SERVICE);
               for (const r of results) {
                 const sid = (r as any).serverId || (r as any).server?.id || (r as any).id;
@@ -833,7 +833,6 @@ export class NetworkCommandsModule implements CommandModule {
         if (isFirstVisit && !targetServer.isPlayerHome) {
           try {
             const { getService } = await import("../../di/container");
-            const { CONTENT_QUEUE_SERVICE } = await import("../../di/tokens");
             const contentQueue = getService<ContentQueueService>(CONTENT_QUEUE_SERVICE);
             await contentQueue.enqueue(targetServer.id, 1 /* URGENT */, {}, context.userId);
           } catch { /* non-critical */ }
@@ -859,7 +858,6 @@ export class NetworkCommandsModule implements CommandModule {
     if (!targetServer.isPlayerHome && targetServer.type !== "player_home") {
       try {
         const { getService } = await import("../../di/container");
-        const { CONTENT_QUEUE_SERVICE } = await import("../../di/tokens");
         const contentQueue = getService<ContentQueueService>(CONTENT_QUEUE_SERVICE);
         await contentQueue.ensureReady(targetServer.id, context.userId);
       } catch { /* non-critical — connect anyway */ }
@@ -1605,7 +1603,6 @@ export class NetworkCommandsModule implements CommandModule {
         if (!targetServer.isPlayerHome && targetServer.type !== "player_home") {
           try {
             const { getService } = await import("../../di/container");
-            const { CONTENT_QUEUE_SERVICE } = await import("../../di/tokens");
             const contentQueue = getService<ContentQueueService>(CONTENT_QUEUE_SERVICE);
             await contentQueue.ensureReady(targetServer.id, context.userId);
           } catch { /* non-critical */ }

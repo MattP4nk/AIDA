@@ -6,6 +6,7 @@ import { ServerContestInfo, FactionResources } from "../../../shared/types";
 import { getService } from "../di/container";
 import { LOGGER, PERSONA_SERVICE, DYNAMIC_CONTENT_SERVICE } from "../di/tokens";
 import { safeExecute } from "../utils/safeExecute";
+import * as TOKENS from "../di/tokens";
 
 /** Cost to initiate a contest */
 const CONTEST_COST: Partial<FactionResources> = { credits: 500, compute: 200 };
@@ -93,7 +94,7 @@ export default class ContestService {
 
     // Spend resources
     const { getService } = await import("../di/container");
-    const resourceService = getService<import("./resourceService").default>("ResourceService");
+    const resourceService = getService<import("./resourceService").default>(TOKENS.RESOURCE_SERVICE);
 
     const canAfford = await resourceService.spendResources(attackingFactionId, CONTEST_COST);
     if (!canAfford) {

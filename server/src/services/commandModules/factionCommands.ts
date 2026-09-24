@@ -1,6 +1,7 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
 import { successResult, errorResult } from "./helpers";
+import * as TOKENS from "../../di/tokens";
 import {
   helpPanel,
   table,
@@ -454,7 +455,7 @@ export class FactionCommandsModule implements CommandModule {
 
     const { getService } = await import("../../di/container");
     const resourceService =
-      getService<import("../resourceService").default>("ResourceService");
+      getService<import("../resourceService").default>(TOKENS.RESOURCE_SERVICE);
     const resources = await resourceService.getFactionResources(
       membership.factionId,
     );
@@ -562,7 +563,7 @@ export class FactionCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const { getService } = await import("../../di/container");
     const contestService =
-      getService<import("../contestService").default>("ContestService");
+      getService<import("../contestService").default>(TOKENS.CONTEST_SERVICE);
 
     const membership = await context.services.factionService.getUserFaction(
       context.userId,
@@ -614,7 +615,7 @@ export class FactionCommandsModule implements CommandModule {
 
     const { getService } = await import("../../di/container");
     const contestService =
-      getService<import("../contestService").default>("ContestService");
+      getService<import("../contestService").default>(TOKENS.CONTEST_SERVICE);
 
     const shortId = args[0]!;
     const side = (args[1]?.toLowerCase() || "neutral") as
@@ -649,7 +650,7 @@ export class FactionCommandsModule implements CommandModule {
 
     const { getService } = await import("../../di/container");
     const contestService =
-      getService<import("../contestService").default>("ContestService");
+      getService<import("../contestService").default>(TOKENS.CONTEST_SERVICE);
 
     const shortId = args[0]!;
     const contestId = await contestService.findContestByShortId(shortId);
@@ -701,7 +702,7 @@ export class FactionCommandsModule implements CommandModule {
 
     const { getService } = await import("../../di/container");
     const contestService =
-      getService<import("../contestService").default>("ContestService");
+      getService<import("../contestService").default>(TOKENS.CONTEST_SERVICE);
 
     const result = await contestService.declareContest(
       context.userId,
@@ -718,7 +719,7 @@ export class FactionCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const { getService } = await import("../../di/container");
     const warfareService =
-      getService<import("../warfareService").default>("WarfareService");
+      getService<import("../warfareService").default>(TOKENS.WARFARE_SERVICE);
 
     const sub = args[0]?.toLowerCase();
 

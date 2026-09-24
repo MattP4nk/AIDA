@@ -24,15 +24,7 @@ import {
 import { injectable, inject } from "tsyringe";
 import { safeExecute } from "../utils/safeExecute";
 import { Logger } from "pino";
-import {
-  LOGGER,
-  SOCKET_IO,
-  EVENT_SERVICE,
-  COMMAND_PROCESSOR,
-  SHOP_SERVICE,
-  MISSION_SERVICE,
-  FACTION_SERVICE,
-} from "../di/tokens";
+import { COMMAND_PROCESSOR, EVENT_SERVICE, FACTION_SERVICE, FILE_SERVICE, LOGGER, MISSION_SERVICE, NETWORK_TOPOLOGY_SERVICE, SERVER_SERVICE, SHOP_SERVICE, SOCKET_IO } from "../di/tokens";
 import { getService } from "../di/container";
 import type EventService from "./eventService";
 import type CommandProcessor from "./commandProcessor";
@@ -210,7 +202,6 @@ class GameStateManager extends EventEmitter {
       await safeExecute({
         fn: async () => {
           const { getService } = await import("../di/container");
-          const { NETWORK_TOPOLOGY_SERVICE } = await import("../di/tokens");
           const topoService = getService<NetworkTopologyService>(NETWORK_TOPOLOGY_SERVICE);
           await topoService.createHomeLink(homeServerId);
         },
@@ -575,7 +566,6 @@ class GameStateManager extends EventEmitter {
   ): Promise<{ allowed: boolean; reason: string }> {
     try {
       const { getService } = await import("../di/container");
-      const { SERVER_SERVICE, NETWORK_TOPOLOGY_SERVICE } = await import("../di/tokens");
 
       const serverService =
         getService<import("./serverService").default>(SERVER_SERVICE);
@@ -679,7 +669,6 @@ class GameStateManager extends EventEmitter {
         await safeExecute({
           fn: async () => {
             const { getService } = await import("../di/container");
-            const { FILE_SERVICE } = await import("../di/tokens");
             const fileService = getService<FileService>(FILE_SERVICE);
             await fileService.initializeFileSystem(
               serverId,
@@ -907,7 +896,6 @@ class GameStateManager extends EventEmitter {
       fn: async () => {
         // Import fileService
         const { getService } = await import("../di/container");
-        const { FILE_SERVICE } = await import("../di/tokens");
         const fileService = getService<FileService>(FILE_SERVICE);
 
         // Check if home server exists
@@ -994,7 +982,6 @@ class GameStateManager extends EventEmitter {
     await safeExecute({
       fn: async () => {
         const { getService } = await import("../di/container");
-        const { FILE_SERVICE } = await import("../di/tokens");
         const fileService = getService<FileService>(FILE_SERVICE);
 
         // Get user info

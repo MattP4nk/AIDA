@@ -19,7 +19,7 @@ import "reflect-metadata";
 import { injectable, inject } from "tsyringe";
 import { PrismaClient } from "@prisma/client";
 import type { Logger } from "pino";
-import { PRISMA_CLIENT, LOGGER } from "../di/tokens";
+import { ARCHITECT_INTERVENTION_EXECUTOR, LOGGER, PRISMA_CLIENT, SOCKET_IO } from "../di/tokens";
 import type { ContentDraftService } from "./contentDraftService";
 import { safeExecute } from "../utils/safeExecute";
 
@@ -196,7 +196,6 @@ export class EpochSchedulerService {
     return await safeExecute({
       fn: async () => {
         const { getService } = await import("../di/container");
-        const { ARCHITECT_INTERVENTION_EXECUTOR } = await import("../di/tokens");
         const executor = getService<ArchitectInterventionExecutor>(ARCHITECT_INTERVENTION_EXECUTOR);
 
         if (!executor) throw new Error("ArchitectInterventionExecutor not available");
@@ -242,7 +241,6 @@ export class EpochSchedulerService {
     if (payload.notifyPlayers) {
       try {
         const { getService } = await import("../di/container");
-        const { SOCKET_IO } = await import("../di/tokens");
         const io = getService<SocketIOServer>(SOCKET_IO);
         if (io) {
           io.emit("notification", {

@@ -12,12 +12,7 @@ import { HackMethod } from "../types/game";
 import { injectable, inject } from "tsyringe";
 import { safeExecute } from "../utils/safeExecute";
 import { Logger } from "pino";
-import {
-  LOGGER,
-  MISSION_INTEGRATION_SERVICE,
-  PLAYER_PROGRESS_REPOSITORY,
-  PROGRESS_SERVICE,
-} from "../di/tokens";
+import { BACKDOOR_SERVICE, FACTION_KNOWLEDGE_SERVICE, FACTION_SERVICE, FORUM_SERVICE, LOGGER, MEMORY_SERVICE, MISSION_INTEGRATION_SERVICE, NPC_REACTION_SERVICE, PERSONA_SERVICE, PLAYER_PROGRESS_REPOSITORY, PROGRESS_SERVICE, REPUTATION_ENGINE, SERVER_SERVICE, SOCKET_IO, TRACE_SERVICE } from "../di/tokens";
 import type MissionIntegrationService from "./missionIntegration";
 import type ProgressService from "./progressService";
 import type PlayerProgressRepository from "../repositories/playerProgressRepository";
@@ -129,7 +124,6 @@ class HackService extends EventEmitter {
   private async getServerService() {
     if (!this._serverService) {
       const { getService } = await import("../di/container");
-      const { SERVER_SERVICE } = await import("../di/tokens");
       this._serverService = getService(SERVER_SERVICE);
     }
     return this._serverService as { triggerSecurityAlert: (...args: unknown[]) => void };
@@ -139,7 +133,6 @@ class HackService extends EventEmitter {
   private async getReputationEngine() {
     if (!this._reputationEngine) {
       const { getService } = await import("../di/container");
-      const { REPUTATION_ENGINE } = await import("../di/tokens");
       this._reputationEngine = getService(REPUTATION_ENGINE);
     }
     return this._reputationEngine as { onServerHacked: (...args: unknown[]) => Promise<void> };
@@ -1244,7 +1237,6 @@ class HackService extends EventEmitter {
       await safeExecute({
         fn: async () => {
           const { getService } = await import("../di/container");
-          const { BACKDOOR_SERVICE } = await import("../di/tokens");
           const backdoorService = getService<BackdoorService>(BACKDOOR_SERVICE);
           const bdResult = await backdoorService.installBackdoor(
             session.attackerId,
@@ -1272,7 +1264,6 @@ class HackService extends EventEmitter {
       await safeExecute({
         fn: async () => {
           const { getService } = await import("../di/container");
-          const { TRACE_SERVICE } = await import("../di/tokens");
           const traceService = getService<TraceService>(TRACE_SERVICE);
           const trResult = await traceService.initiateTrace(
             session.attackerId,
@@ -1448,7 +1439,6 @@ class HackService extends EventEmitter {
       await safeExecute({
         fn: async () => {
           const { getService } = await import("../di/container");
-          const { PERSONA_SERVICE } = await import("../di/tokens");
           const personaService =
             getService<import("./personaService").PersonaService>(
               PERSONA_SERVICE,
@@ -1997,7 +1987,6 @@ class HackService extends EventEmitter {
         if (attackerId) {
           try {
             const { getService } = await import("../di/container");
-            const { TRACE_SERVICE } = await import("../di/tokens");
             const traceService = getService<TraceService>(TRACE_SERVICE);
             // R5: this passed THREE arguments to a four-parameter method. The
             // effect was not a crash — `initiateTrace` catches its own errors
@@ -2027,7 +2016,6 @@ class HackService extends EventEmitter {
             // caller. Only register when a trace actually exists, and key it by
             // the trace we just created.
             if (traceResult?.success && traceResult.trace?.id) {
-              const { MEMORY_SERVICE } = await import("../di/tokens");
               const memoryService = getService<MemoryService>(MEMORY_SERVICE);
               memoryService.registerActiveTrace(
                 attackerId,
@@ -2064,7 +2052,6 @@ class HackService extends EventEmitter {
     await safeExecute({
       fn: async () => {
         const { getService } = await import("../di/container");
-        const { SOCKET_IO } = await import("../di/tokens");
         const io = getService<SocketIOServer>(SOCKET_IO);
 
         const messages: Record<string, string> = {
@@ -2105,7 +2092,6 @@ class HackService extends EventEmitter {
   ): Promise<boolean> {
     try {
       const { getService } = await import("../di/container");
-      const { NPC_REACTION_SERVICE } = await import("../di/tokens");
       const reactionService =
         getService<import("./npcReactionService").NpcReactionService>(
           NPC_REACTION_SERVICE,
@@ -2131,7 +2117,6 @@ class HackService extends EventEmitter {
   ): Promise<void> {
     try {
       const { getService } = await import("../di/container");
-      const { PERSONA_SERVICE } = await import("../di/tokens");
       // Typed, NOT `getService<any>`. The `any` here is what let the arity bug
       // below survive: this call passed a single object to a 4-positional
       // method, so `serverFactionId`/`attackerUserId`/`detected` were all
@@ -2141,7 +2126,6 @@ class HackService extends EventEmitter {
         getService<import("./personaService").PersonaService>(PERSONA_SERVICE);
 
       // Feed knowledge to faction — they now know about the attacker
-      const { FACTION_KNOWLEDGE_SERVICE } = await import("../di/tokens");
       const fkService = getService<FactionKnowledgeService>(FACTION_KNOWLEDGE_SERVICE);
       await fkService.addEntry(factionId, {
         assetType: "player",
@@ -2249,7 +2233,6 @@ class HackService extends EventEmitter {
       // Notify faction members via Socket.IO
       try {
         const { getService } = await import("../di/container");
-        const { SOCKET_IO } = await import("../di/tokens");
         const io = getService<SocketIOServer>(SOCKET_IO);
 
         // Get all faction members to notify
@@ -2281,7 +2264,6 @@ class HackService extends EventEmitter {
         });
 
         if (faction?.aiPersonaId) {
-          const { FORUM_SERVICE } = await import("../di/tokens");
           const forumService = getService<ForumService>(FORUM_SERVICE);
 
           // Find faction forum
@@ -2323,7 +2305,6 @@ class HackService extends EventEmitter {
     await safeExecute({
       fn: async () => {
         const { getService } = await import("../di/container");
-        const { FACTION_SERVICE } = await import("../di/tokens");
         const factionService = getService<FactionService>(FACTION_SERVICE);
 
         // Penalty scales with evidence: 61-80% → -5 rep, 81-100% → -15 rep

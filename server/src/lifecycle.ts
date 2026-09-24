@@ -3,7 +3,7 @@ import { Server as SocketIOServer } from "socket.io";
 import logger from "./logger";
 import { db } from "./database/client";
 import { getService } from "./di/container";
-import { GAME_STATE_MANAGER, PROGRESS_SERVICE, AI_SCHEDULER_SERVICE, RESOURCE_SERVICE, WARFARE_SERVICE, AI_SERVICE, CONTENT_QUEUE_SERVICE, HACK_SERVICE } from "./di/tokens";
+import { AI_SCHEDULER_SERVICE, AI_SERVICE, CONTENT_QUEUE_SERVICE, GAME_STATE_MANAGER, HACK_SERVICE, MISSION_SERVICE, PERSONA_MAIL_QUEUE_SERVICE, PROGRESS_SERVICE, RESOURCE_SERVICE, WARFARE_SERVICE } from "./di/tokens";
 import { stopCsrfCleanup } from "./middleware/csrf";
 import type GameStateManager from "./services/gameStateManager";
 import type ProgressService from "./services/progressService";
@@ -15,6 +15,8 @@ import type { ContentQueueService } from "./services/contentQueueService";
 import type HackService from "./services/hackService";
 import type MissionService from "./services/missionService";
 import type { PersonaMailQueueService } from "./services/personaMailQueueService";
+// A5: static — di/tokens has no imports, so there is no cycle to defer.
+import * as tokens from "./di/tokens";
 let isShuttingDown = false;
 
 /**
@@ -79,7 +81,6 @@ export async function gracefulShutdown(
 
     // Stop mission expiration checker
     try {
-      const { MISSION_SERVICE } = await import("./di/tokens");
       const missionService = getService<MissionService>(MISSION_SERVICE);
       missionService.stopExpirationChecker();
       logger.info("Mission expiration checker stopped");
@@ -102,7 +103,6 @@ export async function gracefulShutdown(
     // Stop persona mail queue. Queued rows survive in the database, so anything
     // undelivered is picked up on the next boot rather than lost.
     try {
-      const { PERSONA_MAIL_QUEUE_SERVICE } = await import("./di/tokens");
       const mailQueue = getService<PersonaMailQueueService>(PERSONA_MAIL_QUEUE_SERVICE);
       mailQueue.stop();
       logger.info("Persona mail queue stopped");
@@ -128,7 +128,6 @@ export async function gracefulShutdown(
       ["PLAYER_PRESENCE_SERVICE", "Presence cleanup", "stop"],
     ] as const) {
       try {
-        const tokens = await import("./di/tokens");
         const svc = getService<Record<string, () => void>>(
           (tokens as Record<string, string>)[token]!,
         );

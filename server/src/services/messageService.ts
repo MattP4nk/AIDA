@@ -28,14 +28,7 @@ import { Server as SocketIOServer } from "socket.io";
 import crypto from "crypto";
 import { Logger } from "pino";
 import { injectable, inject } from "tsyringe";
-import {
-  LOGGER,
-  SOCKET_IO,
-  MISSION_INTEGRATION_SERVICE,
-  AI_SERVICE,
-  MESSAGE_ENCRYPTION_SERVICE,
-  PLAYER_PROGRESS_REPOSITORY,
-} from "../di/tokens";
+import { AI_SERVICE, LOGGER, MESSAGE_ENCRYPTION_SERVICE, MISSION_INTEGRATION_SERVICE, PLAYER_PROGRESS_REPOSITORY, SOCKET_IO, STORY_PROGRESSION_SERVICE } from "../di/tokens";
 import type PlayerProgressRepository from "../repositories/playerProgressRepository";
 import { safeExecute } from "../utils/safeExecute";
 import type { MessageEncryptionService } from "./messageEncryptionService";
@@ -1315,7 +1308,6 @@ export class MessageService {
       // 6b. Record token_used event to StoryLedger
       try {
         const { getService } = await import("../di/container");
-        const { STORY_PROGRESSION_SERVICE } = await import("../di/tokens");
         const storyProgression = getService<
           import("./storyProgressionService").StoryProgressionService
         >(STORY_PROGRESSION_SERVICE);

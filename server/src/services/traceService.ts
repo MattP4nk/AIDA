@@ -2,7 +2,7 @@ import { EventEmitter } from "events";
 import { injectable, inject } from "tsyringe";
 import { Logger } from "pino";
 import { db } from "../database/client";
-import { LOGGER, PLAYER_PROGRESS_REPOSITORY } from "../di/tokens";
+import { LOGGER, MEMORY_SERVICE, PLAYER_PROGRESS_REPOSITORY } from "../di/tokens";
 import type PlayerProgressRepository from "../repositories/playerProgressRepository";
 
 import type MemoryService from "./memoryService";
@@ -545,7 +545,6 @@ class TraceService extends EventEmitter {
   ): Promise<void> {
     try {
       const { getService } = await import("../di/container");
-      const { MEMORY_SERVICE } = await import("../di/tokens");
       const memoryService = getService<MemoryService>(MEMORY_SERVICE);
       memoryService.unregisterActiveTrace(userId, traceId);
     } catch (err) {

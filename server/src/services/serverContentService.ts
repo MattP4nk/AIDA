@@ -28,7 +28,7 @@ import { resolveNpcOwnerId } from "../../prisma/npcOwnership";
 import { injectable, inject } from "tsyringe";
 import { PrismaClient } from "@prisma/client";
 import type { Logger } from "pino";
-import { LOGGER, AI_SERVICE } from "../di/tokens";
+import { AI_SERVICE, FILE_SERVICE, IP_SERVICE, LOGGER, REFERENCE_VALIDATION_SERVICE, SERVER_SERVICE, SOCKET_IO } from "../di/tokens";
 import type { AIService } from "./aiService";
 import { ContentEncoder } from "../utils/contentEncoder";
 import { validateOrRetry, validateContentPlan } from "../utils/aiOutputValidator";
@@ -1742,7 +1742,6 @@ export class ServerContentService {
     // Notify connected players that new files appeared
     try {
       const { getService } = await import("../di/container");
-      const { SOCKET_IO } = await import("../di/tokens");
       const io = getService<SocketIOServer>(SOCKET_IO);
       io.to(`server:${serverId}`).emit("command:result", {
         success: true,
@@ -2105,7 +2104,6 @@ export class ServerContentService {
     let fileService: { initializeFileSystem: (s: string, o: string) => Promise<void> } | null = null;
     try {
       const { getService } = await import("../di/container");
-      const { FILE_SERVICE } = await import("../di/tokens");
       fileService = getService(FILE_SERVICE);
     } catch {
       // FileService genuinely unavailable — fall through to the Prisma path.
@@ -2237,7 +2235,6 @@ export class ServerContentService {
       // Auto-backfill: scan generated file content for IPs/URLs that don't exist
       try {
         const { getService } = await import("../di/container");
-        const { REFERENCE_VALIDATION_SERVICE } = await import("../di/tokens");
         const refService = getService<ReferenceValidationService>(REFERENCE_VALIDATION_SERVICE);
         if (refService) {
           const allContent = validated.files.map((f: any) => f.content || "").join("\n");
@@ -2633,7 +2630,6 @@ export class ServerContentService {
   } | null> {
     try {
       const { getService } = await import("../di/container");
-      const { IP_SERVICE, SERVER_SERVICE } = await import("../di/tokens");
       const ipService = getService<IPService>(IP_SERVICE);
       const serverService = getService<ServerService>(SERVER_SERVICE);
 
@@ -2820,7 +2816,6 @@ export class ServerContentService {
 
     // Plant the files
     const { getService } = await import("../di/container");
-    const { FILE_SERVICE } = await import("../di/tokens");
     const fileService = getService<FileService>(FILE_SERVICE);
 
     for (const file of missionFiles) {

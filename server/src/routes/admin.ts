@@ -2,7 +2,7 @@ import { Router } from "express";
 import { db } from "../database/client";
 import { authenticateToken, requireRole } from "../middleware/auth";
 import { getService } from "../di/container";
-import { GAME_STATE_MANAGER } from "../di/tokens";
+import { AI_SERVICE, GAME_STATE_MANAGER } from "../di/tokens";
 import type GameStateManager from "../services/gameStateManager";
 import type { AIService } from "../services/aiService";
 
@@ -32,7 +32,6 @@ async function getAiHealthCached(): Promise<Record<string, unknown>> {
   let value: Record<string, unknown>;
   try {
     const { getService } = await import("../di/container");
-    const { AI_SERVICE } = await import("../di/tokens");
     const aiService = getService<AIService>(AI_SERVICE);
     const reachable = await aiService.checkHealth();
     value = { status: reachable ? "connected" : "unreachable", ...aiService.getMetrics() };
