@@ -313,6 +313,22 @@ export class FileCommandsModule implements CommandModule {
                 timestamp: new Date(),
               });
             }
+            // R12: report the failure. There was no else at all, and
+            // `createFile` RETURNS `{ success: false }` for cases like
+            // FILE_EXISTS rather than throwing — so the `catch` below never
+            // fired and the player got NO response. Downloading the same file
+            // twice left the terminal waiting on a command that had finished.
+            //
+            // Attached to `result.success`, not to the `context.io` check it
+            // first landed on — TypeScript caught that by narrowing `io` to
+            // `never` inside the wrong branch.
+            if (!result.success && context.io) {
+              context.io.to(`player:${userId}`).emit("command:result", {
+                success: false,
+                output: `Download failed: ${result.message ?? "could not save to home server."}`,
+                timestamp: new Date(),
+              });
+            }
           } catch (err) {
             if (context.io) {
               context.io.to(`player:${userId}`).emit("command:result", {

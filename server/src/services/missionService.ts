@@ -667,6 +667,22 @@ class MissionService extends EventEmitter {
         throw new Error("Player progress not found");
       }
 
+      // R12: tutorial missions cannot be abandoned.
+      //
+      // Nothing checked the type, so a player could abandon a tutorial step —
+      // which sets it "failed" and frees the Mission row, while
+      // `advanceTutorial` only ever fires on COMPLETION. The tutorial chain
+      // then stalls with no way to resume it and no message saying why.
+      const missionRow = await this.prisma.mission.findUnique({
+        where: { id: missionId },
+        select: { type: true },
+      });
+      if (missionRow?.type === "tutorial") {
+        throw new Error(
+          "Tutorial missions cannot be abandoned — complete it to continue.",
+        );
+      }
+
       // D3: serialised, so abandoning cannot race a concurrent completion and
       // overwrite it with "failed".
       const playerMission = await this.playerMissions.mutate(

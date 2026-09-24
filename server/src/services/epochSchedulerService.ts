@@ -250,23 +250,41 @@ export class EpochSchedulerService {
 
     if (!currentEpoch) throw new Error("No active epoch to advance from");
 
+    // R12: find the successor BEFORE retiring the current epoch.
+    //
+    // The completion ran first and unconditionally, so advancing when no
+    // successor exists left the world with ZERO active epochs — and since
+    // this method begins by requiring one, every later advance then threw
+    // "No active epoch to advance from" forever. That is not hypothetical:
+    // the seeded world ships with exactly one epoch (epochNum 0, active), so
+    // the very first advance would have stranded it.
+    const nextEpoch = await this.prisma.narrativeEpoch.findFirst({
+      where: { order: { gt: currentEpoch.order }, status: "draft" },
+      orderBy: { order: "asc" },
+    });
+
+    if (!nextEpoch) {
+      this.logger.warn(
+        { currentEpoch: currentEpoch.epochNum },
+        "No draft epoch follows the active one — staying put rather than retiring it",
+      );
+      return {
+        advanced: false,
+        reason: "no successor epoch",
+        epochNum: currentEpoch.epochNum,
+      };
+    }
+
     // Complete current epoch
     await this.prisma.narrativeEpoch.update({
       where: { id: currentEpoch.id },
       data: { status: "completed", endedAt: new Date() },
     });
 
-    // Find next epoch by order
-    const nextEpoch = await this.prisma.narrativeEpoch.findFirst({
-      where: { order: { gt: currentEpoch.order }, status: "draft" },
-      orderBy: { order: "asc" },
+    await this.prisma.narrativeEpoch.update({
+      where: { id: nextEpoch.id },
+      data: { status: "active", startedAt: new Date() },
     });
-
-    if (nextEpoch) {
-      await this.prisma.narrativeEpoch.update({
-        where: { id: nextEpoch.id },
-        data: { status: "active", startedAt: new Date() },
-      });
 
       // Record epoch transition in story ledger
       await this.prisma.storyLedger.create({
@@ -283,17 +301,10 @@ export class EpochSchedulerService {
         },
       });
 
-      return {
-        completedEpoch: currentEpoch.title,
-        activatedEpoch: nextEpoch.title,
-        newEpochNum: nextEpoch.epochNum,
-      };
-    }
-
     return {
       completedEpoch: currentEpoch.title,
-      activatedEpoch: null,
-      note: "No next epoch available",
+      activatedEpoch: nextEpoch.title,
+      newEpochNum: nextEpoch.epochNum,
     };
   }
 

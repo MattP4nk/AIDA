@@ -874,6 +874,59 @@ comment — the removed code's replacement comment names `player:levelup` in
 prose. Third time this session a substring check matched text I had just
 written. It now matches the `this.emit("player:levelup"` CALL.
 
+
+### Phase 5 R12 (pass 2) — three more fixed, three reported
+
+**Fixed:**
+
+5. **Advancing the last epoch stranded the world.** `handleAdvanceEpoch`
+   completed the current epoch **unconditionally**, then looked for a successor
+   with `status: "draft"`. The seeded world ships with exactly **one** epoch
+   (epochNum 0, active) and no drafts — so the very first advance would have
+   retired it and left ZERO active epochs, after which the method's own opening
+   requirement ("No active epoch to advance from") makes every future advance
+   throw. Permanent, unrecoverable without manual DB surgery. The successor is
+   now found first, and the transition is skipped with a reason if there is
+   none. Note the plan's framing ("epoch transition activation") was wrong —
+   activation *does* happen when a successor exists; the defect is the
+   unconditional retirement.
+6. **Tutorial missions could be abandoned.** Nothing checked the type, so
+   `abandon` on a tutorial step set it "failed" and freed the Mission row —
+   while `advanceTutorial` only ever fires on COMPLETION. The chain stalled
+   with no way to resume and no message explaining why.
+7. **A failed download was silent.** `if (result.success) { …emit… }` had no
+   `else`, and `createFile` RETURNS `{ success: false }` for cases like
+   FILE_EXISTS rather than throwing — so the surrounding `catch` never fired
+   and the player got **no response at all**. Downloading the same file twice
+   left the terminal waiting on a command that had already finished.
+
+**Reported, not fixed — each needs a decision rather than a repair:**
+
+- **`maxAttempts` on connection challenges is per-session and in-memory.**
+  `activeSessions` is a `Map`; exhausting attempts marks the session failed and
+  `cleanup()` removes it, so the player can immediately start a fresh one. No
+  attempt count is persisted anywhere (the only `attempts`/`maxAttempts` columns
+  in the schema belong to `ContentJob` and `PendingPersonaMail`). Making the
+  limit mean anything requires choosing a cooldown or a persistent failure
+  record — a balance decision.
+- **`exploit`, `backdoor` and `rootkit` do not route through the minigame
+  layer.** `hack` gates on `canSpawnProcess("hack_prep")` and spawns a process;
+  the other three resolve instantly. Routing them through the same layer is a
+  gameplay change, not a bug fix.
+- **Traceroute hop-masking: no masking code exists at all.** Grepping
+  `networkCommands` for mask/hide/hop/reveal returns nothing, so there is
+  nothing to repair — this item needs its original finding to say what the
+  intended behaviour was.
+
+Evidence: `scripts/verify-phase5-r12-progression.ts` **14/14** (up from 8),
+negative-controlled on the epoch guard — reverting it reports
+*"STRANDED — zero active epochs, every future advance now throws"*.
+
+**Note on that control:** it mutated the live dev database, completing the only
+epoch, and I had to restore it afterwards. A negative control that exercises a
+destructive path leaves real damage; worth building such controls against a
+disposable fixture in future rather than the seeded world.
+
 ## Decisions log
 
 Recorded so the plan stays internally consistent as it evolves.
