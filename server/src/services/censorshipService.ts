@@ -3,7 +3,12 @@ import { PrismaClient, CensorshipRule } from "@prisma/client";
 import { Logger } from "pino";
 import { CensorshipAlert } from "../../../shared/types";
 import { getService } from "../di/container";
-import { DARKNET_DISCOVERY_SERVICE, LOGGER, PERSONA_SERVICE } from "../di/tokens";
+import {
+  CENSORSHIP_SERVICE,
+  DARKNET_DISCOVERY_SERVICE,
+  LOGGER,
+  PERSONA_SERVICE,
+} from "../di/tokens";
 
 interface FilterResult {
   text: string;
@@ -16,12 +21,46 @@ export default class CensorshipService {
   private rules: CensorshipRule[] = [];
   private compiledRules: { rule: CensorshipRule; regex: RegExp }[] = [];
 
+  /** Set once `loadRules` has actually completed. See `ensureRulesLoaded`. */
+  private rulesLoaded = false;
+  private loadInFlight: Promise<void> | null = null;
+
   constructor(
     @inject("PrismaClient") private prisma: PrismaClient,
     @inject(LOGGER) private logger: Logger,
   ) {
-    // Load rules on construction
-    this.loadRules().catch(() => {});
+    // Warm the cache, but this is only an optimisation: `ensureRulesLoaded`
+    // is what actually guarantees rules exist before any text is filtered.
+    // The failure is logged rather than swallowed — see `ensureRulesLoaded`
+    // for why a silent rejection here used to disable censorship outright.
+    this.loadRules().catch((err) => {
+      this.logger.error({ err }, "Initial censorship rule load failed");
+    });
+  }
+
+  /**
+   * A9 — guarantee rules are compiled, or throw.
+   *
+   * The constructor's load is fire-and-forget, and `seedDefaultRules` returns
+   * early when rules already exist (i.e. on every boot after the first), so it
+   * does NOT reload them. That left exactly one real load, whose rejection was
+   * swallowed by `.catch(() => {})`. When it failed, `compiledRules` stayed
+   * empty and `filterText` returned every input verbatim — a success. So the
+   * A9 rewrite fails closed on a DI failure that cannot happen, while the
+   * failure that CAN happen still published unfiltered text and silently
+   * stopped the `censorship_alert` events that drive DarkNet discovery.
+   *
+   * Throwing here routes that case into the callers' fail-closed handlers, and
+   * retrying on the next call lets a transient DB error self-heal.
+   */
+  public async ensureRulesLoaded(): Promise<void> {
+    if (this.rulesLoaded) return;
+    if (!this.loadInFlight) {
+      this.loadInFlight = this.loadRules().finally(() => {
+        this.loadInFlight = null;
+      });
+    }
+    await this.loadInFlight;
   }
 
   /**
@@ -67,6 +106,7 @@ export default class CensorshipService {
       }
     }
 
+    this.rulesLoaded = true;
     this.logger.info({ ruleCount: this.compiledRules.length }, "Censorship rules loaded");
   }
 
@@ -232,9 +272,15 @@ export async function filterContentOrThrow(
   context: { userId: string; serverId?: string | undefined; factionId?: string | undefined },
 ): Promise<string> {
   const { getService } = await import("../di/container");
-  const service = getService<CensorshipService>("CensorshipService");
-  if (!service) {
-    throw new Error("Censorship service unavailable — refusing to publish unfiltered content");
-  }
+  // `getService` is `container.resolve`, which THROWS on an unregistered
+  // token — it never returns falsy. An `if (!service)` guard here was dead
+  // code. Resolution failure propagates on its own, which is the behaviour
+  // this function wants anyway.
+  const service = getService<CensorshipService>(CENSORSHIP_SERVICE);
+
+  // The load that matters. Without this, an empty rule set filters nothing
+  // and reports success.
+  await service.ensureRulesLoaded();
+
   return service.filterAndAlert(text, context);
 }

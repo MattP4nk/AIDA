@@ -790,7 +790,16 @@ export class PlayerInfoCommandsModule implements CommandModule {
       // anyone could report ANY file in the game — including on servers they
       // have never reached — and its name, server, hidden and encrypted flags
       // were written into faction knowledge. Report what you can actually read.
-      if (!(await context.fileService.canUserReadFile(context.userId, file.id))) {
+      const currentServer = context.gameStateManager.getPlayerSession(
+        context.userId,
+      )?.currentServerId;
+      if (
+        !(await context.fileService.canUserReadFile(
+          context.userId,
+          file.id,
+          currentServer,
+        ))
+      ) {
         return errorResult(`File not found: ${assetId}`);
       }
       assetMeta = {
@@ -1448,48 +1457,36 @@ export class PlayerInfoCommandsModule implements CommandModule {
       const pathParts = filePath.split("/").filter(Boolean);
       const targetName = pathParts.pop() || filename;
 
-      // Walk the directory tree for accurate lookup (handles duplicate names)
-      let parentId: string | null = null;
-      if (pathParts.length > 0) {
-        let current = await db.client.fileSystemNode.findFirst({
-          where: { serverId, parentId: null, type: "directory" },
-          select: { id: true },
-        });
-        for (const part of pathParts) {
-          if (!current) break;
-          current = await db.client.fileSystemNode.findFirst({
-            where: { serverId, parentId: current.id, name: part },
-            select: { id: true },
-          });
-        }
-        parentId = current?.id || null;
-      }
-
       // S10: `...(parentId ? { parentId } : {})` dropped the directory scope
       // entirely for a bare filename, so `report file secrets.txt` matched that
       // name ANYWHERE on the server — including inside directories the player
-      // cannot read. `resolvePath` above already resolves a bare name against
-      // the player's current directory, so the parent is always resolvable;
-      // failing to resolve it means the directory does not exist, which is a
-      // "not found", not a licence to search the whole server.
-      if (parentId === null) {
-        const cwdParts = (session?.currentDirectory || "/").split("/").filter(Boolean);
-        let current = await db.client.fileSystemNode.findFirst({
-          where: { serverId, parentId: null, type: "directory" },
+      // cannot read. `resolvePath` above has already made `filePath` absolute,
+      // so the parent is whatever `pathParts` names; failing to resolve it
+      // means the directory does not exist, which is a "not found", not a
+      // licence to search the whole server.
+      //
+      // Walk ONCE, from the root. An earlier version of this fix walked a
+      // second time from the player's current directory whenever `parentId`
+      // came back null — which conflated "the path had no components" (a file
+      // at the root, the case it was written for) with "the walk broke
+      // partway". `report file /etc/keys.txt` on a server with no `/etc` then
+      // silently re-scoped to the cwd and reported `<cwd>/keys.txt` instead,
+      // naming the requested path in the success line.
+      let current = await db.client.fileSystemNode.findFirst({
+        where: { serverId, parentId: null, type: "directory" },
+        select: { id: true },
+      });
+      for (const part of pathParts) {
+        if (!current) break;
+        current = await db.client.fileSystemNode.findFirst({
+          where: { serverId, parentId: current.id, name: part },
           select: { id: true },
         });
-        for (const part of cwdParts) {
-          if (!current) break;
-          current = await db.client.fileSystemNode.findFirst({
-            where: { serverId, parentId: current.id, name: part },
-            select: { id: true },
-          });
-        }
-        if (!current) {
-          return errorResult(`File not found: ${filename}`);
-        }
-        parentId = current.id;
       }
+      if (!current) {
+        return errorResult(`File not found: ${filename}`);
+      }
+      const parentId: string = current.id;
 
       const file = await db.client.fileSystemNode.findFirst({
         where: { serverId, name: targetName, type: "file", parentId },
@@ -1502,7 +1499,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
 
       // S10: and the player must actually be able to READ it — reporting
       // copies its content into faction knowledge.
-      if (!(await context.fileService.canUserReadFile(userId, file.id))) {
+      if (!(await context.fileService.canUserReadFile(userId, file.id, serverId))) {
         return errorResult(`File not found: ${filename}`);
       }
 

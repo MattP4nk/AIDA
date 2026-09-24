@@ -258,8 +258,12 @@ export class MessageService {
           : maxEncryptionLevel;
 
         if (encryptionLevel > 0 && this.encryptionService) {
+          // A9: encrypt the FILTERED text. This read `options.content`, so
+          // every encrypted message stored the raw original and the censorship
+          // pass above — including its fail-closed handling — was a no-op the
+          // moment a player had enough cryptography skill to encrypt.
           const encryptionResult = await this.encryptionService.encryptMessage(
-            options.content,
+            filteredContent,
             encryptionLevel,
           );
           finalContent = encryptionResult.encryptedContent;

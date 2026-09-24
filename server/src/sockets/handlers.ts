@@ -102,7 +102,18 @@ interface UserLimiters {
   message: () => boolean;
   terminal: () => boolean;
   general: () => boolean;
+  /** When this budget was last consulted — drives the idle sweep below. */
+  lastUsed: number;
 }
+
+/**
+ * The longest limiter window (10s). An entry untouched for longer than this
+ * has an empty sliding window by definition, so discarding it is a no-op —
+ * which is what makes the sweep safe.
+ */
+const LIMITER_WINDOW_MS = 10_000;
+/** Ample margin over the window; the sweep is about memory, not precision. */
+const LIMITER_IDLE_MS = 60_000;
 
 const userLimiters = new Map<string, UserLimiters>();
 /** userId -> that user's live socket ids. */
@@ -119,15 +130,40 @@ function limitersFor(userId: string): UserLimiters {
   let limiters = userLimiters.get(userId);
   if (!limiters) {
     limiters = {
-      command: createSocketRateLimiter(20, 10_000), // 20 commands per 10s
-      message: createSocketRateLimiter(10, 10_000), // 10 messages per 10s
-      terminal: createSocketRateLimiter(10, 10_000), // 10 terminal ops per 10s
-      general: createSocketRateLimiter(30, 10_000), // 30 events per 10s
+      command: createSocketRateLimiter(20, LIMITER_WINDOW_MS), // 20 commands per 10s
+      message: createSocketRateLimiter(10, LIMITER_WINDOW_MS), // 10 messages per 10s
+      terminal: createSocketRateLimiter(10, LIMITER_WINDOW_MS), // 10 terminal ops per 10s
+      general: createSocketRateLimiter(30, LIMITER_WINDOW_MS), // 30 events per 10s
+      lastUsed: Date.now(),
     };
     userLimiters.set(userId, limiters);
   }
+  limiters.lastUsed = Date.now();
   return limiters;
 }
+
+/**
+ * Drop budgets nobody has touched for a while.
+ *
+ * The first version of this released a user's limiters the moment their last
+ * socket closed. That bounded the map, but it also handed the budget back on
+ * every reconnect: spend all 20 commands, disconnect, reconnect, and
+ * `limitersFor` built a fresh window. The published "20 per 10s" became "20
+ * per handshake", and `MAX_SOCKETS_PER_USER` did not bound it, because the
+ * reset fired exactly when the socket count hit zero. S9 would have traded
+ * "N x sockets you open" for "N x reconnects you make".
+ *
+ * Expiring on IDLE instead of on disconnect keeps the budget across a
+ * reconnect while still bounding the map by concurrent activity rather than
+ * by lifetime player count.
+ */
+const limiterSweep = setInterval(() => {
+  const cutoff = Date.now() - LIMITER_IDLE_MS;
+  for (const [userId, limiters] of userLimiters) {
+    if (limiters.lastUsed < cutoff) userLimiters.delete(userId);
+  }
+}, LIMITER_IDLE_MS);
+limiterSweep.unref?.();
 
 function addToIndex(map: Map<string, Set<string>>, key: string, socketId: string): number {
   let set = map.get(key);
@@ -148,11 +184,39 @@ function removeFromIndex(map: Map<string, Set<string>>, key: string, socketId: s
   if (set.size === 0) map.delete(key);
 }
 
-/** The client's address, honouring the proxy header only when configured. */
+/**
+ * The client's address, honouring `X-Forwarded-For` ONLY as far as TRUST_PROXY
+ * says to.
+ *
+ * The first version of this read the header unconditionally — and Socket.IO,
+ * unlike Express, does not consult `app.set("trust proxy")` at all; that only
+ * affects `req.ip` on HTTP requests. So on a directly-exposed server (the
+ * documented default, TRUST_PROXY unset) any client could send
+ * `X-Forwarded-For: <anything>` in the handshake and mint a fresh per-IP
+ * bucket per value, defeating the per-IP cap completely. The O5 comment in
+ * `middleware/setup.ts` warns about exactly this hazard; this function was it.
+ *
+ * Mirrors Express's model: the chain is [...forwarded, socketAddress] and the
+ * trusted client is `hops` entries from the right. With TRUST_PROXY unset the
+ * header is ignored entirely and only the real peer address counts.
+ */
 function clientIp(socket: Socket): string {
-  const fwd = socket.handshake.headers["x-forwarded-for"];
-  const first = Array.isArray(fwd) ? fwd[0] : fwd?.split(",")[0]?.trim();
-  return first || socket.handshake.address || "unknown";
+  const direct = socket.handshake.address || "unknown";
+
+  const configured = Number(process.env.TRUST_PROXY);
+  const hops = Number.isInteger(configured) && configured > 0 ? configured : 0;
+  if (hops === 0) return direct;
+
+  const raw = socket.handshake.headers["x-forwarded-for"];
+  const forwarded = (Array.isArray(raw) ? raw.join(",") : (raw ?? ""))
+    .split(",")
+    .map((v) => v.trim())
+    .filter(Boolean);
+  if (forwarded.length === 0) return direct;
+
+  const chain = [...forwarded, direct];
+  const index = Math.max(0, chain.length - 1 - hops);
+  return chain[index] ?? direct;
 }
 
 /**
@@ -343,13 +407,15 @@ export function setupSocketHandlers(io: SocketIOServer): void {
 
     // ── Disconnection ────────────────────────────────────────────
     socket.on("disconnect", () => {
-      // S9: drop the socket from both indexes, and release the user's limiter
-      // once their last socket goes, so neither map grows with lifetime player
-      // count.
+      // S9: drop the socket from both indexes. The limiter is NOT released
+      // here — see `limiterSweep` for why releasing it on disconnect handed
+      // the user a fresh budget on every reconnect.
       removeFromIndex(userSockets, userId, socket.id);
       removeFromIndex(ipSockets, ip, socket.id);
-      if (!userSockets.has(userId)) userLimiters.delete(userId);
-      handleDisconnect(socket, services);
+      // `removeFromIndex` deletes the key when the set empties, so this is
+      // "was that the user's last socket?".
+      const isLastSocket = !userSockets.has(userId);
+      handleDisconnect(socket, services, isLastSocket);
     });
   });
 }
@@ -480,7 +546,25 @@ async function handleServerConnect(
   const userId = getUserId(socket);
   if (!userId) return;
 
-  await gameStateManager.connectPlayerToServer(userId, data.serverId);
+  // S1: the gate lives in `connectPlayerToServer`, but its answer only means
+  // something if this caller reads it. Ignoring the boolean let a refused
+  // player be registered by `playerJoinedServer` anyway — which sets their
+  // `currentServerId`, adds them to `playersByServer`, and broadcasts
+  // `presence:player_joined_server` to everyone already there. The connection
+  // was denied while the presence system announced it had happened.
+  const connected = await gameStateManager.connectPlayerToServer(
+    userId,
+    data.serverId,
+  );
+  if (!connected) {
+    socket.emit("server:connect_error", {
+      success: false,
+      serverId: data.serverId,
+      error: "Connection refused.",
+    });
+    return;
+  }
+
   await presenceService.playerJoinedServer(userId, data.serverId);
   progressService.saveOnEvent(userId, "server_connected");
 }
@@ -753,8 +837,26 @@ async function handleTerminal(
 async function handleDisconnect(
   socket: Socket,
   { gameStateManager, presenceService, progressService }: SocketServices,
+  isLastSocket: boolean,
 ): Promise<void> {
   const userId = socket.data.user?.id;
+
+  // S9: tear the player down only when their LAST socket goes.
+  //
+  // This ran unconditionally, which was survivable when a second tab was an
+  // edge case and fatal now that `MAX_SOCKETS_PER_USER` explicitly blesses
+  // four. Closing one tab called `destroySession`, which nulls the current
+  // server, clears command history and deletes the session — while the other
+  // tabs' sockets stayed authenticated and hit `if (!session) return false`
+  // on every command. It also told every other player `isOnline: false`
+  // about someone who was still connected.
+  if (userId && !isLastSocket) {
+    logger.info(
+      { userId, socketId: socket.id },
+      "Socket disconnected; user still has other live sockets",
+    );
+    return;
+  }
 
   if (userId) {
     try {

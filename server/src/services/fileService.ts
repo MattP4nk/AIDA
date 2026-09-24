@@ -1256,10 +1256,27 @@ export class FileService {
    * permission check at all: any player could report any file in the game and
    * leak its name, server, hidden and encrypted flags into faction knowledge.
    */
-  public async canUserReadFile(userId: string, fileId: string): Promise<boolean> {
+  public async canUserReadFile(
+    userId: string,
+    fileId: string,
+    currentServerId?: string,
+  ): Promise<boolean> {
     const node = await prisma.fileSystemNode.findUnique({ where: { id: fileId } });
     if (!node) return false;
     const accessLevel = await this.getUserAccessLevel(userId, node.serverId);
+
+    // REACHABILITY. `canRead` alone does not deliver the "servers they have
+    // never reached" property the callers claim, because world content is
+    // seeded with `others: 5` (READ|EXECUTE) and `requiredAccessLevel: 0` —
+    // see serverContentService/contentDraftService. Every such file therefore
+    // returns true from `canRead` for ANY user on ANY server, so an id alone
+    // was still enough to report a file the player has never been near.
+    //
+    // `getUserAccessLevel` is >0 only for a server you own or have
+    // successfully hacked, so pair it with "or you are standing on it".
+    const reachable = accessLevel > 0 || (!!currentServerId && node.serverId === currentServerId);
+    if (!reachable) return false;
+
     return this.canRead(userId, node as unknown as FileNode, accessLevel);
   }
 

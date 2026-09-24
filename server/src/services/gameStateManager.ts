@@ -566,11 +566,6 @@ class GameStateManager extends EventEmitter {
           return false;
         }
 
-        // Disconnect from previous server
-        if (session.currentServerId) {
-          await this.disconnectPlayerFromServer(userId);
-        }
-
         // ── S1: authorization lives HERE, so every caller inherits it ──────
         //
         // The socket handler (`sockets/handlers.ts` server:connect) called this
@@ -599,6 +594,14 @@ class GameStateManager extends EventEmitter {
             "Refused server connection — authorization failed",
           );
           return false;
+        }
+
+        // Only now tear down the previous connection. This used to run BEFORE
+        // the gate, so a refused `server:connect` still evicted the player
+        // from the server they were legitimately on — leaving them nowhere,
+        // from an event any client can emit with any id.
+        if (session.currentServerId) {
+          await this.disconnectPlayerFromServer(userId);
         }
 
         // Verify server exists

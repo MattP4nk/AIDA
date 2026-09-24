@@ -221,16 +221,20 @@ export const optionalAuth = async (
       return next(); // Continue without user
     }
 
+    // S10: verify BEFORE the cache — see the long note in `authenticateToken`.
+    // All three verify sites share one module-level `authCache`, so leaving the
+    // lookup first here reopened the hole for any request that reaches this
+    // middleware with a warm entry.
+    const decoded = jwt.verify(token, config.JWT_SECRET, { algorithms: ["HS256"] }) as {
+      userId: string;
+    };
+
     const optTokenHash = hashToken(token);
     const cached = authCache.get(optTokenHash);
     if (cached && cached.expiresAt > Date.now()) {
       req.user = cached.user;
       return next();
     }
-
-    const decoded = jwt.verify(token, config.JWT_SECRET, { algorithms: ["HS256"] }) as {
-      userId: string;
-    };
 
     const session = await prisma.userSession.findFirst({
       where: {
@@ -274,15 +278,21 @@ export const optionalAuth = async (
 // Socket.io authentication helper
 export const verifySocketToken = async (token: string) => {
   try {
+    // S10: verify BEFORE the cache. This site matters most of the three: it is
+    // the socket HANDSHAKE gate, and a socket is long-lived. A cache hit on an
+    // expired (or session-revoked) token did not grant 60 more seconds — it
+    // granted a connection that `setupAuthMiddleware` never re-verifies, so the
+    // token's `exp` and the `UserSession` row stopped mattering for the life of
+    // that socket.
+    const decoded = jwt.verify(token, config.JWT_SECRET, { algorithms: ["HS256"] }) as {
+      userId: string;
+    };
+
     const socketTokenHash = hashToken(token);
     const cached = authCache.get(socketTokenHash);
     if (cached && cached.expiresAt > Date.now()) {
       return cached.user;
     }
-
-    const decoded = jwt.verify(token, config.JWT_SECRET, { algorithms: ["HS256"] }) as {
-      userId: string;
-    };
 
     const session = await prisma.userSession.findFirst({
       where: {

@@ -12,6 +12,97 @@ not just a typecheck.
 
 ---
 
+
+### Phase 4 code review (decision 15) — 11 defects, 9 fixed
+
+Run against `a94245d..HEAD` plus the working tree. Eight finder angles, then
+every surviving candidate re-verified by hand against the source. **Nine of the
+eleven were defects in Phase 4's own fixes** — bugs written while fixing bugs.
+
+Fixed, with `scripts/verify-phase4-review-fixes.ts` (12/12) and
+`scripts/verify-phase4-a9-encrypted-censorship.ts` (7/7) as the evidence:
+
+1. **S10 was applied to one of three verify sites.** `optionalAuth` and
+   `verifySocketToken` still read the shared `authCache` before `jwt.verify`.
+   The socket one is the worst: `io.use` is the only gate a socket passes and
+   nothing re-verifies afterwards, so a cache hit on a dead token bought an
+   indefinitely-authenticated connection, not 60 more seconds.
+2. **`handleServerConnect` discarded the S1 denial.** The gate returned
+   `false`; the handler ignored it and called `playerJoinedServer` anyway,
+   which set the player's current server, added them to `playersByServer`, and
+   broadcast `presence:player_joined_server` to everyone on a server they had
+   just been refused. The gate worked and its answer was thrown away at the
+   one handler S1 was written for.
+3. **A9 fails closed only on the branch that cannot execute.** `getService` is
+   `container.resolve`, which throws — it never returns falsy, so the
+   `if (!service)` guard was dead. The reachable failure was the constructor's
+   `loadRules().catch(() => {})`: `seedDefaultRules` early-returns before its
+   own `loadRules()` on every boot after the first, so that swallow was the
+   only load. When it lost, `compiledRules` stayed empty and the filter
+   returned every input verbatim, reporting success. Now `ensureRulesLoaded()`
+   throws into the callers' fail-closed handlers and retries next call.
+4. **Encrypted messages skipped censorship entirely.** The `encrypt` branch
+   passed `options.content` — the raw original — so `filteredContent` was
+   computed, fail-closed, and then discarded. Pre-existing (`17e73b1`), but it
+   made A9 a no-op for anyone with the cryptography to encrypt.
+5. **`connectPlayerToServer` tore down before it authorized.** A refused
+   `server:connect` — an event any client can emit with any id — evicted the
+   player from the server they were legitimately on.
+6. **Closing one tab destroyed the session the other tabs were using.**
+   `handleDisconnect` ran `destroySession` unconditionally. Survivable when a
+   second tab was an edge case; not once `MAX_SOCKETS_PER_USER = 4` blesses
+   four. The surviving sockets stayed authenticated against a dead session.
+7. **The rate budget was refunded on reconnect.** Releasing the limiter when
+   the last socket closed turned "20 per 10s" into "20 per handshake" — S9
+   traded "N x sockets you open" for "N x reconnects you make". Now expires on
+   idle, which bounds the map without refunding.
+8. **My own `report file` fix silently reported the wrong file.** The fallback
+   fired both when the path had no components (the root case it was written
+   for) and when the walk broke partway, so `report file /etc/keys.txt` on a
+   server with no `/etc` reported `<cwd>/keys.txt` while naming the requested
+   path back to the player. Now one walk; a broken path is a not-found.
+9. **`canUserReadFile` did not deliver the property its caller claims.** World
+   content is seeded `others: 5` (READ) with `requiredAccessLevel: 0`, so
+   `canRead` returned true for any file on any server — including the "servers
+   they have never reached" my own comment said it blocked. Reachability is
+   now explicit.
+
+Also found before the review, and fixed: `clientIp()` honoured
+`X-Forwarded-For` unconditionally. Socket.IO does not consult Express's
+`trust proxy`, so on a directly-exposed server any client could forge a fresh
+per-IP bucket and walk past the S9 cap — the exact hazard the O5 comment two
+files away warns about.
+
+**Reported, deliberately NOT fixed** (both are design calls, not defects I
+should settle unilaterally):
+
+- **Faction-scoped censorship rules cannot reach two of the five A9 call
+  sites.** `filterText` skips any rule whose `factionId` differs from the
+  caller's context, and every story rule in the seeded set (AIDA, DarkNet,
+  fragment, Project Echo) carries one. `messageService` passes `{ userId }`
+  alone and `systemCommands` passes `{ userId, serverId }` — so on the private
+  message and `cat` paths, the only rule that can ever match is the unscoped
+  SSN pattern. Verified directly: `filterText("...DarkNet...", { userId })`
+  returns `wasFiltered: false` with all 7 rules compiled. A9 therefore hardened
+  a filter that is inert on those paths, and the `censorship_alert` events that
+  drive DarkNet discovery never fire from them. Whose rules should apply to a
+  DM — the sender's faction? everyone's? — is a game-design question.
+- **`admin kick` invalidates nothing.** It closes sockets but leaves the JWT,
+  the `UserSession` row and the auth cache intact, and there is no cooldown.
+  Socket.IO does not auto-reconnect after a server-forced close, so a normal
+  client stays out until reload — but the "modified or stale client" the S3
+  comment names is back in one handshake. `handleBan` does all three
+  invalidations; kick does none. Whether a kick should bite at all is a design
+  call.
+
+Confirmed and worth recording: **the client has no `force:disconnect` listener
+anywhere.** So the pre-S3 ban did not merely depend on client cooperation — it
+depended on a handler nobody had written. Destroying the session and
+broadcasting the reason to every player was the whole of it; the server-side
+close added in S3 is now the only thing that enforces a ban.
+
+Full suite after the fixes: 14 harnesses, **192 checks, 0 failures.**
+
 ## Decisions log
 
 Recorded so the plan stays internally consistent as it evolves.
@@ -2071,6 +2162,12 @@ error-level lines**.
       a suggestion, not enforcement, and an old or modified client simply ignored it.
       Auth-cache invalidation was already correct — `invalidateAuthCacheForUser` existed and the ban
       path already called it. Kick deliberately does **not** invalidate: a kick is not permanent.
+      **Found during the phase review, and it makes S3 worse than written:** the client has **no
+      `force:disconnect` handler at all** (`grep` across `client/src` returns nothing). So the old
+      implementation did not merely *rely on* client cooperation — it relied on a listener nobody
+      had written. Ban "enforcement" consisted of destroying the server-side session and
+      broadcasting the reason to every player; the banned user's socket stayed open. The only
+      part that actually worked was the leak.
 - [x] **S9 — DONE 2026-09-23. Three separate holes, not one.**
       1. **Authentication ran per PACKET.** It was `socket.use()`, so a socket with no token
          completed the handshake and stayed connected indefinitely, holding a descriptor, with its
