@@ -5,6 +5,7 @@ import { NotFoundError, ValidationError, GameError } from "../../../../shared/ty
 import { resolveNpcOwnerId } from "../../../prisma/npcOwnership";
 
 import type { ReferenceValidationService } from "../../services/referenceValidationService";
+import { normalizeAccessMethod, accessMethodList, DEFAULT_ACCESS_METHOD } from "../../utils/accessMethod";
 const router = Router();
 
 // GET / — List servers with filtering and pagination
@@ -125,6 +126,21 @@ router.post("/", asyncHandler(async (req: any, res: any) => {
     type,
   });
 
+  // U3: reject an unknown accessMethod instead of storing it. The read side
+  // fails closed (S11), so an invented value used to produce a server nobody
+  // could ever reach — safe, but silent and indistinguishable from a topology
+  // bug. A 400 here is the difference between a typo and a mystery.
+  const resolvedAccessMethod =
+    accessMethod === undefined || accessMethod === null
+      ? DEFAULT_ACCESS_METHOD
+      : normalizeAccessMethod(accessMethod);
+  if (resolvedAccessMethod === null) {
+    return res.status(400).json({
+      success: false,
+      error: `Invalid accessMethod "${accessMethod}". Expected one of: ${accessMethodList()}`,
+    });
+  }
+
   const server = await prisma.gameServer.create({
     data: {
       name,
@@ -139,7 +155,7 @@ router.post("/", asyncHandler(async (req: any, res: any) => {
       encryptionLevel: encryptionLevel ?? 0,
       discoveryLevel: discoveryLevel ?? 0,
       isPublic: isPublic ?? true,
-      accessMethod: accessMethod ?? "hackable",
+      accessMethod: resolvedAccessMethod,
       accessKey: accessKey ?? undefined,
       isOnline: isOnline ?? true,
       maxConnections: maxConnections ?? 10,
@@ -173,7 +189,17 @@ router.put("/:id", asyncHandler(async (req: any, res: any) => {
   if (encryptionLevel !== undefined) data.encryptionLevel = encryptionLevel;
   if (discoveryLevel !== undefined) data.discoveryLevel = discoveryLevel;
   if (isPublic !== undefined) data.isPublic = isPublic;
-  if (accessMethod !== undefined) data.accessMethod = accessMethod;
+  if (accessMethod !== undefined) {
+    // U3: same check on the update path — it took req.body verbatim.
+    const normalized = normalizeAccessMethod(accessMethod);
+    if (normalized === null) {
+      return res.status(400).json({
+        success: false,
+        error: `Invalid accessMethod "${accessMethod}". Expected one of: ${accessMethodList()}`,
+      });
+    }
+    data.accessMethod = normalized;
+  }
   if (accessKey !== undefined) data.accessKey = accessKey;
   if (isOnline !== undefined) data.isOnline = isOnline;
   if (maxConnections !== undefined) data.maxConnections = maxConnections;

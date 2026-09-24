@@ -3570,16 +3570,39 @@ them individually before trusting a "NO SUMMARY" as a failure.
       player inputs are interpolated raw (`:1310` reply body + username, `:1304-1308` NPC memory),
       and the memory replayed at :1307 is itself AI-extracted from prior player text — so wiring
       this up as-is would create a **persistent** injection channel, not just a per-turn one.
-- [ ] **U3 — Validate `accessMethod` against an enum at the WRITE path.** Re-verified 2026-09-24.
-      The valid set exists only as a **comment** on `schema.prisma:228` — no Prisma enum, no shared
-      constant, no validator. Unvalidated writes: `contentDraftService.ts:232`,
-      `routes/adminApi/servers.ts:142` (straight from `req.body`) and `:176`. The AI path is closed
-      **today only by a hardcoded literal** (`aiAgentTools.ts:518` `accessMethod: "hackable"`), not by
-      an allow-list — any future field pass-through in `create_server` reopens it, and
-      `contentDraftService.ts:232` would accept whatever arrives. Read-side is already fail-closed
-      (S11, `networkTopologyService.ts:768`). **Also fix the stale comment at
-      `networkTopologyService.ts:770-773`**, which claims `serverContentService` writes `accessMethod`
-      from AI content — that file contains no such write.
+- [x] **U3 DONE 2026-09-24 — `accessMethod` allow-list at the write boundary.**
+      The valid set existed only as a **comment** on `schema.prisma:228`. New `utils/accessMethod.ts`
+      is the one definition; `contentDraftService` and both admin API paths (create and update, which
+      took `req.body` verbatim) now normalize or reject with a 400.
+      - **Why it mattered even though the read side is fail-closed (S11):** an invented value did not
+        publish the server, it made it *permanently unreachable* — safe, but silent and
+        indistinguishable from a topology bug. Rejecting at the write turns a typo into an error
+        someone can see. Whitespace and case are tolerated (`"keycard "` is obviously meant), because
+        the alternative was a dead server and no message anywhere.
+      - The AI path is still closed only by a hardcoded literal in `create_server` — which is why the
+        check belongs at the write boundary rather than in the caller.
+      - **Corrected a stale comment** at `networkTopologyService` claiming `serverContentService`
+        writes `accessMethod` from AI content. It does not — and the harness asserts that absence as
+        a precondition rather than taking my word for it.
+- [x] **R14 DONE 2026-09-24 — agent-loop prompt budget.** `conversationHistory` is append-only and
+      resent in full every round; per-tool-result truncation capped each addition at 4000 chars but
+      nothing capped the total (~6x4000 plus framing, growing quadratically in tokens across the
+      loop). `budgetConversation` keeps the **original task at the head** — dropping that is how an
+      agent forgets the question and starts answering the last tool result — plus the most recent
+      rounds, and elides the middle with a **visible** marker so the model is told something was
+      removed rather than left to invent it. Ceiling 32k chars, above a normal loop, so only a
+      runaway conversation is trimmed.
+- [ ] **`forumService.handleNPCReply` — dead, and that is a GAMEPLAY gap, not just dead code.**
+      Verified 2026-09-24: `createNPCPost` has three call sites, so NPCs **do** start forum threads —
+      but `createReply` has no NPC hook at all, so when a player replies to an NPC's post the NPC
+      never answers. `handleNPCReply(postId, replyUserId, replyContent)` takes exactly the arguments
+      `createReply` already holds. **Mail is NOT affected** — it has its own path,
+      `messageService.generatePersonaReply` (`:1329`), token-gated via `key.contact`.
+      Wiring it is a feature decision with an AI-cost tail (one generation per player forum reply,
+      and the per-persona `AI_MAX_ACTIONS_PER_DAY` cap lives in `aiSchedulerService`, which this path
+      would bypass) — so it belongs in Phase 8, not in an AI-hardening phase. It is now sanitized
+      (S6c), so wiring it later is safe from the injection side.
+
 - [x] **U4 — MOOT as written (re-verified 2026-09-24).** The premise was stale on both halves.
       There is no per-player *daily* cap to raise: `AI_MESSAGE_FLOOD_LIMIT = 5`
       (`messageService.ts:25-26`) is per-sender→per-recipient per **hour**, and the old global

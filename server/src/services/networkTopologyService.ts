@@ -767,12 +767,15 @@ export class NetworkTopologyService {
         // everyone.
         //
         // Not reachable from seeded data — the schema default is "hackable"
-        // and all seeded values are valid — but `accessMethod` is a plain
-        // String column, and BOTH the `create_server` agent tool and
-        // `serverContentService` write it from AI-generated content. One
-        // invented or typo'd value ("hack_only", "keycard ") would have
-        // silently published that server. An unknown policy is a policy we
+        // and all seeded values are valid. An unknown policy is a policy we
         // cannot evaluate, and the safe answer to that is no.
+        //
+        // Corrected 2026-09-24: this used to claim `serverContentService`
+        // writes `accessMethod` from AI content. It does not — that file
+        // contains no such write. The real writes are `contentDraftService`
+        // and the admin API, and as of U3 both reject an unrecognised value
+        // at the boundary (`utils/accessMethod.ts`). This stays as the
+        // backstop for rows written before that, and for any future writer.
         this.logger.warn(
           { serverId, accessMethod: server.accessMethod },
           "Unknown accessMethod — denying access (S11 fail-closed)",

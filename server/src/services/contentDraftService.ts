@@ -14,6 +14,7 @@ import { PRISMA_CLIENT, LOGGER } from "../di/tokens";
 import { resolveNpcOwnerId } from "../../prisma/npcOwnership";
 
 import type { ContentQueueService } from "./contentQueueService";
+import { normalizeAccessMethod, DEFAULT_ACCESS_METHOD } from "../utils/accessMethod";
 export interface CreateDraftInput {
   type: "server" | "file" | "link" | "mission" | "forum_post" | "network" | "forum";
   title: string;
@@ -229,7 +230,11 @@ export class ContentDraftService {
         encryptionLevel: payload.encryptionLevel ?? 0,
         discoveryLevel: payload.discoveryLevel ?? 0,
         isPublic: payload.isPublic ?? false,
-        accessMethod: payload.accessMethod || "hackable",
+        // U3: a draft's accessMethod is AI-authored. The agent tool hardcodes
+        // "hackable" today, so nothing invalid arrives — but that is a literal
+        // in one caller, not a guarantee, and this is the write that would
+        // accept whatever a future pass-through sent.
+        accessMethod: normalizeAccessMethod(payload.accessMethod) ?? DEFAULT_ACCESS_METHOD,
         accessKey: payload.accessKey || null,
         isOnline: payload.isOnline ?? true,
         maxConnections: payload.maxConnections ?? 10,

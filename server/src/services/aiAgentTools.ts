@@ -678,6 +678,15 @@ export const TOOLS: ToolDefinition[] = [
 // Build tool registry
 const TOOL_MAP = new Map(TOOLS.map(t => [t.name, t]));
 
+/**
+ * R14: ceiling on the accumulated agent transcript.
+ *
+ * Six rounds x 4000 chars of tool output plus framing is roughly 30k chars;
+ * this sits just above that, so a normal loop is untouched and only a
+ * genuinely runaway conversation is trimmed.
+ */
+const MAX_AGENT_PROMPT_CHARS = 32_000;
+
 // ═══════════════════════════════════════════════════════════════
 // Tool-Use Prompt Block
 // ═══════════════════════════════════════════════════════════════
@@ -734,6 +743,30 @@ RULES:
  * @param maxRounds - Maximum tool-call rounds (default 6)
  * @returns The AI's final response string, or null on failure
  */
+/**
+ * R14: bound an append-only agent transcript.
+ *
+ * Keeps the ORIGINAL task at the head — dropping that is how an agent forgets
+ * what it was asked and starts answering the last tool result instead — plus
+ * the most recent rounds, which carry the state it is actually reasoning over.
+ * The middle is elided with a visible marker rather than silently cut, so the
+ * model is told that something was removed.
+ */
+export function budgetConversation(
+  history: string,
+  originalPrompt: string,
+  maxChars: number = MAX_AGENT_PROMPT_CHARS,
+): string {
+  if (history.length <= maxChars) return history;
+
+  const head = originalPrompt.slice(0, Math.min(originalPrompt.length, Math.floor(maxChars * 0.25)));
+  const marker = "\n\n[... earlier rounds elided to stay within the prompt budget ...]\n\n";
+  const tailBudget = maxChars - head.length - marker.length;
+  const tail = history.slice(-Math.max(tailBudget, 0));
+
+  return head + marker + tail;
+}
+
 export async function runAgentLoop(
   aiService: AIService,
   prisma: PrismaClient,
@@ -749,14 +782,22 @@ export async function runAgentLoop(
   const fullSystemPrompt =
     systemPrompt + "\n" + buildToolUsePrompt(allowSensitiveTools);
 
-  // Build conversation as a growing prompt (since Ollama doesn't support multi-turn natively in single API)
+  // Build conversation as a growing prompt (since Ollama doesn't support
+  // multi-turn natively in a single API call).
+  //
+  // R14: this is APPEND-ONLY and was unbounded. Per-tool-result truncation
+  // (4000 chars) capped each addition but nothing capped the total, so the
+  // whole accumulated transcript was resent on every round — worst case about
+  // 6 x 4000 plus framing, growing quadratically in tokens across the loop.
+  // `budgetConversation` keeps the head (the original task, which the model
+  // must not lose) and the most recent rounds, eliding the middle.
   let conversationHistory = userPrompt;
 
   for (let round = 0; round < maxRounds; round++) {
     const result = await safeExecute({
       fn: async () => {
         const aiResult = await aiService.generateOrThrow(
-          conversationHistory,
+          budgetConversation(conversationHistory, userPrompt),
           fullSystemPrompt,
         );
         return aiResult;
