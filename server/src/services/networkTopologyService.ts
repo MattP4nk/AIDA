@@ -50,7 +50,11 @@ export interface PathHop {
   latency: number;
 }
 
-export interface DiscoveryResult {
+export // A2 — NAME COLLISION, NOT A DUPLICATE. Do not "reconcile" this with
+// `shared/types/network.ts`'s DiscoveryResult: that one reports a scan
+// outcome {success, discovered, target, message, partialInfo}. This one is a
+// per-server record {server, isNew} from topology traversal.
+interface DiscoveryResult {
   server: AdjacentServer;
   isNew: boolean; // true if this link was just discovered
 }

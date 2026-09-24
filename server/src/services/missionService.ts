@@ -1,4 +1,5 @@
 import { EventEmitter } from "events";
+import { MissionStatus as SharedMissionStatus } from "../../../shared/types";
 import { Mission } from "@prisma/client";
 import { db } from "../database/client";
 import { injectable, inject } from "tsyringe";
@@ -84,13 +85,11 @@ interface CreateMissionData {
 /**
  * Mission status type
  */
-type MissionStatus =
-  | "available"
-  | "assigned"
-  | "active"
-  | "completed"
-  | "failed"
-  | "expired";
+// A2: was a private duplicate of the shared enum that disagreed with it
+// (this one had "active", the shared one had a phantom "in_progress").
+// `MissionStatusValue` is the string-literal view of the shared enum, so the
+// two cannot drift again — adding a member there is a compile error here.
+type MissionStatus = `${SharedMissionStatus}`;
 
 /**
  * Player mission tracking

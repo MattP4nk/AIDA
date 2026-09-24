@@ -3806,9 +3806,39 @@ Write them per-refactor, immediately before touching the code:
       Note also that the U1 harness had to reimplement the client's auth handshake by hand
       (`emit("authenticated", cb)` then wait for the ack) to drive commands at all; a typed contract
       would let harnesses and the client share that shape instead of duplicating it.
-- [ ] **A2** Reconcile the 8 duplicated `shared/types` definitions; make `shared/` the single
-      source of truth. Fix `MissionStatus` (`in_progress` is a phantom; `abandoned` is undeclared)
-      and the notification priority enum.
+- [~] **A2 — PARTLY DONE 2026-09-24, and the premise was wrong.**
+      **5 of the 8 "duplicated definitions" are NAME COLLISIONS between different concepts.**
+      Reconciling them as instructed would have caused regressions, so they are now *marked* at each
+      declaration instead:
+      - `ServerState` — shared is a presence record `{serverId, connectedPlayers[], isOnline,
+        lastUpdate, activeConnections}`; the server's is live load telemetry `{online, load,
+        connections, lastActivity, alerts}`. They share a name and nothing else.
+      - `InventoryItem` — shared is a flat display shape; the server's is the persisted row carrying
+        a joined `ShopItem`. Different layers.
+      - `DiscoveryResult` — shared reports a scan outcome; the server's is a per-server traversal
+        record `{server, isNew}`.
+      - `PlayerSkills` — shared has all six skills required; the local one is a three-field optional
+        view. Substituting the shared type would force callers to supply skills the minigame ignores.
+      - `Notification` — **the subtle one.** The shared `NotificationType` is a SEVERITY taxonomy
+        (`info|success|warning|error|hack_alert|mission|message|system`); the client's is a SOURCE
+        taxonomy (`message|chat|mail|forum|system|game`). Only two members overlap, so importing the
+        shared type in the client would reject every chat/mail/forum/game notification. The client
+        also adds `action?`. These two genuinely should converge — but in **A3**, as part of the
+        socket contract, not by deleting one.
+      - [x] **`MissionStatus` FIXED — a real duplicate with a real defect.** The shared enum declared
+        `IN_PROGRESS = "in_progress"`, written by **nothing** (verified repo-wide *and* against the
+        database, which holds only `"active"` in both `Mission` and `PlayerMission`), while
+        `missionService` kept a private union that had `active` and no `in_progress`. A cast at
+        `gameStateManager.ts:456` hid the disagreement. The shared enum now has `ACTIVE`, the server
+        union is derived from it (`type MissionStatus = \`${SharedMissionStatus}\``, so they cannot
+        drift again), and the dead `"in_progress"` filter value is gone from `adminApi/players.ts`.
+      - **PLAN's other two `MissionStatus` claims were wrong:** `"abandoned"` is a **StoryArc**
+        status (`storyMissionService.ts:808`) — `abandonMission` writes `"failed"` to the mission
+        itself; `"pending"`/`"skipped"` are **StoryStep** statuses. Neither belongs in `MissionStatus`.
+      - Notification priority needed no work — Phase 5 R13 already aligned it.
+      - [ ] **Still open:** `EventSubscription` (near-identical — shared has `id`+`isActive`, local
+        has `createdAt`) and `MissionObjective` (shared `progress`/`required` vs local `current` —
+        a genuine divergence that is serialized to clients, so it belongs with A3).
 - [ ] **A4** Decompose `CommandContext`: per-module interfaces instead of 26 services + raw
       Prisma handed to every command. Remove `db.client` from `CommandContext` and migrate the
       **170 direct Prisma calls** in command modules onto services.

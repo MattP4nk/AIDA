@@ -4,6 +4,14 @@ import { sound } from "./sound";
 
 // ==================== TYPES ====================
 
+// A2 — NAME COLLISION, NOT A DUPLICATE. `shared/types/game.ts` also declares
+// `Notification`, but its `NotificationType` is a SEVERITY taxonomy
+// (info|success|warning|error|hack_alert|mission|message|system) while this
+// one is a SOURCE taxonomy (message|chat|mail|forum|system|game) — only
+// `message` and `system` overlap. The client also adds `action?`. Importing
+// the shared type here would reject every chat/mail/forum/game notification.
+// The two need reconciling in A3 as part of the socket contract, not by
+// deleting one.
 export interface Notification {
   id: string;
   type: "message" | "chat" | "mail" | "forum" | "system" | "game";

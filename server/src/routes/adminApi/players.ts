@@ -81,7 +81,10 @@ router.get("/:id", asyncHandler(async (req: any, res: any) => {
         },
       },
       missions: {
-        where: { status: { in: ["active", "available", "in_progress"] } },
+        // A2: "in_progress" dropped — it was never written by anything and
+        // matches zero rows in the database. Keeping it implied a state the
+        // game does not have.
+        where: { status: { in: ["active", "available"] } },
         select: {
           id: true,
           title: true,

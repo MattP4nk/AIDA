@@ -86,6 +86,11 @@ export interface ItemEffects {
 /**
  * Inventory item with quantity
  */
+// A2 — NAME COLLISION, NOT A DUPLICATE. Do not "reconcile" this with
+// `shared/types/game.ts`'s InventoryItem: that one is a flat display shape
+// {id, name, type, description, quantity}. This is the persisted row
+// {itemId, item: ShopItem, quantity, acquiredAt}, which carries the joined
+// ShopItem. Different layers, same word.
 export interface InventoryItem {
   itemId: string;
   item: ShopItem;

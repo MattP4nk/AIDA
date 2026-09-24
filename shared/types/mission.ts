@@ -15,10 +15,28 @@ export interface MissionInfo {
   expiresAt?: Date;
 }
 
+/**
+ * A2: these are the values actually written to `Mission.status` and
+ * `PlayerMission.status`.
+ *
+ * `IN_PROGRESS = "in_progress"` was a phantom — declared here, written by
+ * NOTHING (verified repo-wide and against the database, which holds only
+ * "active"), and read by exactly one defensive admin filter. The value the
+ * game really uses for an in-flight mission is "active", which was missing
+ * from this enum entirely while `missionService` kept a private union that
+ * had it. The two disagreed, and a cast at `gameStateManager.ts:456`
+ * (`m.status as MissionStatus`) papered over the difference.
+ *
+ * NOT here, deliberately, though PLAN.md implied they belonged:
+ *   - "abandoned" is a **StoryArc** status (storyMissionService.ts:808).
+ *     `abandonMission` writes "failed" to the mission itself.
+ *   - "pending" / "skipped" are **StoryStep** statuses
+ *     (storyMissionService.ts:41), a different concept again.
+ */
 export enum MissionStatus {
   AVAILABLE = "available",
   ASSIGNED = "assigned",
-  IN_PROGRESS = "in_progress",
+  ACTIVE = "active",
   COMPLETED = "completed",
   FAILED = "failed",
   EXPIRED = "expired",

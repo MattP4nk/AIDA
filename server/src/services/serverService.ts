@@ -38,6 +38,11 @@ const clamp = (n: number, lo: number, hi: number): number =>
 /**
  * Server state interface
  */
+// A2 — NAME COLLISION, NOT A DUPLICATE. Do not "reconcile" this with
+// `shared/types/game.ts`'s ServerState: that one is
+// {serverId, connectedPlayers[], isOnline, lastUpdate, activeConnections} —
+// a presence record. This is live load telemetry. They share a name and
+// nothing else; merging them would break both.
 interface ServerState {
   online: boolean;
   load: number;

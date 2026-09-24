@@ -30,6 +30,11 @@ interface VisibleFileInfo {
   createdAt: Date;
 }
 
+// A2 — NAME COLLISION, NOT A DUPLICATE. Do not "reconcile" this with
+// `shared/types/game.ts`'s PlayerSkills: that one has all SIX skills, all
+// required. This is a partial view — the three skills this generator reads,
+// all optional. Substituting the shared type would force callers to supply
+// skills the minigame does not use.
 interface PlayerSkills {
   forensics?: number;
   cryptography?: number;
