@@ -377,9 +377,7 @@ class MissionService extends EventEmitter {
         })),
         startedAt: null,
         completedAt: null,
-        expiresAt: mission.timeLimit
-          ? new Date(Date.now() + mission.timeLimit * 1000)
-          : null,
+        expiresAt: missionExpiresAt(mission.timeLimit),
       };
 
       // Update mission status and assign to user
@@ -1237,11 +1235,10 @@ class MissionService extends EventEmitter {
       let multiplier = 1.0;
 
       // Time bonus (faster completion = higher multiplier)
-      if (
-        mission.timeLimit &&
-        performance.timeElapsed < mission.timeLimit * 1000
-      ) {
-        const timeRatio = performance.timeElapsed / (mission.timeLimit * 1000);
+      // R7: one conversion point. `timeElapsed` is ms; `timeLimit` is seconds.
+      const limitMs = missionTimeLimitMs(mission.timeLimit);
+      if (limitMs !== null && performance.timeElapsed < limitMs) {
+        const timeRatio = performance.timeElapsed / limitMs;
         multiplier += (1 - timeRatio) * 0.5; // Up to 50% bonus
       }
 
@@ -1744,6 +1741,7 @@ export default MissionService;
 // Backward compatibility
 import { container } from "../di/container";
 import { MISSION_SERVICE } from "../di/tokens";
+import { missionExpiresAt, missionTimeLimitMs } from "../utils/missionTime";
 export const missionService = new Proxy({} as MissionService, {
   get(_target, prop) {
     const instance = container.resolve(MISSION_SERVICE as any);

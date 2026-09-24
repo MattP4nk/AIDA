@@ -25,6 +25,7 @@ import {
 } from "./missionTemplatePool";
 import { validateObjective, OBJECTIVE_TYPES } from "./missionObjectiveTypes";
 
+import { missionExpiresAt } from "../utils/missionTime";
 /**
  * MissionGenerator Service
  *
@@ -204,9 +205,7 @@ export class MissionGeneratorService {
                   })),
                   startedAt: null,
                   completedAt: null,
-                  expiresAt: mission.timeLimit
-                    ? new Date(Date.now() + (mission.timeLimit as number) * 1000)
-                    : null,
+                  expiresAt: missionExpiresAt(mission.timeLimit),
                 } as never;
               }
               return true;
@@ -372,12 +371,13 @@ export class MissionGeneratorService {
         template.rewards.credits.perLevel * playerLevel,
     );
 
-    // Calculate time limit: random between min and max (seconds), convert to ms
-    const timeLimitSeconds =
+    // R7: SECONDS, stored as-is. This converted to ms while all three readers
+    // multiplied by 1000 again, so every template mission expired 1000x too
+    // late — "1–2 hours" became 41–83 days. See utils/missionTime.ts.
+    const timeLimit =
       Math.floor(
         Math.random() * (template.timeLimit.max - template.timeLimit.min + 1),
       ) + template.timeLimit.min;
-    const timeLimit = timeLimitSeconds * 1000;
 
     return {
       title: this.interpolateString(title, {
@@ -594,7 +594,7 @@ Format as JSON:
           credits: creditsReward,
           reputation: difficulty * 5,
         },
-        timeLimit: difficulty * 60 * 60 * 1000,
+        timeLimit: difficulty * 60 * 60, // R7: SECONDS (was ms)
         issuedBy: gameMaster.id,
       };
       },
