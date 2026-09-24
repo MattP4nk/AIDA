@@ -3723,6 +3723,60 @@ from template output at a glance.
 
 ## Phase 7 — Architecture (1–2 weeks)
 
+### Step 0 DONE 2026-09-24 — characterization harness, and three broken premises
+
+**Three of this phase's own premises were false.** Verified before starting:
+1. *"the socket contract check from Phase 2 already covers the event-map refactor"* — **no such
+   check exists.** There are two Phase 4 socket *authz* harnesses, which test something else.
+2. **Zero harnesses called `executeCommand`.** A4 decomposes `CommandContext` across 23 command
+   modules and 166 direct Prisma calls with nothing able to detect a behaviour change.
+3. **No cycle-detection tooling is installed** (no madge/dpdm anywhere), so A5's "48-module cycle /
+   closes 36 cycles" numbers cannot be reproduced.
+
+`VERIFY.md` says in its own header that it is the only thing exercising behaviour — and it is
+**manual**. So the regression detector for a week of refactoring was a person playing the game.
+
+`scripts/characterize-commands.ts` is now a golden master: 23 cases across 17 modules, `--record`
+before a refactor, compare after. **It leaks nothing** (session and connection row counts verified
+identical across runs) and it is negative-controlled.
+
+**It was vacuous twice before it worked, and that is the point worth recording.**
+- v1 drove `executeCommand` with no session. `validateCommand` rejects first, so all 23 cases
+  recorded the *same* `"No active session"` error — **zero commands ran**. It was stable across two
+  runs for the worst possible reason, and a deliberate change to `pwd` did not move it.
+- v2 added a session; the second gate, `"Must be connected to a server"`, rejected all 23 again.
+- Both were caught only by patching a real handler and seeing the suite stay green, so the harness
+  now asserts its own **non-vacuity**: if no case succeeds it fails loudly instead of recording.
+- `leaderboard` then made it flap 22/23 — it ranks other players' live state, which the harness
+  itself perturbs by creating a session. It is now pinned by *shape* only. A golden master that
+  cries wolf gets ignored, which is the same as not having one.
+
+### Verified claim corrections (2026-09-24) — most numbers had drifted
+
+| claim | verdict |
+|---|---|
+| A3 `ServerToClientEvents`/`ClientToServerEvents` exist | **Absent** — confirmed. `Socket` is ungenericized on both sides |
+| A3 "11 dead listeners" | **10** dead client listeners — but **50 orphaned event names total**: 37 server emits with no client listener, 2 client emits with no server listener, 1 server listener with no client emitter |
+| A3 `authenticated`/`authentication:complete` | **TRUE and worse.** Client emits `authenticated` *with no ack*, so the server takes its else-branch and emits `authentication:complete` — **which nothing listens for**. The client listens for `authenticated`, which the server never emits. The handshake "works" only through side effects. Harnesses pass an ack and take the branch the real client never takes |
+| A3 U5 crash | **Wrong file.** `networkCommands.ts:845` is a REST *return*, and `Terminal.svelte:881` already normalises arrays — the real socket-path instance is **`hackCommands.ts:454`** (`context.io...emit("command:result", …)` with an array and no `terminalId`). The `.substring` line is triple-guarded and effectively unreachable, so **A3's justification is type safety, not a live crash** |
+| A2 "8 duplicated shared/types" | **TRUE, exactly 8** — DiscoveryResult, EventSubscription, InventoryItem, MissionObjective, MissionStatus, Notification, PlayerSkills, ServerState |
+| A2 `MissionStatus` | **TRUE + a third mismatch.** `in_progress` has **0 writers**; `abandoned` is written and undeclared; **and `active` — the value actually written for in-flight missions — is absent from the shared enum.** `pending`/`skipped` are also undeclared |
+| A2 notification priority | **Already consistent** (fixed in Phase 5 R13); only the duplicate *declaration* remains |
+| A4 "26 services" | 26 populated, but **25 declared + an index signature**, and `storyMissionService` is smuggled through that signature **undeclared**. 30 injected deps in total |
+| A4 "170 Prisma calls" | **166** |
+| A4 60s DI cache | **TRUE on both halves** — caches `undefined` on failure for a full TTL, 30 call sites, many non-null-asserted so it becomes a crash rather than a retry |
+| A5 `interface.ts:21` | **FALSE** — `:21` is *already* `import type`. The fixable value imports are **`:1-3`** |
+| A5 "7 static di/container imports" | **13** — including a hoisted one at `missionService.ts:1836`, below `export default`, the most cycle-prone and easiest to miss |
+| A5 "58 `await import(tokens)`" | **64**, and genuinely pointless (`di/tokens.ts` has zero imports and 60 plain-string exports) |
+| A5 "11 raw-string getService" | **TRUE, exactly 11** |
+| A8 `initialize()` 438 lines | **504** — 82% of `index.ts` |
+| A8 `handleSubmit` 295 lines | **292** ✓ |
+| A8 file sizes | serverContentService **3,001**, forumService **2,988**, Terminal.svelte **2,867**, hackService **2,680**, missionTemplatePool **2,199** (array 1,900), index.ts **617**, auth.ts **564** |
+| A9 `serviceRegistry.ts` 0 callers | **TRUE** |
+| A10 "29 dead gameBalance constants" | **18 truly dead.** 28 have no *external* consumer but 10 of those are used by exported functions in-file. The parenthetical "tuning that file does nothing" is **false** — 33 of 61 have external consumers |
+| A8 two `mission:completed` listeners | **TRUE** (`index.ts:246`, `:435`) |
+
+
 **Testing (revised 2026-08-30):** tests *are* written for this phase — but **at** Phase 7, not
 now. They are **characterization tests**: written against the behaviour as it exists immediately
 before each refactor, to prove the refactor changed nothing. That sidesteps the earlier objection
