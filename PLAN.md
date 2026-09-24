@@ -103,6 +103,44 @@ close added in S3 is now the only thing that enforces a ban.
 
 Full suite after the fixes: 14 harnesses, **192 checks, 0 failures.**
 
+
+### Task #5 (seed against the Phase 3 schema) — the blocking defect found statically
+
+The task asked a human to run `npm run db:reset` against a scratch DB because
+reading `DATABASE_URL` is blocked in the agent environment. Before handing it
+over, two things turned out to be worth checking.
+
+**The task's stated risk was wrong.** It named "the seed's `deleteMany` cascade
+order now interacts with the new FKs". `db push --force-reset` drops and
+recreates the schema *first*, so `prisma/seed.ts` runs against an empty
+database and all 57 `deleteMany` calls are no-ops. Cascade order cannot bite on
+the `db:reset` path (only on a bare `db:seed` against a populated DB). The real
+exposure is the opposite direction: whether the seed's **inserts** violate the
+constraints Phase 3 added. Only two of those can fail an insert —
+`@@unique([serverId, parentId, name])` on FileSystemNode and
+`@@unique([userId, shopItemId])` on InventoryItem. Indexes cannot.
+
+**And one insert does violate it.** `rogueAttacker` ("Phantom Probe Node") is
+`role: "workstation"`, so `createFilesystemForServer` builds it `/home` from
+the workstation template. The Phantom Network story block then calls
+`fileSystemNode.create` for a directory named `home` under the same root with
+no existence check (`prisma/seed.ts` ~2135). Before Phase 3 that silently
+produced a server with **two** `/home` directories; with the new unique it is a
+P2002 that aborts the seed partway. Fixed by reusing the existing directory.
+
+This did not need a database: the templates are a pure function of the server's
+role, so the collision question is decidable from source.
+`scripts/verify-seed-fs-uniques.ts` (6/6) checks all three shapes — duplicate
+paths within a role, a file sharing a sibling directory's name (the unique does
+not discriminate on `type`), and a story-content create colliding with its
+server's template. Its exemption for the guarded `findFirst ?? create` form was
+itself negative-controlled: reverting the fix makes the check fail again, so
+the exemption does not blind it.
+
+**Still needs a human run**, for the parts that genuinely require a database:
+the 57 `deleteMany`s in dependency order against the 6 new cascading FKs, and a
+first boot on a world with empty `player_missions`.
+
 ## Decisions log
 
 Recorded so the plan stays internally consistent as it evolves.

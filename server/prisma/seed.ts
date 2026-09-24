@@ -2132,15 +2132,29 @@ echo-backup.internal    IN  A    172.16.99.2  ; Project Echo backup (OFFLINE)
     where: { serverId: rogueAttacker.id, name: "/", type: "directory" },
   });
   if (rogueRoot) {
-    const homeDir = await prisma.fileSystemNode.create({
-      data: {
-        serverId: rogueAttacker.id,
-        parentId: rogueRoot.id,
-        name: "home",
-        type: "directory",
-        permissions: DEFAULT_PERMISSIONS,
-      },
-    });
+    // rogueAttacker is `role: "workstation"`, and the workstation template in
+    // createFilesystemForServer ALREADY creates /home. Creating it again here
+    // used to succeed and leave the server with two `/home` directories; with
+    // the Phase 3 `@@unique([serverId, parentId, name])` it is a P2002 that
+    // aborts the whole seed. Reuse the existing directory instead.
+    const homeDir =
+      (await prisma.fileSystemNode.findFirst({
+        where: {
+          serverId: rogueAttacker.id,
+          parentId: rogueRoot.id,
+          name: "home",
+          type: "directory",
+        },
+      })) ??
+      (await prisma.fileSystemNode.create({
+        data: {
+          serverId: rogueAttacker.id,
+          parentId: rogueRoot.id,
+          name: "home",
+          type: "directory",
+          permissions: DEFAULT_PERMISSIONS,
+        },
+      }));
     const opDir = await prisma.fileSystemNode.create({
       data: {
         serverId: rogueAttacker.id,
