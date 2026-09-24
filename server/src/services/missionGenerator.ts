@@ -302,6 +302,12 @@ export class MissionGeneratorService {
               : "",
         completed: false,
         metadata: obj.metadata,
+        // R7: carry the flag through. `isBonus` was declared on templates and
+        // set on 39 objectives, then DROPPED here — so it never reached
+        // storage, `allCompleted` demanded every objective including the
+        // "optional" ones, and `bonusObjectivesCompleted` could only ever
+        // be 0.
+        ...(obj.isBonus ? { isBonus: true } : {}),
       };
 
       // Validate objective against canonical types

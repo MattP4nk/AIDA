@@ -2566,3 +2566,31 @@
     "Room membership is NOT observable from a client — the only way to test it is to emit into the room and assert delivery, paired with a positive control (a socket that MUST receive), since 'did not receive' is also what a broken emit looks like."
   ]
 }
+
+
+@phase5_r7_timelimit_and_rewards {
+  @summary [
+    "Two halves. Units: verified + fixed. Multipliers: verified, then DECIDED WITH THE MAINTAINER because it changes balance, not correctness."
+    "Evidence: scripts/verify-phase5-r7-timelimit.ts 17/17, negative-controlled. Full suite 21 harnesses / 250 checks / 0 fail."
+  ]
+
+  @timelimit_units [
+    "WRITTEN IN TWO UNITS, READ IN A THIRD ASSUMPTION. Producers: missionGenerator template path = seconds*1000 (ms); missionGenerator AI path = difficulty*3600*1000 (ms); personaMissionGenService = raw template (seconds); storyMissionService = raw template (seconds). All THREE readers multiplied by 1000 (assumed seconds)."
+    "Effect: the two ms producers gave expiries 1000x too long — a template documenting '1–2 hours' expired in 41–83 days. MEASURED: 187 of 187 missions with a timeLimit held a ms value. Mission expiry was disabled game-wide."
+    "Chose SECONDS, against the plan's suggested ms: every human-authored source already uses seconds (templates comment 3600–7200 as '1–2 hours'; gameBalance minigame limits are seconds, UI prints 's'), and all three readers already expected seconds — so the fix lands on 2 producers instead of 3 readers. utils/missionTime.ts is the only place a timeLimit is multiplied or divided."
+    "Existing rows still hold ms and stay wrong until the db:reset (task #5)."
+  ]
+
+  @rewards_that_never_varied [
+    "detectionCount and hintCount are READ in completeMission and WRITTEN NOWHERE. So stealthScore was always 100 and efficiencyScore always 100, both thresholds always passed, and the pair paid a flat +0.35 on every mission while reading as if it graded the player. Now BASELINE_COMPLETION_BONUS — payouts identical, the pretence removed. The metrics are still computed because mission grading + the AI feedback line consume them."
+    "bonusObjectivesCompleted was max(0, completed - total) — MATHEMATICALLY always 0, since completed counts a subset of total."
+    "isBonus was declared on templates, set on 39 objectives, documented 'failure doesn't fail the mission' — then DROPPED during generation, with no column on PlayerMissionObjective to live in. Completion was objectives.every(completed) with no exclusion, so bonus objectives were mandatory, which is WHY the bonus count could never be positive."
+    "Now: carried through both generators, persisted in a new is_bonus column, restored on read, and requiredObjectivesComplete ignores bonus objectives — falling back to requiring ALL if a mission is somehow all-bonus ('no required objectives' must not mean 'complete immediately')."
+  ]
+
+  @lessons [
+    "A fix can be correct at the source and inert at a PERSISTENCE BOUNDARY. isBonus reached Mission.objectives (Json) but PlayerMissionObjective is typed COLUMNS — no column meant the flag was silently discarded and requiredObjectivesComplete would never have seen it. The round-trip check is what caught it; the generator-level check passed happily."
+    "`prisma generate` rewrites node_modules/@prisma/client, which tsx watch does NOT watch. After adding a column the long-running dev server kept a STALE client and two unrelated harnesses failed with 'Unknown argument isBonus' — a stale-process failure that reads exactly like a code regression. Bounce the watch server after every prisma generate."
+    "Reported a check that never ran: `cd server && npx tsc` where cwd was ALREADY server — cd failed, tsc never executed, and the following `echo TSC_DONE` printed anyway. Verify the command ran, not just that the script reached the echo."
+  ]
+}

@@ -63,6 +63,8 @@ export interface StoredObjective {
   target: number | boolean | string;
   current: number | boolean | string;
   completed: boolean;
+  /** R7: a bonus objective does not gate mission completion. */
+  isBonus?: boolean;
   metadata?: Record<string, unknown>;
 }
 
@@ -157,6 +159,9 @@ export class PlayerMissionRepository {
           target: isCount ? o.targetCount! : isFlag ? o.targetFlag! : (o.targetText ?? ""),
           current: isCount ? o.currentCount : isFlag ? o.currentFlag : (o.currentText ?? ""),
           completed: o.completed,
+          // R7: restore the bonus flag, or `requiredObjectivesComplete` can
+          // never see it and bonus objectives stay mandatory.
+          ...(o.isBonus ? { isBonus: true } : {}),
           ...(o.metadata !== null
             ? { metadata: o.metadata as Record<string, unknown> }
             : {}),
@@ -379,6 +384,7 @@ export class PlayerMissionRepository {
             type: o.type,
             description: o.description ?? null,
             completed: o.completed === true,
+            isBonus: o.isBonus === true,
             metadata: (o.metadata ?? undefined) as never,
             position: i,
             ...vals,
@@ -387,6 +393,7 @@ export class PlayerMissionRepository {
             type: o.type,
             description: o.description ?? null,
             completed: o.completed === true,
+            isBonus: o.isBonus === true,
             metadata: (o.metadata ?? undefined) as never,
             position: i,
             ...vals,

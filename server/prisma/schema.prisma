@@ -1909,6 +1909,11 @@ model PlayerMissionObjective {
   currentText String? @map("current_text")
 
   completed Boolean @default(false)
+  /// R7: a bonus objective does not gate completion — see
+  /// `requiredObjectivesComplete`. The flag was declared on templates and set
+  /// on 39 of them, but was dropped during generation AND had nowhere to live
+  /// here, so bonus objectives were mandatory in practice.
+  isBonus   Boolean @default(false) @map("is_bonus")
   /// Entity ids for target matching live here, not in `target`. See G6.
   metadata  Json?
   /// Preserves the authored order, which the blob got from being an array.

@@ -331,6 +331,8 @@ Respond ONLY with JSON:
         current: 0,
         completed: false,
         metadata,
+        // R7: see missionGenerator — the flag was dropped during generation.
+        ...(objTemplate.isBonus ? { isBonus: true } : {}),
       });
     }
 

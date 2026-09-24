@@ -805,7 +805,7 @@ class MissionService extends EventEmitter {
       outcome.value = {
         current: objective.current,
         completed: objective.completed,
-        allCompleted: playerMission.objectives.every((obj) => obj.completed),
+        allCompleted: requiredObjectivesComplete(playerMission.objectives),
       };
       return playerMission;
         },
@@ -1087,11 +1087,14 @@ class MissionService extends EventEmitter {
             )
           : 100;
 
-      // Bonus objectives: count objectives beyond the minimum required
-      const bonusObjectivesCompleted = Math.max(
-        0,
-        completedObjectives - totalObjectives,
-      );
+      // R7: count COMPLETED BONUS objectives.
+      //
+      // This was `max(0, completedObjectives - totalObjectives)` — completed
+      // counts a subset of total, so the expression was mathematically always
+      // 0 and the `* 0.1` reward term could never pay out.
+      const bonusObjectivesCompleted = objectives.filter(
+        (o: any) => o.isBonus && o.completed,
+      ).length;
 
       const performance: PerformanceMetrics = {
         timeElapsed,
@@ -1242,17 +1245,22 @@ class MissionService extends EventEmitter {
         multiplier += (1 - timeRatio) * 0.5; // Up to 50% bonus
       }
 
-      // Stealth bonus
-      if (performance.stealthScore > 80) {
-        multiplier += 0.2;
-      }
+      // R7: the stealth and efficiency bonuses were NOT bonuses.
+      //
+      // Both are derived from `detectionCount`/`hintCount`, which are read in
+      // `completeMission` and written NOWHERE in the codebase. So stealthScore
+      // was always 100 and efficiencyScore always 100, both thresholds always
+      // passed, and the pair contributed a flat +0.35 to every single mission
+      // while appearing to measure performance.
+      //
+      // The constant is kept — payouts are unchanged — but it is now named for
+      // what it is instead of being laundered through two dead predicates. The
+      // metrics themselves are still computed above: they feed mission
+      // grading and the AI feedback line, which are honest consumers of a
+      // constant in a way that a "bonus" is not.
+      multiplier += BASELINE_COMPLETION_BONUS;
 
-      // Efficiency bonus
-      if (performance.efficiencyScore > 90) {
-        multiplier += 0.15;
-      }
-
-      // Bonus objectives
+      // Bonus objectives — now able to vary, see `bonusObjectivesCompleted`.
       multiplier += performance.bonusObjectivesCompleted * 0.1;
 
       // Apply multiplier
@@ -1741,7 +1749,12 @@ export default MissionService;
 // Backward compatibility
 import { container } from "../di/container";
 import { MISSION_SERVICE } from "../di/tokens";
-import { missionExpiresAt, missionTimeLimitMs } from "../utils/missionTime";
+import {
+  missionExpiresAt,
+  missionTimeLimitMs,
+  requiredObjectivesComplete,
+  BASELINE_COMPLETION_BONUS,
+} from "../utils/missionTime";
 export const missionService = new Proxy({} as MissionService, {
   get(_target, prop) {
     const instance = container.resolve(MISSION_SERVICE as any);

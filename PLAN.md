@@ -362,6 +362,68 @@ already out of the room. Rebuilt on `server:user_connected`, where
 `socketsJoin` verifiably precedes the broadcast and `io.to(room)` does not
 exclude the sender. Room membership is not otherwise observable from a client.
 
+
+### Phase 5 R7 — mission time limits, and rewards that never varied
+
+**Half one: `timeLimit` was written in two units and read in a third
+assumption.** Producers: `missionGenerator`'s template path stored
+`seconds * 1000`, its AI path `difficulty * 3600 * 1000` — both **ms**;
+`personaMissionGenService` and `storyMissionService` stored the raw template
+value — **seconds**. All three readers multiplied by 1000, i.e. assumed
+seconds. So the two ms producers yielded expiries 1000x too long: a template
+documenting itself as "1–2 hours" expired in 41–83 days. Measured before the
+fix, **187 of 187** missions carrying a `timeLimit` held a millisecond value —
+mission expiry was disabled game-wide.
+
+Canonical unit is **seconds**, against the plan's suggested ms. Every
+human-authored source already uses seconds (templates comment 3600–7200 as
+"1–2 hours"; `gameBalance`'s minigame limits are seconds and the UI prints
+"s"), and all three readers already expected seconds — so the fix lands on two
+producers rather than three readers. `utils/missionTime.ts` is now the only
+place a `timeLimit` is multiplied or divided.
+
+Existing rows still hold millisecond values and will keep reading as absurd
+durations until the pending `db:reset` (task #5).
+
+**Half two: none of the three "performance" multipliers could vary.** Decided
+with the maintainer, since it changes balance rather than fixing a crash.
+
+- `stealthScore` and `efficiencyScore` derive from `detectionCount` and
+  `hintCount`, which are **read in `completeMission` and written nowhere in the
+  codebase**. Both scores were pinned at 100, both thresholds always passed,
+  and the pair contributed a flat **+0.35 to every mission** while reading as
+  though it graded the player. The constant is kept — payouts are unchanged —
+  but it is now `BASELINE_COMPLETION_BONUS`, not two dead predicates. The
+  metrics are still computed: mission grading and the AI feedback line consume
+  them, which is honest for a constant in a way a "bonus" is not.
+- `bonusObjectivesCompleted` was `max(0, completed - total)`, which is
+  **mathematically always 0** — `completed` counts a subset of `total`.
+- `isBonus` was declared on templates, set on **39 objectives**, documented as
+  "failure doesn't fail the mission" — and then **dropped during generation**,
+  with no column to live in on `PlayerMissionObjective`. Completion was
+  `objectives.every(completed)` with no exclusion, so bonus objectives were
+  mandatory in practice, which is *why* the bonus count could never be positive.
+
+Now: the flag is carried through both generators, persisted in a new
+`is_bonus` column, restored on read, and `requiredObjectivesComplete` ignores
+bonus objectives (falling back to requiring all if a mission is somehow
+all-bonus — "no required objectives" must not mean "complete immediately").
+So 39 objectives across 83 templates become genuinely optional, and the
+`* 0.1` per-bonus reward term can finally pay out.
+
+Evidence: `scripts/verify-phase5-r7-timelimit.ts` **17/17**, negative-
+controlled on the producer. Expiry is bounded from BOTH sides, because "in the
+future" was also true of the 41-day bug. Includes an end-to-end round trip
+through `PlayerMissionObjective` — without it the generator fix would have
+looked right while the flag was silently discarded at the table boundary.
+
+**Operational note:** `prisma generate` rewrites `node_modules/@prisma/client`,
+which `tsx watch` does not watch. After adding the column, the long-running dev
+server kept a stale client and two unrelated harnesses failed with "Unknown
+argument `isBonus`" — a *stale-process* failure that reads exactly like a code
+regression. Restarting the server restored 15/15 and 4/4. Always bounce the
+watch server after a `prisma generate`.
+
 ## Decisions log
 
 Recorded so the plan stays internally consistent as it evolves.
