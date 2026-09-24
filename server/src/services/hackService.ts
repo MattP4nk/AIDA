@@ -2424,17 +2424,16 @@ class HackService extends EventEmitter {
           successfulHacks: success ? 1 : 0,
           failedHacks: success ? 0 : 1,
         });
-        const xp = await this.playerProgress.addExperience(
-          attackerId,
-          success ? 50 : 10,
-        );
-        if (xp.leveledUp) {
-          this.emit("player:levelup", {
-            userId: attackerId,
-            newLevel: xp.level,
-            experience: xp.experience,
-          });
-        }
+
+        // R12: the XP award that used to live here is GONE.
+        //
+        // `resolveHackSession` calls this method AND `awardExperience` on the
+        // same hack, and both granted `success ? 50 : 10` — so every hack paid
+        // out twice, once unmultiplied here and once multiplied there, and a
+        // level-up could emit `player:levelup` twice for one action.
+        // `awardExperience` is the one that applies the multiplier and is
+        // named for the job; a method called `updateHackStatistics` has no
+        // business granting experience.
 
         // Update target's security awareness (increase forensics slightly).
         // D8: was `Math.min(1, 100 - targetProgress.forensics)` from a separate

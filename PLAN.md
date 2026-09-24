@@ -814,6 +814,66 @@ Evidence: `verify-phase5-r9-encryption.ts` **16/16** (up from 14, with the
 keyless-bypass guard added); R10 15/15, R11 14/14, O9 9/9, and the
 encryption-adjacent harnesses green.
 
+
+### Phase 5 R12 (pass 1 of 2) — progression
+
+R12 lists **eleven** sub-items. All eleven were verified against source; this
+pass fixes the four that were confirmed AND self-contained, rather than
+half-doing the rest.
+
+**Fixed:**
+
+1. **Every hack awarded experience TWICE.** `resolveHackSession` calls
+   `updateHackStatistics` (line 1372) and `awardExperience` (line 1407), and
+   both granted `success ? 50 : 10` — once unmultiplied in the statistics
+   method, once multiplied in the award method. A level-up could therefore emit
+   `player:levelup` twice for a single hack. The statistics method now only
+   updates statistics; a method with that name has no business granting XP.
+2. **`mission:failed` had no emitter.** `index.ts` has listened for it all
+   along — it advances the story arc via `advanceStory(missionId, "failed")`
+   and writes a story-ledger entry — but nothing ever emitted it. Failing or
+   abandoning a mission had **no narrative consequence whatsoever**. Exactly
+   R4's shape: a wired-up listener starved of a producer. Now emitted from both
+   failure paths, `abandonMission` (`reason: "abandoned"`) and the expiry sweep
+   (`reason: "expired"`), since expiry is a failure as far as the story is
+   concerned.
+3. **`startTutorial` was a check-then-act.** `count()` → `if (> 0) return` →
+   create, with no lock. Demonstrated: three concurrent calls produce **three**
+   tutorial missions. An in-memory in-flight guard is the right scope — the
+   race is between calls in one process, and a stale entry cannot outlive a
+   restart, after which the `count()` guard is correct again. Released in
+   `finally`, because a throw that left the flag set would lock the player out
+   of the tutorial permanently.
+4. **Relative paths resolved against the wrong directory.** `getServerContext`
+   read the legacy top-level `session.currentDirectory` — the field
+   `gameStateManager` itself labels "for backwards compatibility" — while each
+   terminal tab carries its own. With two tabs open in different directories,
+   `cat notes.txt` in one could read the other tab's file. Now resolves via
+   `session.terminals[activeTerminalId]`, with the legacy field retained as the
+   fallback for sessions that have no terminals.
+
+**Deferred to pass 2, with what is already known about each:**
+
+- tutorial-abandon guard; `maxAttempts` persistence; epoch transition
+  activation; `exploit`/`backdoor`/`rootkit` routed through the same minigame
+  layers as `hack`; traceroute hop-masking; honest download results.
+- **The inverted difficulty→skill relationship is deliberately NOT in scope
+  here.** `hackService` passes `successRate` into `awardExperience`'s
+  `difficulty` parameter — both `number`, so the compiler cannot see it — and
+  since `successRate` is clamped 0.05–0.95, `ceil(difficulty * 2)` yields +1 for
+  a hard hack and **+2 for an easy one**. PLAN's own R5 note assigns the fix to
+  the Phase 8 SKILL ECONOMY work, which redefines the award anyway. Recorded
+  here so it is not lost, not silently reopened.
+
+Evidence: `scripts/verify-phase5-r12-progression.ts` **8/8**, negative-
+controlled on the tutorial lock (removing the guard yields 3 missions from 3
+concurrent calls).
+
+**Harness note:** the levelup assertion first fired on my own explanatory
+comment — the removed code's replacement comment names `player:levelup` in
+prose. Third time this session a substring check matched text I had just
+written. It now matches the `this.emit("player:levelup"` CALL.
+
 ## Decisions log
 
 Recorded so the plan stays internally consistent as it evolves.

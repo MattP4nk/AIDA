@@ -70,7 +70,21 @@ export function getSessionContext(context: CommandContext): {
   if (!session) return null;
   const serverId = session.currentServerId || session.homeServerId;
   if (!serverId) return null;
-  const currentDir = session.currentDirectory || "/";
+
+  // R12: resolve relative paths against the ACTIVE terminal.
+  //
+  // `session.currentDirectory` is the legacy top-level field — gameStateManager
+  // labels it "for backwards compatibility" — while each terminal tab carries
+  // its own `currentDirectory`. A player with two tabs in different directories
+  // had every relative path in BOTH resolved against whichever directory last
+  // wrote the shared field, so `cat notes.txt` in one tab could read a file
+  // from the other tab's directory.
+  const activeTerminal = session.terminals?.find(
+    (t) => t.id === session.activeTerminalId,
+  );
+  const currentDir =
+    activeTerminal?.currentDirectory || session.currentDirectory || "/";
+
   return { session, serverId, currentDir };
 }
 

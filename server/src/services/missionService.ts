@@ -681,6 +681,17 @@ class MissionService extends EventEmitter {
         },
       );
 
+      // R12: emit the Node event. `index.ts` has listened for `mission:failed`
+      // all along — it advances the story arc and writes a story-ledger entry —
+      // but NOTHING ever emitted it, so failing a mission had no narrative
+      // consequence whatsoever. Same shape as R4's traces: a wired-up listener
+      // waiting on a producer that was never written.
+      this.emit("mission:failed", {
+        missionId,
+        userId,
+        reason: "abandoned",
+      });
+
       // Update mission in database to make it available again
       await this.prisma.mission.update({
         where: { id: missionId },
@@ -1683,6 +1694,16 @@ class MissionService extends EventEmitter {
         if (this.io) {
           this.io.to(`player:${userId}`).emit("mission:expired", { missionId });
         }
+
+        // R12: expiry is a failure as far as the story is concerned, so the
+        // Node event fires here too. The socket event above only tells the
+        // player's client; it is `mission:failed` that advances the arc and
+        // writes the ledger entry.
+        this.emit("mission:failed", {
+          missionId,
+          userId,
+          reason: "expired",
+        });
         await this.auditLog(userId, "MISSION_EXPIRED", { missionId });
         await this.prisma.mission.update({
           where: { id: missionId },

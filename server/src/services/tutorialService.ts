@@ -332,7 +332,28 @@ export class TutorialService {
    * Creates the first tutorial mission and sends the first Architect mail.
    * No-ops if the tutorial has already been started.
    */
+  /**
+   * R12 — per-user in-flight guard.
+   *
+   * The `count()` below is a check-then-act: two concurrent calls (a
+   * double-click on "start", a retried socket event, or login racing the
+   * registration hook) both read 0, both pass the guard, and both create a
+   * first tutorial mission. The DB has no unique to stop it, so the player
+   * ends up with duplicate tutorial state and two Architect mails.
+   *
+   * An in-memory set is the right scope: the race is between two calls in
+   * THIS process, and a stale entry cannot outlive a restart — after which
+   * the `count()` guard is correct again because the first call committed.
+   */
+  private readonly startingTutorial = new Set<string>();
+
   public async startTutorial(userId: string): Promise<void> {
+    if (this.startingTutorial.has(userId)) {
+      this.logger.debug({ userId }, "Tutorial start already in flight, skipping");
+      return;
+    }
+    this.startingTutorial.add(userId);
+
     try {
       // Guard: don't re-start if tutorial missions already exist
       const existingCount = await this.prisma.mission.count({
@@ -364,6 +385,11 @@ export class TutorialService {
       this.logger.info({ userId }, "Tutorial started for new player");
     } catch (error) {
       this.logger.error({ err: error, userId }, "Error starting tutorial");
+    } finally {
+      // Release in `finally`, not on the success path: a throw that left the
+      // flag set would lock the player out of ever starting the tutorial for
+      // the life of the process.
+      this.startingTutorial.delete(userId);
     }
   }
 
