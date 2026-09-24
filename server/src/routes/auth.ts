@@ -479,7 +479,9 @@ router.get("/verify", asyncHandler(async (req: any, res: any) => {
 
     if (!token) throw new GameError("No token provided", "AUTH_REQUIRED", 401);
 
-    const decoded = jwt.verify(token, config.JWT_SECRET) as { userId: string };
+    const decoded = jwt.verify(token, config.JWT_SECRET, {
+      algorithms: ["HS256"],
+    }) as { userId: string };
 
     // Check if session is active
     const session = await prisma.userSession.findFirst({

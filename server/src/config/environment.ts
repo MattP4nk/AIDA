@@ -157,6 +157,37 @@ export const validateConfig = (): void => {
     );
   }
 
+  // ── S8: NODE_ENV must be explicit and recognised ────────────────────
+  //
+  // It defaults to "development", and that default is load-bearing in the
+  // wrong direction: `isDevelopment` gates the /admin panel being served as
+  // static files, and the cookie config falls back to `sameSite: "none"`. So
+  // deploying with NODE_ENV simply unset — the easiest possible mistake —
+  // publishes the admin panel and ships cross-site cookies, silently.
+  //
+  // A typo is the same hazard with a friendlier face: "prod", "Production"
+  // and "staging" all fail `=== "production"`, so they are development too.
+  // Only the three known values are accepted, and anything else is fatal at
+  // boot rather than quietly permissive.
+  const KNOWN_ENVS = ["development", "production", "test"];
+  if (!KNOWN_ENVS.includes(config.NODE_ENV)) {
+    throw new Error(
+      `NODE_ENV must be one of ${KNOWN_ENVS.join(" | ")}, got "${config.NODE_ENV}". ` +
+        "It is not cosmetic: an unrecognised value is treated as development, " +
+        "which serves the /admin panel and uses sameSite=none cookies.",
+    );
+  }
+  if (!process.env.NODE_ENV) {
+    // Not fatal — a bare `npm run dev` is a legitimate way to start. But it
+    // must be loud, because the default is the permissive one.
+    // console, not the logger: this module is imported by the logger's own
+    // config, so it runs before a logger exists.
+    console.warn(
+      "[config] NODE_ENV is not set — defaulting to development. The /admin panel " +
+        "WILL be served and cookies use sameSite=none. Set NODE_ENV=production to deploy.",
+    );
+  }
+
   // Validate JWT secret length
   if (config.JWT_SECRET.length < 32) {
     throw new Error("JWT_SECRET must be at least 32 characters long");

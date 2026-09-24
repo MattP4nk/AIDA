@@ -534,17 +534,18 @@ export class SystemCommandsModule implements CommandModule {
 
       // Apply censorship filtering to file content on faction-owned servers
       try {
-        const { getService } = await import("../../di/container");
-        const censorshipService =
-          getService<import("../censorshipService").default>(
-            "CensorshipService",
-          );
-        output = await censorshipService.filterAndAlert(output, {
+        const { filterContentOrThrow } = await import("../censorshipService");
+        output = await filterContentOrThrow(output, {
           userId: context.userId,
           serverId,
         });
       } catch {
-        /* Censorship service not available */
+        // A9: FAIL CLOSED, and on a READ path the reasoning is even starker —
+        // this filter REDACTS sensitive content, so passing through on failure
+        // hands the player exactly what censorship exists to withhold.
+        return errorResult(
+          "Unable to verify file contents right now. Try again shortly.",
+        );
       }
 
       return successResult(output);

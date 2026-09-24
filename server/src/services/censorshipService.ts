@@ -209,3 +209,32 @@ export default class CensorshipService {
     await this.loadRules();
   }
 }
+
+/**
+ * A9 — the one way to run content through censorship, and it FAILS CLOSED.
+ *
+ * This block was copy-pasted at five call sites (forumService x3,
+ * messageService, systemCommands), each resolving the service by hand and each
+ * ending in `catch { /* Censorship service not available — pass through *\/ }`.
+ *
+ * Passing through is the wrong answer to a failed filter. Censorship here is
+ * not cosmetic — `censorshipService.processAlerts` is what raises
+ * `censorship_alert` events, which `darknetDiscoveryService` counts toward
+ * DarkNet discovery. So a filter that silently no-ops does not just publish
+ * unfiltered text; it also stops the alert that was supposed to fire. Five
+ * independent `catch`es meant five chances for that to happen unnoticed.
+ *
+ * Throws on failure. Callers must let it propagate (or surface it) rather than
+ * re-swallowing — publishing the raw text is precisely what this prevents.
+ */
+export async function filterContentOrThrow(
+  text: string,
+  context: { userId: string; serverId?: string | undefined; factionId?: string | undefined },
+): Promise<string> {
+  const { getService } = await import("../di/container");
+  const service = getService<CensorshipService>("CensorshipService");
+  if (!service) {
+    throw new Error("Censorship service unavailable — refusing to publish unfiltered content");
+  }
+  return service.filterAndAlert(text, context);
+}

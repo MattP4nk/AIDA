@@ -216,17 +216,19 @@ export class MessageService {
       // Apply censorship filtering
       let filteredContent = options.content;
       try {
-        const { getService } = await import("../di/container");
-        const censorshipService =
-          getService<import("./censorshipService").default>(
-            "CensorshipService",
-          );
-        filteredContent = await censorshipService.filterAndAlert(
-          options.content,
-          { userId: senderId },
-        );
-      } catch {
-        /* Censorship service not available — pass through */
+        const { filterContentOrThrow } = await import("./censorshipService");
+        filteredContent = await filterContentOrThrow(options.content, {
+          userId: senderId,
+        });
+      } catch (err) {
+        // A9: FAIL CLOSED. Swallowing here published the raw message AND
+        // suppressed the censorship alert that feeds DarkNet discovery.
+        this.logger.error({ err, senderId }, "Censorship failed — refusing to send");
+        return {
+          success: false,
+          message: "Unable to verify message content right now. Try again shortly.",
+          error: "CENSORSHIP_UNAVAILABLE",
+        };
       }
 
       let finalContent = filteredContent;

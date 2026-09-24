@@ -612,20 +612,18 @@ export class ForumService extends EventEmitter {
       let filteredTitle = title;
       let filteredContent = content;
       try {
-        const { getService } = await import("../di/container");
-        const censorshipService =
-          getService<import("./censorshipService").default>(
-            "CensorshipService",
-          );
+        const { filterContentOrThrow } = await import("./censorshipService");
         const forum = await prisma.forum.findUnique({ where: { id: forumId } });
         const ctx: { userId: string; factionId?: string | undefined } = {
           userId,
         };
         if (forum?.factionId) ctx.factionId = forum.factionId;
-        filteredTitle = await censorshipService.filterAndAlert(title, ctx);
-        filteredContent = await censorshipService.filterAndAlert(content, ctx);
-      } catch {
-        /* Censorship service not available — pass through */
+        filteredTitle = await filterContentOrThrow(title, ctx);
+        filteredContent = await filterContentOrThrow(content, ctx);
+      } catch (err) {
+        // A9: FAIL CLOSED. This used to swallow and publish the raw text.
+        this.logger.error({ err, userId, forumId }, "Censorship failed — refusing to post");
+        throw new Error("Unable to verify content right now. Try again shortly.");
       }
 
       // Create post
@@ -1927,19 +1925,17 @@ YOUR POST TITLE: "${post.title}"`;
       // Apply censorship filtering
       let filteredContent = content;
       try {
-        const { getService } = await import("../di/container");
-        const censorshipService =
-          getService<import("./censorshipService").default>(
-            "CensorshipService",
-          );
+        const { filterContentOrThrow } = await import("./censorshipService");
         const forum = await prisma.forum.findUnique({ where: { id: forumId } });
         const ctx: { userId: string; factionId?: string | undefined } = {
           userId,
         };
         if (forum?.factionId) ctx.factionId = forum.factionId;
-        filteredContent = await censorshipService.filterAndAlert(content, ctx);
-      } catch {
-        /* Censorship service not available — pass through */
+        filteredContent = await filterContentOrThrow(content, ctx);
+      } catch (err) {
+        // A9: FAIL CLOSED — see the post path.
+        this.logger.error({ err, userId, postId }, "Censorship failed — refusing to reply");
+        throw new Error("Unable to verify content right now. Try again shortly.");
       }
 
       // Create reply
@@ -2865,22 +2861,17 @@ YOUR POST TITLE: "${post.title}"`;
       // Apply censorship filtering
       let filteredContent = newContent;
       try {
-        const { getService } = await import("../di/container");
-        const censorshipService =
-          getService<import("./censorshipService").default>(
-            "CensorshipService",
-          );
+        const { filterContentOrThrow } = await import("./censorshipService");
         const forum = await prisma.forum.findUnique({ where: { id: forumId } });
         const ctx: { userId: string; factionId?: string | undefined } = {
           userId,
         };
         if (forum?.factionId) ctx.factionId = forum.factionId;
-        filteredContent = await censorshipService.filterAndAlert(
-          newContent,
-          ctx,
-        );
-      } catch {
-        /* Censorship service not available — pass through */
+        filteredContent = await filterContentOrThrow(newContent, ctx);
+      } catch (err) {
+        // A9: FAIL CLOSED — see the post path.
+        this.logger.error({ err, userId, postId }, "Censorship failed — refusing to edit");
+        throw new Error("Unable to verify content right now. Try again shortly.");
       }
 
       const updatedPost = await prisma.post.update({

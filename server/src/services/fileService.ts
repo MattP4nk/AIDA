@@ -1247,6 +1247,22 @@ export class FileService {
   /**
    * Check if user can read a file/directory
    */
+  /**
+   * S10 — may this user read this file, by id?
+   *
+   * Public because command modules need the question answered without being
+   * handed `canRead`/`getUserAccessLevel`, which are internals. Added for
+   * `report file`, which looked a file up by a CLIENT-SUPPLIED id with no
+   * permission check at all: any player could report any file in the game and
+   * leak its name, server, hidden and encrypted flags into faction knowledge.
+   */
+  public async canUserReadFile(userId: string, fileId: string): Promise<boolean> {
+    const node = await prisma.fileSystemNode.findUnique({ where: { id: fileId } });
+    if (!node) return false;
+    const accessLevel = await this.getUserAccessLevel(userId, node.serverId);
+    return this.canRead(userId, node as unknown as FileNode, accessLevel);
+  }
+
   private async canRead(
     userId: string,
     nodeOrId: string | FileNode,

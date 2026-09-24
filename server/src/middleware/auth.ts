@@ -108,16 +108,29 @@ export const authenticateToken = async (
       });
     }
 
-    // Cache hit — skip DB entirely (keyed by hash of token)
+    // ── S10: verify the JWT BEFORE consulting the cache ────────────────
+    //
+    // The cache lookup used to come first, and `cached.expiresAt` is the CACHE
+    // ENTRY's 60s TTL — it has nothing to do with the token's own `exp`. So a
+    // JWT that had already expired kept working for up to a minute after
+    // expiry, because the warm entry short-circuited before anything checked
+    // it. The same shortcut skipped the `UserSession` active/expiry check.
+    //
+    // `algorithms: ["HS256"]` is pinned here and at every other verify site.
+    // Without it the library accepts whatever the token's own header asks for,
+    // which is the classic algorithm-confusion foothold.
+    const decoded = jwt.verify(token, config.JWT_SECRET, {
+      algorithms: ["HS256"],
+    }) as { userId: string };
+
+    // Only now may the cache stand in for the DB round trips. It is a cache of
+    // the LOOKUP, never of the decision that the token is still valid.
     const tokenHash = hashToken(token);
     const cached = authCache.get(tokenHash);
     if (cached && cached.expiresAt > Date.now()) {
       req.user = cached.user;
       return next();
     }
-
-    // Verify JWT token
-    const decoded = jwt.verify(token, config.JWT_SECRET) as { userId: string };
 
     // Check if session is active
     const session = await prisma.userSession.findFirst({
@@ -215,7 +228,9 @@ export const optionalAuth = async (
       return next();
     }
 
-    const decoded = jwt.verify(token, config.JWT_SECRET) as { userId: string };
+    const decoded = jwt.verify(token, config.JWT_SECRET, { algorithms: ["HS256"] }) as {
+      userId: string;
+    };
 
     const session = await prisma.userSession.findFirst({
       where: {
@@ -265,7 +280,9 @@ export const verifySocketToken = async (token: string) => {
       return cached.user;
     }
 
-    const decoded = jwt.verify(token, config.JWT_SECRET) as { userId: string };
+    const decoded = jwt.verify(token, config.JWT_SECRET, { algorithms: ["HS256"] }) as {
+      userId: string;
+    };
 
     const session = await prisma.userSession.findFirst({
       where: {

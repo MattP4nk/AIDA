@@ -16,7 +16,7 @@ import type ProgressService from "../services/progressService";
 import type CommandProcessor from "../services/commandProcessor";
 import type PlayerPresenceService from "../services/playerPresenceService";
 import type MessageService from "../services/messageService";
-import { validateCommandInput, sanitizeSocketInput, validateMessageInput } from "../utils/inputValidation";
+import { validateCommandInput, validateCommandArgs, sanitizeSocketInput, validateMessageInput } from "../utils/inputValidation";
 
 /**
  * Socket handler context — resolved once from DI, shared across all connections.
@@ -536,7 +536,17 @@ async function handleCommandExecute(
       return;
     }
 
-    // Validate and sanitize args
+    // Validate and sanitize args.
+    // The socket path takes `args` pre-split, bypassing the length and
+    // character checks the HTTP path applies to the whole command string.
+    const argsValidation = validateCommandArgs(args);
+    if (!argsValidation.valid) {
+      socket.emit("command:error", {
+        success: false,
+        error: argsValidation.reason || "Invalid arguments",
+      });
+      return;
+    }
     const sanitizedArgs = Array.isArray(args)
       ? args.filter((a): a is string => typeof a === "string").map(sanitizeSocketInput)
       : [];

@@ -32,6 +32,43 @@ export function validateCommandInput(
   return { valid: true };
 }
 
+/**
+ * Caps on a pre-split `args` array.
+ *
+ * The HTTP path never needed this: it takes a single raw command STRING, which
+ * `validateCommand()` length- and character-checks before the shell tokenizer
+ * ever sees it. The socket path accepts `args` as a separate array, which
+ * skips all of that — it was only filtered to strings and stripped of control
+ * characters, with no cap on how many args or how long each one could be. So
+ * the same input that HTTP bounds at MAX_COMMAND_LENGTH could arrive over the
+ * socket as 10,000 arguments of arbitrary size.
+ *
+ * Deliberately NOT applying COMMAND_REGEX to args: unlike a command NAME, args
+ * legitimately carry paths, quotes and free text (`msg alice it's fine`), so a
+ * character whitelist here would break real input. Bounding size and count is
+ * the part that was missing.
+ */
+export const MAX_COMMAND_ARGS = 32;
+export const MAX_ARG_LENGTH = 512;
+
+export function validateCommandArgs(
+  args: unknown,
+): { valid: boolean; reason?: string } {
+  if (args === undefined || args === null) return { valid: true };
+  if (!Array.isArray(args)) {
+    return { valid: false, reason: "Arguments must be an array" };
+  }
+  if (args.length > MAX_COMMAND_ARGS) {
+    return { valid: false, reason: `Too many arguments (max ${MAX_COMMAND_ARGS})` };
+  }
+  for (const a of args) {
+    if (typeof a === "string" && a.length > MAX_ARG_LENGTH) {
+      return { valid: false, reason: `Argument exceeds maximum length of ${MAX_ARG_LENGTH}` };
+    }
+  }
+  return { valid: true };
+}
+
 export function sanitizeSocketInput(text: string): string {
   return (
     text

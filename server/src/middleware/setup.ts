@@ -33,9 +33,32 @@ export function asyncHandler(
  * Configure all Express middleware in the correct order.
  */
 export function setupMiddleware(app: Application): void {
-  // Trust proxy — required for correct req.ip behind reverse proxies (rate limiting, audit logs)
-  if (process.env.TRUST_PROXY) {
-    app.set("trust proxy", Number(process.env.TRUST_PROXY) || 1);
+  // ── O5: trust proxy, validated ──────────────────────────────────────
+  //
+  // Required for a correct `req.ip` behind a reverse proxy, which rate
+  // limiting, audit logs and the new per-IP socket cap all depend on. It is
+  // also a footgun: set it when you are NOT behind a proxy and any client can
+  // forge `X-Forwarded-For`, defeating every per-IP control at once.
+  //
+  // `Number(x) || 1` accepted anything — `TRUST_PROXY=yes` silently became 1,
+  // i.e. "trust one hop", which is a security decision made by a typo. The
+  // value is now parsed explicitly and a bad one is fatal at boot rather than
+  // guessed at.
+  //
+  // DEPLOYMENT: set TRUST_PROXY to the NUMBER OF PROXIES between the internet
+  // and this server (1 for a single nginx/Caddy in front). Leave it unset when
+  // the server is directly exposed.
+  const trustProxyRaw = process.env.TRUST_PROXY;
+  if (trustProxyRaw !== undefined && trustProxyRaw !== "") {
+    const hops = Number(trustProxyRaw);
+    if (!Number.isInteger(hops) || hops < 0 || hops > 10) {
+      throw new Error(
+        `TRUST_PROXY must be an integer number of proxy hops between 0 and 10, got "${trustProxyRaw}". ` +
+          "Set it to the number of proxies in front of this server (1 for a single nginx/Caddy), " +
+          "or leave it unset if the server is directly exposed.",
+      );
+    }
+    app.set("trust proxy", hops);
   }
 
   // Security headers

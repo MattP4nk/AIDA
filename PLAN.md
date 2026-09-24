@@ -2090,8 +2090,13 @@ error-level lines**.
       `force:disconnect` events.
       Regression: tutorial 11/11, gate 15/15, P0 4/4, G3 19/19, shop 10/10, provisioning 5/5 — all
       through the new handshake auth.
-- [ ] **S8** Make `NODE_ENV` explicit — fail fast at boot if unset in a non-dev context, so the
-      `/admin` panel and `sameSite: "none"` can't leak into production by default.
+- [x] **S8 — DONE 2026-09-23.** Only `development | production | test` are accepted; anything else
+      is fatal at boot. The danger is not just an unset value: `"prod"`, `"Production"` and
+      `"staging"` all fail `=== "production"`, so each of them silently *was* development — which
+      serves the `/admin` panel as static files and uses `sameSite: "none"` cookies. Unset stays
+      non-fatal (a bare `npm run dev` is legitimate) but now warns loudly, because the default is
+      the permissive one. Uses `console.warn`, not the logger: this module is imported by the
+      logger's own config.
 - [x] **S11 — DONE 2026-09-23. Now fails closed**, with a warning naming the offending value.
       Measured before changing it: all **217** live servers use one of the four handled values
       (hackable 192, keycard 13, hack_or_key 7, open 5), so the change locks nobody out today — it
@@ -2104,13 +2109,67 @@ error-level lines**.
       `create_server` agent tool and `serverContentService` can write arbitrary strings — an
       AI-generated server with a typo'd or invented `accessMethod` becomes freely accessible to
       everyone. Fail closed. *(Found while reviewing the uncommitted work; not in the original audit.)*
-- [ ] **S10** `story <arcId>` ownership filter; `report file` permission check + `parentId` scoping.
-- [ ] **S10** Move the auth cache lookup *after* expiry validation; pin `algorithms: ["HS256"]`
-      on all four `jwt.verify` sites; delete the dead `hashPassword`; use `config.BCRYPT_ROUNDS`
-      in `adminCommands.ts:719`.
-- [ ] **A9** De-duplicate the censorship block (3× verbatim) into one helper — and make it **fail
-      closed**, not silently open.
-- [ ] **O5** `TRUST_PROXY`: validate the value; document the deployment requirement.
+- [~] **S10 (data scoping) — `report file` DONE 2026-09-23; `story <arcId>` NOT APPLICABLE.**
+      There is no `story` command — `grep` for `storyArc` across `commandModules` returns nothing.
+      Story arcs are driven by `storyMissionService` and surfaced as missions, so the ownership
+      filter has no command to attach to. Recorded rather than invented.
+      **`report file` had two defects, and the plan named both.** The lookup was
+      `{ serverId, name, type, ...(parentId ? { parentId } : {}) }` — for a bare filename the
+      directory scope was dropped **entirely**, so `report file secrets.txt` matched that name
+      anywhere on the server, including inside directories the player cannot read. It now resolves
+      the player's current directory and always scopes to a real `parentId`, and it checks read
+      permission before copying the file into faction knowledge.
+      **Found by asking where else the pattern lives: `share_intel file <id>` was worse.** It did
+      `findUnique({ where: { id: assetId } })` on a **client-supplied id** with no check at all —
+      any player could leak any file's name, server, hidden and encrypted flags into faction
+      knowledge. Both now go through a new public `fileService.canUserReadFile`, added rather than
+      widening `canRead`/`getUserAccessLevel` to public.
+- [x] **S10 (auth) — DONE 2026-09-23.**
+      **Cache ordering was the real bug.** The cache was consulted *before* `jwt.verify`, and
+      `cached.expiresAt` is the cache entry's own 60-second TTL — nothing to do with the token's
+      `exp`. So an **already-expired JWT kept working for up to a minute**, and the same shortcut
+      skipped the `UserSession` active/expiry check. Verification now runs first; the cache only
+      ever stands in for the DB round trips, never for the decision that the token is valid.
+      `algorithms: ["HS256"]` pinned on **all four** `jwt.verify` sites (three in `middleware/auth`,
+      one in `routes/auth`) — verified by counting, because two wrapped onto a second line and a
+      naive grep reported them as unpinned.
+      `adminCommands` was hashing a reset password with a hardcoded `10` instead of
+      `config.BCRYPT_ROUNDS` (12, range-validated at boot) — quietly weaker than registration.
+      **`hashPassword` no longer exists** — that part of the item was already stale.
+- [x] **A9 — DONE 2026-09-23. It was 5 sites, not 3** (`forumService` ×3, `messageService`,
+      `systemCommands`), each resolving the service by hand and each ending in
+      `catch { /* pass through */ }`.
+      **Failing open was worse than it looks.** `processAlerts` is what raises `censorship_alert`
+      events, which `darknetDiscoveryService` counts toward DarkNet discovery — so a swallowed
+      filter did not merely publish unfiltered text, it also suppressed the alert that was supposed
+      to fire, and five independent `catch`es meant five places for that to happen unnoticed.
+      One exported `filterContentOrThrow` now does it and throws. Callers surface a retry message
+      instead of publishing. The `cat` path in `systemCommands` is the starkest case: that filter
+      **redacts**, so passing through on failure hands the player exactly what censorship exists to
+      withhold.
+- [x] **O5 — DONE 2026-09-23.** `Number(process.env.TRUST_PROXY) || 1` accepted anything —
+      `TRUST_PROXY=yes` silently became `1`, i.e. "trust one hop", a security decision made by a
+      typo. It is now parsed as an integer hop count (0–10) and a bad value is fatal at boot.
+      This matters more after S9: set it when you are **not** behind a proxy and any client can
+      forge `X-Forwarded-For`, defeating the new per-IP socket cap along with rate limiting and
+      audit logs. Deployment requirement documented at the call site: set it to the number of
+      proxies in front of the server, leave it unset when directly exposed.
+
+- [x] **Filed here by Phase 1's audit: socket arg whitelist bypass — DONE 2026-09-23.**
+      The HTTP path takes a single raw command STRING, which `validateCommand()` length- and
+      character-checks before the tokenizer sees it. The socket path accepts `args` as a separate
+      pre-split array, which skipped all of that — filtered to strings and stripped of control
+      characters, but with **no cap on how many args or how long each one could be**, so input HTTP
+      bounds at 1000 chars could arrive over the socket as thousands of arbitrary-length arguments.
+      New `validateCommandArgs`: max 32 args, max 512 chars each. Deliberately **not** applying
+      `COMMAND_REGEX` to args — unlike a command name they legitimately carry paths, quotes and free
+      text (`msg alice it's fine`), so a character whitelist would break real input. Bounding size
+      and count is the part that was missing.
+- [ ] **Filed here by Phase 1's audit: player-deletable rate-limit rows — NOT FOUND, needs the
+      original finding.** No rate-limit table exists in `schema.prisma` and no such rows are
+      written; the socket limiter is in-memory and the HTTP one is `express-rate-limit`. Either the
+      finding refers to something since removed, or it meant a different mechanism. Left open
+      rather than guessed at.
 
 **Gate:** verified by hand (decision 2) — emitting `server:connect` for an unowned server is
 rejected; a banned user's live socket actually dies; per-user rate limits hold across two open

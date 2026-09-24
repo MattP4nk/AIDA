@@ -724,7 +724,12 @@ export class AdminCommandsModule implements CommandModule {
       tempPw += chars[Math.floor(Math.random() * chars.length)];
     }
 
-    const hashed = await bcrypt.hash(tempPw, 10);
+    // S10: use the configured cost, not a hardcoded 10. `config.BCRYPT_ROUNDS`
+    // defaults to 12 and is range-validated at boot, so this site was quietly
+    // issuing weaker hashes than registration — and would ignore any future
+    // tuning of the cost.
+    const { config } = await import("../../config/environment");
+    const hashed = await bcrypt.hash(tempPw, config.BCRYPT_ROUNDS);
     await context.db.client.user.update({
       where: { id: user.id },
       data: { password: hashed },
