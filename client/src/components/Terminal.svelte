@@ -420,15 +420,19 @@
 
         // Subscribe to live messages for notifications
         const unsubscribe = liveMessages.subscribe((messages) => {
-            unreadCount = messages.length;
-
-            // Count chat vs mail messages
-            unreadChatCount = messages.filter(
-                (msg) => !msg.subject || msg.subject.trim() === "",
-            ).length;
-            unreadMailCount = messages.filter(
-                (msg) => msg.subject && msg.subject.trim() !== "",
-            ).length;
+            // R13: the unread counts are NOT written here any more.
+            //
+            // Two owners wrote these three variables: the reactive statements
+            // above (`$: unreadCount = $unreadCounts.total`) and these
+            // assignments — so which value the badge showed depended on which
+            // store happened to update last. Worse, `liveMessages` is the
+            // WHOLE message list, so `messages.length` counted messages the
+            // player had already read: the badge only ever climbed, and
+            // marking everything read did not clear it.
+            //
+            // `notificationService.updateUnreadCounts` already computes these
+            // correctly by filtering on `!n.read`. One owner, and it is the one
+            // that knows what "unread" means. Only the side effect stays here.
 
             // Play notification sound or show visual feedback
             if (messages.length > 0) {

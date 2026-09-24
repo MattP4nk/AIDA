@@ -988,6 +988,48 @@ owners, the duplicate reconnect loop, and reconnect state reconciliation. These
 four are interrelated — they all concern who owns notification/connection state
 — and deserve reading together rather than being picked off individually.
 
+
+### Phase 5 R13 (pass 2) — the four state-ownership items
+
+Read together rather than picked off individually, which was the right call:
+**two of the four turned out to be one defect, and one was already handled.**
+
+**Unread-count inflation and "the badge's two owners" are the same bug.**
+`Terminal.svelte` derives the counts reactively from the store
+(`$: unreadCount = $unreadCounts.total`) AND assigns the same three variables
+imperatively inside a `liveMessages` subscription. Two writers, so which value
+the badge showed depended on which store updated last. And the imperative one
+was wrong on its own terms: `liveMessages` is the WHOLE message list, so
+`unreadCount = messages.length` counted messages the player had already read —
+the badge only ever climbed, and marking everything read did not clear it.
+`notificationService.updateUnreadCounts` already computes these correctly by
+filtering on `!n.read`, so the imperative writes are gone and the sound-effect
+side effect stays. One owner, and it is the one that knows what "unread" means.
+
+**The duplicate reconnect loop was real.** socket.io's built-in `reconnection`
+defaults to **true** and was never disabled, so it ran alongside the hand-rolled
+`handleReconnect()`. The two fed each other: every internal retry that failed
+emitted `connect_error`, which called `handleReconnect()`, which bumped the
+manual attempt counter and scheduled another `connect()` — and `connect()`
+builds a fresh socket (`forceNew: true`), abandoning the one socket.io was
+still retrying. Built-in reconnection is now off. The explicit loop is the one
+kept, because the app has real policy attached to it: a max-attempt ceiling,
+exponential backoff, a user-facing "please refresh" message, and the deliberate
+rule that `io server disconnect` — a kick or ban — must NOT auto-reconnect.
+That last point matters: leaving both enabled would have let socket.io quietly
+undo Phase 4's ban enforcement.
+
+**Reconnect state reconciliation was already handled** — and by this phase's own
+work. The `connect` handler re-emits `authenticated`, and R6 is what made that
+meaningful: before it, re-authenticating on a surviving session bound nothing,
+joined no rooms, and left the socket deaf. Client half was already right; the
+server half was R6. Recorded as verified rather than fixed.
+
+R13 is therefore complete: **11 of 12 fixed, 1 verified as already correct.**
+Client `svelte-check` shows zero genuine errors (only the repeated
+`VITE_API_URL` build guard, which is environmental), and the production build
+succeeds.
+
 ## Decisions log
 
 Recorded so the plan stays internally consistent as it evolves.

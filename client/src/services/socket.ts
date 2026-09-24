@@ -139,6 +139,19 @@ class SocketService {
       transports: ["websocket", "polling"],
       timeout: 10000,
       forceNew: true,
+      // R13: socket.io's built-in reconnection defaults to TRUE and was never
+      // disabled, so it ran alongside `handleReconnect()` — two loops for one
+      // job. Each internal retry that failed emitted `connect_error`, which
+      // called `handleReconnect()`, which incremented the manual attempt
+      // counter and scheduled ANOTHER `connect()` — and `connect()` builds a
+      // fresh socket (`forceNew: true`), abandoning the one socket.io was
+      // still retrying. The two fed each other and raced to create sockets.
+      //
+      // The explicit loop is kept because the app has real policy around it:
+      // a max-attempt ceiling, exponential backoff, a user-facing "please
+      // refresh" message, and the deliberate rule that `io server disconnect`
+      // (a kick or ban) must NOT auto-reconnect.
+      reconnection: false,
     });
 
     this.setupEventHandlers();
