@@ -761,7 +761,28 @@ export class NetworkTopologyService {
       }
 
       default:
-        return { allowed: true, reason: "Default access.", requiresHack: false, requiresKey: false };
+        // ── S11: FAIL CLOSED ──────────────────────────────────────────────
+        // This used to `return { allowed: true }`, so any `accessMethod` the
+        // switch did not recognise made the server freely accessible to
+        // everyone.
+        //
+        // Not reachable from seeded data — the schema default is "hackable"
+        // and all seeded values are valid — but `accessMethod` is a plain
+        // String column, and BOTH the `create_server` agent tool and
+        // `serverContentService` write it from AI-generated content. One
+        // invented or typo'd value ("hack_only", "keycard ") would have
+        // silently published that server. An unknown policy is a policy we
+        // cannot evaluate, and the safe answer to that is no.
+        this.logger.warn(
+          { serverId, accessMethod: server.accessMethod },
+          "Unknown accessMethod — denying access (S11 fail-closed)",
+        );
+        return {
+          allowed: false,
+          reason: `${server.name} has an unrecognised access policy and cannot be reached.`,
+          requiresHack: false,
+          requiresKey: false,
+        };
     }
   }
 

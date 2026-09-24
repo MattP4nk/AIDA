@@ -498,6 +498,53 @@ class GameStateManager extends EventEmitter {
 
   // ==================== SERVER STATE MANAGEMENT ====================
 
+  /**
+   * S1 — the single authorization point for "may this player be on this server".
+   *
+   * Combines the two checks the command path already did separately:
+   *   - `serverService.canAccessServer` — level vs encryption, owner bypass
+   *   - `networkTopologyService.checkServerAccess` — accessMethod
+   *     (open / hackable / keycard / hack_or_key)
+   *
+   * Resolved through the container rather than injected because
+   * `gameStateManager` is constructed before both services exist. A resolution
+   * failure FAILS CLOSED: if we cannot evaluate the policy we do not grant
+   * access, which is the opposite of what the old `default:` arm in
+   * `checkServerAccess` did (see S11).
+   */
+  private async authorizeServerAccess(
+    userId: string,
+    serverId: string,
+  ): Promise<{ allowed: boolean; reason: string }> {
+    try {
+      const { getService } = await import("../di/container");
+      const { SERVER_SERVICE, NETWORK_TOPOLOGY_SERVICE } = await import("../di/tokens");
+
+      const serverService =
+        getService<import("./serverService").default>(SERVER_SERVICE);
+      const access = await serverService.canAccessServer(userId, serverId);
+      if (!access.canAccess) {
+        return { allowed: false, reason: access.reason };
+      }
+
+      const topology = getService<
+        import("./networkTopologyService").NetworkTopologyService
+      >(NETWORK_TOPOLOGY_SERVICE);
+      const method = await topology.checkServerAccess(userId, serverId);
+      if (!method.allowed) {
+        return { allowed: false, reason: method.reason };
+      }
+
+      return { allowed: true, reason: access.reason };
+    } catch (err) {
+      this.logger.error(
+        { err, userId, serverId },
+        "Server authorization check failed — refusing connection",
+      );
+      return { allowed: false, reason: "Authorization unavailable." };
+    }
+  }
+
   public async connectPlayerToServer(
     userId: string,
     serverId: string,
@@ -522,6 +569,36 @@ class GameStateManager extends EventEmitter {
         // Disconnect from previous server
         if (session.currentServerId) {
           await this.disconnectPlayerFromServer(userId);
+        }
+
+        // ── S1: authorization lives HERE, so every caller inherits it ──────
+        //
+        // The socket handler (`sockets/handlers.ts` server:connect) called this
+        // with a client-supplied `serverId` and NO authorization at all — no
+        // access check, no adjacency, no challenge. Emitting one event put a
+        // player on any server in the game.
+        //
+        // It is not enough to guard that handler: the `connect` command path
+        // authorises correctly today, so a per-handler fix leaves two policies
+        // that can drift, and the next entry point starts unguarded again.
+        // Putting the check in the one function both paths funnel through means
+        // a new caller cannot forget it.
+        //
+        // Both predicates are pure and idempotent, so the command path
+        // re-running them costs one query and changes nothing.
+        //
+        // NOTE what is deliberately NOT here: adjacency (`canTraverse`) and the
+        // first-visit challenge. Those are rules about HOW you travelled, and
+        // `connect home` legitimately bypasses adjacency — they stay in
+        // `networkCommands`. This gate answers the security question, "may this
+        // player be on this server at all".
+        const authorized = await this.authorizeServerAccess(userId, serverId);
+        if (!authorized.allowed) {
+          this.logger.warn(
+            { userId, serverId, reason: authorized.reason },
+            "Refused server connection — authorization failed",
+          );
+          return false;
         }
 
         // Verify server exists

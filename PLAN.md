@@ -2028,9 +2028,40 @@ error-level lines**.
 
 ## Phase 4 — Security (1–2 days)
 
-- [ ] **S1** Move authorization into `connectPlayerToServer` so the socket path and the command
-      path both inherit `checkServerAccess` + the handshake. Delete the duplicated gate in
-      `networkCommands.ts`.
+- [x] **S1 — DONE 2026-09-23.** Authorization now lives in `connectPlayerToServer`, so every caller
+      inherits it — present and future. A new private `authorizeServerAccess` combines the two checks
+      the command path did separately (`canAccessServer` for level-vs-encryption + owner bypass,
+      `checkServerAccess` for accessMethod) and **fails closed** if either service cannot be
+      resolved.
+      **The hole was worse than "a duplicated gate".** The socket handler took a client-supplied
+      `serverId` and called straight through with no access check, no adjacency and no challenge —
+      and it was not a redundant path: the client's `POST /servers/:id/connect` **404s**, because no
+      `/api/servers` router is mounted at all (`middleware/setup.ts` mounts only `/api/admin`,
+      `/api/command`, `/api/auth`). So the unauthorized socket event was the only thing that worked.
+      **NOT deleted, deliberately**, though the client caller turns out to be dead UI code: the fix
+      belongs in the funnel, not in one handler. Guarding the handler alone would have left two
+      policies free to drift and the next entry point unguarded again.
+      **Adjacency and the first-visit challenge deliberately stay in `networkCommands`** — they are
+      rules about *how you travelled*, and `connect home` legitimately bypasses adjacency. This gate
+      answers only "may this player be on this server at all".
+      **Gate: `verify-phase4-s1-socket-authz.ts` 6/6**, driving the real socket the way an attacker
+      would. The exploit is refused with *"Insufficient level. Required: 6, Current: 1"*, a bogus id
+      with *"Server not found"*, and the refusal still holds once the player has a valid session.
+      Positive control: an authorized connect is not refused and reaches its challenge; the full
+      end-to-end control is `verify-tutorial-altpath` 11/11, which hops four servers with this gate
+      live.
+
+- [ ] **NEW, found while testing S1 — the socket path and the DB disagree about where a player is.**
+      `connectPlayerToServer` updates only the in-memory session; the `ServerConnection` row is
+      written by `serverService.connectToServer`, which **only the `connect <ip>` command path
+      calls**. So both `server:connect` **and `connect home`** move the player in-session while
+      leaving no active row — and `who` (`playerInfoCommands`, which reads `disconnectedAt: null`)
+      will report "not connected to any server" straight after a successful `connect home`.
+      Pre-existing and independent of S1; it is why the S1 harness cannot observe a socket-initiated
+      connection at all. Fix belongs with S1's funnel idea taken one step further: have
+      `connectPlayerToServer` own the row too, so session and database cannot disagree.
+      *(Not fixed here — it is a behaviour change to the `connect home` path and wants its own
+      verification.)*
 - [ ] **S3** Real ban enforcement: track sockets per user, force-close server-side on ban/kick,
       and invalidate the auth cache entry. Change `io.emit` → `io.to(user:<id>)` so the ban
       reason stops broadcasting to everyone.
@@ -2039,6 +2070,11 @@ error-level lines**.
       not just ignored.
 - [ ] **S8** Make `NODE_ENV` explicit — fail fast at boot if unset in a non-dev context, so the
       `/admin` panel and `sameSite: "none"` can't leak into production by default.
+- [x] **S11 — DONE 2026-09-23. Now fails closed**, with a warning naming the offending value.
+      Measured before changing it: all **217** live servers use one of the four handled values
+      (hackable 192, keycard 13, hack_or_key 7, open 5), so the change locks nobody out today — it
+      closes the door before AI-generated content walks through it.
+      *(original note follows)*
 - [ ] **S11 — `checkServerAccess` fails OPEN on an unknown `accessMethod`.**
       `networkTopologyService.ts` (:~756) ends its switch with
       `default: return { allowed: true, reason: "Default access." }`. Not currently reachable from
