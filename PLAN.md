@@ -424,6 +424,89 @@ argument `isBonus`" — a *stale-process* failure that reads exactly like a code
 regression. Restarting the server restored 15/15 and 4/4. Always bounce the
 watch server after a `prisma generate`.
 
+
+### Phase 5 code review (decision 15) — 8 findings, 6 of them MY OWN regressions
+
+The most productive review so far, and the least comfortable: **six of the
+eight findings were defects introduced by this phase's own fixes**, several of
+which the phase's harnesses had certified green.
+
+Fixed:
+
+1. **`acceptMission` never re-stamped the expiry — the R7 unit fix turned every
+   daily offer into a trap.** `expiresAt` was written once, at GENERATION time,
+   on the `available` offer; accept flipped the status and carried it over.
+   While `timeLimit` was wrongly in milliseconds the expiry sat 41–83 days out
+   and nothing showed. Correcting the unit made template limits 1–2 HOURS, so a
+   mission generated yesterday was already expired on accept and
+   `checkExpiredMissions` killed it within 15 minutes. The clock now starts at
+   accept, which is what the rest of the code already assumed — `startedAt` is
+   set there and `calculateRewards` measures elapsed time from it. Offers no
+   longer carry a run-expiry at all (`findExpired` only matches `active`, so
+   stamping it on an offer was inert until it became harmful).
+2. **The completion rule had two implementations that disagreed.**
+   `missionService` used the new bonus-aware rule; the repository's
+   `allObjectivesComplete` still counted every objective. Finishing all
+   REQUIRED objectives through the second path left the mission permanently
+   unfinished — strictly worse than before R7, when both at least agreed. The
+   repository now delegates; one rule, one implementation.
+3. **Efficiency counted bonus objectives in its denominator**, so a player who
+   did everything the mission demanded scored 50 on a 1-required/1-bonus
+   template, failed the `> 90` predicate, and was paid **0.15 less than before
+   R7** — on all 39 bonus-carrying templates. The "payouts unchanged" claim in
+   the R7 commit was simply false. Efficiency now measures required work only.
+4. **R7's first draft folded `efficiencyScore` into a constant on the grounds
+   that it never varied — while the same change made it vary.** Bonus
+   objectives became optional, so `completed < total` became reachable.
+   Collapsing it would have deleted the one reward lever R7 brought to life and
+   overpaid exactly the player who skipped the optional work. Only the
+   genuinely dead half (stealth, whose inputs are still written nowhere) is now
+   a named constant, and it moved to `gameBalance.ts` with the other tuning.
+5. **R5's arity fix silently removed the evade prompt from the hacks that most
+   need it.** At evidence > 80 the counter-measures branch now creates the
+   trace successfully, so the pipeline's later `initiateTrace` is
+   duplicate-rejected and `⚠ ACTIVE TRACE LOCKED ON` never prints. Before R5
+   the first call was broken, so the second succeeded. Added
+   `hasActiveTrace`; the prompt now fires when a trace exists, however it got
+   there.
+6. **The R6 survivor socket could be one that never authenticated.**
+   `userSockets` is populated at connection; `user:<id>` is joined only at
+   authentication. Handing the session binding to an unauthenticated socket
+   left it in no room, so `socketsJoin`/`socketsLeave` matched nothing. Room
+   membership is now the source of truth for the handoff.
+7. `counterMeasures.push("trace_initiated", "access_revoked")` fired before
+   either was attempted — the same lie R5 fixed twenty lines below, left
+   intact. Now only what actually happened is announced.
+8. `requiredObjectivesComplete` lived in `missionTime.ts`, a module named for
+   TIME — plausibly *why* finding 2 happened, since nobody writing a repository
+   method greps a time utility for the completion rule. Moved to
+   `utils/missionCompletion.ts`.
+
+**Reported, not fixed:**
+- **Bonus objectives are largely unreachable in practice.** Missions
+  auto-complete the moment the required set is done, and in all 39 templates
+  the bonus objective sits *after* its required sibling in the credit loop — so
+  it can only pay if the player happens to finish it first. Making it reliably
+  earnable means deferring completion or crediting a whole event's objectives
+  before evaluating completion. That is a design change, not a repair.
+- **Server downtime now reads as "hacker caught."** Traces active with a past
+  `expiresAt` complete on the next boot tick, emitting "identity exposed" for
+  players who had no running server to evade against. Under the old branch
+  these became `expired`, the benign terminal state, and there is now no path
+  that produces `expired` at all.
+- `is_bonus` has no migration artifact (this project uses `db push` and has no
+  `migrations/` directory), and the 187 legacy millisecond `timeLimit` rows are
+  still unmigrated. Both resolve with the pending `db:reset` (task #5).
+
+Evidence: `verify-phase5-r7-timelimit.ts` **22/22**; full suite 21 harnesses,
+**254 checks, 0 failures.**
+
+**The lesson worth keeping:** every one of these six passed the phase's own
+harnesses. Green tests written by the same pass that wrote the code test the
+author's model of the system, not the system. The review is not a formality
+after the tests pass — it is the step that catches what the tests were shaped
+to miss.
+
 ## Decisions log
 
 Recorded so the plan stays internally consistent as it evolves.

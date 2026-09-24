@@ -132,9 +132,13 @@ class TraceService extends EventEmitter {
    * duration. A trace that reaches 100 % — equivalently, that reaches its
    * `expiresAt` — is COMPLETED: the hacker is caught. Only evasion stops it.
    *
-   * `expired` is retained in the return shape for callers, but the loop no
-   * longer produces that status; see the note at the completion branch. It
-   * stays a valid stored value for rows written before this was fixed, which
+   * The return value is DIAGNOSTIC, not control flow: the only production
+   * caller is the internal timer, which discards it. It is shaped this way so
+   * the verification harness can assert which bucket a trace landed in —
+   * specifically that a trace at full duration is reported as `completed` and
+   * NOT as `expired`, which is the whole of the R4 fix. `expired` therefore
+   * stays in the shape while the loop no longer produces it; it also remains a
+   * valid stored value for rows written before the fix, which
    * `cleanupOldTraces` still collects.
    */
   async progressTraces(): Promise<{
@@ -241,6 +245,23 @@ class TraceService extends EventEmitter {
     }
 
     return { completed, expired, progressed };
+  }
+
+  /**
+   * Is there already a live trace against this target on this server?
+   *
+   * Needed because two call sites can each legitimately try to start the same
+   * trace during one hack resolution — the counter-measures branch and the
+   * session-resolution pipeline. The second is duplicate-rejected, which is
+   * correct for the DATA but must not be read as "no trace", or the player is
+   * never told to evade one that exists.
+   */
+  async hasActiveTrace(targetId: string, serverId: string): Promise<boolean> {
+    const existing = await db.client.activeTrace.findFirst({
+      where: { targetId, serverId, status: "active" },
+      select: { id: true },
+    });
+    return existing !== null;
   }
 
   /**

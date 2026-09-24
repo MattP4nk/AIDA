@@ -419,7 +419,19 @@ export function setupSocketHandlers(io: SocketIOServer): void {
       // R6: unbind this socket. If it was the one the session was bound to
       // and the user still has others, hand the binding to a survivor —
       // otherwise the session would keep naming a closed socket.
-      const survivor = userSockets.get(userId)?.values().next().value;
+      //
+      // REVIEW FIX: the survivor must be a socket that has AUTHENTICATED, not
+      // merely one that has connected. `userSockets` is populated at
+      // connection time (handshake auth), while `user:<id>` is joined only in
+      // `handleAuthentication`. Handing the binding to a connected-but-
+      // unauthenticated socket left the session pointing at a socket in no
+      // room, so `socketsJoin`/`socketsLeave` over `user:<id>` matched nothing
+      // and the player silently stopped receiving their server's broadcasts.
+      // Room membership is the source of truth for "has authenticated".
+      const authedRoom = io.sockets.adapter.rooms.get(`user:${userId}`);
+      const survivor = [...(userSockets.get(userId) ?? [])].find(
+        (id) => id !== socket.id && authedRoom?.has(id),
+      );
       services.gameStateManager.detachSocket(userId, socket.id, survivor);
 
       handleDisconnect(socket, services, isLastSocket);

@@ -25,7 +25,6 @@ import {
 } from "./missionTemplatePool";
 import { validateObjective, OBJECTIVE_TYPES } from "./missionObjectiveTypes";
 
-import { missionExpiresAt } from "../utils/missionTime";
 /**
  * MissionGenerator Service
  *
@@ -205,7 +204,12 @@ export class MissionGeneratorService {
                   })),
                   startedAt: null,
                   completedAt: null,
-                  expiresAt: missionExpiresAt(mission.timeLimit),
+                  // R7 REVIEW: offers do NOT carry a run-expiry. The clock
+                  // starts at accept (see `missionService.acceptMission`), and
+                  // `findExpired` only matches `status:"active"` — so stamping
+                  // here was inert until the unit fix, at which point it began
+                  // expiring offers the moment they were accepted.
+                  expiresAt: null,
                 } as never;
               }
               return true;

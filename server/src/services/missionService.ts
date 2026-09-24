@@ -557,6 +557,25 @@ class MissionService extends EventEmitter {
       //
       // So this correctly stays a hard requirement: you can only accept a
       // mission that is already on offer TO YOU.
+      // R7 REVIEW FIX: the clock starts when the mission is ACCEPTED.
+      //
+      // `expiresAt` was stamped once, at GENERATION time, on the `available`
+      // offer, and `acceptMission` carried it over untouched. While
+      // `timeLimit` was (wrongly) milliseconds that was invisible — the expiry
+      // sat 41–83 days out, so no offer could go stale. Fixing the unit made
+      // template limits 1–2 HOURS, which turned every daily-generated offer
+      // into a trap: accept it the next day and `checkExpiredMissions` (which
+      // matches `status:"active" AND expiresAt < now`) kills it within 15
+      // minutes, before the player can touch an objective.
+      //
+      // Accept time is also the semantics the rest of the code already
+      // assumes: `startedAt` is set here, and `calculateRewards` measures
+      // `timeElapsed` from `startedAt` against this same `timeLimit`.
+      const missionRow = await this.prisma.mission.findUnique({
+        where: { id: missionId },
+        select: { timeLimit: true },
+      });
+
       await this.playerMissions.mutate(userId, missionId, (playerMission) => {
       if (!playerMission) {
         throw new Error("Mission not assigned to player");
@@ -592,6 +611,7 @@ class MissionService extends EventEmitter {
       // Update status
       playerMission.status = "active";
       playerMission.startedAt = new Date();
+      playerMission.expiresAt = missionExpiresAt(missionRow?.timeLimit);
       return playerMission;
       });
 
@@ -1063,10 +1083,6 @@ class MissionService extends EventEmitter {
 
       // Calculate real performance metrics from objective completion data
       const objectives = playerMission.objectives || [];
-      const totalObjectives = objectives.length;
-      const completedObjectives = objectives.filter(
-        (o: any) => o.completed,
-      ).length;
 
       // Stealth: based on detection data stored in mission metadata, default to base score
       const missionMeta = (playerMission as any).metadata || {};
@@ -1077,13 +1093,23 @@ class MissionService extends EventEmitter {
         100 - detectionEvents * 15 - hintCount * 5,
       );
 
-      // Efficiency: ratio of completed vs attempted objectives, penalized by hints
+      // Efficiency: ratio of REQUIRED objectives completed, penalised by hints.
+      //
+      // R7 REVIEW FIX: this counted bonus objectives in the denominator. Once
+      // R7 made bonus objectives optional, a player who did everything the
+      // mission actually demanded scored 50 on a 1-required/1-bonus template
+      // and lost the `> 90` reward — so the change quietly made all 39
+      // bonus-carrying templates pay LESS than before it. Efficiency measures
+      // how cleanly you did the required work; the optional work is already
+      // rewarded by its own per-bonus term.
+      const requiredObjectives = objectives.filter((o: any) => !o.isBonus);
+      const requiredTotal = requiredObjectives.length;
+      const requiredDone = requiredObjectives.filter((o: any) => o.completed).length;
       const efficiencyScore =
-        totalObjectives > 0
+        requiredTotal > 0
           ? Math.max(
               0,
-              Math.round((completedObjectives / totalObjectives) * 100) -
-                hintCount * 10,
+              Math.round((requiredDone / requiredTotal) * 100) - hintCount * 10,
             )
           : 100;
 
@@ -1245,19 +1271,31 @@ class MissionService extends EventEmitter {
         multiplier += (1 - timeRatio) * 0.5; // Up to 50% bonus
       }
 
-      // R7: the stealth and efficiency bonuses were NOT bonuses.
+      // R7 + review: efficiency is a LIVE signal again.
       //
-      // Both are derived from `detectionCount`/`hintCount`, which are read in
-      // `completeMission` and written NOWHERE in the codebase. So stealthScore
-      // was always 100 and efficiencyScore always 100, both thresholds always
-      // passed, and the pair contributed a flat +0.35 to every single mission
-      // while appearing to measure performance.
+      // Bonus objectives became optional in the same change, so a mission can
+      // now complete with `completed < total` and this score genuinely varies
+      // — a 3-objective mission finished without its bonus scores 67 and does
+      // not earn this. Folding it into the flat constant (as the first draft
+      // did) would have overpaid exactly the player who skipped the optional
+      // work, and deleted the incentive to do it.
+      if (performance.efficiencyScore > 90) {
+        multiplier += 0.15;
+      }
+
+      // Stealth, by contrast, IS still constant.
       //
-      // The constant is kept — payouts are unchanged — but it is now named for
-      // what it is instead of being laundered through two dead predicates. The
-      // metrics themselves are still computed above: they feed mission
-      // grading and the AI feedback line, which are honest consumers of a
-      // constant in a way that a "bonus" is not.
+      // `stealthScore` is `100 - detectionCount*15 - hintCount*5`, and nothing
+      // in the codebase writes either input — so it is pinned at 100, its
+      // `> 80` threshold always passed, and it paid a flat +0.2 while reading
+      // as a skill bonus. Same value, honest name. A full completion therefore
+      // still earns the historical +0.35 (0.2 here plus 0.15 for efficiency
+      // above); only a bonus-skipping completion now earns less, which is the
+      // point.
+      //
+      // `stealthScore` is still computed: mission grading and the AI feedback
+      // line consume it, which is a fair use of a constant in a way that
+      // calling it a "bonus" was not.
       multiplier += BASELINE_COMPLETION_BONUS;
 
       // Bonus objectives — now able to vary, see `bonusObjectivesCompleted`.
@@ -1749,12 +1787,9 @@ export default MissionService;
 // Backward compatibility
 import { container } from "../di/container";
 import { MISSION_SERVICE } from "../di/tokens";
-import {
-  missionExpiresAt,
-  missionTimeLimitMs,
-  requiredObjectivesComplete,
-  BASELINE_COMPLETION_BONUS,
-} from "../utils/missionTime";
+import { missionExpiresAt, missionTimeLimitMs } from "../utils/missionTime";
+import { requiredObjectivesComplete } from "../utils/missionCompletion";
+import { BASELINE_COMPLETION_BONUS } from "../config/gameBalance";
 export const missionService = new Proxy({} as MissionService, {
   get(_target, prop) {
     const instance = container.resolve(MISSION_SERVICE as any);

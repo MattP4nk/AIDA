@@ -1280,7 +1280,20 @@ class HackService extends EventEmitter {
             session.targetServerId,
             evidenceLeft,
           );
-          if (trResult.success) {
+          // R5 REVIEW FIX: at evidence > 80 `triggerCounterMeasures` has
+          // ALREADY created this exact trace (same target + server), so the
+          // duplicate guard rejects this call and `success` is false. Before
+          // R5 that first call was broken, so this one succeeded and printed
+          // the prompt — fixing the arity silently removed the warning from
+          // precisely the hacks that most need it. Evasion chance decays with
+          // trace progress, so a player who is not told cannot evade in time.
+          if (
+            trResult.success ||
+            (await traceService.hasActiveTrace(
+              session.attackerId,
+              session.targetServerId,
+            ))
+          ) {
             output.push(`  ⚠ ACTIVE TRACE LOCKED ON — evade with trace.evade`);
           }
         },
@@ -1919,7 +1932,16 @@ class HackService extends EventEmitter {
 
       // ── Critical evidence (81-100): Lockdown + trace + access revocation ──
       if (evidenceLevel > 80) {
-        counterMeasures.push("server_lockdown", "trace_initiated", "faction_alert", "access_revoked");
+        // R5 REVIEW: announce only what is actually done.
+        //
+        // This pushed "trace_initiated" and "access_revoked" before either was
+        // attempted — the same lie R5 fixed for "trace_active" twenty lines
+        // below, left intact here. Hack the same server twice while the first
+        // trace is still running and the second is duplicate-rejected, yet the
+        // defender is still told a trace was initiated. "access_revoked" was
+        // also a duplicate of the "access_key_revoked" pushed at the point the
+        // key is really revoked.
+        counterMeasures.push("server_lockdown", "faction_alert");
 
         // Increase security to max for 2 hours
         await db.client.gameServer.update({

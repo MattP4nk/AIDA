@@ -54,6 +54,7 @@ import { Prisma, PrismaClient } from "@prisma/client";
 import { Logger } from "pino";
 import { LOGGER, PRISMA_CLIENT } from "../di/tokens";
 
+import { requiredObjectivesComplete } from "../utils/missionCompletion";
 /** One objective inside a player's copy of a mission. */
 export interface StoredObjective {
   id: string;
@@ -488,18 +489,28 @@ export class PlayerMissionRepository {
     });
   }
 
-  /** True when every objective on the player's copy is complete. */
+  /**
+   * True when the player's copy of the mission is complete.
+   *
+   * R7 REVIEW FIX: this counted EVERY objective, including bonus ones, while
+   * `missionService.updateObjective` had just been changed to ignore bonus
+   * objectives. That left two disagreeing definitions of "complete" on two
+   * different auto-complete paths: finishing all REQUIRED objectives through
+   * `updateObjective` completed the mission, while doing the same through the
+   * path that calls this returned false and the mission silently never
+   * finished — a progression stall, and strictly worse than before the change,
+   * when both paths at least agreed.
+   *
+   * It now delegates to `requiredObjectivesComplete`, so the rule has exactly
+   * ONE implementation. The two COUNT queries become one small SELECT;
+   * objectives per mission are a handful, so this is not a hot path concern.
+   */
   public async allObjectivesComplete(userId: string, missionId: string): Promise<boolean> {
-    const remaining = await this.prisma.playerMissionObjective.count({
-      where: {
-        completed: false,
-        playerMission: { userId, missionId },
-      },
-    });
-    const total = await this.prisma.playerMissionObjective.count({
+    const objectives = await this.prisma.playerMissionObjective.findMany({
       where: { playerMission: { userId, missionId } },
+      select: { completed: true, isBonus: true },
     });
-    return total > 0 && remaining === 0;
+    return requiredObjectivesComplete(objectives);
   }
 
   /**

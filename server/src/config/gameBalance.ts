@@ -229,6 +229,29 @@ export function getTraceEvasionChance(stealthSkill: number, traceProgress: numbe
   return Math.max(0, Math.min(0.95, baseChance - progressPenalty));
 }
 
+/**
+ * R7 — the part of the old "performance" multiplier that really was constant.
+ *
+ * `stealthScore` is `100 - detectionCount*15 - hintCount*5`, and NOTHING in
+ * the codebase writes either input, so it is pinned at 100 and its `> 80`
+ * threshold always passed. That +0.2 was a flat markup wearing the costume of
+ * a skill bonus. It is kept at its old value — payouts for a full completion
+ * are unchanged — but named for what it is.
+ *
+ * REVIEW CORRECTION: `efficiencyScore` was originally folded in here too, on
+ * the same reasoning. That was wrong. It is
+ * `round(completed / total * 100) - hintCount*10`, and the SAME change that
+ * introduced this constant made bonus objectives optional — so `completed <
+ * total` became reachable and the score genuinely varies. Collapsing it into a
+ * constant would have deleted the one reward lever R7 brought to life, and
+ * would have overpaid a bonus-skipping completion by 0.15. Its predicate lives
+ * on in `calculateRewards`.
+ *
+ * Wiring real detection tracking, which would make stealth vary too, is
+ * feature work rather than a repair — see the R7 notes in PLAN.md.
+ */
+export const BASELINE_COMPLETION_BONUS = 0.2;
+
 // ═══════════════════════════════════════════════════════════════════
 // Sessions & Resources
 // ═══════════════════════════════════════════════════════════════════
