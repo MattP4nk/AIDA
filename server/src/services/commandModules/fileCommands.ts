@@ -528,7 +528,10 @@ export class FileCommandsModule implements CommandModule {
             `  KEY: ${issuedKey}`,
             "",
             "  Store this key. It is required to read the file back:",
-            `    cat ${filename} --key=${issuedKey}`,
+            // `decrypt`, not `cat --key=`: nothing parses a `--key` flag.
+            // The first draft of this message named one, so a player who
+            // followed it verbatim could never open their own file.
+            `    decrypt ${filename} ${issuedKey}`,
           ].join("\n"),
         );
       }

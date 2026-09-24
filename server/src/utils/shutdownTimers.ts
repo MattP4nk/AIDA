@@ -38,7 +38,3 @@ export function clearShutdownTimers(): number {
   return count;
 }
 
-/** How many timers are currently registered. For verification. */
-export function registeredTimerCount(): number {
-  return timers.size;
-}

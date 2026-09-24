@@ -142,7 +142,3 @@ export function isAuthenticatedPayload(payload: string): boolean {
   return payload.startsWith(`${V2}:`);
 }
 
-/** A fresh random content key. */
-export function generateContentKey(bytes = 32): string {
-  return crypto.randomBytes(bytes).toString("hex");
-}

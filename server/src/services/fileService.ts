@@ -388,6 +388,25 @@ export class FileService {
         // Reporting ENCRYPTED for both shapes is what makes them crackable,
         // and is honest: from the player's side they are the same thing — a
         // file you cannot read yet.
+        // A LOCKED file has no stored key, so there is no key that can open
+        // it — only the crack flow can. Returning it whenever a key was
+        // merely SUPPLIED was a hole introduced by the first draft of this
+        // fix: the ternary below read as a null-guard, so any non-empty
+        // argument (`decrypt story.enc x`) skipped straight past validation
+        // and handed back the plaintext, bypassing the very crack minigame
+        // this change exists to make reachable.
+        if (!file.encryptionKey) {
+          return {
+            success: false,
+            message: "File is encrypted. Crack it to reveal the contents.",
+            error: "ENCRYPTED",
+            data: {
+              isEncrypted: true,
+              hint: `Use 'crack ${file.name}' — this file has no key to supply.`,
+            },
+          };
+        }
+
         if (!decryptionKey) {
           return {
             success: false,
@@ -395,18 +414,18 @@ export class FileService {
             error: "ENCRYPTED",
             data: {
               isEncrypted: true,
-              hint: "Use --key=<key> or crack the encryption",
+              // `cat` takes no key argument — only `decrypt` does. The first
+              // draft of this hint named a `--key=` flag that nothing parses,
+              // so following it led nowhere.
+              hint: `Use 'decrypt ${file.name} <key>' or crack the encryption.`,
             },
           };
         }
 
         try {
-          // `decryptionKey` is guaranteed non-null here by the guard above.
-          // Prefer the STORED key when there is one: a locked-but-unencrypted
-          // file has plaintext content and nothing to decrypt.
-          content = file.encryptionKey
-            ? await this.decryptContent(content, decryptionKey)
-            : content;
+          // Both are non-null here: a stored key to check against, and a
+          // supplied key to check.
+          content = await this.decryptContent(content, decryptionKey);
         } catch (err) {
           return {
             success: false,
@@ -1679,16 +1698,6 @@ export class FileService {
     return true;
   }
 
-  /**
-   * R9 — decrypt ciphertext with a known key. Public so the crack flow and its
-   * harness can share one implementation.
-   */
-  public async decryptWithKey(
-    encryptedContent: string,
-    key: string,
-  ): Promise<string> {
-    return this.decryptContent(encryptedContent, key);
-  }
 
   /**
    * Generate random encryption key

@@ -529,13 +529,17 @@ export class EventService {
   }
 
   /**
-   * O9 — stop the background timer.
+   * O9 — stop the subscription sweep.
    *
-   * Shutdown stopped ten subsystems and missed this one. The process exits
-   * explicitly so an unstopped timer does not HANG exit — the harm is that it
-   * keeps firing while the server tears down, and `db.disconnect()` happens
-   * near the end of that sequence. A tick landing after it rejects, and an
-   * unhandled rejection re-enters the shutdown handler.
+   * Belt-and-braces: this timer is already `unref`'d at construction and its
+   * callback only prunes an in-memory Map, so it can neither hold the process
+   * open nor touch a disconnected database. Stopped anyway so that "every
+   * recurring timer is stopped on shutdown" is a rule with no exceptions to
+   * remember.
+   *
+   * (An earlier version of this comment claimed a `db.disconnect()` hazard.
+   * That is true of the index.ts sweeps, not of this one — the file it was
+   * written in contradicted it.)
    */
   public stop(): void {
     if (this.cleanupInterval) {

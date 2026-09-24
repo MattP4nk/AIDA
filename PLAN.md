@@ -720,6 +720,64 @@ controlled on both destructive fixes independently.
   used here, is to drain stdout and *then* exit explicitly — it dodges both
   failure modes at once.
 
+
+### Phase 5 second review (R9/R10/O9/R11) — 6 findings, 5 of them mine
+
+**The severe one is a hole my own R9 fix opened.** R9 changed the read guard to
+`if (!decryptionKey)` and made the decrypt a ternary on the STORED key. For the
+provisioned "locked" shape — `isEncrypted: true`, plaintext content, no key —
+that meant any non-empty argument skipped past validation entirely:
+`decrypt story.enc x` returned the contents. So the fix traded *"unreadable by
+anyone"* for *"readable by anyone who types one character"*, bypassing the
+crack minigame it existed to make reachable. The ternary read as a null-guard,
+which is exactly why it was invisible at the call site.
+
+A file with no stored key now always reports ENCRYPTED: there is no key that
+can open it, only cracking. Regression-guarded in the harness.
+
+Also fixed:
+
+- **The recovery instruction named a flag nothing parses.** R9 printed
+  `cat <file> --key=<key>`; `cat` takes three arguments and never reads a
+  `--key`. A player following it verbatim could never open their own file. Now
+  `decrypt <file> <key>`, which is the only path that accepts one.
+- **Two O9 comments asserted a rationale their own file disproves.** I justified
+  stopping the `eventService` and `playerPresenceService` timers with a
+  `db.disconnect()` hazard — but `eventService`'s timer is already `unref`'d and
+  both callbacks prune in-memory Maps and touch no database. The real hazard for
+  presence is a tick after `io.close()`, since it emits. Third time this session
+  a comment I wrote contradicted the code beneath it.
+- **Three new exports with zero consumers**, removed: `decryptWithKey` (whose
+  docstring claimed a sharing with the harness that never existed — the harness
+  calls `unlockCrackedFile`), `generateContentKey` (byte-identical to
+  `fileService.generateEncryptionKey`), and `registeredTimerCount`.
+
+**Reported, not fixed:**
+
+- `canReadAncestors` roughly doubles the queries on `cat`: `resolvePath` already
+  descends the path fetching each row, then this climbs back up refetching them.
+  `resolvePath` could return the chain it materialised. Worth doing when that
+  function is next touched.
+- The O9 shutdown table is stringly-typed (`(tokens as Record<string,string>)[token]!`
+  and `svc[method]?.()`), so a renamed token or typo'd method silently no-ops
+  **and still logs "stopped"** — the log asserts the thing O9 exists to
+  guarantee. All 7 entries currently resolve and all 7 stops are idempotent
+  (verified), so this is fragility rather than a live break.
+- The "locked file" state (`isEncrypted && !encryptionKey`) is now load-bearing
+  across three files and has no name in `shared/types` or the schema. Finding 1
+  is the direct cost of that.
+
+**A correction to my own R11 claim, found by measuring:** the ancestor
+permission check blocks nothing in the live world — **no directory has
+`requiredAccessLevel > 0`** (705 explicitly 0, 4,648 unset). The hole is real
+and the guard works against a synthetically-restricted directory, but no
+shipped content exercises it. "Closed a security hole" overstates it; if
+high-security directories are intended, provisioning is where that belongs.
+
+Evidence: `verify-phase5-r9-encryption.ts` **16/16** (up from 14, with the
+keyless-bypass guard added); R10 15/15, R11 14/14, O9 9/9, and the
+encryption-adjacent harnesses green.
+
 ## Decisions log
 
 Recorded so the plan stays internally consistent as it evolves.

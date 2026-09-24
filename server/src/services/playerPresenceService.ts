@@ -593,13 +593,14 @@ export class PlayerPresenceService extends EventEmitter {
   }
 
   /**
-   * O9 — stop the background timer.
+   * O9 — stop the inactive-player sweep.
    *
-   * Shutdown stopped ten subsystems and missed this one. The process exits
-   * explicitly so an unstopped timer does not HANG exit — the harm is that it
-   * keeps firing while the server tears down, and `db.disconnect()` happens
-   * near the end of that sequence. A tick landing after it rejects, and an
-   * unhandled rejection re-enters the shutdown handler.
+   * This one is NOT `unref`'d, and its callback emits presence events over
+   * Socket.IO. A tick landing after `io.close()` is the concrete hazard here —
+   * not the database, which this path never touches.
+   *
+   * (An earlier version of this comment claimed a `db.disconnect()` hazard,
+   * which the callback in this same file disproves.)
    */
   public stop(): void {
     if (this.presenceTimer) {
