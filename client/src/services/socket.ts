@@ -313,12 +313,6 @@ class SocketService {
       ]);
     });
 
-    this.on("server:file_modified", (data: any) => {
-      serverActivity.update((activities) => [
-        { type: "file_modified", data, timestamp: new Date() },
-        ...activities.slice(0, 49),
-      ]);
-    });
 
     // ==================== MESSAGING EVENTS ====================
 
@@ -416,6 +410,16 @@ class SocketService {
       console.error("🔓 Hack error:", data);
       socketError.set(`Hack error: ${data.message}`);
     });
+
+    // A3: four listeners were removed here — `faction:event`,
+    // `mission:updated`, `server:file_modified` and `error`. Nothing in the
+    // codebase produced any of them: not a socket emit, not even an internal
+    // EventEmitter. They were speculative handlers for events that were never
+    // built, and they made the client look like it handled cases it did not.
+    //
+    // NOT removed, because they are a different problem: the `hack:*` and
+    // `process:failed` listeners wait on events that ARE produced — on the
+    // internal service bus, never bridged to a socket. See PLAN.md A3.
 
     // ==================== GAME EVENTS ====================
 
@@ -540,18 +544,6 @@ class SocketService {
       }
     });
 
-    this.on("faction:event", async (data: any) => {
-      const ns = await getNotifService();
-      if (ns) {
-        ns.add({
-          type: "game",
-          title: "Faction Event",
-          message: data.message || data.type || "Faction activity",
-          priority: "normal",
-          data,
-        });
-      }
-    });
 
     // Was listening for "discovery:made" and reading `data.title`. The server
     // emits "server:discovered" with { count, subnet, servers[] } and no title at
@@ -691,18 +683,6 @@ class SocketService {
       }
     });
 
-    this.on("mission:updated", async (data: any) => {
-      const ns = await getNotifService();
-      if (ns) {
-        ns.add({
-          type: "game",
-          title: "Mission Updated",
-          message: data.title || "A mission has been updated",
-          priority: "normal",
-          data,
-        });
-      }
-    });
 
     // Renamed from "game:state_update" — the server emits "game:event" with a
     // compatible payload ({ type, message, timestamp }).
@@ -955,10 +935,6 @@ class SocketService {
 
     // ==================== ERROR HANDLING ====================
 
-    this.on("error", (data: any) => {
-      console.error("Socket error:", data);
-      socketError.set(data.message || "Unknown socket error");
-    });
   }
 
   // ==================== RECONNECTION LOGIC ====================

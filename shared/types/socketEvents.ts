@@ -116,13 +116,24 @@ export interface ClientToServerEvents {
 export const KNOWN_ORPHANED_EVENTS = {
   /** Client listens; no server emits. Fix by wiring up or deleting. */
   clientListenersWithoutEmitter: [
-    "hack:attempted", // near-miss for "hack:attempt"
-    "hack:successful", // near-miss for "hack:result"
-    "hack:blocked", // near-miss for "hack:detected"
+    // These wait on events that ARE produced — on the internal service bus,
+    // never bridged to a socket. Deleting them would discard a feature; the
+    // fix is a bridge, which is a behaviour change. See PLAN.md A3.
+    "hack:attempted", // hackService emits "hack:attempt" internally
+    "hack:successful", // would carry the "your system was compromised" alert
+    "hack:blocked",
     "hack:error",
-    "mission:updated",
+    "process:failed", // processStateService.ts:189, internal only
+  ],
+  /**
+   * Removed 2026-09-24: `faction:event`, `mission:updated`,
+   * `server:file_modified`, `error`. No producer existed anywhere — not a
+   * socket emit, not even an internal EventEmitter. Speculative handlers for
+   * events that were never built.
+   */
+  deletedDeadListeners: [
     "faction:event",
-    "process:failed", // emitted internally on an EventEmitter, never bridged
+    "mission:updated",
     "server:file_modified",
     "error",
   ],
