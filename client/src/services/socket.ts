@@ -941,8 +941,21 @@ class SocketService {
     );
 
     setTimeout(() => {
-      if (!this.socket?.connected) {
-        this.connect();
+      if (this.socket?.connected) return;
+
+      this.connect();
+
+      // R13 REVIEW: keep the chain alive when `connect()` no-ops.
+      //
+      // `connect()` returns early if `apiClient.getToken()` is null — a real
+      // state while a token refresh is failing. No socket is created, so
+      // neither `connect_error` nor `disconnect` fires, so nothing re-arms
+      // this loop and the client stays disconnected FOREVER. That was masked
+      // while socket.io's built-in reconnection was also running; turning it
+      // off (to stop the duplicate loop) made this the only retry path, so it
+      // has to be self-sustaining. The attempt ceiling still bounds it.
+      if (!this.socket) {
+        this.handleReconnect();
       }
     }, delay);
   }
