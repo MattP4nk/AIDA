@@ -91,7 +91,12 @@ export class AIService {
     retryQueueSize: 0,
     retryQueueDropped: 0,
     retrySuccesses: 0,
+    /** R14c: how many times a caller had to serve static fallback content. */
+    fallbacksServed: 0,
   };
+
+  /** R14c: when a fallback was last served, and for what. */
+  private lastFallback: { at: string; context: string } | null = null;
 
   /** Queue of failed requests to retry later. */
   private retryQueue: QueuedRequest[] = [];
@@ -717,6 +722,20 @@ export class AIService {
     })();
   }
 
+  /**
+   * R14c: record that a caller fell back to static content.
+   *
+   * Fallbacks were completely invisible: `safeAI` returned the fallback value
+   * unchanged with no flag and no counter, and `aiFallbacks` returns plain
+   * strings indistinguishable from real AI output. A total outage looked, from
+   * outside, exactly like a working game with slightly duller prose — which is
+   * the failure this phase is meant to make impossible to miss.
+   */
+  public noteFallbackServed(context: string): void {
+    this.metrics.fallbacksServed++;
+    this.lastFallback = { at: new Date().toISOString(), context };
+  }
+
   public async summarize(content: string): Promise<string> {
     const systemPrompt =
       "Summarize the following text concisely, retaining key facts and entities.";
@@ -743,6 +762,10 @@ export class AIService {
   public getMetrics() {
     return {
       ...this.metrics,
+      // R14c: exposed so an outage is legible without reading logs.
+      lastFallback: this.lastFallback,
+      queueDepth: this.requestQueue.length,
+      activeRequests: this.activeRequests,
       cacheHitRate:
         this.metrics.totalRequests > 0
           ? (

@@ -312,6 +312,8 @@ interface AIServiceLike {
     onSuccess?: (response: string) => void,
     expectedFormat?: string,
   ): void;
+  /** R14c: lets safeAI record that static content was served instead. */
+  noteFallbackServed?(context: string): void;
 }
 
 interface SafeAIConfig<TResult> {
@@ -330,7 +332,23 @@ interface SafeAIConfig<TResult> {
   /** Human-readable context for logging */
   context: string;
   /** Logger instance */
-  logger?: { error?: (obj: any, msg: string) => void; debug?: (obj: any, msg: string) => void };
+  logger?: {
+    error?: (obj: any, msg: string) => void;
+    warn?: (obj: any, msg: string) => void;
+    debug?: (obj: any, msg: string) => void;
+  };
+  /**
+   * R14c: whether to suppress the per-ATTEMPT failure log. Defaults to true.
+   *
+   * This was hardcoded and absent from this interface, so no caller could
+   * change it — every AI failure logged at `debug`, lost its error code, and
+   * at default log level an outage produced no output whatsoever. Set false on
+   * a path where each individual failure matters.
+   *
+   * Note this controls attempt logging only: a served fallback is ALWAYS
+   * warned and counted, because that is the signal that the game is degraded.
+   */
+  silent?: boolean;
   /** JSON extraction type — "object" (default) or "array" */
   jsonType?: "object" | "array";
   /** If true, queue the prompt for background retry when AI fails */
@@ -394,9 +412,26 @@ export async function safeAI<TResult>(config: SafeAIConfig<TResult>): Promise<TR
     },
     context: config.context,
     logger: config.logger,
-    silent: true, // AI failures are expected — debug level, not error
+    // Default stays `true`, deliberately. The original reasoning was sound —
+    // an individual AI failure is expected and error-level spam for it trains
+    // people to ignore errors — the bug was that it was HARDCODED, so no
+    // caller could opt out and nothing else reported the degradation either.
+    // Visibility now comes from the fallback warn + counter below: one line
+    // per degraded RESPONSE rather than one per failed attempt.
+    silent: config.silent ?? true,
     fallback: resolvedFallback,
   })();
+
+  // R14c: a served fallback is the signal that AI is degraded. Count it even
+  // when the per-failure log is suppressed — the counter is what the health
+  // endpoint reads, and it must not depend on log settings.
+  if (result === resolvedFallback) {
+    config.aiService.noteFallbackServed?.(config.context);
+    config.logger?.warn?.(
+      { context: config.context },
+      "AI unavailable — served static fallback content",
+    );
+  }
 
   // Queue for retry if AI failed and retry is enabled
   if (result === resolvedFallback && config.retry && config.aiService.queueForRetry) {

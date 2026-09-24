@@ -3516,8 +3516,32 @@ encryption round-trips without data loss.
 
 - [ ] **R14** `validateContentPlan`: cap array lengths and path depth, reject `..`, route through
       `pathSanitizer`. Add null-element guards to the three validators missing them.
-- [ ] **R14** Observability: stop hardcoding `silent: true` in `safeAI`; mark fallback content so
-      an outage is visible; expose `getMetrics()`/`checkHealth()` on a route.
+- [x] **R14c DONE 2026-09-24 — observability. This was the phase gate.**
+      - **`silent: true` was hardcoded AND absent from `SafeAIConfig`**, so no caller could change
+        it: every AI failure logged at `debug` and lost its error code, producing no output at all at
+        default log level. It is now a config field. **The default stays `true`, deliberately** — the
+        original reasoning was sound (error-level spam per failed attempt trains people to ignore
+        errors); the bug was that it was unreachable *and* nothing else reported the degradation.
+      - **Visibility moved to the right signal.** A served fallback is now counted
+        (`metrics.fallbacksServed`, `lastFallback {at, context}`) and warned — one line per degraded
+        RESPONSE rather than one per failed attempt. The counter is deliberately **not** gated on
+        `silent`: the health endpoint must not depend on log settings.
+      - **`/health` reported the database only**, while `checkHealth()`/`getMetrics()` sat on
+        AIService with zero callers outside a manual script. It now carries an `ai` block with
+        reachability plus metrics. **Only the database decides 200 vs 503** — the game is playable
+        without AI, so an outage shows as `status: "degraded"` rather than making an orchestrator
+        kill a serving process.
+      - Verified the route is reachable in production: `middleware/setup.ts:153` does
+        `app.use(adminRoutes)` unconditionally — only the static admin *panel* is `isDevelopment`-gated.
+      - `scripts/verify-phase6-r14c-observability.ts` — 24 checks, negative-controlled, and the last
+        block **actually serves `/health` over HTTP** on an ephemeral port rather than grepping for
+        the handler. Bounded from both sides: a *successful* call must NOT advance the fallback
+        counter, since a counter that only rises measures nothing.
+
+**Harness note (2026-09-24):** two harnesses are timing-sensitive and intermittently produce no
+summary when the whole suite runs back-to-back — `p5new-discovery` (waits out a 30s adjacency cache)
+and `r10-crypto` (measures event-loop stall, async 6.1ms vs sync 431ms). Both pass standalone. Run
+them individually before trusting a "NO SUMMARY" as a failure.
 - [ ] **R14** Bound the agent-loop prompt (token budget, truncate old rounds).
 - [ ] **R14** `forumService.ts:1242` `handleNPCReply` — sanitize before wiring it up. Zero callers
       confirmed repo-wide (2026-09-24); the cited line 1334 was wrong and lands mid-method. Both
