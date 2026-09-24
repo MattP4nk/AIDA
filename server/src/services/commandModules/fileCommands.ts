@@ -482,7 +482,30 @@ export class FileCommandsModule implements CommandModule {
       // original was already gone and the staging copy went with it — the file
       // was destroyed by the command meant to protect it. Verify first, and
       // keep the staging copy as a recovery point when the write fails.
-      await context.fileService.deleteNode(serverId, context.userId, path);
+      // REVIEW FIX: check the delete. `deleteNode` refuses `isProtected`
+      // nodes, and every account is created with a protected
+      // `/home/<user>/welcome.txt` — so `encrypt welcome.txt` silently failed
+      // to remove the original, the re-create hit FILE_EXISTS, and the player
+      // was told "Your data is NOT lost — the encrypted copy is at
+      // <path>.__encrypting__". Nothing had been at risk, the suggested `mv`
+      // would fail against the still-present original, and the orphan left
+      // behind was encrypted under a fresh random key that is never surfaced
+      // (the key-printing block only runs on the success path).
+      const removed = await context.fileService.deleteNode(
+        serverId,
+        context.userId,
+        path,
+      );
+      if (!removed.success) {
+        // Clean up the staging copy: it is unreachable anyway, since its key
+        // was never shown to anyone.
+        try {
+          await context.fileService.deleteNode(serverId, context.userId, tempPath);
+        } catch { /* best effort */ }
+        return errorResult(
+          `Cannot encrypt ${path}: ${removed.message ?? "the original could not be replaced"}`,
+        );
+      }
 
       const finalResult = await context.fileService.createFile(
         serverId,
@@ -592,9 +615,31 @@ export class FileCommandsModule implements CommandModule {
               return;
             }
 
+            // REVIEW FIX: same unchecked delete-then-recreate as the
+            // fallback below. This path was worse — it emitted
+            // `success: true` to the client after destroying the file.
             const content = readResult.data.content;
-            await context.fileService.deleteNode(serverId, context.userId, path);
-            await context.fileService.createFile(serverId, context.userId, path, content, false);
+            const removed = await context.fileService.deleteNode(serverId, context.userId, path);
+            if (!removed.success) {
+              context.io?.to(`player:${context.userId}`).emit("command:result", {
+                success: false,
+                output: `Cannot decrypt: ${removed.message ?? "the original could not be replaced"}`,
+                timestamp: new Date(),
+              });
+              return;
+            }
+
+            const rewritten = await context.fileService.createFile(serverId, context.userId, path, content, false);
+            if (!rewritten.success) {
+              context.io?.to(`player:${context.userId}`).emit("command:result", {
+                success: false,
+                output:
+                  `Decryption failed while rewriting ${path}: ${rewritten.message}. ` +
+                  `The file has been removed — its decrypted contents were:\n\n${content}`,
+                timestamp: new Date(),
+              });
+              return;
+            }
 
             context.io?.to(`player:${context.userId}`).emit("command:result", {
               success: true, output: `File decrypted: ${filename}`, timestamp: new Date(),
@@ -619,8 +664,39 @@ export class FileCommandsModule implements CommandModule {
       if (!readResult.data.isEncrypted) {
         return successResult("File is not encrypted");
       }
-      await context.fileService.deleteNode(serverId, context.userId, path);
-      await context.fileService.createFile(serverId, context.userId, path, readResult.data.content, false);
+      // REVIEW FIX: this is the same delete-then-recreate hazard R9 fixed in
+      // `handleEncrypt` — left intact in the function directly below it.
+      // Neither result was checked, and the two calls use DIFFERENT permission
+      // rules: `deleteNode` checks write on the NODE, `createFile` checks write
+      // on the PARENT DIRECTORY. A player with write on the file but not on
+      // its directory therefore deleted it, failed to recreate it, and was
+      // told "File decrypted".
+      const removed = await context.fileService.deleteNode(
+        serverId,
+        context.userId,
+        path,
+      );
+      if (!removed.success) {
+        return errorResult(
+          `Cannot decrypt: ${removed.message ?? "the original could not be replaced"}`,
+        );
+      }
+
+      const rewritten = await context.fileService.createFile(
+        serverId,
+        context.userId,
+        path,
+        readResult.data.content,
+        false,
+      );
+      if (!rewritten.success) {
+        return errorResult(
+          `Decryption failed while rewriting ${path}: ${rewritten.message}. ` +
+            `The file has been removed — its decrypted contents were:\n\n` +
+            `${readResult.data.content}`,
+        );
+      }
+
       return successResult(`File decrypted: ${filename}`);
     } catch (error) {
       return errorResult("Decryption failed", error instanceof Error ? error.message : "Unknown error");

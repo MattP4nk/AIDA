@@ -1140,6 +1140,27 @@ export class FileService {
         };
       }
 
+      // REVIEW FIX: refuse copying a directory into its own subtree.
+      //
+      // R11 added this guard to `moveNode` and not to `copyNode`, where the
+      // consequence is worse: `cp /data /data/backup` recursed without bound,
+      // creating rows until the database or the heap gave out while the
+      // request never returned. `mv` at least only corrupts the tree.
+      if (
+        sourceResolution.node!.type === "directory" &&
+        destDirResolution.nodeId &&
+        (await this.isDescendantOf(
+          destDirResolution.nodeId,
+          sourceResolution.node!.id,
+        ))
+      ) {
+        return {
+          success: false,
+          message: `Cannot copy ${sourcePath} into its own subdirectory`,
+          error: "INVALID_COPY",
+        };
+      }
+
       // Copy the node
       const copiedNode = await this.duplicateNode(
         sourceResolution.node,
@@ -1857,6 +1878,21 @@ export class FileService {
     newName: string,
     userId: string,
   ): Promise<any> {
+    // REVIEW FIX: read the child list BEFORE creating the copy.
+    //
+    // `create` ran first, so when a directory is copied INTO ITSELF the fresh
+    // copy appears in its own `findMany({ parentId: sourceNode.id })` result
+    // and the recursion never terminates. R11's naming fix is what exposed
+    // this: while every child was (wrongly) named after the destination, the
+    // second one hit `@@unique([serverId, parentId, name])` and P2002 aborted
+    // the copy — an accidental brake that the correct naming removed.
+    const children =
+      sourceNode.type === "directory"
+        ? await prisma.fileSystemNode.findMany({
+            where: { parentId: sourceNode.id },
+          })
+        : [];
+
     const newNode = await prisma.fileSystemNode.create({
       data: {
         serverId: sourceNode.serverId,
@@ -1876,10 +1912,6 @@ export class FileService {
 
     // If directory, recursively copy children
     if (sourceNode.type === "directory") {
-      const children = await prisma.fileSystemNode.findMany({
-        where: { parentId: sourceNode.id },
-      });
-
       for (const child of children) {
         await this.duplicateNode(
           child as unknown as FileNode,

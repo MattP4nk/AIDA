@@ -752,6 +752,42 @@ Also fixed:
   calls `unlockCrackedFile`), `generateContentKey` (byte-identical to
   `fileService.generateEncryptionKey`), and `registeredTimerCount`.
 
+**A second finder angle landed later and found four more — the worst of them
+also caused by an R11 fix:**
+
+- **`cp` into the source's own subtree recursed without bound.** R11 added the
+  subtree guard to `moveNode` and not to `copyNode`, and `duplicateNode`
+  created the copy BEFORE reading the child list — so the fresh copy appeared
+  in its own `findMany` result and the recursion never terminated. Rows created
+  until the database or the heap gave out, request never returning.
+  **The pre-R11 naming bug had been an accidental brake:** every child was
+  named after the destination, so the second one hit P2002 and aborted.
+  Fixing the naming removed it. Two complementary fixes now: the child list is
+  snapshotted before the copy (stops the runaway), and `copyNode` refuses a
+  copy into its own subtree (the correct semantic). The control proves both —
+  removing only the guard lets the copy succeed and create 3 stray rows, while
+  the snapshot keeps it from hanging.
+- **`decrypt` destroyed the file on a failed rewrite and reported success** —
+  the exact bug R9 fixed in `handleEncrypt`, sitting untouched in the function
+  directly below it. A "where else does this pattern live?" miss on my part.
+  Worse on the background path, which emitted `success: true` to the client
+  after the file was gone. Both paths now check each step and, if the rewrite
+  fails, hand the player the decrypted contents rather than a cheerful lie.
+  Note the two calls use DIFFERENT permission rules — `deleteNode` checks write
+  on the NODE, `createFile` on the PARENT — so the failure is reachable.
+- **`encrypt` on a protected file left an unreachable orphan and a false
+  recovery message.** `deleteNode` refuses `isProtected` nodes, and every
+  account is created with a protected `welcome.txt`. The unchecked delete meant
+  the player was told "Your data is NOT lost — the encrypted copy is at
+  <path>.__encrypting__", when nothing had been at risk, the suggested `mv`
+  would fail against the still-present original, and the orphan was encrypted
+  under a key that is never printed on the failure path.
+- **`contentCrypto` threw raw Node crypto errors where it documents
+  `ContentDecryptionError`** — `createDecipheriv` and `setAuthTag` sat outside
+  the try blocks, so a truncated auth tag surfaced as
+  `ERR_CRYPTO_INVALID_AUTH_TAG` and was mapped to "Invalid encrypted content
+  format" instead of the tamper message GCM exists to produce.
+
 **Reported, not fixed:**
 
 - `canReadAncestors` roughly doubles the queries on `cat`: `resolvePath` already

@@ -104,9 +104,15 @@ export async function decryptContent(
     const tag = Buffer.from(parts[3]!, "hex");
     const keyBuffer = await scrypt(key, salt, KEY_BYTES);
 
-    const decipher = crypto.createDecipheriv(V2_ALGORITHM, keyBuffer, iv);
-    decipher.setAuthTag(tag);
+    // REVIEW FIX: `createDecipheriv` and `setAuthTag` are inside the guard.
+    // They sat outside it, so a truncated tag or a short IV threw Node's raw
+    // `ERR_CRYPTO_INVALID_AUTH_TAG` / `ERR_CRYPTO_INVALID_IV` instead of the
+    // `ContentDecryptionError` this function's contract promises — and callers
+    // mapped it to "Invalid encrypted content format" rather than the tamper
+    // message GCM was introduced to produce.
     try {
+      const decipher = crypto.createDecipheriv(V2_ALGORITHM, keyBuffer, iv);
+      decipher.setAuthTag(tag);
       let decrypted = decipher.update(parts[4]!, "hex", "utf8");
       decrypted += decipher.final("utf8");
       return decrypted;
@@ -127,8 +133,10 @@ export async function decryptContent(
   const iv = Buffer.from(parts[1]!, "hex");
   const keyBuffer = await scrypt(key, salt, KEY_BYTES);
 
-  const decipher = crypto.createDecipheriv(LEGACY_ALGORITHM, keyBuffer, iv);
+  // Same as the v2 branch: construction is inside the guard, because a
+  // malformed IV throws here rather than at `final()`.
   try {
+    const decipher = crypto.createDecipheriv(LEGACY_ALGORITHM, keyBuffer, iv);
     let decrypted = decipher.update(parts[2]!, "hex", "utf8");
     decrypted += decipher.final("utf8");
     return decrypted;
