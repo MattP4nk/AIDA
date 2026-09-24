@@ -3874,3 +3874,13 @@ passively while other phases proceed.
 - Verify against a running server, not just `tsc`. Every gate above names a behaviour to observe.
 - **No feature loss.** Phase 7 is behaviour-preserving; if a refactor would drop a capability,
   it stops and gets raised instead.
+- **Decision 17 (2026-09-24): the `verify-*` harnesses stay untracked until the refactor is
+  done.** `.gitignore:36` keeps `server/scripts/` out, and that stands for now — the harnesses
+  are still changing shape with the code they test, and committing them mid-refactor just
+  bakes in churn. They get `git add -f`'d in one batch once Phase 7 settles and they are in
+  their final form. Until then they are **local-only on the maintainer's machine**, so a fresh
+  clone or a lost disk loses all of them (162 checks as of this writing, with their negative
+  controls). That is an accepted, deliberate risk, not an oversight — and it is the reason no
+  harness result in these docs can be reproduced by anyone but the maintainer.
+- These docs are **internal** — notes for the two of us, not for an outside audience. Keep them
+  true (I re-read them and act on them), but skip the framing written for imaginary readers.
