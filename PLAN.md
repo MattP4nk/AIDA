@@ -3906,8 +3906,17 @@ Write them per-refactor, immediately before touching the code:
       `mission:completed` listeners; type the 18 `(data: any)` handlers.
 - [ ] **A9** Remaining duplication: profile builder, `probeRows`, the two content-plan
       persistence paths, `di/serviceRegistry.ts` (0 callers).
-- [ ] **A10** Delete ~2,150 lines of dead code and the 29 dead `gameBalance` constants (tuning
-      that file currently does nothing).
+- [ ] **A10** Delete the dead code. Corrected counts (2026-09-24): **18** genuinely dead
+      `gameBalance` constants, not 29 — 28 have no external consumer but 10 of those are used by
+      exported functions in-file, and the parenthetical "tuning that file does nothing" is false,
+      since 33 of 61 have external consumers.
+      - [ ] **`processStateService.ts` is entirely dead** (found 2026-09-24 chasing an orphaned
+        socket event). It is registered in DI, resolved by `commandProcessor`, and injected into
+        every `CommandContext` — but **not one of its 11 methods is ever called**. So no process is
+        ever registered, none can fail, and its five internal events can never fire. The live
+        process system is `memoryService`, which emits `process:started/completed/cancelled` over
+        real sockets. Being wired into DI is not the same as being used.
+      - [ ] `di/serviceRegistry.ts` — 139 lines, 0 importers (verified).
 
 **Gate:** CI green, characterization tests green, `VERIFY.md` playthrough unchanged. No feature
 regressions — this phase is behaviour-preserving by definition.
@@ -3915,6 +3924,26 @@ regressions — this phase is behaviour-preserving by definition.
 ---
 
 ## Phase 8 — Feature completion & improvement
+
+- [ ] **HACK ALERTS NEVER REACH THE VICTIM (found 2026-09-24, A3 orphan audit).**
+      In a hacking game, a player is never told they were hacked. The whole client side already
+      exists and is complete — the `hackAttempts` store, `"Hack attempt detected from X"`,
+      `"Your system has been compromised!"`, `sound.hackSuccess()` — sitting behind four listeners
+      (`hack:attempted`, `hack:successful`, `hack:blocked`, `hack:error`) that never fire.
+      - `hackService` emits `hack:attempt` / `hack:detected` on the **internal EventEmitter bus**
+        (`:1370`, `:1383`). `index.ts:169/:174` consumes them for dynamic content, story ledger,
+        personas and achievements — **all server-side. Nothing bridges them to a socket.**
+      - Verified there is **no other path**: no socket event reaches a hack victim today.
+      - The socket's `hack:result` is a stub replying *"Use command:execute with hack commands
+        instead"* — and `command:execute` has no client emitter either.
+      - **Fix:** one `io.to(\`user:${targetId}\`).emit(...)` in the existing `index.ts` handlers,
+        plus renaming the client listeners to the real event names. Deferred from Phase 7 because it
+        is a behaviour change, and because it carries a genuine design question: should a **blocked**
+        attempt notify the victim, or only a successful one? Alerting on every failed attempt could
+        be the tension you want or pure noise.
+- [ ] **`forumService.handleNPCReply` — NPCs post but never answer** (filed earlier; see A3 notes).
+
+
 
 Things the game *advertises* but doesn't do. These are the highest-value additions because the
 UI, copy, and data already exist — only the behaviour is missing.

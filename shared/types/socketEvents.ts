@@ -123,7 +123,6 @@ export const KNOWN_ORPHANED_EVENTS = {
     "hack:successful", // would carry the "your system was compromised" alert
     "hack:blocked",
     "hack:error",
-    "process:failed", // processStateService.ts:189, internal only
   ],
   /**
    * Removed 2026-09-24: `faction:event`, `mission:updated`,
@@ -136,6 +135,8 @@ export const KNOWN_ORPHANED_EVENTS = {
     "mission:updated",
     "server:file_modified",
     "error",
+    // No producer in either process system — see the note in socket.ts.
+    "process:failed",
   ],
   /** Client emits; no server listens. */
   clientEmitsWithoutListener: ["join:room", "leave:room"],

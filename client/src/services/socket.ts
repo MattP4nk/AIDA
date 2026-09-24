@@ -626,21 +626,12 @@ class SocketService {
       );
     });
 
-    this.on("process:failed", async (data: any) => {
-      activeProcesses.update((procs) =>
-        procs.filter((p) => p.pid !== data.pid),
-      );
-      const ns = await getNotifService();
-      if (ns) {
-        ns.add({
-          type: "game",
-          title: "Process Failed",
-          message: data.error || `Process ${data.pid} failed`,
-          priority: "high",
-          data,
-        });
-      }
-    });
+    // A3: `process:failed` listener removed. It had no producer in EITHER
+    // process system: the live one (memoryService) never sets a "failed"
+    // status at all — only running/completed/cancelled — and the one that
+    // does have a `failProcess` (processStateService) is entirely dead, 11
+    // methods with zero callers. `process:progress` is NOT removed; that one
+    // has a real socket emitter.
 
     // ==================== MISSION EVENTS ====================
 
