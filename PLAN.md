@@ -3413,28 +3413,57 @@ encryption round-trips without data loss.
       player-authored text as untrusted), add an allow-list so `get_server_access_keys` /
       `get_ai_personas` output can never reach generated file content, and **validate intervention
       `data` against a schema with bounded rewards** instead of `as any`.
-- [ ] **S6** Sanitize prompt history, not just the current turn; extend `sanitizeForPrompt` to all
-      ~25 prompt-construction sites.
+- [ ] **S6** Sanitize prompt history, not just the current turn. **Re-verified 2026-09-24 — the
+      "~25 sites" figure is an undercount: there are 37 AI invocation sites (34 generation +
+      3 moderation), and `sanitizeForPrompt` is used at only 5 prompts / 6 invocations.**
+      The history bug is worse than "not covered": in `messageService.ts:1370-1398` the sanitizer is
+      imported on line **1390 — one line AFTER** the loop that splices raw `pm.content` history into
+      the prompt at :1385. So current-turn sanitization is trivially bypassed by sending the payload
+      on turn N and letting it be replayed bare on turn N+1. `playerUsername` (:1392) is unsanitized
+      too. Same shape in `forumService.ts:1304-1310`, where the replayed "memory" is itself
+      AI-extracted from earlier player text — a *persistent* injection channel, not a per-turn one.
 - [ ] **S7** Sanitize moderation input; validate `safe` as a real boolean; **fail closed**;
-      moderate *before* broadcasting a reply, not after.
+      moderate *before* broadcasting. **All four legs verified FALSE 2026-09-24 (`aiService.ts:447-477`):**
+      (a) `content` is passed raw as the prompt — the text being judged is itself an injection vector
+      into the judge; the "filtered" callers pass is `censorshipService` word-replacement, not prompt
+      sanitization. (b) `parsed.safe as boolean` is a compile-time cast with **no runtime check**, and
+      consumers test truthiness — so a model emitting the *string* `"false"` is truthy and the content
+      **publishes**. (c) Four separate fail-open returns (`safe: true` on AI failure, on no-JSON, on
+      parse throw, on nullish). The only fail-closed case is accidental: a missing `safe` key is
+      falsy. (d) Moderation is **fire-and-forget at `messageService.ts:357`, three steps after the
+      message is persisted (:270), delivered over Socket.IO (:294) and broadcast (:312)** — the
+      recipient has already rendered it; `isHidden` only suppresses later re-fetches.
 - [ ] **R14** `validateContentPlan`: cap array lengths and path depth, reject `..`, route through
       `pathSanitizer`. Add null-element guards to the three validators missing them.
 - [ ] **R14** Observability: stop hardcoding `silent: true` in `safeAI`; mark fallback content so
       an outage is visible; expose `getMetrics()`/`checkHealth()` on a route.
 - [ ] **R14** Bound the agent-loop prompt (token budget, truncate old rounds).
-- [ ] **R14** `forumService.ts:1334` `handleNPCReply` — sanitize before wiring it up (currently
-      zero callers, so this is free to fix now).
-- [ ] **U3 — Validate `accessMethod` from AI output against an enum.** Pairs with S11: fixing the
-      fail-open `default` closes the hole, but AI-created servers should also be *rejected* at the
-      validator rather than silently written with an invented access method. Same class as the
-      unbounded `reward` cast in S5.
-- [ ] **U4 — Hold the AI message cap increase until the queue is fixed.** The uncommitted work
-      raises the per-player daily cap from **5 → 20** (`messageService.ts`). Against
-      `MAX_CONCURRENT_REQUESTS = 2`, `MAX_QUEUE_DEPTH = 30`, and a `SLOT_TIMEOUT_MS` that is
-      already shorter than the worst-case slot hold, that is **4× the demand on a system that
-      currently fails by arithmetic**. Shipping it before the reentrancy guard and timeout fix
-      would raise the fallback rate — i.e. it would make *"AI content is disappointing"* measurably
-      worse, not better. Land the queue fixes first, then raise the cap, then re-measure.
+- [ ] **R14** `forumService.ts:1242` `handleNPCReply` — sanitize before wiring it up. Zero callers
+      confirmed repo-wide (2026-09-24); the cited line 1334 was wrong and lands mid-method. Both
+      player inputs are interpolated raw (`:1310` reply body + username, `:1304-1308` NPC memory),
+      and the memory replayed at :1307 is itself AI-extracted from prior player text — so wiring
+      this up as-is would create a **persistent** injection channel, not just a per-turn one.
+- [ ] **U3 — Validate `accessMethod` against an enum at the WRITE path.** Re-verified 2026-09-24.
+      The valid set exists only as a **comment** on `schema.prisma:228` — no Prisma enum, no shared
+      constant, no validator. Unvalidated writes: `contentDraftService.ts:232`,
+      `routes/adminApi/servers.ts:142` (straight from `req.body`) and `:176`. The AI path is closed
+      **today only by a hardcoded literal** (`aiAgentTools.ts:518` `accessMethod: "hackable"`), not by
+      an allow-list — any future field pass-through in `create_server` reopens it, and
+      `contentDraftService.ts:232` would accept whatever arrives. Read-side is already fail-closed
+      (S11, `networkTopologyService.ts:768`). **Also fix the stale comment at
+      `networkTopologyService.ts:770-773`**, which claims `serverContentService` writes `accessMethod`
+      from AI content — that file contains no such write.
+- [x] **U4 — MOOT as written (re-verified 2026-09-24).** The premise was stale on both halves.
+      There is no per-player *daily* cap to raise: `AI_MESSAGE_FLOOD_LIMIT = 5`
+      (`messageService.ts:25-26`) is per-sender→per-recipient per **hour**, and the old global
+      20/day cap was **deliberately deleted** — `messageService.ts:468-479` records why (it could not
+      save AI cost, because `content` arrives already generated and the tokens were spent before the
+      check ran; and being global it let one persona send one player 20 messages while stopping 20
+      players from receiving one each). Cost control now lives in `aiSchedulerService`'s per-persona
+      `AI_MAX_ACTIONS_PER_DAY`, checked *pre*-generation. The queue arithmetic this item was gating
+      on is fixed in R14a regardless. **Residual gap worth keeping:** the flood limit sits only in
+      `sendAIMessage`, so the Architect's `send_message` intervention is covered
+      (`architectInterventionExecutor.ts:398`) but `generatePersonaReply` is not.
 
 **Gate:** AI outage is visible in logs and on the health endpoint; injected file content cannot
 produce an intervention with out-of-range rewards.
