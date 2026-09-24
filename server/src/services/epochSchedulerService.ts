@@ -143,6 +143,23 @@ export class EpochSchedulerService {
           return;
       }
 
+      // R12 REVIEW: a handler that declined to act must not consume the event.
+      //
+      // Every path landed here and wrote `status: "fired", success: true` —
+      // including the advance_epoch branch that deliberately stays put because
+      // no successor epoch exists. The event was then permanently spent: the
+      // scheduler only picks up `status: "pending"`, so once the next epoch
+      // WAS authored, nothing ever advanced to it, and the stored result
+      // claimed success for something that did nothing.
+      if ((result as any).__retry) {
+        const { __retry, ...detail } = result as any;
+        this.logger.warn(
+          { eventId: event.id, action, ...detail },
+          "Epoch event could not act yet — left pending for a later tick",
+        );
+        return;
+      }
+
       await this.markEventResult(event.id, "fired", { success: true, ...result });
 
       this.logger.info(
@@ -272,6 +289,8 @@ export class EpochSchedulerService {
         advanced: false,
         reason: "no successor epoch",
         epochNum: currentEpoch.epochNum,
+        // Tells fireEvent to leave the event PENDING. See markEventResult.
+        __retry: true,
       };
     }
 
@@ -301,10 +320,14 @@ export class EpochSchedulerService {
         },
       });
 
+    // R12 REVIEW: same keys as the no-successor return above. The two exits
+    // shared no field at all, so a caller could not ask "did it advance?"
+    // without knowing which branch it came from.
     return {
+      advanced: true,
       completedEpoch: currentEpoch.title,
       activatedEpoch: nextEpoch.title,
-      newEpochNum: nextEpoch.epochNum,
+      epochNum: nextEpoch.epochNum,
     };
   }
 

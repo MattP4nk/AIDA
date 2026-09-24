@@ -3302,6 +3302,67 @@ sockets on one account. Add each to `VERIFY.md`.
       delivery — the removed global 20/day message cap failed precisely because it sat after the spend
       had already happened.
 
+### Code review pass 3 (2026-09-24) — 11 findings, 9 of them in Phase 5's own fixes
+
+Fixed in this pass:
+
+- **Download emitted two contradictory results.** The success emit was gated on `context.io` alone,
+  not on `result.success` — so R12's added failure branch made a failed download print "File saved to
+  home server." *and then* "Download failed". The R12 comment claiming TypeScript had verified the
+  nesting was simply false.
+- **Abandoning a story mission destroyed the arc.** R12 added the `mission:failed` emit that
+  `index.ts` had always been waiting for; it drives `advanceStory(id, "failed")`, which walks the
+  step's `failureBranch` and can set `storyArc.status = "failed"` permanently — while `abandonMission`
+  returns the row to the pool as `available`. Abandon and expiry can no longer share a path: expiry
+  still advances the arc, abandonment only writes a ledger entry.
+- **A declined epoch advance consumed its event.** The no-successor branch returned `{advanced:false}`
+  but `fireEvent` still wrote `status:"fired", success:true`. Since the scheduler only picks up
+  `pending`, authoring the next epoch later would never have advanced to it. It now stays pending.
+- **`socket.ts` — the `"urgent"`→`"critical"` rename missed the site that maps server severity.**
+  Inverted the outcome: CRITICAL alerts mapped to a value matching no sound, colour, or CSS rule,
+  while non-critical ones got `"high"` and did. The matching `.notif-priority.urgent` CSS rule was
+  also missed; the template interpolates the raw priority into the class name.
+- **The mail badge counted every notification type** (`$unreadCounts.total`) while its icon and
+  tooltip describe chat/mail only — one unread `game` notification rendered as "📧 1 / 0 mail
+  messages". Now counts chat+mail.
+- **`clearNotifications()` made the badge permanently unclearable.** R13 removed one of the two
+  writers of the count variables and left this one, which assigns to `$:`-derived variables — those
+  assignments are clobbered on the next store update, and nothing marked anything read. It now calls
+  `markAllAsRead`.
+- **Reconnection regressed from infinite to ~31 seconds.** Turning off socket.io's built-in
+  reconnection handed the only retry path to `handleReconnect()`, which gave up after 5 attempts.
+  socket.io's default is `Infinity`. Now retries indefinitely with the delay capped at 30s.
+- **Socket auth failure left the terminal with zero tabs.** Awaiting `reconnect()` brought a
+  previously-dead reject path to life, and it unwound past `terminalTabsStore.initialize()`.
+
+Filed, not fixed:
+
+- [ ] **Per-tab working directory (withdrawn R12-d).** All tabs share `session.currentDirectory`, so
+      two tabs in different directories resolve relative paths against whichever `cd` ran last. R12
+      "fixed" this with a `getSessionContext` helper that had **zero callers** and preferred
+      `activeTerminal.currentDirectory` — a field **no code path updates after session setup** (`cd`
+      writes only the session field). Had it been wired up it would have resolved every path against
+      the connect-time home directory, ignoring every `cd`. Withdrawn. The real fix: make `cd` write
+      the issuing tab's field (the socket payload already carries `terminalId`, and `switchTerminal`
+      does maintain `activeTerminalId`), then move all 26 reader sites in the same change.
+      The harness now asserts the *precondition* — when `cd` starts maintaining that field, R12-d
+      flips to failing, which is the signal the real fix has become safe.
+
+Also fixed this pass — **a harness that damaged the dev database.** R12-e read whatever
+epochs the dev DB held and then called `handleAdvanceEpoch()`, a state-mutating service
+method, against them. That is how the earlier negative control completed the world's only
+epoch. It now builds its own fixture at `order: -1000` (so the service selects it ahead of
+the seeded Genesis epoch, which `storyProgressionService` recreates on every DI boot),
+asserts that every pre-existing epoch row is unchanged afterwards, and deletes the fixture
+by id in a `finally` that reports failure instead of swallowing it. Negative-controlled:
+reintroducing the stranding bug turns it red while the "nothing else was modified"
+assertion stays green.
+
+**Method note.** The structural check that certified R12-d (`/activeTerminalId/.test(src)`) matched
+the comment explaining the fix, not the fix. That trap fired **four times** this phase. Harness
+guards now strip comments before matching, and every guard added in this pass was negative-controlled
+by reintroducing the bug and confirming the check fails.
+
 **Gate:** the client survives a server restart mid-hack without losing state; traces complete;
 encryption round-trips without data loss.
 

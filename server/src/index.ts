@@ -263,16 +263,32 @@ async function initialize(): Promise<void> {
   });
 
   missionService.on("mission:failed", (data: any) => {
-    if (data.missionId)
+    // R12 REVIEW: abandoning is NOT a narrative failure.
+    //
+    // `advanceStory(id, "failed")` walks the step's `failureBranch`, which can
+    // set `storyArc.status = "failed"` permanently — there is no path back.
+    // Meanwhile `abandonMission` returns the Mission row to the pool
+    // (`status: "available"`, `assignedTo: null`). So a player who took a
+    // story mission and thought better of it burned down the whole arc, while
+    // the mission itself sat there available for someone to take again. Once
+    // the emit existed, "abandon" and "fail" could no longer share a path.
+    //
+    // Expiry still advances the arc — running out of time IS failing.
+    const abandoned = data.reason === "abandoned";
+
+    if (data.missionId && !abandoned)
       defer(() => storyMissionService.advanceStory(data.missionId, "failed"), "Story mission advance error on mission:failed");
+
+    // The ledger records both — the narrative should remember that the player
+    // walked away, it just should not branch the arc on it.
     defer(() => storyProgression.recordEvent({
       type: "player_choice",
       category: "narrative",
       actorId: data.userId,
       actorType: "player",
-      summary: `Failed mission: ${data.missionId}`,
+      summary: `${abandoned ? "Abandoned" : "Failed"} mission: ${data.missionId}`,
       data: { missionId: data.missionId, reason: data.reason },
-      weight: 2,
+      weight: abandoned ? 1 : 2,
     }), "Story ledger error on mission:failed");
   });
 

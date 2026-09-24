@@ -265,9 +265,16 @@
     let showNotifications = false;
 
     // Notification state (now managed by notification service)
-    $: unreadCount = $unreadCounts.total;
+    // R13 REVIEW: this badge is gated on chat+mail, NOT on `.total`.
+    //
+    // `.total` counts every unread notification — `game`, `system`, `forum`,
+    // `trace`, everything. But the badge's icon and tooltip are built from
+    // chat/mail alone, so a single unread `game` notification rendered the
+    // badge as "📧 1" with the tooltip "0 mail messages". The count has to be
+    // over the same set the label describes.
     $: unreadChatCount = $unreadCounts.chat;
     $: unreadMailCount = $unreadCounts.mail;
+    $: unreadCount = unreadChatCount + unreadMailCount;
 
     // UI enhancements
     let currentTime = new Date().toLocaleTimeString();
@@ -1161,9 +1168,18 @@
 
     function clearNotifications() {
         liveMessages.set([]);
-        unreadCount = 0;
-        unreadChatCount = 0;
-        unreadMailCount = 0;
+
+        // R13 REVIEW: mark them READ; do not assign to the badge variables.
+        //
+        // Those three are `$:`-derived from `$unreadCounts` (above), so an
+        // imperative write here survives only until the next store update —
+        // at which point Svelte recomputes from notifications that are all
+        // still unread and the badge springs back. The earlier R13 fix removed
+        // the *other* writer and left this one, which made the badge
+        // permanently unclearable: nothing marked anything read any more.
+        // Clearing a notification badge means marking the notifications read.
+        notificationService.markAllAsRead("chat");
+        notificationService.markAllAsRead("mail");
     }
 
     // ==================== HISTORY NAVIGATION ====================

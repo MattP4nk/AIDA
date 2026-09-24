@@ -104,8 +104,23 @@ async function getAddOutput() {
 class SocketService {
   private socket: Socket | null = null;
   private reconnectAttempts = 0;
-  private maxReconnectAttempts = 5;
+  /**
+   * R13 REVIEW: retry indefinitely, with a CAPPED DELAY — not a capped
+   * attempt count.
+   *
+   * Turning off socket.io's built-in reconnection (to stop the duplicate
+   * loop) handed the only retry path to `handleReconnect()`, which gave up
+   * after 5 attempts — 1+2+4+8+16s, about 31 seconds. socket.io's default is
+   * `reconnectionAttempts: Infinity`. So a server restart, a laptop
+   * sleep/wake, or any wifi drop longer than half a minute left the client
+   * permanently disconnected for the rest of the session, where before it
+   * would have recovered on its own. Removing a redundant mechanism must not
+   * import a shorter patience budget than the one it replaced.
+   */
   private reconnectDelay = 1000; // Start with 1 second
+  private maxReconnectDelay = 30_000; // ...and never wait longer than this
+  /** Attempts after which the UI says "please refresh" — retries continue. */
+  private warnAfterAttempts = 5;
   private registeredEvents: string[] = []; // Track registered events for clean removal
   private userId: string | null = null; // Set during authentication
 
@@ -876,7 +891,12 @@ class SocketService {
           type: "game",
           title: data.title || "Alert",
           message: data.message || data.description || "Server notification",
-          priority: data.severity === "critical" ? "urgent" : "high",
+          // R13 REVIEW: this site maps the SERVER's severity and was missed by
+          // the urgent->critical sweep. `ns` is typed `any`, so svelte-check
+          // could not catch it — and the effect was inverted: CRITICAL alerts
+          // mapped to a value matching nothing (no sound, no red, no badge)
+          // while non-critical ones got "high" and did get the treatment.
+          priority: data.severity === "critical" ? "critical" : "high",
           data,
         });
       }
@@ -927,17 +947,21 @@ class SocketService {
   // ==================== RECONNECTION LOGIC ====================
 
   private handleReconnect(): void {
-    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      console.error("🔌 Max reconnection attempts reached");
-      socketError.set("Connection lost. Please refresh the page.");
-      return;
+    this.reconnectAttempts++;
+
+    // Tell the player after a while, but KEEP TRYING — the network coming
+    // back is the common case and it should just work when it does.
+    if (this.reconnectAttempts === this.warnAfterAttempts) {
+      socketError.set("Connection lost — still trying to reconnect…");
     }
 
-    this.reconnectAttempts++;
-    const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1); // Exponential backoff
+    const delay = Math.min(
+      this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1),
+      this.maxReconnectDelay,
+    );
 
     console.log(
-      `🔌 Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`,
+      `🔌 Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})`,
     );
 
     setTimeout(() => {

@@ -604,7 +604,10 @@
         color: #ff6600;
     }
 
-    .notif-priority.urgent {
+    /* R13 REVIEW: renamed with the priority vocabulary. The template
+       interpolates the raw value (`class="notif-priority {priority}"`), so a
+       CRITICAL badge matched no rule and rendered LESS urgent than a HIGH one. */
+    .notif-priority.critical {
         background: rgba(255, 0, 0, 0.2);
         border: 1px solid #ff0000;
         color: #ff0000;

@@ -288,8 +288,15 @@ export class FileCommandsModule implements CommandModule {
 
             }
 
-            // Push result to player
-            if (context.io) {
+            // Push result to player.
+            //
+            // R12 REVIEW: gated on `result.success`. This block sat OUTSIDE the
+            // `if (result.success)` above, so it announced "Downloaded ... File
+            // saved to home server." on every attempt including the failed
+            // ones — and once the failure branch below was added, a failed
+            // download emitted BOTH: a success message and then a
+            // contradictory failure message.
+            if (result.success && context.io) {
               let downloadOutput = `Downloaded ${filename} → ${downloadDir}/\n${fileIsEncrypted ? "[ENCRYPTED] " : ""}File saved to home server.`;
 
               if (accessKeysGranted.length > 0) {
@@ -319,9 +326,8 @@ export class FileCommandsModule implements CommandModule {
             // fired and the player got NO response. Downloading the same file
             // twice left the terminal waiting on a command that had finished.
             //
-            // Attached to `result.success`, not to the `context.io` check it
-            // first landed on — TypeScript caught that by narrowing `io` to
-            // `never` inside the wrong branch.
+            // Mutually exclusive with the success emit above — exactly one
+            // `command:result` per download attempt.
             if (!result.success && context.io) {
               context.io.to(`player:${userId}`).emit("command:result", {
                 success: false,

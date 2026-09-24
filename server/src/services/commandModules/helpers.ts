@@ -71,19 +71,28 @@ export function getSessionContext(context: CommandContext): {
   const serverId = session.currentServerId || session.homeServerId;
   if (!serverId) return null;
 
-  // R12: resolve relative paths against the ACTIVE terminal.
+  // R12 REVIEW: reads the legacy shared field, deliberately.
   //
-  // `session.currentDirectory` is the legacy top-level field — gameStateManager
-  // labels it "for backwards compatibility" — while each terminal tab carries
-  // its own `currentDirectory`. A player with two tabs in different directories
-  // had every relative path in BOTH resolved against whichever directory last
-  // wrote the shared field, so `cat notes.txt` in one tab could read a file
-  // from the other tab's directory.
-  const activeTerminal = session.terminals?.find(
-    (t) => t.id === session.activeTerminalId,
-  );
-  const currentDir =
-    activeTerminal?.currentDirectory || session.currentDirectory || "/";
+  // This previously preferred the active terminal's own `currentDirectory`,
+  // described as a per-tab-cwd fix. It was inert — the function had no callers
+  // — and had it been wired up it would have made things WORSE:
+  //
+  //   `cd` writes ONLY `session.currentDirectory` (systemCommands.ts). No code
+  //   path anywhere updates a terminal's `currentDirectory` after the session
+  //   is built, so that field holds the home directory it was seeded with at
+  //   connect time. Preferring it means every relative path resolves against
+  //   the directory the player started in, ignoring every `cd` they have run.
+  //
+  // (The identity side is fine, for the record: `switchTerminal` does maintain
+  // `activeTerminalId`, from sockets/handlers.ts. It is the DIRECTORY that is
+  // never maintained, not the id.)
+  //
+  // The per-tab bug IS real — two tabs share one cwd — but fixing it means
+  // making `cd` write the issuing tab's field (the socket payload already
+  // carries `terminalId`) and moving all 26 reader sites over in the same
+  // change. Filed in PLAN.md; a half-wired helper is worse than the shared
+  // field, because then the two disagree.
+  const currentDir = session.currentDirectory || "/";
 
   return { session, serverId, currentDir };
 }

@@ -58,6 +58,17 @@
             // the entire authentication-wait block was skipped.
             const socket = await socketService.reconnect();
             if (socket) {
+              // R13 REVIEW: the authentication wait gets its OWN catch.
+              //
+              // Awaiting the reconnect brought this promise's reject path to
+              // life for the first time — and every rejection (10s timeout,
+              // connect_error, a failed `authenticate:request`) unwound past
+              // `terminalTabsStore.initialize()` to the outer catch, which
+              // then set `isTerminalReady = true`. The player got a terminal
+              // with ZERO TABS and no way to get one. The outer catch even
+              // says "still show terminal even if tabs failed to load"; tabs
+              // now have to actually be attempted for that to mean anything.
+              try {
                 await new Promise<void>((resolve, reject) => {
                     const timeout = setTimeout(() => {
                         reject(new Error("Authentication timeout (10s)"));
@@ -90,6 +101,14 @@
                         }
                     });
                 });
+              } catch (authError) {
+                // Degraded, not fatal: tabs still load, the socket keeps
+                // retrying in the background (see SocketService.handleReconnect).
+                console.error(
+                    "Socket authentication failed; continuing with terminal init:",
+                    authError,
+                );
+              }
             }
 
             // Now initialize terminal tabs (server session is ready)
