@@ -9,7 +9,7 @@
  * stripped, not just the one it is about to be wrapped in — otherwise a
  * payload closing a *different* tag escapes its container.
  */
-const BOUNDARY_TAGS = ["user_message", "conversation_history", "entry"] as const;
+const BOUNDARY_TAGS = ["user_message", "conversation_history", "entry", "tool_result"] as const;
 
 const BOUNDARY_TAG_RE = new RegExp(
   `<\\/?(?:${BOUNDARY_TAGS.join("|")})[^>]*>`,
