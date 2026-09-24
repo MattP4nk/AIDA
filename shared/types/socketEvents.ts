@@ -51,9 +51,15 @@ export interface ServerToClientEvents {
 
   // ── authentication ─────────────────────────────────────────────────────
   /**
-   * Emitted ONLY when the client authenticates without an acknowledgement
-   * callback. The real client now always passes one, so this is the legacy
-   * branch — kept because harnesses and any older client still rely on it.
+   * UNREACHABLE. Emitted only in the `else` of
+   * `typeof callback === "function"` — and **every** emitter of
+   * `authenticated`/`authenticate:request` passes an ack: the client
+   * (socket.ts, App.svelte) and all 13 harnesses. Verified by counting: 15
+   * emit sites, 0 without a callback.
+   *
+   * The previous comment here claimed it was "kept because harnesses still
+   * rely on it". That was false — I wrote it while fixing the handshake and
+   * never checked. Flagged for deletion in the orphan audit.
    */
   "authentication:complete": (data: {
     success: boolean;
@@ -83,6 +89,17 @@ export interface ServerToClientEvents {
   "mission:failed": (data: { missionId: string; userId: string; reason: string }) => void;
 
   // ── world / forum ──────────────────────────────────────────────────────
+  /**
+   * ORPHANED BY ROOM, not by name. The server emits these and the client
+   * listens for them, so a name-comparison audit — including the first
+   * version of this file — scores them healthy. But both are addressed to
+   * room `forum:<forumId>`, and **nothing ever joins that room**: the only
+   * rooms joined anywhere are `user:<id>`, `player:<id>` and `server:<id>`.
+   * No live forum update has ever reached a player.
+   *
+   * The lesson for this contract: matching event NAMES is not enough. An
+   * event is only wired if the listener is in the room it is sent to.
+   */
   "forum:new-post": (data: { postId: string; title: string; author: string }) => void;
   "forum:new-reply": (data: { postId: string; replyId: string; author: string }) => void;
   "server:discovered": (data: { count: number; subnet: string; servers: unknown[] }) => void;
