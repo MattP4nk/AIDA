@@ -33,6 +33,8 @@ import {
 } from "../lore/worldLore";
 import { safeAI } from "../utils/safeExecute";
 
+import type ForumService from "./forumService";
+import type { StoryProgressionService } from "./storyProgressionService";
 // ═══════════════════════════════════════════════════════════════════
 // Constants — Procedural Generation Building Blocks
 // ═══════════════════════════════════════════════════════════════════
@@ -746,7 +748,7 @@ Respond ONLY with JSON:
       // Lazy-load ForumService to avoid circular DI
       const { getService } = await import("../di/container");
       const { FORUM_SERVICE } = await import("../di/tokens");
-      const forumService = getService<any>(FORUM_SERVICE);
+      const forumService = getService<ForumService>(FORUM_SERVICE);
 
       const post = await forumService.createAIPost(
         architect.id,
@@ -822,7 +824,7 @@ Respond ONLY with JSON:
       try {
         const { getService } = await import("../di/container");
         const { STORY_PROGRESSION_SERVICE } = await import("../di/tokens");
-        const storyService = getService<any>(STORY_PROGRESSION_SERVICE);
+        const storyService = getService<StoryProgressionService>(STORY_PROGRESSION_SERVICE);
         await storyService.recordEvent({
           type: "fragment_found",
           category: "discovery",

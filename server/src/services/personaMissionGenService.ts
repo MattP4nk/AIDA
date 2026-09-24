@@ -15,6 +15,7 @@ import { OBJECTIVE_TYPES } from "./missionObjectiveTypes";
 import { validateMissionOutput } from "../utils/aiOutputValidator";
 import { safeAI } from "../utils/safeExecute";
 
+import { levelForExperience } from "../repositories/playerProgressRepository";
 // ── Faction Leader Profiles ────────────────────────────────────────────────
 
 export interface FactionMissionProfile {
@@ -230,11 +231,17 @@ Respond ONLY with JSON:
         take: 20,
       });
       if (members.length === 0) return 10; // default
-      const levels = members
-        .map((m) => {
-          const xp = (m.user.progress as any)?.totalXP || 0;
-          return Math.floor(Math.sqrt(xp / 100)) + 1;
-        });
+      // R5: this read `progress.totalXP`, a column that does not exist — the
+      // field is `experience`. The `as any` is what hid it, so `xp` was always
+      // 0, every member scored level 1, and this function returned 1 for every
+      // faction no matter who was in it. Faction mission difficulty has been
+      // estimated against a level-1 playerbase since the line was written.
+      //
+      // The inline formula was itself a duplicate of the canonical curve, so
+      // call that instead and the two can never drift apart.
+      const levels = members.map((m) =>
+        levelForExperience(m.user.progress?.experience ?? 0),
+      );
       return Math.round(levels.reduce((a, b) => a + b, 0) / levels.length);
     } catch {
       return 10;

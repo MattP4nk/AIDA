@@ -2450,3 +2450,35 @@
     "Harness summary formats differ: some print '=== N PASS / N FAIL ===', others 'N/N passed', verify-tutorial-altpath prints neither. A grep for one format reported 7 healthy harnesses as 'NO SUMMARY LINE' — an empty grep is not a finding."
   ]
 }
+
+
+@phase5_r5_any_sweep {
+  @summary [
+    "R5 done as ONE mechanical sweep (the plan's own instruction, after a prior attempt fixed one `as any` then reintroduced the pattern in the same session)."
+    "Measured first: 51 REAL getService<any> call sites, not 53 — two of the grep hits are comments naming the pattern. 98 resolves were already typed."
+    "Converted all 51 by script, then let tsc find the damage. 4 errors surfaced; 3 were live bugs."
+    "Evidence: scripts/verify-phase5-r5.ts 11/11. Full suite 17 harnesses / 197 checks / 0 fail."
+  ]
+
+  @why_type_only_imports [
+    "Nearly every getService<any> site lives inside an `await import(...)` block that exists to BREAK a require cycle. Static imports would have reintroduced them."
+    "`import type` is erased at compile time, so it gives the compiler the signature without creating a runtime edge. Verified: server restarted clean, zero ReferenceError / 'cannot access before initialization'."
+  ]
+
+  @the_shared_bug_shape [
+    "All three live bugs had the SAME shape: a wrong call that could not fail loudly. An `any` hid it from the compiler AND an enclosing catch/fallback hid it from the runtime. That combination is what let them survive."
+    "Corollary for testing: asserting 'nothing threw' would have PASSED before every one of these fixes. Each harness check must distinguish 'fixed code ran' from 'broken code failed quietly'."
+  ]
+
+  @bugs_found [
+    "initiateTrace got 3 args for 4 params (hackService, evidenceLevel>80 branch). initiateTrace catches its own errors and returns {success:false}, so: initiatedBy=serverId, serverId=a NUMBER, evidenceLevel=undefined, Prisma rejected the row — and the next line pushed 'trace_active' unconditionally. Every critical-evidence hack claimed a trace that did not exist, leaving trace.evade (R4) with nothing to evade. Fixed to pass targetUserId (the server owner), matching the correct call site 700 lines earlier which passes session.targetOwnerId."
+    "executor.executeSingle() has NEVER existed on ArchitectInterventionExecutor — the methods are execute() and executeBatch(). The TypeError was eaten by a safeExecute fallback, so every epoch-scheduled Architect intervention silently reported 'failed' and none ever ran."
+    "progress.totalXP is not a column — the field is `experience` — hidden behind `as any`. xp was always 0, every member scored level 1, estimateFactionPlayerLevel returned 1 for EVERY faction. Faction mission difficulty has been calibrated against a level-1 playerbase since the line was written. The inline sqrt formula was a character-for-character duplicate of the canonical levelForExperience, so it now calls that and the two cannot drift."
+    "NOT a bug: forum.factionId narrowing does not survive into an async closure (TS cannot prove the property is unchanged when the callback runs). Bound to a local."
+  ]
+
+  @too_narrow_declarations [
+    "Two declarations were narrower than their implementations, which is WHY callers reached for `any`: generateUniqueIP takes the IPZone enum (a bare string is a runtime 'Invalid IP zone'), and CreateServerData.ownerId is really string|null (the impl already did `data.ownerId ?? null`; resolveNpcOwnerId returns null)."
+    "Lesson: an `any` at a call site is often a symptom of a lying signature upstream, not laziness at the call site."
+  ]
+}

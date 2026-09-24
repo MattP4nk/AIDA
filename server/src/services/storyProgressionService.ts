@@ -23,6 +23,7 @@ import { EventType, EventSeverity } from "../../../shared/types";
 import { validateOrRetry, validateArchitectEvaluation } from "../utils/aiOutputValidator";
 import { safeAI } from "../utils/safeExecute";
 
+import type { ArchitectInterventionExecutor } from "./architectInterventionExecutor";
 // ═══════════════════════════════════════════════════════════════════
 // Types
 // ═══════════════════════════════════════════════════════════════════
@@ -244,7 +245,7 @@ Routine hacks or mission completions usually don't.`;
       // Execute via the intervention executor
       const { getService } = await import("../di/container");
       const { ARCHITECT_INTERVENTION_EXECUTOR } = await import("../di/tokens");
-      const executor = getService<any>(ARCHITECT_INTERVENTION_EXECUTOR);
+      const executor = getService<ArchitectInterventionExecutor>(ARCHITECT_INTERVENTION_EXECUTOR);
 
       await executor.execute({
         type: parsed.action,
@@ -450,7 +451,7 @@ Routine hacks or mission completions usually don't.`;
     try {
       const { getService } = await import("../di/container");
       const { ARCHITECT_INTERVENTION_EXECUTOR } = await import("../di/tokens");
-      const executor = getService<any>(ARCHITECT_INTERVENTION_EXECUTOR);
+      const executor = getService<ArchitectInterventionExecutor>(ARCHITECT_INTERVENTION_EXECUTOR);
       if (executor?.checkInterventionOutcomes) {
         interventionOutcomes = await executor.checkInterventionOutcomes();
       }

@@ -3,6 +3,7 @@ import { prisma } from "../../database/client";
 import { asyncHandler } from "../../middleware/setup";
 import { NotFoundError, ValidationError } from "../../../../shared/types";
 
+import type { ContentDraftService } from "../../services/contentDraftService";
 const router = Router();
 
 // GET / — List drafts with filtering and pagination
@@ -61,7 +62,7 @@ router.post("/:id/approve", asyncHandler(async (req: any, res: any) => {
   const { reviewNote } = req.body;
   const { getService } = await import("../../di/container");
   const { CONTENT_DRAFT_SERVICE } = await import("../../di/tokens");
-  const draftService = getService<any>(CONTENT_DRAFT_SERVICE);
+  const draftService = getService<ContentDraftService>(CONTENT_DRAFT_SERVICE);
 
   const { draft, resultId } = await draftService.approveDraft(
     req.params.id,

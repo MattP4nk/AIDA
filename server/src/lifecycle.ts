@@ -10,6 +10,11 @@ import type ProgressService from "./services/progressService";
 import type AISchedulerService from "./services/aiSchedulerService";
 import type ResourceService from "./services/resourceService";
 
+import type { AIService } from "./services/aiService";
+import type { ContentQueueService } from "./services/contentQueueService";
+import type HackService from "./services/hackService";
+import type MissionService from "./services/missionService";
+import type { PersonaMailQueueService } from "./services/personaMailQueueService";
 let isShuttingDown = false;
 
 /**
@@ -75,21 +80,21 @@ export async function gracefulShutdown(
     // Stop mission expiration checker
     try {
       const { MISSION_SERVICE } = await import("./di/tokens");
-      const missionService = getService<any>(MISSION_SERVICE);
+      const missionService = getService<MissionService>(MISSION_SERVICE);
       missionService.stopExpirationChecker();
       logger.info("Mission expiration checker stopped");
     } catch { /* Not fatal */ }
 
     // Stop AI retry queue
     try {
-      const aiService = getService<any>(AI_SERVICE);
+      const aiService = getService<AIService>(AI_SERVICE);
       aiService.stopRetryQueue();
       logger.info("AI retry queue stopped");
     } catch { /* Not fatal */ }
 
     // Stop content queue
     try {
-      const contentQueueService = getService<any>(CONTENT_QUEUE_SERVICE);
+      const contentQueueService = getService<ContentQueueService>(CONTENT_QUEUE_SERVICE);
       await contentQueueService.stop();
       logger.info("Content queue stopped");
     } catch { /* Not fatal */ }
@@ -98,14 +103,14 @@ export async function gracefulShutdown(
     // undelivered is picked up on the next boot rather than lost.
     try {
       const { PERSONA_MAIL_QUEUE_SERVICE } = await import("./di/tokens");
-      const mailQueue = getService<any>(PERSONA_MAIL_QUEUE_SERVICE);
+      const mailQueue = getService<PersonaMailQueueService>(PERSONA_MAIL_QUEUE_SERVICE);
       mailQueue.stop();
       logger.info("Persona mail queue stopped");
     } catch { /* Not fatal */ }
 
     // Clear hack session timers
     try {
-      const hackService = getService<any>(HACK_SERVICE);
+      const hackService = getService<HackService>(HACK_SERVICE);
       hackService.cleanup();
       logger.info("Hack session timers cleared");
     } catch { /* Not fatal */ }

@@ -141,6 +141,64 @@ the exemption does not blind it.
 the 57 `deleteMany`s in dependency order against the 6 new cascading FKs, and a
 first boot on a world with empty `player_missions`.
 
+
+### Phase 5 R5 — the `any` sweep, and the three bugs it exposed
+
+Done as ONE mechanical sweep, per this plan's own instruction. Measured first:
+exactly **51** real `getService<any>` call sites (the "53" counted two comments
+that name the pattern) against 98 already-typed resolves. All 51 converted by
+script, then `tsc` was allowed to find the damage.
+
+**Type-only imports, deliberately.** Nearly every one of these sites sits
+inside an `await import(...)` block that exists to break a require cycle. A
+static import would have reintroduced those cycles; `import type` is erased at
+compile time and cannot. Verified after the sweep: the server restarted clean
+with zero `ReferenceError`/"cannot access before initialization" in the log.
+
+The compiler then surfaced four errors that had been invisible. Three were live
+bugs, and all three shared the same shape — **a wrong call that could not fail
+loudly**, because an `any` hid it from the compiler AND an enclosing
+catch/fallback hid it from the runtime:
+
+1. **`initiateTrace` got three arguments for four parameters**
+   (`hackService.ts`, the `evidenceLevel > 80` counter-measures branch). Not a
+   crash: `initiateTrace` catches its own errors and returns
+   `{ success: false }`. So `initiatedBy` received the serverId, `serverId`
+   received a **number**, `evidenceLevel` arrived `undefined`, Prisma rejected
+   the row — and the next line pushed `"trace_active"` unconditionally. Every
+   critical-evidence hack told the defender a trace had locked on while no
+   trace existed, which also left `trace.evade` (R4) with nothing to evade.
+   Fixed to pass `targetUserId` — the server's owner, the same value the
+   correct call site 700 lines earlier passes as `session.targetOwnerId`.
+2. **`executor.executeSingle(...)` has never existed** (`epochSchedulerService`).
+   The class exposes `execute` and `executeBatch`. The TypeError was swallowed
+   by a `safeExecute` fallback, so every epoch-scheduled Architect intervention
+   silently reported `"failed"` and none ever ran.
+3. **`progress.totalXP` is not a column** (`personaMissionGenService`) — the
+   field is `experience`, and an `as any` hid the read. `xp` was therefore
+   always 0, every member scored level 1, and `estimateFactionPlayerLevel`
+   returned 1 for every faction regardless of who was in it. Faction mission
+   difficulty has been calibrated against a level-1 playerbase for as long as
+   the line has existed. The inline formula turned out to be a character-for-
+   character duplicate of the canonical `levelForExperience`, so it now calls
+   that instead and the two cannot drift.
+
+The fourth was a genuine narrowing failure, not a bug: `forum.factionId`'s
+`if` check does not survive into an async closure, since TS cannot prove the
+property is unchanged when the callback runs. Bound to a local.
+
+Two type declarations were also too narrow, which is what had pushed callers to
+`any` in the first place: `generateUniqueIP` takes the `IPZone` enum (a bare
+string is a runtime "Invalid IP zone"), and `CreateServerData.ownerId` is
+really `string | null` — the implementation already did `data.ownerId ?? null`
+and the NPC-ownership resolver returns null.
+
+Evidence: `scripts/verify-phase5-r5.ts` **11/11**. Each check distinguishes
+"the fixed code ran" from "the broken code failed quietly" — asserting that
+nothing threw would have passed *before* the fix too. Includes a regression
+guard asserting zero `getService<any>` call sites remain. Full suite: 17
+harnesses, **197 checks, 0 failures.**
+
 ## Decisions log
 
 Recorded so the plan stays internally consistent as it evolves.

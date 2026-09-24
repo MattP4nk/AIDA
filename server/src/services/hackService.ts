@@ -29,6 +29,13 @@ import {
   validateAnswer,
 } from "./hackMinigameGenerator";
 import type { LayerResult } from "../types/game";
+import type BackdoorService from "./backdoorService";
+import type { FactionService } from "./factionService";
+import type ForumService from "./forumService";
+import type MemoryService from "./memoryService";
+import type { Server as SocketIOServer } from "socket.io";
+import type TraceService from "./traceService";
+import type { FactionKnowledgeService } from "./factionKnowledgeService";
 import {
   HACK_COOLDOWN_BASE_S,
   MAX_TOOL_SUCCESS_BONUS,
@@ -1238,7 +1245,7 @@ class HackService extends EventEmitter {
         fn: async () => {
           const { getService } = await import("../di/container");
           const { BACKDOOR_SERVICE } = await import("../di/tokens");
-          const backdoorService = getService<any>(BACKDOOR_SERVICE);
+          const backdoorService = getService<BackdoorService>(BACKDOOR_SERVICE);
           const bdResult = await backdoorService.installBackdoor(
             session.attackerId,
             session.targetServerId,
@@ -1266,7 +1273,7 @@ class HackService extends EventEmitter {
         fn: async () => {
           const { getService } = await import("../di/container");
           const { TRACE_SERVICE } = await import("../di/tokens");
-          const traceService = getService<any>(TRACE_SERVICE);
+          const traceService = getService<TraceService>(TRACE_SERVICE);
           const trResult = await traceService.initiateTrace(
             session.attackerId,
             session.targetOwnerId,
@@ -1969,13 +1976,29 @@ class HackService extends EventEmitter {
           try {
             const { getService } = await import("../di/container");
             const { TRACE_SERVICE } = await import("../di/tokens");
-            const traceService = getService<any>(TRACE_SERVICE);
-            await traceService.initiateTrace(attackerId, serverId, evidenceLevel);
-            counterMeasures.push("trace_active");
+            const traceService = getService<TraceService>(TRACE_SERVICE);
+            // R5: this passed THREE arguments to a four-parameter method. The
+            // effect was not a crash — `initiateTrace` catches its own errors
+            // and returns `{ success: false }` — so `initiatedBy` got the
+            // serverId, `serverId` got a NUMBER, `evidenceLevel` got undefined,
+            // Prisma rejected the row, and the next line reported
+            // "trace_active" regardless. Every critical-evidence hack told the
+            // defender a trace had locked on while none existed, and left
+            // `trace.evade` with nothing to evade.
+            //
+            // `targetUserId` is the server's owner — the same value the
+            // correct call site above passes as `session.targetOwnerId`.
+            const traceResult = await traceService.initiateTrace(
+              attackerId,
+              targetUserId,
+              serverId,
+              evidenceLevel,
+            );
+            if (traceResult?.success) counterMeasures.push("trace_active");
 
             // Register trace as passive resource drain on attacker
             const { MEMORY_SERVICE } = await import("../di/tokens");
-            const memoryService = getService<any>(MEMORY_SERVICE);
+            const memoryService = getService<MemoryService>(MEMORY_SERVICE);
             memoryService.registerActiveTrace(attackerId, serverId, `Trace from ${server.name}`);
           } catch (err) {
             this.logger.error({ err }, "Failed to initiate trace");
@@ -2007,7 +2030,7 @@ class HackService extends EventEmitter {
       fn: async () => {
         const { getService } = await import("../di/container");
         const { SOCKET_IO } = await import("../di/tokens");
-        const io = getService<any>(SOCKET_IO);
+        const io = getService<SocketIOServer>(SOCKET_IO);
 
         const messages: Record<string, string> = {
           warning: `[SECURITY] Suspicious activity detected on ${serverName}. Evidence: ${evidenceLevel}%`,
@@ -2084,7 +2107,7 @@ class HackService extends EventEmitter {
 
       // Feed knowledge to faction — they now know about the attacker
       const { FACTION_KNOWLEDGE_SERVICE } = await import("../di/tokens");
-      const fkService = getService<any>(FACTION_KNOWLEDGE_SERVICE);
+      const fkService = getService<FactionKnowledgeService>(FACTION_KNOWLEDGE_SERVICE);
       await fkService.addEntry(factionId, {
         assetType: "player",
         assetId: attackerId,
@@ -2192,7 +2215,7 @@ class HackService extends EventEmitter {
       try {
         const { getService } = await import("../di/container");
         const { SOCKET_IO } = await import("../di/tokens");
-        const io = getService<any>(SOCKET_IO);
+        const io = getService<SocketIOServer>(SOCKET_IO);
 
         // Get all faction members to notify
         const members = await db.client.factionMember.findMany({
@@ -2224,7 +2247,7 @@ class HackService extends EventEmitter {
 
         if (faction?.aiPersonaId) {
           const { FORUM_SERVICE } = await import("../di/tokens");
-          const forumService = getService<any>(FORUM_SERVICE);
+          const forumService = getService<ForumService>(FORUM_SERVICE);
 
           // Find faction forum
           const forum = await db.client.forum.findFirst({
@@ -2266,7 +2289,7 @@ class HackService extends EventEmitter {
       fn: async () => {
         const { getService } = await import("../di/container");
         const { FACTION_SERVICE } = await import("../di/tokens");
-        const factionService = getService<any>(FACTION_SERVICE);
+        const factionService = getService<FactionService>(FACTION_SERVICE);
 
         // Penalty scales with evidence: 61-80% → -5 rep, 81-100% → -15 rep
         const penalty = evidenceLevel > 80 ? -15 : -5;

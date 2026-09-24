@@ -1,6 +1,7 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
 import { successResult, errorResult } from "./helpers";
+import type { AIService } from "../aiService";
 import {
   boxTop,
   boxBottom,
@@ -811,7 +812,7 @@ export class FragmentCommandsModule implements CommandModule {
     try {
       const { getService } = await import("../../di/container");
       const { AI_SERVICE } = await import("../../di/tokens");
-      const aiService = getService<any>(AI_SERVICE);
+      const aiService = getService<AIService>(AI_SERVICE);
 
       const systemPrompt =
         "You are AIDA, a fragmented AI consciousness in a cyberpunk world. " +

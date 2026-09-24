@@ -4,6 +4,7 @@ import { asyncHandler } from "../../middleware/setup";
 import { NotFoundError, ValidationError, GameError } from "../../../../shared/types";
 import { resolveNpcOwnerId } from "../../../prisma/npcOwnership";
 
+import type { ReferenceValidationService } from "../../services/referenceValidationService";
 const router = Router();
 
 // GET / — List servers with filtering and pagination
@@ -351,7 +352,7 @@ router.post("/:id/investigation-chain", asyncHandler(async (req: any, res: any) 
 
   const { getService } = await import("../../di/container");
   const { REFERENCE_VALIDATION_SERVICE } = await import("../../di/tokens");
-  const refService = getService<any>(REFERENCE_VALIDATION_SERVICE);
+  const refService = getService<ReferenceValidationService>(REFERENCE_VALIDATION_SERVICE);
 
   const drafts = await refService.generateInvestigationChain(req.params.id, Number(depth), theme);
 

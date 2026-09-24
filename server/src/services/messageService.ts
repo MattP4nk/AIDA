@@ -358,7 +358,7 @@ export class MessageService {
         try {
           const { getService } = await import("../di/container");
           const { AI_SERVICE } = await import("../di/tokens");
-          const aiService = getService<any>(AI_SERVICE);
+          const aiService = getService<AIService>(AI_SERVICE);
           const modResult = await aiService.moderate(filteredContent);
           if (!modResult.safe) {
             await prisma.message.update({ where: { id: message.id }, data: { isHidden: true } });

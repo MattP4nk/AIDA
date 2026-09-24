@@ -23,6 +23,8 @@ import { PRISMA_CLIENT, LOGGER } from "../di/tokens";
 import type { ContentDraftService } from "./contentDraftService";
 import { safeExecute } from "../utils/safeExecute";
 
+import type { Server as SocketIOServer } from "socket.io";
+import type { ArchitectInterventionExecutor } from "./architectInterventionExecutor";
 @injectable()
 export class EpochSchedulerService {
   private checkInterval: ReturnType<typeof setInterval> | null = null;
@@ -178,18 +180,28 @@ export class EpochSchedulerService {
       fn: async () => {
         const { getService } = await import("../di/container");
         const { ARCHITECT_INTERVENTION_EXECUTOR } = await import("../di/tokens");
-        const executor = getService<any>(ARCHITECT_INTERVENTION_EXECUTOR);
+        const executor = getService<ArchitectInterventionExecutor>(ARCHITECT_INTERVENTION_EXECUTOR);
 
         if (!executor) throw new Error("ArchitectInterventionExecutor not available");
 
         const intervention = payload.intervention || payload;
-        await executor.executeSingle(intervention);
 
-        return { interventionType: intervention.type };
+        // R5: this called `executeSingle`, which has never existed on this
+        // class — the methods are `execute` (one) and `executeBatch` (many).
+        // The TypeError was swallowed by the `safeExecute` fallback below, so
+        // every epoch-scheduled Architect intervention silently reported
+        // "failed" and none ever ran. Invisible until the resolve was typed.
+        const result = await executor.execute(intervention);
+
+        return {
+          interventionType: intervention.type,
+          success: result.success,
+          ...(result.error ? { error: result.error } : {}),
+        };
       },
       context: "Architect intervention",
       logger: this.logger,
-      fallback: { interventionType: "failed" },
+      fallback: { interventionType: "failed", success: false },
     })();
   }
 
@@ -214,7 +226,7 @@ export class EpochSchedulerService {
       try {
         const { getService } = await import("../di/container");
         const { SOCKET_IO } = await import("../di/tokens");
-        const io = getService<any>(SOCKET_IO);
+        const io = getService<SocketIOServer>(SOCKET_IO);
         if (io) {
           io.emit("notification", {
             type: "world_event",

@@ -3,6 +3,7 @@ import { prisma } from "../../database/client";
 import { asyncHandler } from "../../middleware/setup";
 import { NotFoundError, ValidationError, GameError } from "../../../../shared/types";
 
+import type { EpochSchedulerService } from "../../services/epochSchedulerService";
 const router = Router();
 
 // GET / — List epochs ordered by order field
@@ -264,7 +265,7 @@ router.post("/:id/events/:eventId/fire", asyncHandler(async (req: any, res: any)
   // Use EpochSchedulerService to actually execute the event payload
   const { getService } = await import("../../di/container");
   const { EPOCH_SCHEDULER_SERVICE } = await import("../../di/tokens");
-  const scheduler = getService<any>(EPOCH_SCHEDULER_SERVICE);
+  const scheduler = getService<EpochSchedulerService>(EPOCH_SCHEDULER_SERVICE);
   await scheduler.fireEvent(event);
 
   // Re-fetch the updated event

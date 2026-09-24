@@ -27,6 +27,8 @@ import type { FactionKnowledgeService } from "./factionKnowledgeService";
 import { validateForumPosts, validateForumReply } from "../utils/aiOutputValidator";
 import { fallbackForumPost } from "../utils/aiFallbacks";
 
+import type { AIService } from "./aiService";
+import type { ReputationEngine } from "./reputationEngine";
 /**
  * ForumService - Underground forum networks and darkweb system
  *
@@ -670,7 +672,7 @@ export class ForumService extends EventEmitter {
         try {
           const { getService } = await import("../di/container");
           const { AI_SERVICE } = await import("../di/tokens");
-          const aiService = getService<any>(AI_SERVICE);
+          const aiService = getService<AIService>(AI_SERVICE);
           const modResult = await aiService.moderate(`${filteredTitle}\n${filteredContent}`);
           if (!modResult.safe) {
             await prisma.post.update({ where: { id: post.id }, data: { isHidden: true } });
@@ -731,7 +733,7 @@ export class ForumService extends EventEmitter {
         fn: async () => {
           const { getService } = await import("../di/container");
           const { REPUTATION_ENGINE } = await import("../di/tokens");
-          const reputationEngine = getService<any>(REPUTATION_ENGINE);
+          const reputationEngine = getService<ReputationEngine>(REPUTATION_ENGINE);
           await reputationEngine.onForumPost(userId, forumId);
         },
         context: "Apply forum post reputation",
@@ -1605,16 +1607,20 @@ YOUR POST TITLE: "${post.title}"`;
           },
         });
 
-        // If forum belongs to a faction, decrease reputation via ReputationEngine
-        if (forum.factionId) {
+        // If forum belongs to a faction, decrease reputation via ReputationEngine.
+        // Bind the id to a local first: narrowing from `if (forum.factionId)`
+        // does not survive into the async closure below, because TS cannot
+        // prove the property is unchanged by the time the callback runs.
+        const honeypotFactionId = forum.factionId;
+        if (honeypotFactionId) {
           await safeExecute({
             fn: async () => {
               const { getService } = await import("../di/container");
               const { REPUTATION_ENGINE } = await import("../di/tokens");
-              const reputationEngine = getService<any>(REPUTATION_ENGINE);
+              const reputationEngine = getService<ReputationEngine>(REPUTATION_ENGINE);
               await reputationEngine.onCaughtByFaction(
                 userId,
-                forum.factionId,
+                honeypotFactionId,
                 "high",
               );
             },
@@ -1972,7 +1978,7 @@ YOUR POST TITLE: "${post.title}"`;
         try {
           const { getService } = await import("../di/container");
           const { AI_SERVICE } = await import("../di/tokens");
-          const aiService = getService<any>(AI_SERVICE);
+          const aiService = getService<AIService>(AI_SERVICE);
           const modResult = await aiService.moderate(filteredContent);
           if (!modResult.safe) {
             await prisma.postReply.update({ where: { id: reply.id }, data: { isHidden: true } });

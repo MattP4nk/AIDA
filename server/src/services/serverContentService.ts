@@ -33,6 +33,12 @@ import type { AIService } from "./aiService";
 import { ContentEncoder } from "../utils/contentEncoder";
 import { validateOrRetry, validateContentPlan } from "../utils/aiOutputValidator";
 
+import type FileService from "./fileService";
+import type IPService from "./ipService";
+import type { ReferenceValidationService } from "./referenceValidationService";
+import type ServerService from "./serverService";
+import type { Server as SocketIOServer } from "socket.io";
+import { IPZone } from "../../../shared/types/network";
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -1737,7 +1743,7 @@ export class ServerContentService {
     try {
       const { getService } = await import("../di/container");
       const { SOCKET_IO } = await import("../di/tokens");
-      const io = getService<any>(SOCKET_IO);
+      const io = getService<SocketIOServer>(SOCKET_IO);
       io.to(`server:${serverId}`).emit("command:result", {
         success: true,
         output: `[${server.name}] New files detected.`,
@@ -2232,7 +2238,7 @@ export class ServerContentService {
       try {
         const { getService } = await import("../di/container");
         const { REFERENCE_VALIDATION_SERVICE } = await import("../di/tokens");
-        const refService = getService<any>(REFERENCE_VALIDATION_SERVICE);
+        const refService = getService<ReferenceValidationService>(REFERENCE_VALIDATION_SERVICE);
         if (refService) {
           const allContent = validated.files.map((f: any) => f.content || "").join("\n");
           if (allContent.length > 10) {
@@ -2628,16 +2634,19 @@ export class ServerContentService {
     try {
       const { getService } = await import("../di/container");
       const { IP_SERVICE, SERVER_SERVICE } = await import("../di/tokens");
-      const ipService = getService<any>(IP_SERVICE);
-      const serverService = getService<any>(SERVER_SERVICE);
+      const ipService = getService<IPService>(IP_SERVICE);
+      const serverService = getService<ServerService>(SERVER_SERVICE);
 
-      // Determine which IP zone to use
-      const zoneMap: Record<string, string> = {
-        corporate: "corporate",
-        government: "government",
-        underground: "underground",
+      // Determine which IP zone to use. Typed as IPZone, not string:
+      // `generateUniqueIP` takes the enum and throws "Invalid IP zone" on
+      // anything it does not recognise, so a bare string here is a runtime
+      // failure waiting on a typo rather than a compile error.
+      const zoneMap: Record<string, IPZone> = {
+        corporate: IPZone.CORPORATE,
+        government: IPZone.GOVERNMENT,
+        underground: IPZone.UNDERGROUND,
       };
-      const zone = zoneMap[serverType] || "corporate";
+      const zone = zoneMap[serverType] ?? IPZone.CORPORATE;
       const ip = await ipService.generateUniqueIP(zone);
 
       // Generate a thematic name
@@ -2812,7 +2821,7 @@ export class ServerContentService {
     // Plant the files
     const { getService } = await import("../di/container");
     const { FILE_SERVICE } = await import("../di/tokens");
-    const fileService = getService<any>(FILE_SERVICE);
+    const fileService = getService<FileService>(FILE_SERVICE);
 
     for (const file of missionFiles) {
       try {

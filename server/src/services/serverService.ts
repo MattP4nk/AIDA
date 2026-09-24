@@ -17,6 +17,7 @@ import type MissionIntegrationService from "./missionIntegration";
 import type { FactionKnowledgeService } from "./factionKnowledgeService";
 import { safeExecute } from "../utils/safeExecute";
 
+import type { ContentQueueService } from "./contentQueueService";
 // ==================== ACCESS BALANCE ====================
 // Grounded in the shipped data: GameServer.encryptionLevel spans 0..5 across
 // all 44 servers, ServerLink.requiredAccess gates on 0 / 2 / 3 / 5, and a new
@@ -52,7 +53,11 @@ interface CreateServerData {
   name: string;
   ipAddress: string;
   type: string;
-  ownerId?: string;
+  // `string | null`, not `string | undefined`: the implementation already
+  // does `data.ownerId ?? null`, and the NPC-ownership resolver returns
+  // `string | null`. The narrower declaration just moved the mismatch out of
+  // the compiler's reach at every `getService<any>` call site.
+  ownerId?: string | null;
   encryptionLevel?: number;
   accessRules?: any[];
   maxConnections?: number;
@@ -216,7 +221,7 @@ class ServerService {
           try {
             const { getService } = await import("../di/container");
             const { CONTENT_QUEUE_SERVICE } = await import("../di/tokens");
-            const contentQueue = getService<any>(CONTENT_QUEUE_SERVICE);
+            const contentQueue = getService<ContentQueueService>(CONTENT_QUEUE_SERVICE);
             await contentQueue.enqueue(server.id, 5 /* NORMAL */);
           } catch { /* non-critical */ }
         }

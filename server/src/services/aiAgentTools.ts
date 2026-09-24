@@ -19,6 +19,7 @@ import type { AIService } from "./aiService";
 import type { Logger } from "pino";
 import { safeExecute } from "../utils/safeExecute";
 
+import type { ContentDraftService } from "./contentDraftService";
 // ═══════════════════════════════════════════════════════════════
 // Tool Definitions
 // ═══════════════════════════════════════════════════════════════
@@ -500,7 +501,7 @@ const TOOLS: ToolDefinition[] = [
     execute: async (_prisma, params) => {
       const { getService } = await import("../di/container");
       const { CONTENT_DRAFT_SERVICE } = await import("../di/tokens");
-      const draftService = getService<any>(CONTENT_DRAFT_SERVICE);
+      const draftService = getService<ContentDraftService>(CONTENT_DRAFT_SERVICE);
 
       const draft = await draftService.createDraft({
         type: "server",
@@ -530,7 +531,7 @@ const TOOLS: ToolDefinition[] = [
     execute: async (_prisma, params) => {
       const { getService } = await import("../di/container");
       const { CONTENT_DRAFT_SERVICE } = await import("../di/tokens");
-      const draftService = getService<any>(CONTENT_DRAFT_SERVICE);
+      const draftService = getService<ContentDraftService>(CONTENT_DRAFT_SERVICE);
 
       const draft = await draftService.createDraft({
         type: "network",
@@ -553,7 +554,7 @@ const TOOLS: ToolDefinition[] = [
     execute: async (_prisma, params) => {
       const { getService } = await import("../di/container");
       const { CONTENT_DRAFT_SERVICE } = await import("../di/tokens");
-      const draftService = getService<any>(CONTENT_DRAFT_SERVICE);
+      const draftService = getService<ContentDraftService>(CONTENT_DRAFT_SERVICE);
 
       // Verify server exists
       const server = await _prisma.gameServer.findUnique({
@@ -586,7 +587,7 @@ const TOOLS: ToolDefinition[] = [
     execute: async (_prisma, params) => {
       const { getService } = await import("../di/container");
       const { CONTENT_DRAFT_SERVICE } = await import("../di/tokens");
-      const draftService = getService<any>(CONTENT_DRAFT_SERVICE);
+      const draftService = getService<ContentDraftService>(CONTENT_DRAFT_SERVICE);
 
       const draft = await draftService.createDraft({
         type: "link",
@@ -611,7 +612,7 @@ const TOOLS: ToolDefinition[] = [
     execute: async (_prisma, params) => {
       const { getService } = await import("../di/container");
       const { CONTENT_DRAFT_SERVICE } = await import("../di/tokens");
-      const draftService = getService<any>(CONTENT_DRAFT_SERVICE);
+      const draftService = getService<ContentDraftService>(CONTENT_DRAFT_SERVICE);
 
       // Get a valid author ID (use first NPC user)
       const npc = await _prisma.user.findFirst({

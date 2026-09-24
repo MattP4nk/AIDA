@@ -40,6 +40,8 @@ import type ShopService from "./shopService";
 import type MissionService from "./missionService";
 import type { FactionService } from "./factionService";
 
+import type FileService from "./fileService";
+import type { NetworkTopologyService } from "./networkTopologyService";
 @injectable()
 class GameStateManager extends EventEmitter {
   private playerSessions: Map<string, PlayerSession>;
@@ -209,7 +211,7 @@ class GameStateManager extends EventEmitter {
         fn: async () => {
           const { getService } = await import("../di/container");
           const { NETWORK_TOPOLOGY_SERVICE } = await import("../di/tokens");
-          const topoService = getService<any>(NETWORK_TOPOLOGY_SERVICE);
+          const topoService = getService<NetworkTopologyService>(NETWORK_TOPOLOGY_SERVICE);
           await topoService.createHomeLink(homeServerId);
         },
         context: "Create home link to Internet Exchange",
@@ -623,7 +625,7 @@ class GameStateManager extends EventEmitter {
           fn: async () => {
             const { getService } = await import("../di/container");
             const { FILE_SERVICE } = await import("../di/tokens");
-            const fileService = getService<any>(FILE_SERVICE);
+            const fileService = getService<FileService>(FILE_SERVICE);
             await fileService.initializeFileSystem(
               serverId,
               server.ownerId || userId,
@@ -844,7 +846,7 @@ class GameStateManager extends EventEmitter {
         // Import fileService
         const { getService } = await import("../di/container");
         const { FILE_SERVICE } = await import("../di/tokens");
-        const fileService = getService<any>(FILE_SERVICE);
+        const fileService = getService<FileService>(FILE_SERVICE);
 
         // Check if home server exists
         let homeServer = await db.client.gameServer.findUnique({
@@ -931,7 +933,7 @@ class GameStateManager extends EventEmitter {
       fn: async () => {
         const { getService } = await import("../di/container");
         const { FILE_SERVICE } = await import("../di/tokens");
-        const fileService = getService<any>(FILE_SERVICE);
+        const fileService = getService<FileService>(FILE_SERVICE);
 
         // Get user info
         const user = await db.client.user.findUnique({

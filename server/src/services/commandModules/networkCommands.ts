@@ -3,6 +3,7 @@ import { CommandModule, CommandContext } from "./interface";
 import logger from "../../logger";
 import { spawnBackgroundProcess, successResult, errorResult, refreshComputerSpec } from "./helpers";
 import { redactSensitiveContent } from "../../utils/contentRedaction";
+import type { ContentQueueService } from "../contentQueueService";
 import {
   validateIPAddress,
   validateServerId,
@@ -196,7 +197,7 @@ export class NetworkCommandsModule implements CommandModule {
             try {
               const { getService } = await import("../../di/container");
               const { CONTENT_QUEUE_SERVICE } = await import("../../di/tokens");
-              const contentQueue = getService<any>(CONTENT_QUEUE_SERVICE);
+              const contentQueue = getService<ContentQueueService>(CONTENT_QUEUE_SERVICE);
               for (const r of results) {
                 const sid = (r as any).serverId || (r as any).server?.id || (r as any).id;
                 if (sid) {
@@ -791,7 +792,7 @@ export class NetworkCommandsModule implements CommandModule {
           try {
             const { getService } = await import("../../di/container");
             const { CONTENT_QUEUE_SERVICE } = await import("../../di/tokens");
-            const contentQueue = getService<any>(CONTENT_QUEUE_SERVICE);
+            const contentQueue = getService<ContentQueueService>(CONTENT_QUEUE_SERVICE);
             await contentQueue.enqueue(targetServer.id, 1 /* URGENT */, {}, context.userId);
           } catch { /* non-critical */ }
         }
@@ -817,7 +818,7 @@ export class NetworkCommandsModule implements CommandModule {
       try {
         const { getService } = await import("../../di/container");
         const { CONTENT_QUEUE_SERVICE } = await import("../../di/tokens");
-        const contentQueue = getService<any>(CONTENT_QUEUE_SERVICE);
+        const contentQueue = getService<ContentQueueService>(CONTENT_QUEUE_SERVICE);
         await contentQueue.ensureReady(targetServer.id, context.userId);
       } catch { /* non-critical — connect anyway */ }
     }
@@ -1563,7 +1564,7 @@ export class NetworkCommandsModule implements CommandModule {
           try {
             const { getService } = await import("../../di/container");
             const { CONTENT_QUEUE_SERVICE } = await import("../../di/tokens");
-            const contentQueue = getService<any>(CONTENT_QUEUE_SERVICE);
+            const contentQueue = getService<ContentQueueService>(CONTENT_QUEUE_SERVICE);
             await contentQueue.ensureReady(targetServer.id, context.userId);
           } catch { /* non-critical */ }
         }

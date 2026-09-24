@@ -13,6 +13,7 @@ import type { Logger } from "pino";
 import { PRISMA_CLIENT, LOGGER } from "../di/tokens";
 import { resolveNpcOwnerId } from "../../prisma/npcOwnership";
 
+import type { ContentQueueService } from "./contentQueueService";
 export interface CreateDraftInput {
   type: "server" | "file" | "link" | "mission" | "forum_post" | "network" | "forum";
   title: string;
@@ -268,7 +269,7 @@ export class ContentDraftService {
     try {
       const { getService } = await import("../di/container");
       const { CONTENT_QUEUE_SERVICE } = await import("../di/tokens");
-      const contentQueue = getService<any>(CONTENT_QUEUE_SERVICE);
+      const contentQueue = getService<ContentQueueService>(CONTENT_QUEUE_SERVICE);
       await contentQueue.enqueue(server.id, 5 /* NORMAL */);
     } catch { /* non-critical */ }
 

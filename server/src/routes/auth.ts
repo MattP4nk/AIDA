@@ -12,6 +12,7 @@ import { FACTION_SERVICE, IP_SERVICE } from "../di/tokens";
 import type { FactionService } from "../services/factionService";
 import type IPService from "../services/ipService";
 import { GameError, type AuthRequest, type AuthResponse, type User } from "../../../shared/types";
+import type { NetworkTopologyService } from "../services/networkTopologyService";
 import {
   validateRegistration,
   validateLogin,
@@ -206,7 +207,7 @@ router.post(
       // Link home server to Internet Exchange (using ID from transaction, no re-query)
       try {
         const { NETWORK_TOPOLOGY_SERVICE } = await import("../di/tokens");
-        const topoService = getService<any>(NETWORK_TOPOLOGY_SERVICE);
+        const topoService = getService<NetworkTopologyService>(NETWORK_TOPOLOGY_SERVICE);
         if (homeServerId) {
           await topoService.createHomeLink(homeServerId);
           logger.info({ homeServerId }, "Home server linked to Internet Exchange");
