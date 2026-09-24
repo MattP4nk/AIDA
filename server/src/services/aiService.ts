@@ -56,6 +56,7 @@ export class AIService {
     failedRequests: 0,
     cacheHits: 0,
     retryQueueSize: 0,
+    retryQueueDropped: 0,
     retrySuccesses: 0,
   };
 
@@ -65,6 +66,10 @@ export class AIService {
   private readonly RETRY_QUEUE_INTERVAL_MS = 30_000; // Process queue every 30s
   private readonly RETRY_MAX_ATTEMPTS = 3;
   private readonly RETRY_MAX_AGE_MS = 10 * 60 * 1000; // Drop requests older than 10 min
+  /** Shortest attempt worth starting — below this, fail rather than half-try. */
+  private readonly MIN_ATTEMPT_MS = 5_000;
+  /** R14: guards processRetryQueue against overlapping interval ticks. */
+  private retryQueueProcessing = false;
   private retryTimer: NodeJS.Timeout | null = null;
 
   /** Concurrency throttle — prevents flooding the API with parallel requests. */
@@ -182,25 +187,71 @@ export class AIService {
     }
   }
 
+  /**
+   * R14: the retry chain is bounded by a DEADLINE, not just an attempt count.
+   *
+   * This runs INSIDE an acquired slot (see generateResponse), so however long
+   * it takes is how long a slot is held. It used to be able to run
+   * 3 x requestTimeout(120s) + 5s + 15s = 380s, while `SLOT_TIMEOUT_MS` — how
+   * long a WAITER will wait for a slot — was 120s. A holder could therefore
+   * occupy a slot for three times longer than anyone would wait for it, so
+   * with MAX_CONCURRENT_REQUESTS = 2 a 30-deep queue drained into timeouts
+   * instead of being served.
+   *
+   * Tuning two constants to agree would have drifted apart again at the next
+   * model change. Instead the budget IS the slot timeout: attempts stop when
+   * the remaining budget cannot cover a backoff plus a meaningful attempt, and
+   * each attempt's own timeout is clamped to what is left. The worst-case hold
+   * is now SLOT_TIMEOUT_MS by construction.
+   */
   private async retryOperation<T>(
-    operation: () => Promise<T>,
+    operation: (attemptTimeoutMs: number) => Promise<T>,
     maxRetries: number = 3,
+    budgetMs: number = this.SLOT_TIMEOUT_MS,
   ): Promise<T> {
+    const deadline = Date.now() + budgetMs;
+    let lastError: unknown;
+
     for (let i = 0; i < maxRetries; i++) {
+      const remaining = deadline - Date.now();
+      // Too little left to be worth ANOTHER attempt — stop rather than start
+      // one we would have to abandon mid-flight.
+      //
+      // The first attempt is exempt. Gating it on the budget too meant that a
+      // budget smaller than MIN_ATTEMPT_MS produced ZERO attempts and a
+      // synthetic error — the call silently became a no-op that had never
+      // touched the API. Whatever the budget, we try once; only retries have
+      // to justify themselves against the remaining time.
+      if (i > 0 && remaining < this.MIN_ATTEMPT_MS) {
+        throw lastError ?? new Error("AI retry budget exhausted");
+      }
+
       try {
-        return await operation();
+        return await operation(Math.min(this.requestTimeout, remaining));
       } catch (error) {
+        lastError = error;
         const isRateLimit = error instanceof Error && error.message.includes("Too Many Requests");
         if (i === maxRetries - 1) throw error;
-        // Use longer backoff for rate limits (5s, 15s, 30s)
+
         const delay = isRateLimit
           ? 5000 * Math.pow(3, i)
           : 1000 * Math.pow(2, i);
+
+        // Only sleep if the budget can still fund the sleep AND an attempt
+        // after it. Otherwise the sleep would burn the slot for nothing.
+        if (Date.now() + delay + this.MIN_ATTEMPT_MS > deadline) {
+          this.logger.warn(
+            { attempt: i + 1, isRateLimit },
+            "AI retry budget exhausted — not sleeping for a retry that cannot finish",
+          );
+          throw error;
+        }
+
         this.logger.warn({ attempt: i + 1, delay, isRateLimit }, "Retrying AI request");
         await new Promise((resolve) => setTimeout(resolve, delay));
       }
     }
-    throw new Error("Max retries exceeded");
+    throw lastError ?? new Error("Max retries exceeded");
   }
 
   /**
@@ -235,7 +286,7 @@ export class AIService {
     // Throttle concurrent requests to avoid rate limiting
     await this.acquireSlot();
     try {
-      const result = await this.retryOperation(async () => {
+      const result = await this.retryOperation(async (attemptTimeoutMs) => {
         const messages: OllamaChatMessage[] = [];
 
         if (systemPrompt) {
@@ -255,10 +306,7 @@ export class AIService {
         };
 
         const controller = new AbortController();
-        const timeout = setTimeout(
-          () => controller.abort(),
-          this.requestTimeout,
-        );
+        const timeout = setTimeout(() => controller.abort(), attemptTimeoutMs);
 
         try {
           const response = await fetch(`${this.apiUrl}/api/chat`, {
@@ -350,10 +398,24 @@ export class AIService {
     onSuccess: (response: string) => void | Promise<void>,
     expectedFormat?: string,
   ): void {
-    // Don't exceed max queue size
+    // R14: dropping the oldest entry used to drop the IN-FLIGHT one.
+    //
+    // processRetryQueue read `retryQueue[0]` and left it in place across a
+    // long await, so the "oldest entry" this shift() discarded was usually
+    // the request currently being generated — and when that generation
+    // finished it removed index 0 again, silently discarding a DIFFERENT,
+    // untried request. Requests vanished without ever running.
+    //
+    // The in-flight request is now removed from the array while it runs (see
+    // processRetryQueue), so it cannot be the victim here and this shift()
+    // only ever drops a genuinely queued, untried entry.
     if (this.retryQueue.length >= this.RETRY_QUEUE_MAX) {
-      // Drop oldest entry
-      this.retryQueue.shift();
+      const dropped = this.retryQueue.shift();
+      this.metrics.retryQueueDropped++;
+      this.logger.warn(
+        { id: dropped?.id, max: this.RETRY_QUEUE_MAX },
+        "AI retry queue full — dropped the oldest queued request",
+      );
     }
 
     const id = `retry_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -376,6 +438,28 @@ export class AIService {
    * Runs every RETRY_QUEUE_INTERVAL_MS (30s).
    */
   private async processRetryQueue(): Promise<void> {
+    // R14: REENTRANCY GUARD.
+    //
+    // This is driven by `setInterval(..., 30_000)` and never awaited, while
+    // the generateResponse below can hold for up to SLOT_TIMEOUT_MS. Ticks
+    // therefore overlapped as a matter of course, not as a rare race: several
+    // of them read the same `retryQueue[0]`, each fired that request's
+    // `onSuccess` (duplicate NPC mail, duplicate generated content), and each
+    // then shift()ed a different entry off the front — so for every duplicate
+    // delivery another queued request disappeared untried.
+    if (this.retryQueueProcessing) {
+      this.logger.debug("Retry queue tick skipped — previous tick still running");
+      return;
+    }
+    this.retryQueueProcessing = true;
+    try {
+      await this.processRetryQueueOnce();
+    } finally {
+      this.retryQueueProcessing = false;
+    }
+  }
+
+  private async processRetryQueueOnce(): Promise<void> {
     if (this.retryQueue.length === 0) return;
 
     // Purge expired entries
@@ -386,8 +470,14 @@ export class AIService {
 
     if (this.retryQueue.length === 0) return;
 
-    // Try the oldest request — pass format hint through generateResponse
-    const req = this.retryQueue[0]!;
+    // TAKE the request out of the queue for the duration of the attempt.
+    //
+    // Removal used to be positional — `shift()` after the await — which is
+    // only correct if the array did not change while we were awaiting. It
+    // did: the purge above reassigns it wholesale, and queueForRetry drops
+    // the head on overflow. Holding the entry itself, rather than an index
+    // into a mutating array, is what makes the removal correct.
+    const req = this.retryQueue.shift()!;
     req.attempts++;
 
     // On retry, strengthen the format instruction
@@ -399,8 +489,7 @@ export class AIService {
       const result = await this.generateResponse(req.prompt, req.systemPrompt, retryFormat);
 
       if (result.success) {
-        // Success — remove from queue and call the callback
-        this.retryQueue.shift();
+        // Already removed above — nothing to shift.
         this.metrics.retrySuccesses++;
         this.metrics.retryQueueSize = this.retryQueue.length;
 
@@ -412,17 +501,22 @@ export class AIService {
           this.logger.warn({ err: cbErr, id: req.id }, "Retry queue: onSuccess callback failed");
         }
       } else if (req.attempts >= this.RETRY_MAX_ATTEMPTS) {
-        // Max attempts reached — drop it
-        this.retryQueue.shift();
+        // Max attempts reached — leave it removed.
+        this.metrics.retryQueueDropped++;
         this.metrics.retryQueueSize = this.retryQueue.length;
         this.logger.warn({ id: req.id, attempts: req.attempts }, "Retry queue: request dropped after max attempts");
-      }
-      // Otherwise leave it in queue for next cycle
-    } catch (err) {
-      if (req.attempts >= this.RETRY_MAX_ATTEMPTS) {
-        this.retryQueue.shift();
+      } else {
+        // Not done — put it BACK at the front so it keeps its place in line.
+        this.retryQueue.unshift(req);
         this.metrics.retryQueueSize = this.retryQueue.length;
       }
+    } catch (err) {
+      if (req.attempts >= this.RETRY_MAX_ATTEMPTS) {
+        this.metrics.retryQueueDropped++;
+      } else {
+        this.retryQueue.unshift(req);
+      }
+      this.metrics.retryQueueSize = this.retryQueue.length;
       this.logger.debug({ err, id: req.id }, "Retry queue: attempt failed");
     }
   }

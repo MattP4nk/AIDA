@@ -3379,9 +3379,34 @@ encryption round-trips without data loss.
 
 ## Phase 6 — AI hardening (2 days)
 
-- [ ] **R14** Retry queue reentrancy guard; stop dropping the in-flight entry on overflow.
-- [ ] **R14** Make `SLOT_TIMEOUT_MS` exceed the worst-case slot hold, or cap the retry chain so
-      the two are consistent.
+- [x] **R14a DONE 2026-09-24.** Retry queue reentrancy guard; in-flight entry no longer droppable;
+      slot hold bounded by the slot timeout. All three verified against source first, and the plan
+      was right on every point — unusual enough to note.
+      - **Reentrancy was the normal case, not a race.** `setInterval(processRetryQueue, 30_000)` at
+        `aiService.ts:110` is fire-and-forget, while the `generateResponse` inside it can hold for
+        up to `SLOT_TIMEOUT_MS` (120s). Ticks therefore always overlapped: each read the same
+        `retryQueue[0]`, each fired that request's `onSuccess` (duplicate NPC mail / duplicate
+        generated content), and each `shift()`ed a *different* entry off the front. Negative control
+        reproduces it exactly — 3 concurrent ticks → **3 generate calls, 3 duplicate callbacks, and
+        all 3 queued requests gone**, two of them never tried.
+      - **Positional removal was the root cause.** `shift()` after a long await removes whatever sits
+        at index 0 *then*, not the request that was processed — and the array does change underneath
+        it (the age purge reassigns it wholesale; overflow drops the head). Now take-then-process:
+        the entry is removed up front and `unshift`ed back only if it needs another attempt, so the
+        in-flight request is not in the array to be clobbered.
+      - **Slot arithmetic is now structural, not numerical.** The retry chain runs *inside* the
+        acquired slot (`acquireSlot` :236 → `retryOperation` :238), so worst case it held
+        3 × 120s + 5s + 15s = **380s** while waiters gave up after 120s — with 2 slots, a 30-deep
+        queue drained into timeouts instead of being served. Rather than hand-tuning two constants
+        to agree (they would drift apart at the next model change), the retry budget now *is*
+        `SLOT_TIMEOUT_MS`: attempts stop when the remaining budget cannot fund one, and each
+        attempt's abort timeout is clamped to what is left. A holder can no longer outlast a waiter.
+      - **The harness caught a flaw in my own fix:** gating the *first* attempt on the budget made a
+        small budget produce zero attempts — a silent no-op that never touched the API. The first
+        attempt is now unconditional; only retries must justify themselves. There is a regression
+        check for exactly this.
+      - `scripts/verify-phase6-r14a-queue.ts` — 15 checks, all driving the real methods (a structural
+        grep cannot prove whether two interval ticks overlap). Both fixes negative-controlled.
 - [ ] **R14** Per-user AI quota + cooldown on `key.contact`; move it off the synchronous command
       path so one player can't stall global content generation.
 - [ ] **S5** Constrain the Architect loop: scope `search_files` to non-player content (or tag
