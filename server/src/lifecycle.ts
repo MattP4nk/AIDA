@@ -108,6 +108,46 @@ export async function gracefulShutdown(
       logger.info("Persona mail queue stopped");
     } catch { /* Not fatal */ }
 
+    // O9 — the timers shutdown used to forget.
+    //
+    // Ten subsystems were stopped and these six were not. The process exits
+    // explicitly, so an unstopped interval does not HANG exit — the harm is
+    // that it keeps firing while the server tears down. `db.disconnect()`
+    // happens at the end of this sequence, so a tick landing after it rejects,
+    // and an unhandled rejection re-enters this very handler.
+    //
+    // Each is independent: one failing must not skip the rest, hence the
+    // per-entry catch rather than one try around the group.
+    for (const [token, label, method] of [
+      ["TRACE_SERVICE", "Trace progress loop", "stop"],
+      ["COMMAND_PROCESSOR", "Command processor timer", "stop"],
+      ["EPOCH_SCHEDULER_SERVICE", "Epoch scheduler", "stop"],
+      ["MESSAGE_SERVICE", "Message delivery processor", "stop"],
+      ["CACHE_SERVICE", "Cache cleanup", "dispose"],
+      ["EVENT_SERVICE", "Event sweep", "stop"],
+      ["PLAYER_PRESENCE_SERVICE", "Presence cleanup", "stop"],
+    ] as const) {
+      try {
+        const tokens = await import("./di/tokens");
+        const svc = getService<Record<string, () => void>>(
+          (tokens as Record<string, string>)[token]!,
+        );
+        svc[method]?.();
+        logger.info(`${label} stopped`);
+      } catch {
+        /* Not fatal — a timer we could not stop is noise, not corruption. */
+      }
+    }
+
+    // O9: clear the inline timers that have no owning service — the Architect
+    // evaluation and dungeon expiry sweeps in `index.ts`, which captured no
+    // handle at all before this and so could not be stopped even in principle.
+    try {
+      const { clearShutdownTimers } = await import("./utils/shutdownTimers");
+      const cleared = clearShutdownTimers();
+      if (cleared > 0) logger.info({ cleared }, "Inline timers cleared");
+    } catch { /* Not fatal */ }
+
     // Clear hack session timers
     try {
       const hackService = getService<HackService>(HACK_SERVICE);

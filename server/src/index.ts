@@ -61,6 +61,7 @@ import {
 } from "./middleware/setup";
 import { setupSocketHandlers } from "./sockets/handlers";
 import { registerShutdownHandlers } from "./lifecycle";
+import { registerShutdownTimer } from "./utils/shutdownTimers";
 import {
   ARCHITECT_EVAL_INTERVAL_MS,
   DUNGEON_EXPIRATION_INTERVAL_MS,
@@ -443,8 +444,11 @@ async function initialize(): Promise<void> {
     ARCHITECT_INTERVENTION_EXECUTOR,
   );
 
-  // Periodic Architect evaluation — every 2 hours
-  setInterval(
+  // Periodic Architect evaluation — every 2 hours.
+  // O9: registered so shutdown can stop it. This captured no handle at all,
+  // and its callback touches the database, which `gracefulShutdown`
+  // disconnects near the end of its sequence.
+  registerShutdownTimer(setInterval(
     async () => {
       try {
         const evaluation = await storyProgression.evaluateAndAct();
@@ -471,7 +475,7 @@ async function initialize(): Promise<void> {
       }
     },
     ARCHITECT_EVAL_INTERVAL_MS,
-  );
+  ));
   logger.info("✅ Architect periodic evaluation scheduled (every 2h)");
 
   // Initialize DarkNet Dungeon system — ensure at least one active dungeon
@@ -484,8 +488,8 @@ async function initialize(): Promise<void> {
     .then(() => logger.info("✅ DarkNet Dungeon system initialized"))
     .catch((err) => logger.warn({ err }, "DarkNet Dungeon initialization failed (non-critical)"));
 
-  // Periodic dungeon expiration check — every 1 hour
-  setInterval(
+  // Periodic dungeon expiration check — every 1 hour. O9: see above.
+  registerShutdownTimer(setInterval(
     async () => {
       try {
         await dungeonService.expireOldDungeons();
@@ -494,7 +498,7 @@ async function initialize(): Promise<void> {
       }
     },
     DUNGEON_EXPIRATION_INTERVAL_MS,
-  );
+  ));
   logger.info("✅ DarkNet Dungeon expiration checker scheduled (every 1h)");
 
   // Content generation queue — reliable pipeline for server content

@@ -608,6 +608,58 @@ Measuring only during a stall means measuring nothing. Separately, R9's
 here: a stale test, indistinguishable from a regression until read. It now
 asserts the property, not the shape.
 
+
+### Phase 5 K7 + O9
+
+**K7 was already done.** `redactionCount++` already sits above the
+`cryptoSkill >= 50` branch, with a comment explaining why. That matches the
+`[x]` at PLAN.md:301 ("pulled forward"); the Phase 5 entry still saying "do
+this now" is stale. Verified, not redone.
+
+**O9 — the plan named four timers; the audit found the two it named are not
+where it says, and three more nobody had listed.**
+
+Shutdown already stopped ten subsystems. First, the framing: `gracefulShutdown`
+ends with an explicit `process.exit()`, so an unstopped interval does **not**
+hang exit. The real harm is that it keeps firing during teardown, and
+`db.disconnect()` runs near the end of that sequence — a tick landing after it
+rejects, and the unhandled rejection re-enters the shutdown handler that is
+already running.
+
+Wired into shutdown (all had a `stop()` nobody called): `TraceService`,
+`CommandProcessor`, `EpochSchedulerService`, `MessageService`,
+`PlayerPresenceService`, `EventService`, and `CacheService` (whose existing
+`dispose()` did the job — an identically-named `stop()` was briefly added
+before noticing, then removed; one job, one method).
+
+**The plan's "Architect" and "dungeon expiry" are not in the services their
+names suggest** — both are inline `setInterval`s in `index.ts` that captured no
+handle at all, so they could not be stopped even in principle, and both call
+into the database. They now register with `utils/shutdownTimers.ts`, which
+`lifecycle` clears wholesale. Two module-level session sweepers
+(`fileAccessCommands`, `hackCommands`) prune in-memory Maps only and touch no
+database, so they are simply `unref`'d.
+
+Evidence: `scripts/verify-phase5-o9-timers.ts` **9/9**. It is a STRUCTURAL
+check by choice — a real SIGTERM is not available here, and "the process
+exited" would prove nothing since it exits explicitly either way. It audits
+every one of the 25 timer-owning files, and parses the shutdown table out of
+`lifecycle.ts` rather than restating it, so a hardcoded copy cannot drift from
+the thing it checks.
+
+**A harness-infrastructure bug found on the way, affecting every harness in
+this repo:** `process.exit()` **truncates piped stdout**. Run under `| grep`,
+stdout is an async pipe and the process can die before the summary line
+flushes — which produced an intermittent "NO SUMMARY" that reads exactly like a
+harness crashing mid-run. It cost a real investigation here. Reproduced at
+roughly 1 run in 8; fixed in the R10 harness by setting `process.exitCode`
+instead, then confirmed 12/12 clean. **The same pattern is in every other
+harness** and should be changed as each is next touched — the ones holding a
+Prisma connection or sockets need their handles closed first, so it is not a
+blind sweep.
+
+Full suite: 24 harnesses, **292 checks, 0 failures.**
+
 ## Decisions log
 
 Recorded so the plan stays internally consistent as it evolves.

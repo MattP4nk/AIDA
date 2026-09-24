@@ -10,7 +10,7 @@ interface CacheEntry<T> {
 @injectable()
 export class CacheService {
   private cache: Map<string, CacheEntry<any>> = new Map();
-  private cleanupInterval: NodeJS.Timeout;
+  private cleanupInterval: NodeJS.Timeout | null = null;
   private readonly DEFAULT_TTL = 60; // 1 minute default
   private readonly MAX_ENTRIES = 5000;
 
@@ -117,7 +117,14 @@ export class CacheService {
     }
   }
 
+  /**
+   * O9: also the shutdown hook. An identically-named `stop()` was briefly
+   * added here before noticing this existed — one job, one method.
+   */
   public dispose(): void {
-    clearInterval(this.cleanupInterval);
+    if (this.cleanupInterval) {
+      clearInterval(this.cleanupInterval);
+      this.cleanupInterval = null;
+    }
   }
 }

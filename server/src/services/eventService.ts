@@ -22,7 +22,7 @@ const activeSubscriptions = new Map<string, EventSubscription>();
 
 @injectable()
 export class EventService {
-  private cleanupInterval: NodeJS.Timeout;
+  private cleanupInterval: NodeJS.Timeout | null = null;
 
   constructor(
     @inject(LOGGER) private logger: Logger,
@@ -527,6 +527,23 @@ export class EventService {
 
     return events as GameEvent[];
   }
+
+  /**
+   * O9 — stop the background timer.
+   *
+   * Shutdown stopped ten subsystems and missed this one. The process exits
+   * explicitly so an unstopped timer does not HANG exit — the harm is that it
+   * keeps firing while the server tears down, and `db.disconnect()` happens
+   * near the end of that sequence. A tick landing after it rejects, and an
+   * unhandled rejection re-enters the shutdown handler.
+   */
+  public stop(): void {
+    if (this.cleanupInterval) {
+      clearInterval(this.cleanupInterval);
+      this.cleanupInterval = null;
+    }
+  }
+
 }
 
 export default EventService;

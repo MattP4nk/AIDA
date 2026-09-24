@@ -78,6 +78,7 @@ export type PresenceEvent =
  */
 @injectable()
 export class PlayerPresenceService extends EventEmitter {
+    private presenceTimer: NodeJS.Timeout | null = null;
   private onlinePlayers: Map<string, OnlinePlayer>;
   private playersByServer: Map<string, Set<string>>;
   private activityTimeouts: Map<string, NodeJS.Timeout>;
@@ -95,7 +96,7 @@ export class PlayerPresenceService extends EventEmitter {
     this.logger.info("Player Presence Service initialized");
 
     // Clean up inactive players every minute
-    setInterval(() => this.cleanupInactivePlayers(), 60000);
+    this.presenceTimer = setInterval(() => this.cleanupInactivePlayers(), 60000);
   }
 
   // ==================== PLAYER ONLINE STATUS ====================
@@ -590,6 +591,23 @@ export class PlayerPresenceService extends EventEmitter {
 
     return output;
   }
+
+  /**
+   * O9 — stop the background timer.
+   *
+   * Shutdown stopped ten subsystems and missed this one. The process exits
+   * explicitly so an unstopped timer does not HANG exit — the harm is that it
+   * keeps firing while the server tears down, and `db.disconnect()` happens
+   * near the end of that sequence. A tick landing after it rejects, and an
+   * unhandled rejection re-enters the shutdown handler.
+   */
+  public stop(): void {
+    if (this.presenceTimer) {
+      clearInterval(this.presenceTimer);
+      this.presenceTimer = null;
+    }
+  }
+
 }
 
 export default PlayerPresenceService;

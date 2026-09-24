@@ -52,6 +52,9 @@ const activeFileCrackSessions = new Map<string, FileCrackSession>();
 const activeStormSessions = new Map<string, FileCrackSession>();
 
 // Cleanup expired sessions
+// O9: unref'd. This prunes an in-memory Map only — it touches no
+// database and has no service to own a stop() — so keeping the
+// process alive is the only harm it could do.
 setInterval(() => {
   const now = Date.now();
   for (const [uid, s] of activeFileCrackSessions) {
@@ -60,7 +63,7 @@ setInterval(() => {
   for (const [uid, s] of activeStormSessions) {
     if (now > s.expiresAt) activeStormSessions.delete(uid);
   }
-}, 30_000);
+}, 30_000).unref?.();
 
 export class HackCommandsModule implements CommandModule {
   public category = "hack";

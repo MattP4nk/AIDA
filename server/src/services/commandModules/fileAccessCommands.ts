@@ -34,6 +34,9 @@ interface SweepSession {
 const activeSweepSessions = new Map<string, SweepSession>();
 
 // Cleanup expired sessions periodically
+// O9: unref'd. This prunes an in-memory Map only — it touches no
+// database and has no service to own a stop() — so keeping the
+// process alive is the only harm it could do.
 setInterval(() => {
   const now = Date.now();
   for (const [userId, session] of activeSweepSessions) {
@@ -41,7 +44,7 @@ setInterval(() => {
       activeSweepSessions.delete(userId);
     }
   }
-}, 30_000);
+}, 30_000).unref?.();
 
 // ═══════════════════════════════════════════════════════════════════
 // Module
