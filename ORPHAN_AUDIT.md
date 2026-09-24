@@ -9,6 +9,121 @@ findings below are invisible to a name-comparison audit — an event can be emit
 listened for and still reach nobody (wrong room), and a service can be registered,
 resolved and injected everywhere and still be dead (no method ever called).
 
+
+---
+
+## The organising question: *would deleting this lose functionality?*
+
+Re-sorted on that basis. **Most of this is not dead code — it is unreachable code**: whole
+features that were written, wired part-way, and never connected. Deleting them would quietly
+ratify their absence.
+
+### A. FEATURES THAT EXIST BUT CANNOT BE REACHED — wire these, do not delete
+
+Ranked by what the player loses.
+
+| # | Capability | Why it never runs | Size |
+|---|---|---|---|
+| 1 | **Faction wars can never start** | `warfareService.declareWar` has **zero callers**. `startWarMonitor` runs and the `war` command reads war rows — but nothing can ever create one. `surrender`, `updateWarScore`, `getReputationMultiplier` dead alongside it. `FactionWar` table: 0 rows. | 122 LOC |
+| 2 | **Being hacked is never announced** | `hack:attempt`/`hack:detected` emit on the internal bus; nothing bridges to a socket. Client UI is complete and unreachable. (Already filed Phase 8.) | bridge only |
+| 3 | **IP discovery / traceroute / range scan** | `ipService.discoverIP`, `traceRoute`, `scanIPRange`, `assignIPToServer`, `cleanupOrphanedIPs` — 9 of 18 methods, zero callers. Only IP *generation* is wired. traceroute is a genre-defining mechanic sitting inert. | 318 LOC |
+| 4 | **Event subscriptions — dead on BOTH ends** | `eventService.createSubscription`/`removeSubscription`/`getUserSubscriptions` + 6 typed factories unreachable; `client/src/services/api.ts` has the matching dead `subscribeToEvent`/`getEventSubscriptions`/`unsubscribeFromEvent`. `loadSubscriptionsFromDatabase` runs at startup and loads rows **nothing can write**. | 212 LOC + client |
+| 5 | **Progress backup / restore** | Entire subsystem dead: `createBackup`, `restoreBackup`, `getBackups`, `deleteOldBackups`, `createBackupForAll`. `ProgressBackup` table: 0 rows. There is no recovery path for player progress. | 168 LOC |
+| 6 | **Faction standing changes are silent** | `reputation:changed` emitted, no listener. The cross-faction rivalry mechanic — hacking A helps A's rival — is invisible to the player. | wire only |
+| 7 | **Honeypot trap gives no warning** | On the `registerForumAccount` path the player sees `✓ Successfully registered` while their IP is logged and rep drops. `security:warning` is emitted and dropped. | wire only |
+| 8 | **Territory changing hands is invisible** | `faction:contest_started` / `faction:contest_resolved` are global emits with no listener. The payoff of the whole contest system produces no on-screen event. | wire only |
+| 9 | **Notifications do not survive a reload** | The `Notification` model is fully specced (5 indexes, read/dismiss/expiry) and **never written or read**. Delivery is socket-only, client store in-memory. | 32 schema lines |
+| 10 | **Skill does not affect trace duration or hack cooldown** | `getTraceDuration` and `getHackCooldown` have zero callers. `traceService` rebuilds its own tiers via a function that **takes no stealth argument**; a flat 30s cooldown runs. Two balance levers are inert. | 2 functions |
+| 11 | **No active-mission cap exists** | `MAX_ACTIVE_MISSIONS = 5` has no consumer and no hardcoded twin — nothing anywhere limits how many missions a player holds. | 1 constant |
+| 12 | **Failed terminal tab operations do nothing** | `terminal:error` emitted from 5 sites; client uses `socket.once(...)` with no error listener and no timeout, so the click appears ignored. | wire only |
+| 13 | **Kicked/banned players are never told why** | `force:disconnect` carries the admin's reason; the client's `disconnect` handler returns early without surfacing it. Same for `connection:refused` at the socket cap → frozen UI. | wire only |
+| 14 | **No live forum updates reach anyone** | `forum:new-post`/`forum:new-reply` are emitted to room `forum:<id>`, **which nothing ever joins**. | join the room |
+| 15 | **NPCs post but never answer** | `forumService.handleNPCReply` — zero callers. (Filed Phase 8.) | 162 LOC |
+| 16 | **Passive resource drain never happens** | `registerConnection`/`registerBackdoor` zero callers; `registerTerminal` is called only from `initializeSession`, which itself has zero callers. Nothing feeds `addPassiveConsumer`. | 6 methods |
+| 17 | **Drafts can be approved but never rejected** | `contentDraftService.rejectDraft` — zero callers. | 1 method |
+| 18 | **Moderated content vanishes unexplained** | `moderation:flagged` carries the reason; nothing listens. (From my own Phase 6 work.) | wire only |
+| 19 | **Attacker never learns they tripped an alarm** | `server:alert` attacker branch has no client-side equivalent, so a trace can begin with no warning. | wire only |
+| 20 | **A plot lead is composed and discarded** | `story:fragment-intel` tells you who holds the fragment you need. No listener. | wire only |
+
+### B. UNIFY, don't delete — 15 tunable knobs with live hardcoded twins
+
+These look like dead constants but deleting them **loses the ability to tune the game**. The fix
+is the reverse: make the service read the constant. Worst case — the **entire bounty economy**
+is five bare literals in one expression at `hackService.ts:2192-2194`, sitting under a comment
+that restates the formula, while the named config is unreferenced 1,800 lines away. Also
+`DETECTION_FLOOR_PCT` (3 twins), `BOUNTY_EVIDENCE_THRESHOLD` (4 twins), the AI cadence values
+(env-shadowed), `MISSION_EXPIRATION_INTERVAL_MS`, `DAILY_MISSIONS_PER_PLAYER`, `DUNGEON_*`.
+
+### C. GENUINELY SAFE TO DELETE — nothing is lost
+
+- **Duplicate socket emits** where a live equivalent already reaches the client: the four
+  `presence:*` events (duplicates of `server:user_connected` / `user:status_change`), and the
+  command-echo events (`mission:accepted`, `mission:abandoned`, `server:disconnected`,
+  `forum:accessed`, `forum:registered`, `proxy:connected/disconnected`, `message:reported`,
+  `forum:scan-complete`) whose commands already return the outcome.
+- `authentication:complete` — unreachable branch (all 15 emitters pass an ack).
+- `join:room` / `leave:room` — dead on both sides; rooms are server-driven.
+- Dead schema twins: `ForumPost`/`ForumReply` (the live family is `Forum`/`Post`/`PostReply`),
+  `AidaClue`, `KnowledgeTopic`, `PlayerKnowledge`.
+- Superseded files: `server/src/utils/ipUtils.ts` (180 LOC — `ipService` has its own
+  implementations), `client/src/utils/forumSystem.ts` (105 — superseded by `ForumDialog`),
+  `client/src/components/TerminalTabs.svelte` (356 — name-collides with the live
+  `services/terminalTabs.ts` store), `server/src/database/seed.ts` (8, stale stub).
+- Dead deps: `jest`, `ts-jest`, `@types/jest`, `@types/cron`, `redis`.
+- `state:delta`, and the four `serverService` emits whose methods have zero callers.
+
+### D. MUST NOT DELETE despite looking orphaned
+`command:error` and the `command:execute` **listener** are harness-load-bearing — the entire
+verification suite drives commands through that socket path.
+
+---
+
+## Fixed immediately during the audit
+
+**Two unstopped timers**, the exact shape `lifecycle.ts` claims to have fixed ("six subsystems
+shutdown forgot" — it missed two more). Both start in a constructor and both have a stop method
+with **zero callers**: `memoryService` (`setInterval(tick, 1000)`, `destroy()`) and
+`missionGenerator` (`new CronJob`, `stopMidnightScheduler()`). Neither appeared in the shutdown
+table. Added. The ticker is `unref`'d so it would not hang exit, but it kept firing through
+teardown past `db.disconnect()`.
+
+---
+
+## Dimension 2 — the A4 sizing answer
+
+**No other service has the `processStateService` shape** (registered, resolved, zero methods
+called) — that one was unique. But the audit found the real A4 lever: `buildCommandContext`
+performs **28 DI resolutions per command**, and **none are unused** — so A4 cannot be sized by
+deleting injections. It sizes by **fan-out**: 17 of the 25 services are used by exactly *one*
+command module. Every command pays for services only one module wants.
+
+| Consumer | Used exclusively by it |
+|---|---|
+| `playerInfoCommands` | achievement, leaderboard, factionKnowledge, playerPresence |
+| `hackCommands` | backdoor, trace, messageEncryption |
+| `networkCommands` | connectionChallenge, networkTopology, serverService |
+| `systemCommands` | darknetDungeon, darknetDiscovery |
+| `missionCommands` | missionGenerator, storyMission |
+| `socialCommands` | chat, forum |
+| `shopCommands` | inventory |
+
+Broad enough to stay in a base context: `missionIntegration` (7 modules), `memoryService` (4),
+`shopService` (3), `keyFragment` (3), `fileService`, `gameStateManager`, `playerProgress`.
+
+Also: `storyMissionService` is injected but **not declared** in `interface.ts` — it type-checks
+only through the `[key: string]: any` escape hatch.
+
+### Traps the audit had to correct (method notes)
+- Walking `.claude/worktrees/` made every symbol match itself in a clone → 23 "dead" vs the real
+  282. Excluded.
+- "Zero external refs" ≠ "zero callers": module-level wrappers in the service's own file.
+  `censorshipService` first scored 1/6 live — a false "censorship does nothing" finding — until
+  `filterContentOrThrow` (5 call sites) was accounted for.
+- String-indexed dispatch: `cacheService.dispose` has **zero** syntactic call sites and is live
+  only through `lifecycle.ts`'s data table. The `?.` there means a rename fails silently.
+- Name collisions: `.getStats(` looked live but every hit was internal — it is dead on 8 services.
+- Harness *descriptions* containing a method name are not calls (`handleNPCReply`).
+
 ---
 
 ## Dimension 3 — socket events (complete)

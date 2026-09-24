@@ -126,6 +126,15 @@ export async function gracefulShutdown(
       ["CACHE_SERVICE", "Cache cleanup", "dispose"],
       ["EVENT_SERVICE", "Event sweep", "stop"],
       ["PLAYER_PRESENCE_SERVICE", "Presence cleanup", "stop"],
+      // Orphan audit 2026-09-24: two more this table had missed. Both start a
+      // timer IN THEIR CONSTRUCTOR and both have a stop method with ZERO
+      // callers — the same shape the comment above says was fixed.
+      //   memoryService:194  startTicker() -> setInterval(tick, 1000)
+      //   missionGenerator:79 startMidnightScheduler() -> new CronJob
+      // The ticker is unref'd so it will not hang exit, but it keeps firing
+      // through teardown, past db.disconnect().
+      ["MEMORY_SERVICE", "Memory/resource ticker", "destroy"],
+      ["MISSION_GENERATOR_SERVICE", "Midnight mission scheduler", "stopMidnightScheduler"],
     ] as const) {
       try {
         const svc = getService<Record<string, () => void>>(
