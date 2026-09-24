@@ -237,8 +237,26 @@ class SocketService {
       socketError.set(null);
       this.reconnectAttempts = 0;
 
-      // Authenticate the socket connection
-      this.socket?.emit("authenticated");
+      // A3: authenticate WITH an acknowledgement.
+      //
+      // This emitted with no callback, and `handleAuthentication` branches on
+      // `typeof callback === "function"`: with none it fell to the else branch
+      // and emitted `authentication:complete` — an event NOTHING in the client
+      // listens for. The client instead listened for `authenticated`, which the
+      // server never emits. So the success signal was never delivered on this
+      // path at all; it only appeared to work because the server's side effects
+      // (room joins, attachSocket, broadcastStateUpdate) happen regardless.
+      //
+      // This path matters more than App.svelte's: it runs on EVERY `connect`,
+      // which is what re-authenticates after a reconnect.
+      this.socket?.emit("authenticated", (response: { success: boolean; error?: string }) => {
+        if (response?.success) {
+          socketError.set(null);
+        } else {
+          console.error("[socket] authentication failed:", response?.error);
+          socketError.set(response?.error || "Authentication failed");
+        }
+      });
     });
 
     this.on("disconnect", (reason) => {
@@ -258,10 +276,9 @@ class SocketService {
       this.handleReconnect();
     });
 
-    // Authentication events
-    this.on("authenticated", () => {
-      // Authenticated successfully
-    });
+    // A3: the `authenticated` listener is GONE — the server never emitted it.
+    // It was one of 10 client listeners waiting on events no server code
+    // sends. The acknowledgement above is the real signal.
 
     // ==================== USER PRESENCE EVENTS ====================
 

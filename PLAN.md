@@ -3792,20 +3792,42 @@ Write them per-refactor, immediately before touching the code:
 - The socket contract check from Phase 2 already covers the event-map refactor.
 
 
-- [ ] **A3** Typed socket contract: `ServerToClientEvents`/`ClientToServerEvents` in `shared/`,
-      generic `Socket` on both sides. Delete or wire up the 11 dead listeners; fix the
-      `authenticated`/`authentication:complete` handshake mismatch.
-      **Concrete instance to fix with it (U5, verified still open 2026-08-31):**
-      `command:result.output` is `string | string[]` — `networkCommands.ts:802` sends
-      `output: challenge.displayText` (an array) while everything else sends a rendered string, and
-      `client/src/services/socket.ts:767` passes it unnormalised into
-      `addOutputLine(_, text: string, _)`. Cosmetic in the transcript (the puzzle itself renders
-      correctly via the dedicated panel), but the no-target-tab fallback at `socket.ts:780` calls
-      `data.output.substring(0, 100)`, **which throws on an array**. A typed contract makes this a
-      compile error rather than a latent crash — it is the best small justification for doing A3.
-      Note also that the U1 harness had to reimplement the client's auth handshake by hand
-      (`emit("authenticated", cb)` then wait for the ack) to drive commands at all; a typed contract
-      would let harnesses and the client share that shape instead of duplicating it.
+- [~] **A3 — PARTLY DONE 2026-09-24. Two real bugs fixed; the contract is written down.**
+      - [x] **HANDSHAKE — the client's auth success signal was never delivered.** `socket.ts` emitted
+        `authenticated` with **no acknowledgement**, so `handleAuthentication` took its else-branch
+        and replied with `authentication:complete` — an event **nothing in the client listens for**.
+        The client instead listened for `authenticated`, which the server never emits. It only
+        appeared to work because the server's side effects (room joins, `attachSocket`,
+        `broadcastStateUpdate`) happen regardless. This path matters more than `App.svelte`'s, which
+        *does* pass an ack: **`socket.ts` runs on every `connect`, so it is what re-authenticates
+        after a reconnect.** Now passes an ack and surfaces failures; the dead listener is deleted.
+      - [x] **U5 ARRAY OUTPUT — and PLAN named the wrong file.** `networkCommands.ts:845` is a REST
+        *return*, and `Terminal.svelte:881` already normalises arrays on that path, which is why it
+        never misbehaved. The real instance was **`hackCommands.ts:454`**, a socket emit carrying an
+        array with no `terminalId`, landing on the client's `addOutputLine(id, text: string)`. Joined
+        at the emitter, since the socket path has no normalising layer. The `.substring` crash line
+        is triple-guarded and effectively unreachable — **A3's case is type safety, not a live crash.**
+      - [x] **`shared/types/socketEvents.ts`** now declares `ServerToClientEvents` /
+        `ClientToServerEvents`, plus `KNOWN_ORPHANED_EVENTS` as data so the orphan list cannot grow
+        silently. The `authenticated` signature declares the ack — which is what makes omitting it a
+        mistake rather than a style choice.
+      - [x] **`scripts/verify-phase7-a3-socket-contract.ts`** — 16 checks, negative-controlled
+        (reverting either fix turns it red). The command golden master cannot see socket events, so
+        this is the other half of the net.
+      - **Two harness assertions were wrong and were corrected, not worked around:** the array check
+        matched a `[` *inside a string* (`output: "[System] …"`) and reported two false positives;
+        and the orphan check counted `this.emit(...)` — the internal EventEmitter bus — as a socket
+        emitter, which mislabelled `process:failed` as fixed. It is emitted on the service bus and
+        **never bridged to a socket**: emitted and orphaned at the same time, the subtlest shape on
+        the list. Both now have positive controls.
+      - [ ] **Still open:** applying the maps as `Socket<…>` generics on both sides, and the 50
+        orphaned event names (10 dead client listeners — several near-misses like `hack:attempted`
+        for the real `hack:attempt` — 37 server emits with no listener, 2 client emits with no
+        server listener, 1 server listener with no client emitter). Each orphan is a per-event
+        behaviour decision (wire up or delete), which is why it is not a mechanical sweep. Also
+        inherited from A2: the `Notification` severity-vs-source taxonomy and `MissionObjective`'s
+        `progress`/`required` vs `current` (a wire-format change).
+
 - [~] **A2 — PARTLY DONE 2026-09-24, and the premise was wrong.**
       **5 of the 8 "duplicated definitions" are NAME COLLISIONS between different concepts.**
       Reconciling them as instructed would have caused regressions, so they are now *marked* at each

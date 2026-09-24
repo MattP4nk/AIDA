@@ -451,7 +451,15 @@ export class HackCommandsModule implements CommandModule {
                 const cbChallengeType = result.challenge?.type || "cipher";
                 context.io.to(`player:${context.userId}`).emit("command:result", {
                   success: true,
-                  output: result.output || ["Exploit ready. Security challenge initiated."],
+                  // A3/U5: `command:result.output` is typed `string | string[]`, and this
+        // emit carries no `terminalId`, so it lands on the client's
+        // `addOutputLine(terminalId, text: string, …)` unnormalised — an array
+        // where a string is declared. Joined here, at the emitter, because the
+        // socket path has no normalising layer (the REST path does, at
+        // Terminal.svelte:881, which is why this instance survived).
+        output: Array.isArray(result.output)
+          ? result.output.join("\n")
+          : result.output || "Exploit ready. Security challenge initiated.",
                   data: {
                     sessionId: result.session?.id,
                     targetIp,
