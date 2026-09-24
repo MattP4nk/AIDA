@@ -357,9 +357,12 @@ export class FileService {
       const file = resolution.node;
       const accessLevel = await this.getUserAccessLevel(userId, serverId);
 
-      // Check read permission
+      // Check read permission on the file AND on every directory leading to
+      // it. R11: the ancestor half was missing, so a permissive file inside a
+      // restricted directory was readable by anyone who knew the path.
       if (
-        !(await this.canRead(userId, file as unknown as FileNode, accessLevel))
+        !(await this.canRead(userId, file as unknown as FileNode, accessLevel)) ||
+        !(await this.canReadAncestors(userId, file.id, accessLevel))
       ) {
         return {
           success: false,
@@ -951,6 +954,29 @@ export class FileService {
             error: "DIRECTORY_NOT_EMPTY",
           };
         }
+
+        // R11: protection has to hold for DESCENDANTS too.
+        //
+        // `isProtected` was checked on the target only, and the recursive
+        // delete is performed by the database — `parent ... onDelete: Cascade`
+        // on the self-relation — which consults no application flags. So
+        // `rm -r` on an unprotected parent destroyed protected children
+        // inside it. World provisioning marks story files `isProtected: true`,
+        // so deleting one directory could take authored content with it.
+        if (recursive && children > 0) {
+          const protectedChild = await this.findProtectedDescendant(node.id);
+          if (protectedChild) {
+            return {
+              success: false,
+              message:
+                `Cannot delete ${path}: it contains a protected item ` +
+                `(${protectedChild})`,
+              error: "PROTECTED",
+            };
+          }
+        }
+
+
       }
 
       // ── Before deletion: check for access key revocation + honeypot ──
@@ -1215,6 +1241,26 @@ export class FileService {
           success: false,
           message: `Permission denied: cannot write to ${destDir}`,
           error: "PERMISSION_DENIED",
+        };
+      }
+
+      // R11: refuse to move a directory into its own subtree.
+      //
+      // There was no such check, so `mv /a /a/b` simply set `/a`'s parent to a
+      // node beneath it. The result is a cycle that is unreachable from the
+      // root, which silently orphans the whole subtree — every file under it
+      // becomes invisible to `ls`/`cd` while still occupying rows, and
+      // `onDelete: Cascade` on the self-relation makes the cleanup semantics
+      // of that loop anyone's guess.
+      if (
+        sourceNode.type === "directory" &&
+        destDirResolution.nodeId &&
+        (await this.isDescendantOf(destDirResolution.nodeId, sourceNode.id))
+      ) {
+        return {
+          success: false,
+          message: `Cannot move ${sourcePath} into its own subdirectory`,
+          error: "INVALID_MOVE",
         };
       }
 
@@ -1685,6 +1731,117 @@ export class FileService {
   /**
    * Duplicate a node (for copy operation)
    */
+  /**
+   * R11 — may this user read every directory on the way to `nodeId`?
+   *
+   * Permissions were checked on the TARGET only, so a file could be read
+   * through a directory the player had no business entering: a file with
+   * `requiredAccessLevel: 0` sitting inside a directory with
+   * `requiredAccessLevel: 5` was readable by anyone who knew the path, and
+   * hacking the server to raise your access level was optional.
+   *
+   * Note this is not as strict as it could be: `canRead` deliberately lets any
+   * connected player read a directory whose `requiredAccessLevel` is 0 or 1
+   * (that is what makes `ls`/`cd` work at all), so this enforces the
+   * high-security directories rather than every `others` bit. Tightening
+   * further would need the permission model revisited, not a stricter walk.
+   */
+  private async canReadAncestors(
+    userId: string,
+    nodeId: string,
+    accessLevel: number,
+  ): Promise<boolean> {
+    const start = await prisma.fileSystemNode.findUnique({
+      where: { id: nodeId },
+      select: { parentId: true },
+    });
+
+    let currentId = start?.parentId ?? null;
+    const seen = new Set<string>();
+
+    while (currentId) {
+      if (seen.has(currentId)) break; // pre-existing cycle; see `isDescendantOf`
+      seen.add(currentId);
+
+      const dir = await prisma.fileSystemNode.findUnique({
+        where: { id: currentId },
+      });
+      if (!dir) break;
+
+      if (!(await this.canRead(userId, dir as unknown as FileNode, accessLevel))) {
+        return false;
+      }
+      currentId = dir.parentId;
+    }
+    return true;
+  }
+
+  /**
+   * R11 — find a protected node anywhere beneath `rootId`, or null.
+   *
+   * Breadth-first over the subtree, because the delete it guards is performed
+   * by a database cascade that cannot consult application flags. Returns the
+   * offending NAME so the refusal can say which file it is protecting rather
+   * than just refusing.
+   */
+  private async findProtectedDescendant(
+    rootId: string,
+  ): Promise<string | null> {
+    let frontier = [rootId];
+    const seen = new Set<string>([rootId]);
+
+    while (frontier.length > 0) {
+      const children = await prisma.fileSystemNode.findMany({
+        where: { parentId: { in: frontier } },
+        select: { id: true, name: true, isProtected: true },
+      });
+      if (children.length === 0) return null;
+
+      const hit = children.find((c) => c.isProtected);
+      if (hit) return hit.name;
+
+      frontier = [];
+      for (const c of children) {
+        // Guard against a pre-existing cycle in the data; see `isDescendantOf`.
+        if (!seen.has(c.id)) {
+          seen.add(c.id);
+          frontier.push(c.id);
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
+   * R11 — is `candidateId` inside the subtree rooted at `ancestorId`?
+   *
+   * Walks parents rather than descendants: a path to the root is bounded by
+   * depth, while enumerating a subtree is bounded by size. The visited set is
+   * not paranoia — if a cycle already exists in the data (this check is new,
+   * so some may), walking parents would otherwise never terminate.
+   */
+  private async isDescendantOf(
+    candidateId: string,
+    ancestorId: string,
+  ): Promise<boolean> {
+    const seen = new Set<string>();
+    let currentId: string | null = candidateId;
+
+    while (currentId) {
+      if (currentId === ancestorId) return true;
+      if (seen.has(currentId)) break; // pre-existing cycle; stop rather than hang
+      seen.add(currentId);
+
+      const row: { parentId: string | null } | null =
+        await prisma.fileSystemNode.findUnique({
+          where: { id: currentId },
+          select: { parentId: true },
+        });
+      currentId = row?.parentId ?? null;
+    }
+    return false;
+  }
+
   private async duplicateNode(
     sourceNode: FileNode,
     newParentId: string,
@@ -1718,7 +1875,13 @@ export class FileService {
         await this.duplicateNode(
           child as unknown as FileNode,
           newNode.id,
-          newName,
+          // R11: the CHILD's own name. This passed `newName` — the top-level
+          // destination name — to every descendant, so `cp -r /data /backup`
+          // tried to name every child "backup". Before the Phase 3
+          // `@@unique([serverId, parentId, name])` that silently produced N
+          // identically-named siblings; after it, the second child raises
+          // P2002 and the copy fails partway, leaving a half-written tree.
+          child.name,
           userId,
         );
       }

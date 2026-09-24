@@ -660,6 +660,66 @@ blind sweep.
 
 Full suite: 24 harnesses, **292 checks, 0 failures.**
 
+
+### Phase 5 R11 — filesystem semantics
+
+All five claims verified against source; all five held. Four fixed, one
+reported.
+
+1. **Recursive `cp` was broken.** `duplicateNode` recursed into children but
+   passed `newName` — the TOP-LEVEL destination name — to every descendant, so
+   `cp -r /data /backup` tried to name every child "backup". Before Phase 3's
+   `@@unique([serverId, parentId, name])` that silently produced N
+   identically-named siblings; after it, the second child raises P2002 and the
+   copy dies half-written. Demonstrated by the negative control: reverting the
+   one word gives `got [backup]` and `1 of 3` children.
+2. **`mv` had no ancestor-cycle check.** `mv /a /a/b` simply set `/a`'s parent
+   to a node beneath it, producing a loop unreachable from the root — the whole
+   subtree silently invisible to `ls`/`cd` while still occupying rows. The new
+   `isDescendantOf` walks PARENTS (bounded by depth) rather than enumerating
+   descendants (bounded by size), and carries a visited-set because a cycle may
+   already exist in data written before this check.
+3. **No ancestor permission check.** Permissions were checked on the target
+   only, so a file with `requiredAccessLevel: 0` inside a directory with
+   `requiredAccessLevel: 5` was readable by anyone who knew the path — hacking
+   the server to raise your access level was optional. Note the scope: `canRead`
+   deliberately admits any connected player to a directory whose
+   `requiredAccessLevel` is 0 or 1 (that is what makes `ls`/`cd` work), so this
+   enforces the high-security directories, not every `others` bit. Measured
+   first: of 400 sampled directories, 226 carry `others: 1` and 14 carry `0`,
+   so a stricter reading would have broken ordinary traversal everywhere.
+4. **`rm -r` bypassed `isProtected`.** It was checked on the TARGET only, and
+   the recursive delete is performed by the database — `parent ... onDelete:
+   Cascade` on the self-relation — which consults no application flags. So
+   deleting an unprotected parent destroyed protected children inside it, and
+   world provisioning marks story files `isProtected: true`. The negative
+   control says it plainly: *"the protected file still exists — DESTROYED by
+   the cascade"*.
+5. **The `faction` permission bit is never enforced** — `permissions.faction`
+   appears exactly once, inside `formatPermissions`, for display. REPORTED, NOT
+   FIXED: enforcing it *grants* access to faction members who currently fall
+   through to `others`, which is a balance decision rather than a repair.
+
+Evidence: `scripts/verify-phase5-r11-filesystem.ts` **14/14**, negative-
+controlled on both destructive fixes independently.
+
+**Two process failures worth recording, both mine:**
+
+- **I left the file in a broken state mid-review.** The negative controls used
+  a backup/restore chain, and because commands were backgrounded the restore
+  had not landed before the next backup was taken — so a "restored" file still
+  carried two reverts, and a later run silently tested the broken code. Caught
+  by checking for each fix by name rather than trusting the restore. Verify the
+  file, not the procedure.
+- **The O9 exit-pattern change caused a hang here.** O9 replaced
+  `process.exit()` with `process.exitCode` to stop piped output being
+  truncated — and I noted at the time that harnesses holding connections would
+  need their handles closed first, then applied it to a harness that boots the
+  DI container. Several services start non-unref'd intervals, so the loop never
+  drained: 14/14 passed and the run still timed out. The correct pattern, now
+  used here, is to drain stdout and *then* exit explicitly — it dodges both
+  failure modes at once.
+
 ## Decisions log
 
 Recorded so the plan stays internally consistent as it evolves.
