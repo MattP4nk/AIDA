@@ -555,6 +555,59 @@ controlled on both the crack path (reverting leaves ciphertext behind) and the
 read guard (reverting restores DECRYPTION_FAILED). Full suite 22 harnesses,
 **268 checks, 0 failures.**
 
+
+### Phase 5 R10 — async scrypt, authenticated encryption, one implementation
+
+Both claims verified against source first; both held.
+
+**scrypt was synchronous, on the main thread.** Four sites (`fileService` x2,
+`messageEncryptionService` x2). Measured here at **35.9 ms per call** — and a
+KDF is *supposed* to be expensive, so this is not a tuning problem. Every file
+read, file write, message send and message read froze **every** player for that
+window. Measured end to end: 8 derivations produced **295.2 ms of event-loop
+unresponsiveness** before, **5.6 ms** after.
+
+**AES-256-CBC is unauthenticated**, and the harness demonstrates the
+consequence rather than asserting it: flipping one ciphertext byte made the
+legacy path **silently return altered plaintext** — a corrupted first block
+followed by correctly-decrypted content. GCM rejects it. Note this was never
+merely theoretical: `readFile` reports `DECRYPTION_FAILED` on a throw, so under
+CBC a tampered file could come back as "successfully decrypted" garbage.
+
+**Both services carried a byte-identical copy** of the same cipher, the same
+KDF call, the same `salt:iv:ciphertext` format — the same bugs available in two
+places. Now one implementation in `utils/contentCrypto.ts`.
+
+The wire format is versioned so nothing needs migrating:
+
+```
+legacy (3 parts)  salt : iv : ciphertext                  — AES-256-CBC, read-only
+v2     (5 parts)  "v2" : salt : iv : authTag : ciphertext — AES-256-GCM, written
+```
+
+**A trap caught on the way:** `messageEncryptionService.decryptMessage` had a
+`parts.length !== 3` guard that ran *before* the decrypt. Left in place it
+would have rejected every payload the new encrypt produced — the service would
+have written messages it then refused to read. Format validation now belongs to
+the module that owns the format.
+
+**Honest scope limit:** the legacy-compat path is proven only against
+synthetic payloads. The database currently holds **zero** legacy ciphertext —
+0 encrypted messages with keys, 0 encrypted files with keys (the 85 "encrypted"
+files are the keyless story files from R9). So compatibility is verified by
+construction and by test, not by production data.
+
+Evidence: `scripts/verify-phase5-r10-crypto.ts` **15/15**. Full suite 23
+harnesses, **283 checks, 0 failures.**
+
+**Harness note:** the event-loop check first measured 0 ms of blocking and
+"passed" the wrong way round — while the loop is blocked the timer cannot fire,
+so nothing records the gap. It needed a tick *after* the work to reveal it.
+Measuring only during a stall means measuring nothing. Separately, R9's
+"content is ciphertext" assertion had hardcoded the 3-part format and broke
+here: a stale test, indistinguishable from a regression until read. It now
+asserts the property, not the shape.
+
 ## Decisions log
 
 Recorded so the plan stays internally consistent as it evolves.

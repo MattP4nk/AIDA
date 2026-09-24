@@ -18,11 +18,15 @@ import type PlayerProgressRepository from "../repositories/playerProgressReposit
 
 import type { MessageOperationResult, EncryptionResult } from "./messageService";
 
+import {
+  encryptContent as encryptPayload,
+  decryptContent as decryptPayload,
+  ContentDecryptionError,
+} from "../utils/contentCrypto";
 // ==================== MESSAGE ENCRYPTION SERVICE CLASS ====================
 
 @injectable()
 export class MessageEncryptionService {
-  private encryptionAlgorithm = "aes-256-cbc";
 
   constructor(
     @inject(LOGGER) private logger: Logger,
@@ -44,20 +48,9 @@ export class MessageEncryptionService {
       const keyLength = 16 + encryptionLevel * 2; // 16-36 bytes
       const key = crypto.randomBytes(keyLength).toString("hex");
 
-      const salt = crypto.randomBytes(16);
-      const iv = crypto.randomBytes(16);
-      const keyBuffer = crypto.scryptSync(key, salt, 32);
-      const cipher = crypto.createCipheriv(
-        this.encryptionAlgorithm,
-        keyBuffer,
-        iv,
-      );
-
-      let encrypted = cipher.update(content, "utf8", "hex");
-      encrypted += cipher.final("hex");
-
-      // Format: salt:iv:encrypted (3 parts)
-      const encryptedContent = salt.toString("hex") + ":" + iv.toString("hex") + ":" + encrypted;
+      // R10: shared implementation — async scrypt (this blocked the event loop
+      // for ~36ms per call) and authenticated AES-256-GCM.
+      const encryptedContent = await encryptPayload(content, key);
 
       return {
         encryptedContent,
@@ -139,28 +132,24 @@ export class MessageEncryptionService {
         };
       }
 
-      const parts = encryptedContent.split(":");
-      if (parts.length !== 3) {
+      // R10: format validation belongs to `contentCrypto`, which owns the wire
+      // format. A `parts.length !== 3` guard lived here and would have
+      // rejected every newly-written payload, since authenticated v2 has FIVE
+      // parts — the shared encrypt would have produced messages this method
+      // refused to read.
+      let decrypted: string;
+      try {
+        decrypted = await decryptPayload(encryptedContent, resolvedKey);
+      } catch (err) {
         return {
           success: false,
-          message: "Invalid encrypted content format",
-          error: "INVALID_FORMAT",
+          message:
+            err instanceof ContentDecryptionError
+              ? err.message
+              : "Invalid encrypted content format",
+          error: "DECRYPTION_FAILED",
         };
       }
-
-      const salt = Buffer.from(parts[0]!, "hex");
-      const iv = Buffer.from(parts[1]!, "hex");
-      const encrypted = parts[2]!;
-
-      const keyBuffer = crypto.scryptSync(resolvedKey, salt, 32);
-      const decipher = crypto.createDecipheriv(
-        this.encryptionAlgorithm,
-        keyBuffer,
-        iv,
-      );
-
-      let decrypted = decipher.update(encrypted, "hex", "utf8");
-      decrypted += decipher.final("utf8");
 
       return {
         success: true,

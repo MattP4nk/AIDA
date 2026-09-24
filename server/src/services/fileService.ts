@@ -34,6 +34,10 @@ import type { NetworkTopologyService } from "./networkTopologyService";
 import { isPathSafe, isValidFilename } from "../utils/pathSanitizer";
 import { FilePermissions, PermissionLevel } from "../../../shared/types";
 
+import {
+  encryptContent as encryptPayload,
+  decryptContent as decryptPayload,
+} from "../utils/contentCrypto";
 // ==================== TYPES ====================
 
 export interface FileNode {
@@ -92,7 +96,6 @@ export interface PathResolution {
 
 @injectable()
 export class FileService {
-  private encryptionAlgorithm = "aes-256-cbc";
   private missionIntegration: MissionIntegrationService | null = null;
   private factionKnowledge: FactionKnowledgeService | null = null;
   private networkTopology: NetworkTopologyService | null = null;
@@ -1569,28 +1572,21 @@ export class FileService {
   // ==================== ENCRYPTION ====================
 
   /**
-   * Encrypt content using AES-256-CBC
+   * R10: delegates to `utils/contentCrypto`. This file and
+   * `messageEncryptionService` each carried a byte-identical copy of the same
+   * CBC + blocking-scrypt implementation.
    */
   private async encryptContent(content: string, key: string): Promise<string> {
-    const salt = crypto.randomBytes(16);
-    const iv = crypto.randomBytes(16);
-    const keyBuffer = crypto.scryptSync(key, salt, 32);
-    const cipher = crypto.createCipheriv(
-      this.encryptionAlgorithm,
-      keyBuffer,
-      iv,
-    );
-
-    let encrypted = cipher.update(content, "utf8", "hex");
-    encrypted += cipher.final("hex");
-
-    // Format: salt:iv:encrypted (3 parts)
-    return salt.toString("hex") + ":" + iv.toString("hex") + ":" + encrypted;
+    return encryptPayload(content, key);
   }
 
-  /**
-   * Decrypt content using AES-256-CBC
-   */
+  private async decryptContent(
+    encryptedContent: string,
+    key: string,
+  ): Promise<string> {
+    return decryptPayload(encryptedContent, key);
+  }
+
   /**
    * R9 — turn a cracked file into readable plaintext, atomically.
    *
@@ -1600,15 +1596,10 @@ export class FileService {
    * operation that made the file permanently unreadable.
    *
    * Lives here, not in the command module, so the decrypt-then-clear sequence
-   * has ONE implementation that the verification harness exercises directly —
-   * a test that re-implements the sequence proves only that the author can do
-   * it twice.
+   * has ONE implementation that the verification harness exercises directly.
    *
-   * Two shapes arrive here. A genuinely encrypted file has a stored key and
-   * ciphertext. A provisioned "locked" story file has neither — its content is
-   * already plaintext and only the flag needs clearing. Returns false without
-   * touching the row if decryption fails, because a half-converted file is
-   * exactly what made the original bug unrecoverable.
+   * Returns false without touching the row if decryption fails, because a
+   * half-converted file is what made the original bug unrecoverable.
    */
   public async unlockCrackedFile(fileId: string): Promise<boolean> {
     const node = await prisma.fileSystemNode.findUnique({
@@ -1643,44 +1634,14 @@ export class FileService {
   }
 
   /**
-   * R9 — decrypt ciphertext with a known key.
-   *
-   * Public because the crack flow must turn a cracked file's ciphertext into
-   * plaintext before clearing its `isEncrypted` flag. It previously cleared
-   * the flag and destroyed the key WITHOUT decrypting, which is how a
-   * successful crack produced permanently unreadable content.
+   * R9 — decrypt ciphertext with a known key. Public so the crack flow and its
+   * harness can share one implementation.
    */
   public async decryptWithKey(
     encryptedContent: string,
     key: string,
   ): Promise<string> {
     return this.decryptContent(encryptedContent, key);
-  }
-
-  private async decryptContent(
-    encryptedContent: string,
-    key: string,
-  ): Promise<string> {
-    const parts = encryptedContent.split(":");
-    if (parts.length !== 3) {
-      throw new Error("Invalid encrypted content format");
-    }
-
-    const salt = Buffer.from(parts[0]!, "hex");
-    const iv = Buffer.from(parts[1]!, "hex");
-    const encrypted = parts[2]!;
-
-    const keyBuffer = crypto.scryptSync(key, salt, 32);
-    const decipher = crypto.createDecipheriv(
-      this.encryptionAlgorithm,
-      keyBuffer,
-      iv,
-    );
-
-    let decrypted = decipher.update(encrypted, "hex", "utf8");
-    decrypted += decipher.final("utf8");
-
-    return decrypted;
   }
 
   /**
