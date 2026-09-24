@@ -15,7 +15,6 @@ import type MissionService from "../missionService";
 import type MissionGeneratorService from "../missionGenerator";
 import type ServerService from "../serverService";
 import type MemoryService from "../memoryService";
-import type ProcessStateService from "../processStateService";
 import type PlayerPresenceService from "../playerPresenceService";
 import type HackService from "../hackService";
 import type MessageService from "../messageService";
@@ -60,7 +59,6 @@ export interface CommandContext {
     missionGenerator: MissionGeneratorService;
     serverService: ServerService;
     memoryService: MemoryService;
-    processStateService: ProcessStateService;
     playerPresenceService?: PlayerPresenceService;
     hackService: HackService;
     messageService: MessageService;

@@ -3864,8 +3864,14 @@ Write them per-refactor, immediately before touching the code:
 - [ ] **A4** Decompose `CommandContext`: per-module interfaces instead of 26 services + raw
       Prisma handed to every command. Remove `db.client` from `CommandContext` and migrate the
       **170 direct Prisma calls** in command modules onto services.
-- [ ] **A4** Delete the 60 s DI cache (it's a no-op over singletons and caches `undefined` on
-      failure).
+- [x] **A4 (partial) DONE 2026-09-24 — the 60s DI cache is deleted.** Both halves of the claim
+      held. It bought **nothing**: every token it cached resolves to a tsyringe singleton, so it
+      replaced one registry lookup with a Map lookup plus a timestamp compare. And it cost
+      correctness: `resolveService` returns `undefined` on failure and that `undefined` was written
+      into the map, so **one transient resolution failure was remembered for a full minute** — and
+      since all 29 call sites assert non-null (`!`), it did not retry and did not warn, it
+      propagated as a "definitely defined" value and crashed somewhere else entirely. A cache that
+      remembers failures is worse than no cache. 29 sites now call `resolveService` directly.
 - [~] **A5 — PARTLY DONE 2026-09-24. The cycle is now MEASURABLE, and it is 14, not 48.**
       - **The headline number was folklore.** "48-module cycle / closes 36 cycles" came from an
         analysis nothing in the repo could reproduce — no madge, no dpdm, no eslint rule.
@@ -3910,13 +3916,13 @@ Write them per-refactor, immediately before touching the code:
       `gameBalance` constants, not 29 — 28 have no external consumer but 10 of those are used by
       exported functions in-file, and the parenthetical "tuning that file does nothing" is false,
       since 33 of 61 have external consumers.
-      - [ ] **`processStateService.ts` is entirely dead** (found 2026-09-24 chasing an orphaned
-        socket event). It is registered in DI, resolved by `commandProcessor`, and injected into
-        every `CommandContext` — but **not one of its 11 methods is ever called**. So no process is
-        ever registered, none can fail, and its five internal events can never fire. The live
-        process system is `memoryService`, which emits `process:started/completed/cancelled` over
-        real sockets. Being wired into DI is not the same as being used.
-      - [ ] `di/serviceRegistry.ts` — 139 lines, 0 importers (verified).
+      - [x] **`processStateService.ts` DELETED** — 298 lines, 11 methods, **zero callers**. It was
+        registered in DI, resolved by `commandProcessor`, and injected into every `CommandContext`,
+        which is exactly why it survived earlier dead-code sweeps: **being wired into DI looks
+        identical to being used.** Removing it also drops `CommandContext` from 30 injected
+        dependencies to 29 — a down payment on A4.
+      - [x] **`di/serviceRegistry.ts` DELETED** — 139 lines, 0 importers.
+      - [ ] The 18 genuinely dead `gameBalance` constants remain.
 
 **Gate:** CI green, characterization tests green, `VERIFY.md` playthrough unchanged. No feature
 regressions — this phase is behaviour-preserving by definition.

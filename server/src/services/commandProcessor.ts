@@ -65,7 +65,6 @@ import type MissionService from "./missionService";
 import type MissionGeneratorService from "./missionGenerator";
 import type ServerService from "./serverService";
 import type MemoryService from "./memoryService";
-import type ProcessStateService from "./processStateService";
 import type HackService from "./hackService";
 import type MessageService from "./messageService";
 import type { ChatService } from "./chatService";
@@ -102,9 +101,6 @@ class CommandProcessor extends EventEmitter {
   private readonly rateLimitCleanupTimer: ReturnType<typeof setInterval>;
 
   // Service resolution cache (avoids ~26 DI lookups per command)
-  private serviceCache = new Map<string, any>();
-  private serviceCacheTime = 0;
-  private readonly SERVICE_CACHE_TTL = 60_000; // 1 minute
 
   // Command categories removed - now handled by modules
 
@@ -168,97 +164,98 @@ class CommandProcessor extends EventEmitter {
     }
   }
 
-  /** Resolve a service with TTL-based caching to avoid repeated DI lookups. */
-  private getCachedService<T>(token: string): T | undefined {
-    if (Date.now() - this.serviceCacheTime > this.SERVICE_CACHE_TTL) {
-      this.serviceCache.clear();
-      this.serviceCacheTime = Date.now();
-    }
-    if (!this.serviceCache.has(token)) {
-      this.serviceCache.set(token, this.resolveService(token));
-    }
-    return this.serviceCache.get(token);
-  }
+  /*
+   * A4: the 60-second service cache is GONE. It bought nothing and cost
+   * correctness.
+   *
+   * Nothing: every token it cached resolves to a tsyringe SINGLETON, so
+   * `getService` already returns the same instance each call. The cache
+   * replaced one registry lookup with a Map lookup plus a timestamp compare.
+   *
+   * Correctness: `resolveService` returns `undefined` on failure, and that
+   * `undefined` was written into the map — so one transient resolution failure
+   * was remembered for a full TTL. Every call site asserts non-null (`!`), so
+   * the cached `undefined` did not retry and did not warn; it propagated as a
+   * "definitely defined" value and crashed somewhere else entirely, up to a
+   * minute later. A cache that remembers failures is worse than no cache.
+   */
 
   private async buildCommandContext(userId: string, terminalCols?: number, userRole?: string): Promise<CommandContext> {
-    const fileService = this.getCachedService<FileService>(TOKENS.FILE_SERVICE)!;
-    const playerProgress = this.getCachedService<PlayerProgressRepository>(
+    const fileService = this.resolveService<FileService>(TOKENS.FILE_SERVICE)!;
+    const playerProgress = this.resolveService<PlayerProgressRepository>(
       TOKENS.PLAYER_PROGRESS_REPOSITORY,
     )!;
-    const shopService = this.getCachedService<ShopService>(TOKENS.SHOP_SERVICE)!;
-    const missionService = this.getCachedService<MissionService>(
+    const shopService = this.resolveService<ShopService>(TOKENS.SHOP_SERVICE)!;
+    const missionService = this.resolveService<MissionService>(
       TOKENS.MISSION_SERVICE,
     )!;
-    const missionGenerator = this.getCachedService<MissionGeneratorService>(
+    const missionGenerator = this.resolveService<MissionGeneratorService>(
       TOKENS.MISSION_GENERATOR_SERVICE,
     )!;
-    const serverService = this.getCachedService<ServerService>(
+    const serverService = this.resolveService<ServerService>(
       TOKENS.SERVER_SERVICE,
     )!;
-    const memoryService = this.getCachedService<MemoryService>(
+    const memoryService = this.resolveService<MemoryService>(
       TOKENS.MEMORY_SERVICE,
     )!;
-    const processStateService = this.getCachedService<ProcessStateService>(
-      TOKENS.PROCESS_STATE_SERVICE,
-    )!;
-    const hackService = this.getCachedService<HackService>(TOKENS.HACK_SERVICE)!;
-    const messageService = this.getCachedService<MessageService>(
+    const hackService = this.resolveService<HackService>(TOKENS.HACK_SERVICE)!;
+    const messageService = this.resolveService<MessageService>(
       TOKENS.MESSAGE_SERVICE,
     )!;
-    const forumService = this.getCachedService<ForumService>(
+    const forumService = this.resolveService<ForumService>(
       TOKENS.FORUM_SERVICE,
     )!;
-    const factionService = this.getCachedService<FactionService>(
+    const factionService = this.resolveService<FactionService>(
       TOKENS.FACTION_SERVICE,
     )!;
-    const inventoryService = this.getCachedService<InventoryService>(
+    const inventoryService = this.resolveService<InventoryService>(
       TOKENS.INVENTORY_SERVICE,
     )!;
-    const playerPresenceService = this.getCachedService<PlayerPresenceService>(
+    const playerPresenceService = this.resolveService<PlayerPresenceService>(
       TOKENS.PLAYER_PRESENCE_SERVICE,
     );
-    const backdoorService = this.getCachedService<BackdoorService>(
+    const backdoorService = this.resolveService<BackdoorService>(
       TOKENS.BACKDOOR_SERVICE,
     )!;
-    const traceService = this.getCachedService<TraceService>(
+    const traceService = this.resolveService<TraceService>(
       TOKENS.TRACE_SERVICE,
     )!;
     const factionKnowledgeService =
-      this.getCachedService<FactionKnowledgeService>(
+      this.resolveService<FactionKnowledgeService>(
         TOKENS.FACTION_KNOWLEDGE_SERVICE,
       );
-    const networkTopologyService = this.getCachedService<NetworkTopologyService>(
+    const networkTopologyService = this.resolveService<NetworkTopologyService>(
       TOKENS.NETWORK_TOPOLOGY_SERVICE,
     );
     const missionIntegrationService =
-      this.getCachedService<MissionIntegrationService>(
+      this.resolveService<MissionIntegrationService>(
         TOKENS.MISSION_INTEGRATION_SERVICE,
       );
-    const storyMissionService = this.getCachedService<StoryMissionService>(
+    const storyMissionService = this.resolveService<StoryMissionService>(
       TOKENS.STORY_MISSION_SERVICE,
     );
-    const leaderboardService = this.getCachedService<
+    const leaderboardService = this.resolveService<
       import("./leaderboardService").LeaderboardService
     >(TOKENS.LEADERBOARD_SERVICE);
-    const achievementService = this.getCachedService<
+    const achievementService = this.resolveService<
       import("./achievementService").AchievementService
     >(TOKENS.ACHIEVEMENT_SERVICE);
-    const keyFragmentService = this.getCachedService<
+    const keyFragmentService = this.resolveService<
       import("./keyFragmentService").KeyFragmentService
     >(TOKENS.KEY_FRAGMENT_SERVICE);
-    const darknetDungeonService = this.getCachedService<
+    const darknetDungeonService = this.resolveService<
       import("./darknetDungeonService").DarkNetDungeonService
     >(TOKENS.DARKNET_DUNGEON_SERVICE);
-    const darknetDiscoveryService = this.getCachedService<
+    const darknetDiscoveryService = this.resolveService<
       import("./darknetDiscoveryService").default
     >("DarkNetDiscoveryService");
-    const connectionChallengeService = this.getCachedService<
+    const connectionChallengeService = this.resolveService<
       import("./connectionChallengeService").ConnectionChallengeService
     >(TOKENS.CONNECTION_CHALLENGE_SERVICE);
-    const chatService = this.getCachedService<ChatService>(
+    const chatService = this.resolveService<ChatService>(
       TOKENS.CHAT_SERVICE,
     );
-    const messageEncryptionService = this.getCachedService<MessageEncryptionService>(
+    const messageEncryptionService = this.resolveService<MessageEncryptionService>(
       TOKENS.MESSAGE_ENCRYPTION_SERVICE,
     );
 
@@ -280,7 +277,6 @@ class CommandProcessor extends EventEmitter {
         ...(playerPresenceService ? { playerPresenceService } : {}),
         serverService,
         memoryService,
-        processStateService,
         hackService,
         messageService,
         forumService,
@@ -659,7 +655,7 @@ class CommandProcessor extends EventEmitter {
       this.emit("command:executed", { userId, command, result });
 
       // Increment command counter (fire-and-forget)
-      this.getCachedService<PlayerProgressRepository>(
+      this.resolveService<PlayerProgressRepository>(
         TOKENS.PLAYER_PROGRESS_REPOSITORY,
       )
         ?.incrementCounter(userId, "commandsExecuted")

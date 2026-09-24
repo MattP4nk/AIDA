@@ -33,7 +33,6 @@ import { ChatService } from "../services/chatService";
 import ForumService from "../services/forumService";
 import PlayerPresenceService from "../services/playerPresenceService";
 import MemoryService from "../services/memoryService";
-import ProcessStateService from "../services/processStateService";
 import CommandProcessor from "../services/commandProcessor";
 import { FactionService } from "../services/factionService";
 import { ReputationEngine } from "../services/reputationEngine";
@@ -133,10 +132,6 @@ export function setupContainer(
     PlayerPresenceService,
   );
   container.registerSingleton(TOKENS.MEMORY_SERVICE, MemoryService);
-  container.registerSingleton(
-    TOKENS.PROCESS_STATE_SERVICE,
-    ProcessStateService,
-  );
   container.registerSingleton(TOKENS.COMMAND_PROCESSOR, CommandProcessor);
   container.registerSingleton(TOKENS.FACTION_SERVICE, FactionService);
   container.registerSingleton(TOKENS.REPUTATION_ENGINE, ReputationEngine);

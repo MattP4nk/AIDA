@@ -30,7 +30,6 @@ export const CHAT_SERVICE = "ChatService";
 export const FORUM_SERVICE = "ForumService";
 export const PLAYER_PRESENCE_SERVICE = "PlayerPresenceService";
 export const MEMORY_SERVICE = "MemoryService";
-export const PROCESS_STATE_SERVICE = "ProcessStateService";
 export const COMMAND_PROCESSOR = "CommandProcessor";
 export const IP_SERVICE = "IPService";
 export const CACHE_SERVICE = "CacheService";
