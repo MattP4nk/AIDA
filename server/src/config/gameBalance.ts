@@ -216,6 +216,23 @@ export const TRACE_DURATION_TIERS: { minEvidence: number; baseMins: number }[] =
   { minEvidence: 0, baseMins: 120 },
 ];
 
+/**
+ * ⚠️ NOT WIRED — AND IT IS INVERTED. Do not connect this without fixing the sign.
+ *
+ * Orphan audit 2026-09-24. This has zero callers and looks like a missing
+ * feature, but it contradicts the live trace semantics:
+ *
+ *   `traceService` (:140): a trace reaching `expiresAt` is COMPLETED, and
+ *   "the hacker is caught. Only evasion stops it."
+ *
+ * So duration is the WINDOW THE HACKER HAS to evade. This function subtracts
+ * `stealthSkill * 0.3` from it — meaning higher stealth would get you caught
+ * SOONER. Wiring it as written makes investing in stealth a liability.
+ *
+ * Stealth already helps through `getTraceEvasionChance`, which IS live. If a
+ * duration bonus is wanted too, the sign must flip (stealth should LENGTHEN
+ * the window) — a balance decision, not a wiring one.
+ */
 export function getTraceDuration(evidenceLevel: number, stealthSkill: number): number {
   const tier = TRACE_DURATION_TIERS.find(t => evidenceLevel >= t.minEvidence) || TRACE_DURATION_TIERS[TRACE_DURATION_TIERS.length - 1]!;
   const reduction = Math.floor(stealthSkill * 0.3); // 0.3 min per stealth level

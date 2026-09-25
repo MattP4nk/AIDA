@@ -33,7 +33,7 @@ Ranked by what the player loses.
 | 7 | **Honeypot trap gives no warning** | On the `registerForumAccount` path the player sees `✓ Successfully registered` while their IP is logged and rep drops. `security:warning` is emitted and dropped. | wire only |
 | 8 | **Territory changing hands is invisible** | `faction:contest_started` / `faction:contest_resolved` are global emits with no listener. The payoff of the whole contest system produces no on-screen event. | wire only |
 | 9 | **Notifications do not survive a reload** | The `Notification` model is fully specced (5 indexes, read/dismiss/expiry) and **never written or read**. Delivery is socket-only, client store in-memory. | 32 schema lines |
-| 10 | **Skill does not affect trace duration or hack cooldown** | `getTraceDuration` and `getHackCooldown` have zero callers. `traceService` rebuilds its own tiers via a function that **takes no stealth argument**; a flat 30s cooldown runs. Two balance levers are inert. | 2 functions |
+| 10 | **Hack cooldown** ✅ WIRED 2026-09-24 — skill now reduces it. **Trace duration ❌ NOT wired: the function is INVERTED** (see below). | | |
 | 11 | **No active-mission cap exists** | `MAX_ACTIVE_MISSIONS = 5` has no consumer and no hardcoded twin — nothing anywhere limits how many missions a player holds. | 1 constant |
 | 12 | **Failed terminal tab operations do nothing** | `terminal:error` emitted from 5 sites; client uses `socket.once(...)` with no error listener and no timeout, so the click appears ignored. | wire only |
 | 13 | **Kicked/banned players are never told why** | `force:disconnect` carries the admin's reason; the client's `disconnect` handler returns early without surfacing it. Same for `connection:refused` at the socket cap → frozen UI. | wire only |
@@ -77,6 +77,28 @@ that restates the formula, while the named config is unreferenced 1,800 lines aw
 verification suite drives commands through that socket path.
 
 ---
+
+## Correction: `getTraceDuration` is not merely unwired — it is INVERTED
+
+Checked before wiring, and it is the second item in this audit whose obvious fix would have
+made the game worse.
+
+`traceService:140` states the semantics plainly: a trace reaching `expiresAt` is COMPLETED and
+**"the hacker is caught. Only evasion stops it."** So duration is the *window the hacker has to
+evade*. `getTraceDuration` returns `baseMins − stealthSkill * 0.3` — so **higher stealth would
+get you caught sooner**. Wiring it as written turns stealth into a liability.
+
+Stealth already helps through `getTraceEvasionChance`, which *is* live. Whether it should also
+buy time is a balance decision with the sign flipped — not a wiring job. Documented at the
+function so the next reader does not repeat the attempt; `traceService` was reverted to
+evidence-only duration.
+
+**`getHackCooldown` was the genuine half of the pair and is now wired.** A flat 30s ran for
+everyone while the field's own comment said "use getHackCooldown(skill)". The lookup lives
+inside `applyCooldown` rather than in its parameters — all three callers had no skill in scope,
+and a parameter every caller must remember to pass is how this became dead in the first place.
+The explicit-duration override still bypasses scaling, so the 15s post-minigame cooldown is
+unchanged.
 
 ## Correction: the IP cluster was superseded, not missing
 

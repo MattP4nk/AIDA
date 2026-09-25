@@ -33,6 +33,7 @@ import type TraceService from "./traceService";
 import type { FactionKnowledgeService } from "./factionKnowledgeService";
 import {
   HACK_COOLDOWN_BASE_S,
+  getHackCooldown,
   MAX_TOOL_SUCCESS_BONUS,
   MAX_TOOL_STEALTH_BONUS,
   SKILL_PENALTY,
@@ -324,7 +325,7 @@ class HackService extends EventEmitter {
       }
 
       // 2b. Apply cooldown immediately to prevent concurrent hack bypass
-      this.applyCooldown(attackerId);
+      await this.applyCooldown(attackerId);
 
       // 3. Get attacker and target data
       const attacker = await db.client.user.findUnique({
@@ -513,7 +514,7 @@ class HackService extends EventEmitter {
       };
     }
 
-    this.applyCooldown(attackerId);
+    await this.applyCooldown(attackerId);
 
     // Fetch data
     const attacker = await db.client.user.findUnique({
@@ -2513,8 +2514,28 @@ class HackService extends EventEmitter {
   /**
    * Apply cooldown to user
    */
-  applyCooldown(userId: string, durationSeconds?: number): void {
-    const seconds = durationSeconds ?? this.COOLDOWN_SECONDS;
+  async applyCooldown(userId: string, durationSeconds?: number): Promise<void> {
+    // ORPHAN AUDIT 2026-09-24: hacking skill now actually reduces the cooldown.
+    //
+    // `getHackCooldown(skill)` existed in gameBalance with ZERO callers, and
+    // the comment on `COOLDOWN_SECONDS` said "use getHackCooldown(skill) for
+    // skill-scaled value" — an instruction to a future reader that nobody
+    // followed. A flat 30s ran for everyone, so investing in hacking bought
+    // nothing here.
+    //
+    // The lookup lives INSIDE this method rather than in its parameters: all
+    // three callers had no skill value in scope, and a parameter every caller
+    // must remember to pass is how this became dead in the first place.
+    let seconds: number;
+    if (durationSeconds !== undefined) {
+      seconds = durationSeconds;
+    } else {
+      const progress = await db.client.playerProgress.findUnique({
+        where: { userId },
+        select: { hacking: true },
+      });
+      seconds = getHackCooldown(progress?.hacking ?? 0);
+    }
     const cooldownEnd = new Date(Date.now() + seconds * 1000);
     this.cooldowns.set(userId, cooldownEnd);
   }
