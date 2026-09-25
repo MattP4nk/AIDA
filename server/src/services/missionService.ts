@@ -573,6 +573,28 @@ class MissionService extends EventEmitter {
       // Accept time is also the semantics the rest of the code already
       // assumes: `startedAt` is set here, and `calculateRewards` measures
       // `timeElapsed` from `startedAt` against this same `timeLimit`.
+      // ORPHAN AUDIT 2026-09-24: the active-mission cap is now enforced.
+      //
+      // `MAX_ACTIVE_MISSIONS = 5` sat in gameBalance with no consumer AND no
+      // hardcoded twin — so unlike the other dead constants, nothing anywhere
+      // limited how many missions a player could hold at once. Verified there
+      // was no competing implementation before wiring.
+      //
+      // Read through the repository, which owns mission state (CLAUDE.md
+      // invariant), rather than querying `playerMission` directly.
+      //
+      // Checked BEFORE the mutate: a cap applied inside the callback would
+      // already have claimed the offer, and `mutate` treats a throw as a
+      // failed write rather than a clean refusal.
+      const held = await this.playerMissions.list(userId);
+      const activeCount = held.filter((m) => m.status === "active").length;
+      if (activeCount >= MAX_ACTIVE_MISSIONS) {
+        throw new Error(
+          `You are already running ${activeCount} missions (limit ${MAX_ACTIVE_MISSIONS}). ` +
+            `Complete or abandon one before accepting another.`,
+        );
+      }
+
       const missionRow = await this.prisma.mission.findUnique({
         where: { id: missionId },
         select: { timeLimit: true },
@@ -1836,7 +1858,7 @@ import { container } from "../di/container";
 import { MISSION_SERVICE } from "../di/tokens";
 import { missionExpiresAt, missionTimeLimitMs } from "../utils/missionTime";
 import { requiredObjectivesComplete } from "../utils/missionCompletion";
-import { BASELINE_COMPLETION_BONUS } from "../config/gameBalance";
+import { BASELINE_COMPLETION_BONUS, MAX_ACTIVE_MISSIONS } from "../config/gameBalance";
 import { boundMissionRewards, boundMissionDifficulty } from "../utils/missionRewards";
 export const missionService = new Proxy({} as MissionService, {
   get(_target, prop) {

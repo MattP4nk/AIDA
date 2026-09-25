@@ -34,7 +34,7 @@ Ranked by what the player loses.
 | 8 | **Territory changing hands is invisible** | `faction:contest_started` / `faction:contest_resolved` are global emits with no listener. The payoff of the whole contest system produces no on-screen event. | wire only |
 | 9 | **Notifications do not survive a reload** | The `Notification` model is fully specced (5 indexes, read/dismiss/expiry) and **never written or read**. Delivery is socket-only, client store in-memory. | 32 schema lines |
 | 10 | **Hack cooldown** ✅ WIRED 2026-09-24 — skill now reduces it. **Trace duration ❌ NOT wired: the function is INVERTED** (see below). | | |
-| 11 | **No active-mission cap exists** | `MAX_ACTIVE_MISSIONS = 5` has no consumer and no hardcoded twin — nothing anywhere limits how many missions a player holds. | 1 constant |
+| 11 | ✅ **WIRED 2026-09-24** — enforced in `acceptMission`, before the mutate so a refusal does not consume the offer. | | |
 | 12 | **Failed terminal tab operations do nothing** | `terminal:error` emitted from 5 sites; client uses `socket.once(...)` with no error listener and no timeout, so the click appears ignored. | wire only |
 | 13 | **Kicked/banned players are never told why** | `force:disconnect` carries the admin's reason; the client's `disconnect` handler returns early without surfacing it. Same for `connection:refused` at the socket cap → frozen UI. | wire only |
 | 14 | **No live forum updates reach anyone** | `forum:new-post`/`forum:new-reply` are emitted to room `forum:<id>`, **which nothing ever joins**. | join the room |
