@@ -14,14 +14,7 @@
 
 import { injectable, inject } from "tsyringe";
 import type { Logger } from "pino";
-import {
-  LOGGER,
-  MESSAGE_SERVICE,
-  MISSION_SERVICE,
-  EVENT_SERVICE,
-  PERSONA_SERVICE,
-  STORY_PROGRESSION_SERVICE,
-} from "../di/tokens";
+import { EVENT_SERVICE, LOGGER, MESSAGE_SERVICE, MISSION_SERVICE, PERSONA_SERVICE, STORY_PROGRESSION_SERVICE, WARFARE_SERVICE } from "../di/tokens";
 import { db } from "../database/client";
 import { EventSeverity } from "../../../shared/types";
 import type { ArchitectIntervention } from "./storyProgressionService";
@@ -76,6 +69,7 @@ export class ArchitectInterventionExecutor {
       create_mission: this.handleCreateMission.bind(this),
       grant_token: this.handleGrantToken.bind(this),
       reveal_faction: this.handleRevealFaction.bind(this),
+      declare_war: this.handleDeclareWar.bind(this),
     };
   }
 
@@ -766,6 +760,63 @@ export class ArchitectInterventionExecutor {
    *
    * targetId: factionId
    */
+  /**
+   * Declare war between two factions.
+   *
+   * ORPHAN AUDIT 2026-09-24: `warfareService.declareWar` had **zero callers**,
+   * so `startWarMonitor` ran and the `war` command read rows that nothing
+   * could ever create — the `FactionWar` table has 0 rows. Faction wars were
+   * a complete, unreachable feature.
+   *
+   * Wired here rather than as a player command because `declareWar`'s third
+   * parameter is documented `declaredBy // AI persona ID`: wars were designed
+   * as AI-driven world events. The Architect is the system that already
+   * decides world events, so this is the entry point the signature implies.
+   *
+   * `targetId` is the DEFENDER. The attacker comes from `data.attackerFactionId`
+   * — an explicit field rather than "the Architect's faction", because the
+   * Architect belongs to none.
+   */
+  private async handleDeclareWar(
+    intervention: ArchitectIntervention,
+  ): Promise<InterventionResult> {
+    const { targetId, data, reasoning } = intervention;
+    const attackerFactionId =
+      typeof data?.attackerFactionId === "string" ? data.attackerFactionId : undefined;
+
+    if (!targetId || !attackerFactionId) {
+      return {
+        type: "declare_war",
+        success: false,
+        reasoning,
+        error: "Missing required fields: targetId (defender) and data.attackerFactionId",
+      };
+    }
+
+    // No local try/catch: `execute()` already wraps every handler, and the
+    // sibling handlers rely on that rather than each adding their own.
+    const { getService } = await import("../di/container");
+    const warfare = getService<import("./warfareService").default>(WARFARE_SERVICE);
+
+    // declareWar already refuses self-war, an existing active war between the
+    // pair, and unknown factions — and returns the reason. Pass it through
+    // rather than re-implementing those checks here and letting the two drift.
+    const result = await warfare.declareWar(
+      attackerFactionId,
+      targetId,
+      typeof data?.personaId === "string" ? data.personaId : "architect",
+    );
+
+    return {
+      type: "declare_war",
+      success: result.success,
+      reasoning,
+      ...(result.success
+        ? { output: { warId: result.war?.id, message: result.message } }
+        : { error: result.message }),
+    } as InterventionResult;
+  }
+
   private async handleRevealFaction(
     intervention: ArchitectIntervention,
   ): Promise<InterventionResult> {

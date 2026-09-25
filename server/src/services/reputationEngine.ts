@@ -3,7 +3,7 @@ import { PrismaClient } from "@prisma/client";
 import { Logger } from "pino";
 import { Server as SocketIOServer } from "socket.io";
 import { FactionService } from "./factionService";
-import { LOGGER } from "../di/tokens";
+import { LOGGER, WARFARE_SERVICE } from "../di/tokens";
 
 /**
  * Cross-faction rivalry matrix.
@@ -86,8 +86,35 @@ export class ReputationEngine {
 
       const shortName = faction.shortName || faction.name.toLowerCase();
 
+      // WAR STAKES. `warfareService.getReputationMultiplier` existed with zero
+      // callers, so a faction war — even once one could be declared — had no
+      // effect on anything. This is the single chokepoint every reputation
+      // change flows through, so it is the one place the multiplier belongs.
+      //
+      // Applied to losses as well as gains: wartime raises the stakes in both
+      // directions, and a multiplier that only rewarded would make war purely
+      // upside. Returns 1.0 when the faction is not at war, so with no active
+      // wars this is a no-op — which is why it can land before the declare
+      // path exists without changing current behaviour.
+      let effectiveAmount = amount;
+      try {
+        const { getService } = await import("../di/container");
+        const warfare = getService<import("./warfareService").default>(WARFARE_SERVICE);
+        const multiplier = await warfare.getReputationMultiplier(factionId);
+        if (multiplier !== 1.0) {
+          effectiveAmount = Math.round(amount * multiplier);
+          this.logger.info(
+            { factionId, amount, multiplier, effectiveAmount, reason },
+            "Wartime reputation multiplier applied",
+          );
+        }
+      } catch (err) {
+        // Never let the war lookup block a reputation change.
+        this.logger.warn({ err, factionId }, "War multiplier lookup failed — using base amount");
+      }
+
       // 1. Apply primary reputation change
-      await this.factionService.addReputation(userId, factionId, amount);
+      await this.factionService.addReputation(userId, factionId, effectiveAmount);
 
       // 2. Create FactionEvent for the change
       await this.prisma.factionEvent.create({
@@ -98,7 +125,7 @@ export class ReputationEngine {
           title: amount > 0 ? "Reputation Gained" : "Reputation Lost",
           description: reason,
           impact: amount > 0 ? "positive" : "negative",
-          reputationChange: amount,
+          reputationChange: effectiveAmount,
         },
       });
 

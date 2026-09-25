@@ -24,7 +24,7 @@ Ranked by what the player loses.
 
 | # | Capability | Why it never runs | Size |
 |---|---|---|---|
-| 1 | **Faction wars can never start** | `warfareService.declareWar` has **zero callers**. `startWarMonitor` runs and the `war` command reads war rows — but nothing can ever create one. `surrender`, `updateWarScore`, `getReputationMultiplier` dead alongside it. `FactionWar` table: 0 rows. | 122 LOC |
+| 1 | ~~**Faction wars can never start**~~ **PARTLY WIRED 2026-09-24** — see below | `warfareService.declareWar` has **zero callers**. `startWarMonitor` runs and the `war` command reads war rows — but nothing can ever create one. `surrender`, `updateWarScore`, `getReputationMultiplier` dead alongside it. `FactionWar` table: 0 rows. | 122 LOC |
 | 2 | **Being hacked is never announced** | `hack:attempt`/`hack:detected` emit on the internal bus; nothing bridges to a socket. Client UI is complete and unreachable. (Already filed Phase 8.) | bridge only |
 | 3 | **IP discovery / traceroute / range scan** | `ipService.discoverIP`, `traceRoute`, `scanIPRange`, `assignIPToServer`, `cleanupOrphanedIPs` — 9 of 18 methods, zero callers. Only IP *generation* is wired. traceroute is a genre-defining mechanic sitting inert. | 318 LOC |
 | 4 | **Event subscriptions — dead on BOTH ends** | `eventService.createSubscription`/`removeSubscription`/`getUserSubscriptions` + 6 typed factories unreachable; `client/src/services/api.ts` has the matching dead `subscribeToEvent`/`getEventSubscriptions`/`unsubscribeFromEvent`. `loadSubscriptionsFromDatabase` runs at startup and loads rows **nothing can write**. | 212 LOC + client |
@@ -79,6 +79,31 @@ verification suite drives commands through that socket path.
 ---
 
 ## Fixed immediately during the audit
+
+### Faction wars — declare + stakes wired (1 of 4 connections remains)
+
+`declareWar` had zero callers, so `startWarMonitor` ran and the `war` command read rows nothing
+could create. But the feature needed **four** connections, not one — declare, score, reputation
+effect, surrender — which is why it was invisible rather than merely buggy.
+
+- **Declaring** is now an Architect intervention (`declare_war`), not a player command. That
+  follows the signature: `declareWar`'s third parameter is documented `declaredBy // AI persona
+  ID`, so wars were designed as AI-driven world events. Wired through the full chain — type
+  union, validator allow-list, dispatch table, handler — and `declareWar`'s own guards
+  (self-war, duplicate war, unknown faction) are passed through rather than re-implemented.
+- **Stakes** now apply: `getReputationMultiplier` is consulted in
+  `reputationEngine.applyReputationChange`, the single chokepoint every reputation change flows
+  through. Applied to losses as well as gains — a multiplier that only rewarded would make war
+  pure upside. It returns 1.0 with no war, so this was a **no-op on landing**.
+- **Still unwired:** `updateWarScore` has no producer, so a declared war sits 0-0 and the monitor
+  resolves it on elapsed time rather than on merit. The natural producer is `hackService`, when a
+  player hacks a server owned by the enemy faction during an active war — but that is a
+  game-design decision (what scores? how much?) rather than a wiring one. `surrender` likewise
+  needs a `war surrender` subcommand and a decision about who may issue it.
+- `scripts/verify-faction-wars.ts` — 11 checks driving the real executor and services,
+  self-contained (builds its own factions and war, deletes both), and it **asserts the remaining
+  gap** so it will fail loudly the day scoring is wired and this note goes stale.
+
 
 **Two unstopped timers**, the exact shape `lifecycle.ts` claims to have fixed ("six subsystems
 shutdown forgot" — it missed two more). Both start in a constructor and both have a stop method

@@ -312,6 +312,7 @@ export function validateContentPlan(parsed: any): ValidatedContentPlan | null {
 const VALID_INTERVENTION_TYPES = new Set([
   "send_message", "plant_clue", "trigger_event",
   "adjust_tension", "create_mission", "grant_token", "reveal_faction",
+  "declare_war",
 ]);
 
 export interface ValidatedIntervention {

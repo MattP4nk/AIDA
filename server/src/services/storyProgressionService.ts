@@ -82,7 +82,8 @@ export interface ArchitectIntervention {
     | "adjust_tension"
     | "create_mission"
     | "grant_token"
-    | "reveal_faction";
+    | "reveal_faction"
+    | "declare_war";
   targetId?: string; // userId, serverId, factionId
   data: Record<string, unknown>;
   reasoning: string; // Why the Architect decided this
