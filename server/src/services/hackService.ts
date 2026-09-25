@@ -31,14 +31,7 @@ import type MemoryService from "./memoryService";
 import type { Server as SocketIOServer } from "socket.io";
 import type TraceService from "./traceService";
 import type { FactionKnowledgeService } from "./factionKnowledgeService";
-import {
-  HACK_COOLDOWN_BASE_S,
-  getHackCooldown,
-  MAX_TOOL_SUCCESS_BONUS,
-  MAX_TOOL_STEALTH_BONUS,
-  SKILL_PENALTY,
-  SKILL_SOFT_BAND,
-} from "../config/gameBalance";
+import { BOUNTY_BASE_CREDITS, BOUNTY_BASE_REP, BOUNTY_CREDITS_PER_EVIDENCE, BOUNTY_EVIDENCE_THRESHOLD, BOUNTY_EXPIRATION_H, HACK_COOLDOWN_BASE_S, MAX_TOOL_STEALTH_BONUS, MAX_TOOL_SUCCESS_BONUS, SKILL_PENALTY, SKILL_SOFT_BAND, getHackCooldown } from "../config/gameBalance";
 
 /**
  * Enhanced HackService - Complete PvP hacking mechanics
@@ -2190,9 +2183,23 @@ class HackService extends EventEmitter {
         return;
       }
 
-      // Reward scales with evidence: 81% → 2000c/10rep, 100% → 5000c/25rep
-      const rewardCredits = Math.floor(1000 + (evidenceLevel - 80) * 200);
-      const rewardReputation = Math.floor(5 + (evidenceLevel - 80));
+      // Reward scales with evidence: 81% → 1200c/6rep, 100% → 5000c/25rep.
+      //
+      // The 81%% figures were wrong in the previous comment (2000c/10rep). The
+      // 100%% end was right, which is how it survived — anyone sanity-checking
+      // the upper bound would have agreed with it.
+      //
+      // ORPHAN AUDIT 2026-09-24: these were five bare literals sitting under a
+      // comment restating the formula, while the named constants had lived
+      // unreferenced 1,800 lines away in gameBalance since they were written.
+      // Editing the config did nothing. The `- 1` is exact, not a fudge: the
+      // gate is "> threshold - 1", so the reward scales from the first
+      // qualifying point.
+      const evidenceOverThreshold = evidenceLevel - (BOUNTY_EVIDENCE_THRESHOLD - 1);
+      const rewardCredits = Math.floor(
+        BOUNTY_BASE_CREDITS + evidenceOverThreshold * BOUNTY_CREDITS_PER_EVIDENCE,
+      );
+      const rewardReputation = Math.floor(BOUNTY_BASE_REP + evidenceOverThreshold);
 
       // Find files the target downloaded from the breached server (stored on their home)
       const stolenFiles = await db.client.fileSystemNode.findMany({
@@ -2217,7 +2224,7 @@ class HackService extends EventEmitter {
           serverId,
           evidenceLevel,
           ...(stolenFileIds.length > 0 ? { stolenFileIds } : {}),
-          expiresAt: new Date(Date.now() + 48 * 60 * 60 * 1000), // 48 hours
+          expiresAt: new Date(Date.now() + BOUNTY_EXPIRATION_H * 60 * 60 * 1000), // 48 hours
         },
       });
 
@@ -2228,7 +2235,7 @@ class HackService extends EventEmitter {
         reason: `Critical intrusion detected on ${serverName}. Evidence level: ${evidenceLevel}%`,
         rewardCredits,
         rewardReputation,
-        expiresAt: new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString(),
+        expiresAt: new Date(Date.now() + BOUNTY_EXPIRATION_H * 60 * 60 * 1000).toISOString(),
       });
 
       // Notify faction members via Socket.IO

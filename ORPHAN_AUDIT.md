@@ -52,14 +52,36 @@ could restore at all), skill-scaled hack cooldown, the active-mission cap, and s
 listeners. **Two items were correctly REFUSED** rather than wired — the IP cluster (superseded by
 topology) and `getTraceDuration` (inverted) — which is a third of what was attempted.
 
-### B. UNIFY, don't delete — 15 tunable knobs with live hardcoded twins
+### B. UNIFY, don't delete — ✅ 11 of 15 done 2026-09-24
 
-These look like dead constants but deleting them **loses the ability to tune the game**. The fix
-is the reverse: make the service read the constant. Worst case — the **entire bounty economy**
-is five bare literals in one expression at `hackService.ts:2192-2194`, sitting under a comment
-that restates the formula, while the named config is unreferenced 1,800 lines away. Also
-`DETECTION_FLOOR_PCT` (3 twins), `BOUNTY_EVIDENCE_THRESHOLD` (4 twins), the AI cadence values
-(env-shadowed), `MISSION_EXPIRATION_INTERVAL_MS`, `DAILY_MISSIONS_PER_PLAYER`, `DUNGEON_*`.
+These look like dead constants, but deleting them loses the ability to tune the game. The fix is
+the reverse: make the service read the constant.
+
+**Unified:** the five `BOUNTY_*` (the whole bounty economy was five bare literals in one
+expression, under a comment restating the formula, while the named config sat unreferenced 1,800
+lines away), `DUNGEON_TTL_DAYS`, `DUNGEON_REGEN_DELAY_MS`, `MISSION_EXPIRATION_INTERVAL_MS`,
+`DAILY_MISSIONS_PER_PLAYER`, `ARCHITECT_MIN_EVENTS`, `FACTION_LOW_RESOURCE_THRESHOLD`.
+
+The harness asserts **numeric equivalence**, not just that a constant is referenced — every value
+still equals the literal it replaced, and the bounty formula is checked identical across all 101
+evidence levels. A unification sweep that silently changes a number is worse than the duplication.
+
+**And the comment was wrong.** Writing that equivalence check surfaced that the formula's own
+comment claimed `81% → 2000c/10rep` when the code gives **1200c/6rep**. The 100% end (5000c/25rep)
+was correct, which is how it survived — anyone sanity-checking the upper bound would have agreed.
+Corrected, and pinned.
+
+**Deliberately NOT substituted (4):**
+- The three `evidenceLevel > 80` gates. They gate the whole **critical-evidence band** (lockdown,
+  alert severity, the -15 rep penalty), not bounties — a `BOUNTY_*` name would mislabel two of the
+  three. They want their own `CRITICAL_EVIDENCE_THRESHOLD`, which is a decision, not a sweep.
+- `DETECTION_FLOOR_PCT` / `DETECTION_AGGRESSIVE_BONUS_PCT`: the constants are **percent** (5, 30)
+  and the twins are **fractions** (`0.05`, `0.30`) — a careless substitution is a 100x bug. Worse,
+  one of the three `0.05` sites clamps `successRate`, a different concept that merely shares the
+  value. Needs per-site judgement.
+- `AI_ACTIONS_PER_DAY` / `AI_LEADER_INTERVAL_H` / `AI_OTHER_INTERVAL_H`: env-shadowed
+  (`parseInt(process.env.X || "3")`). Unifying means deciding whether the constant or the env var
+  is authoritative — a config-precedence decision.
 
 ### C. GENUINELY SAFE TO DELETE — nothing is lost
 

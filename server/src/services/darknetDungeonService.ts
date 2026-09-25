@@ -30,6 +30,7 @@ import { safeAI } from "../utils/safeExecute";
 
 import type ForumService from "./forumService";
 import type { StoryProgressionService } from "./storyProgressionService";
+import { DUNGEON_REGEN_DELAY_MS, DUNGEON_TTL_DAYS } from "../config/gameBalance";
 // ═══════════════════════════════════════════════════════════════════
 // Constants — Procedural Generation Building Blocks
 // ═══════════════════════════════════════════════════════════════════
@@ -374,7 +375,7 @@ export class DarkNetDungeonService {
           rewardType: reward.type,
           rewardData: reward.data as any,
           status: "active",
-          expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7-day TTL
+          expiresAt: new Date(Date.now() + DUNGEON_TTL_DAYS * 24 * 60 * 60 * 1000),
         },
       });
 
@@ -855,7 +856,7 @@ Respond ONLY with JSON:
             "Failed to regenerate dungeon after conquest",
           );
         });
-      }, 30_000);
+      }, DUNGEON_REGEN_DELAY_MS);
 
       this.logger.info(
         {

@@ -146,7 +146,7 @@ class MissionService extends EventEmitter {
   public startExpirationChecker(): void {
     if (this.expirationInterval) return; // Already running
 
-    const INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
+    const INTERVAL_MS = MISSION_EXPIRATION_INTERVAL_MS; // 15 minutes
 
     // Run once immediately, then on interval
     this.checkExpiredMissions().catch((err) => {
@@ -1858,7 +1858,7 @@ import { container } from "../di/container";
 import { MISSION_SERVICE } from "../di/tokens";
 import { missionExpiresAt, missionTimeLimitMs } from "../utils/missionTime";
 import { requiredObjectivesComplete } from "../utils/missionCompletion";
-import { BASELINE_COMPLETION_BONUS, MAX_ACTIVE_MISSIONS } from "../config/gameBalance";
+import { BASELINE_COMPLETION_BONUS, MAX_ACTIVE_MISSIONS, MISSION_EXPIRATION_INTERVAL_MS } from "../config/gameBalance";
 import { boundMissionRewards, boundMissionDifficulty } from "../utils/missionRewards";
 export const missionService = new Proxy({} as MissionService, {
   get(_target, prop) {

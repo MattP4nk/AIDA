@@ -24,6 +24,7 @@ import { validateOrRetry, validateArchitectEvaluation } from "../utils/aiOutputV
 import { safeAI } from "../utils/safeExecute";
 
 import type { ArchitectInterventionExecutor } from "./architectInterventionExecutor";
+import { ARCHITECT_MIN_EVENTS } from "../config/gameBalance";
 // ═══════════════════════════════════════════════════════════════════
 // Types
 // ═══════════════════════════════════════════════════════════════════
@@ -429,7 +430,7 @@ Routine hacks or mission completions usually don't.`;
     const worldState = await this.getWorldNarrativeState();
 
     // Skip if nothing interesting has happened
-    if (worldState.unprocessedEventCount < 5) {
+    if (worldState.unprocessedEventCount < ARCHITECT_MIN_EVENTS) {
       this.logger.debug(
         { unprocessed: worldState.unprocessedEventCount },
         "Architect skipping evaluation — insufficient unprocessed events",

@@ -8,6 +8,7 @@ import { LOGGER, RESOURCE_SERVICE, FACTION_KNOWLEDGE_SERVICE } from "../di/token
 import ResourceService from "./resourceService";
 import type { FactionKnowledgeService } from "./factionKnowledgeService";
 import { safeExecute } from "../utils/safeExecute";
+import { FACTION_LOW_RESOURCE_THRESHOLD } from "../config/gameBalance";
 
 /**
  * AISchedulerService - Automated AI Persona Actions
@@ -146,7 +147,7 @@ export class AISchedulerService {
       try {
         const resources = await resourceService.getFactionResources(faction.id);
         const totalResources = (resources.credits ?? 0) + (resources.intel ?? 0) + (resources.compute ?? 0);
-        const lowThreshold = 50;
+        const lowThreshold = FACTION_LOW_RESOURCE_THRESHOLD;
 
         // Check active wars involving this faction
         const activeWars = await this.prisma.factionWar.count({

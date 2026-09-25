@@ -345,6 +345,16 @@ export const DUNGEON_EXPIRATION_INTERVAL_MS = 60 * 60 * 1000;
 export const BOUNTY_EXPIRATION_H = 48;
 
 /** Evidence threshold for bounty posting. */
+/**
+ * NOTE (orphan audit 2026-09-24): the reward FORMULA now uses this, but the
+ * three `evidenceLevel > 80` gates in hackService deliberately do not.
+ *
+ * Those gates gate the whole CRITICAL-EVIDENCE BAND (81-100) — lockdown, alert
+ * severity, and the -15 rep penalty — not bounties specifically. Substituting
+ * a `BOUNTY_*` name there would mislabel two of the three. They want their own
+ * `CRITICAL_EVIDENCE_THRESHOLD`, which is a rename with a real decision behind
+ * it rather than part of this sweep.
+ */
 export const BOUNTY_EVIDENCE_THRESHOLD = 81;
 
 /** Bounty reward scaling. */

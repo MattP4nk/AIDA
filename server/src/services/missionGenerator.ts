@@ -24,6 +24,7 @@ import {
   MISSION_TEMPLATES,
 } from "./missionTemplatePool";
 import { validateObjective, OBJECTIVE_TYPES } from "./missionObjectiveTypes";
+import { DAILY_MISSIONS_PER_PLAYER } from "../config/gameBalance";
 
 /**
  * MissionGenerator Service
@@ -809,7 +810,7 @@ Format as JSON:
 
         let generated = 0;
         for (const player of activePlayers) {
-          const missions = await this.generateMissionsForPlayer(player.id, 3);
+          const missions = await this.generateMissionsForPlayer(player.id, DAILY_MISSIONS_PER_PLAYER);
           generated += missions.length;
         }
 
