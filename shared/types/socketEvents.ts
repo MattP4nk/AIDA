@@ -79,6 +79,27 @@ export interface ServerToClientEvents {
   "message:new_mail": (data: Record<string, unknown>) => void;
   "moderation:flagged": (data: { type: string; id: string; reason: string }) => void;
 
+  // ── wired 2026-09-24 (orphan audit group B) ────────────────────────────
+  // Each of these was emitted by the server with no client listener. They
+  // carried the only signal the player had for a honeypot, a rep change, a
+  // kick, a refused connection, or a failed tab operation.
+  "security:warning": (data: {
+    type?: string;
+    message: string;
+    forumName?: string;
+    severity?: string;
+  }) => void;
+  "reputation:changed": (data: {
+    factionId: string;
+    factionName: string;
+    amount: number;
+    reason?: string;
+    source?: string;
+  }) => void;
+  "force:disconnect": (data: { reason?: string }) => void;
+  "connection:refused": (data: { reason: string }) => void;
+  "terminal:error": (data: { success: false; error: string }) => void;
+
   // ── hacking ────────────────────────────────────────────────────────────
   "hack:attempt": (data: Record<string, unknown>) => void;
   "hack:detected": (data: Record<string, unknown>) => void;

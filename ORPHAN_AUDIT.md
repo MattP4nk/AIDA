@@ -29,21 +29,28 @@ Ranked by what the player loses.
 | 3 | ~~IP discovery / traceroute / range scan~~ **WRONG — these are PREDECESSORS, not missing features. Deleted 2026-09-24, see correction below.** | | |
 | 4 | **Event subscriptions — dead on BOTH ends** | `eventService.createSubscription`/`removeSubscription`/`getUserSubscriptions` + 6 typed factories unreachable; `client/src/services/api.ts` has the matching dead `subscribeToEvent`/`getEventSubscriptions`/`unsubscribeFromEvent`. `loadSubscriptionsFromDatabase` runs at startup and loads rows **nothing can write**. | 212 LOC + client |
 | 5 | ✅ **WIRED 2026-09-24 — and it was broken in TWO ways.** See below. | | |
-| 6 | **Faction standing changes are silent** | `reputation:changed` emitted, no listener. The cross-faction rivalry mechanic — hacking A helps A's rival — is invisible to the player. | wire only |
-| 7 | **Honeypot trap gives no warning** | On the `registerForumAccount` path the player sees `✓ Successfully registered` while their IP is logged and rep drops. `security:warning` is emitted and dropped. | wire only |
+| 6 | ✅ **WIRED** — `reputation:changed` | `reputation:changed` emitted, no listener. The cross-faction rivalry mechanic — hacking A helps A's rival — is invisible to the player. | wire only |
+| 7 | ✅ **WIRED** — `security:warning` | On the `registerForumAccount` path the player sees `✓ Successfully registered` while their IP is logged and rep drops. `security:warning` is emitted and dropped. | wire only |
 | 8 | **Territory changing hands is invisible** | `faction:contest_started` / `faction:contest_resolved` are global emits with no listener. The payoff of the whole contest system produces no on-screen event. | wire only |
 | 9 | **Notifications do not survive a reload** | The `Notification` model is fully specced (5 indexes, read/dismiss/expiry) and **never written or read**. Delivery is socket-only, client store in-memory. | 32 schema lines |
 | 10 | **Hack cooldown** ✅ WIRED 2026-09-24 — skill now reduces it. **Trace duration ❌ NOT wired: the function is INVERTED** (see below). | | |
 | 11 | ✅ **WIRED 2026-09-24** — enforced in `acceptMission`, before the mutate so a refusal does not consume the offer. | | |
-| 12 | **Failed terminal tab operations do nothing** | `terminal:error` emitted from 5 sites; client uses `socket.once(...)` with no error listener and no timeout, so the click appears ignored. | wire only |
-| 13 | **Kicked/banned players are never told why** | `force:disconnect` carries the admin's reason; the client's `disconnect` handler returns early without surfacing it. Same for `connection:refused` at the socket cap → frozen UI. | wire only |
+| 12 | ✅ **WIRED** — `terminal:error` | `terminal:error` emitted from 5 sites; client uses `socket.once(...)` with no error listener and no timeout, so the click appears ignored. | wire only |
+| 13 | ✅ **WIRED** — `force:disconnect` + `connection:refused` | `force:disconnect` carries the admin's reason; the client's `disconnect` handler returns early without surfacing it. Same for `connection:refused` at the socket cap → frozen UI. | wire only |
 | 14 | **No live forum updates reach anyone** | `forum:new-post`/`forum:new-reply` are emitted to room `forum:<id>`, **which nothing ever joins**. | join the room |
 | 15 | **NPCs post but never answer** | `forumService.handleNPCReply` — zero callers. (Filed Phase 8.) | 162 LOC |
 | 16 | **Passive resource drain never happens** | `registerConnection`/`registerBackdoor` zero callers; `registerTerminal` is called only from `initializeSession`, which itself has zero callers. Nothing feeds `addPassiveConsumer`. | 6 methods |
 | 17 | **Drafts can be approved but never rejected** | `contentDraftService.rejectDraft` — zero callers. | 1 method |
-| 18 | **Moderated content vanishes unexplained** | `moderation:flagged` carries the reason; nothing listens. (From my own Phase 6 work.) | wire only |
+| 18 | ✅ **WIRED** — `moderation:flagged` | `moderation:flagged` carries the reason; nothing listens. (From my own Phase 6 work.) | wire only |
 | 19 | **Attacker never learns they tripped an alarm** | `server:alert` attacker branch has no client-side equivalent, so a trace can begin with no warning. | wire only |
 | 20 | **A plot lead is composed and discarded** | `story:fragment-intel` tells you who holds the fragment you need. No listener. | wire only |
+
+### A-wired so far (2026-09-24)
+
+Faction wars (declare + stakes), progress backup (which needed two latent bug fixes before it
+could restore at all), skill-scaled hack cooldown, the active-mission cap, and six group-B socket
+listeners. **Two items were correctly REFUSED** rather than wired — the IP cluster (superseded by
+topology) and `getTraceDuration` (inverted) — which is a third of what was attempted.
 
 ### B. UNIFY, don't delete — 15 tunable knobs with live hardcoded twins
 

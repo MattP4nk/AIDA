@@ -871,6 +871,101 @@ class SocketService {
       }
     });
 
+    // ── Orphan audit 2026-09-24: six server emits nothing listened for ──
+    //
+    // Each of these was already being sent by the server, carrying exactly the
+    // information the player needed, and thrown away on arrival. They are
+    // grouped here because they share one cause: the event was added on the
+    // server and the client half was never written.
+
+    /**
+     * Honeypot tripped. The `forum access` path prints a warning in its own
+     * command output, but `registerForumAccount` prints only "Successfully
+     * registered" — while the player's IP is logged and faction rep drops.
+     * This was the only signal, and it was dropped.
+     */
+    this.on("security:warning", async (data: any) => {
+      const ns = await getNotifService();
+      ns?.add({
+        type: "game",
+        title: "⚠ SECURITY ALERT",
+        message: data.message || "Your activity has been logged.",
+        priority: data.severity === "critical" ? "critical" : "high",
+        data,
+      });
+    });
+
+    /**
+     * Faction standing moved. Every rep change flows through here, including
+     * the cross-faction rivalry spillover — hacking one faction quietly helps
+     * its rival — which was entirely invisible before.
+     */
+    this.on("reputation:changed", async (data: any) => {
+      const ns = await getNotifService();
+      const amount = Number(data.amount) || 0;
+      if (amount === 0) return;
+      ns?.add({
+        type: "game",
+        title: `${data.factionName ?? "Faction"} ${amount > 0 ? "+" : ""}${amount} rep`,
+        message: data.reason || "Your standing has changed.",
+        priority: "normal",
+        data,
+      });
+    });
+
+    /**
+     * Content was auto-moderated. The author's own command still returns
+     * success, so without this their post simply vanishes on next refresh with
+     * no explanation — and the reason is right here in the payload.
+     */
+    this.on("moderation:flagged", async (data: any) => {
+      const ns = await getNotifService();
+      ns?.add({
+        type: "system",
+        title: "Content hidden by moderation",
+        message: data.reason || "Your content was flagged by content policy.",
+        priority: "high",
+        data,
+      });
+    });
+
+    /**
+     * Kicked or banned. The server sends the admin's reason and then closes
+     * the socket; the `disconnect` handler returns early on
+     * "io server disconnect" without surfacing anything, so the player was
+     * left with a frozen interface and no explanation.
+     */
+    this.on("force:disconnect", (data: any) => {
+      socketError.set(
+        data?.reason
+          ? `Disconnected by an administrator: ${data.reason}`
+          : "You have been disconnected by an administrator.",
+      );
+    });
+
+    /** Socket cap reached — same silent-freeze path as force:disconnect. */
+    this.on("connection:refused", (data: any) => {
+      socketError.set(
+        data?.reason || "Connection refused — too many open sessions.",
+      );
+    });
+
+    /**
+     * A terminal tab operation failed. `terminalTabs.ts` waits with
+     * `socket.once("terminal:created"|...)` and no error listener or timeout,
+     * so a failed create/close/switch left the click looking ignored forever.
+     */
+    this.on("terminal:error", async (data: any) => {
+      const ns = await getNotifService();
+      ns?.add({
+        type: "system",
+        title: "Terminal operation failed",
+        message: data?.error || "The terminal action could not be completed.",
+        priority: "high",
+        data,
+      });
+    });
+
     this.on("notification", async (data: any) => {
       // Generic server notification (used by bounty system, IDS, etc.)
       const ns = await getNotifService();
