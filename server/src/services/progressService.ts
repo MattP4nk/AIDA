@@ -10,6 +10,12 @@ import { safeExecute } from "../utils/safeExecute";
 @injectable()
 class ProgressService {
   private saveQueue: Map<string, SaveTrigger>;
+  private backupInterval: ReturnType<typeof setInterval> | null = null;
+  private isBackingUp = false;
+  /** Full snapshots are heavy — hourly, not on the 180s auto-save tick. */
+  private readonly BACKUP_INTERVAL_MS = 60 * 60 * 1000;
+  /** Matches `deleteOldBackups`' own default. */
+  private readonly BACKUP_KEEP_COUNT = 5;
   private saveInterval: NodeJS.Timeout | null;
   private isSaving: boolean;
   private savesCompleted: number;
@@ -41,16 +47,69 @@ class ProgressService {
       this.processAutoSave();
     }, intervalMs);
 
+    // ORPHAN AUDIT 2026-09-24: the backup subsystem is now actually reachable.
+    //
+    // `createBackup`, `createBackupForAll`, `deleteOldBackups` and
+    // `restoreBackup` all existed with ZERO callers, and `ProgressBackup` had
+    // 0 rows — so there was no recovery path for player progress at all.
+    // Verified first that nothing else provided one; unlike the IP cluster and
+    // `getTraceDuration`, there is no competing implementation to contradict.
+    //
+    // Hourly rather than on the 180s auto-save tick: a backup is a full
+    // snapshot of user + progress + servers per online player, which is far
+    // too heavy to run every three minutes, and the point is recovery from
+    // corruption rather than fine-grained undo.
+    this.backupInterval = setInterval(() => {
+      void this.runScheduledBackup();
+    }, this.BACKUP_INTERVAL_MS);
+    this.backupInterval.unref?.();
+
     this.logger.info(
-      { intervalSeconds: intervalMs / 1000 },
+      { intervalSeconds: intervalMs / 1000, backupIntervalMin: this.BACKUP_INTERVAL_MS / 60000 },
       "Progress auto-save started",
     );
+  }
+
+  /**
+   * Snapshot every online player, then prune their history.
+   *
+   * Pruning is part of the SAME job deliberately: `deleteOldBackups` was dead
+   * alongside `createBackup`, so wiring creation without it would grow the
+   * table without bound — trading a missing feature for a disk leak.
+   */
+  private async runScheduledBackup(): Promise<void> {
+    if (this.isBackingUp) {
+      this.logger.debug("Backup tick skipped — previous run still in progress");
+      return;
+    }
+    this.isBackingUp = true;
+    try {
+      const count = await this.createBackupForAll();
+      if (count > 0) {
+        const online = await this.getOnlineUsers();
+        for (const userId of online) {
+          await this.deleteOldBackups(userId, this.BACKUP_KEEP_COUNT);
+        }
+      }
+      this.logger.info({ count }, "Scheduled progress backup complete");
+    } catch (err) {
+      this.logger.error({ err }, "Scheduled progress backup failed");
+    } finally {
+      this.isBackingUp = false;
+    }
   }
 
   public stop(): void {
     if (this.saveInterval) {
       clearInterval(this.saveInterval);
       this.saveInterval = null;
+    }
+    // Torn down here from the outset. Two timers were found this same day
+    // started in a constructor with a stop method nobody called; adding a
+    // third of those would have been a poor joke.
+    if (this.backupInterval) {
+      clearInterval(this.backupInterval);
+      this.backupInterval = null;
     }
 
     this.logger.info("Progress auto-save stopped");
@@ -273,19 +332,22 @@ class ProgressService {
         };
 
         // Calculate checksum for data integrity
-        const checksum = this.calculateChecksum(JSON.stringify(backupData));
+        const checksum = this.calculateChecksum(this.canonicalJson(backupData));
 
-        const backup: ProgressBackup = {
-          id: `backup_${userId}_${Date.now()}`,
-          userId,
-          data: backupData,
-          createdAt: new Date(),
-          reason,
-          checksum,
-        };
-
-        // Store backup in database
-        await db.client.progressBackup.create({
+        // Store backup in database.
+        //
+        // BUG FOUND ON WIRING (orphan audit 2026-09-24): this returned the
+        // LOCAL `backup` object above, whose `id` is a synthetic
+        // `backup_<userId>_<timestamp>` string. The row written here has no
+        // explicit id, so Prisma generates a cuid — and the two never matched.
+        // `restoreBackup(userId, created.id)` therefore looked up an id that
+        // did not exist and returned false. The backup/restore round trip
+        // could never have worked.
+        //
+        // This is exactly why wiring dead code needs a round-trip test rather
+        // than a "does it run" test: creation succeeded and persisted a row,
+        // so any check short of actually restoring would have passed.
+        const created = await db.client.progressBackup.create({
           data: {
             userId,
             data: backupData,
@@ -297,8 +359,8 @@ class ProgressService {
         // Clean up old backups to maintain retention policy
         await this.deleteOldBackups(userId, 5);
 
-        this.logger.info({ userId, reason }, "Created backup for user");
-        return backup;
+        this.logger.info({ userId, reason, backupId: created.id }, "Created backup for user");
+        return created as unknown as ProgressBackup;
       },
       context: "Create backup",
       logger: this.logger,
@@ -332,7 +394,7 @@ class ProgressService {
 
         // Verify checksum
         const currentChecksum = this.calculateChecksum(
-          JSON.stringify(backup.data),
+          this.canonicalJson(backup.data),
         );
         if (backup.checksum && currentChecksum !== backup.checksum) {
           this.logger.error(
@@ -430,6 +492,43 @@ class ProgressService {
       logger: this.logger,
       fallback: 0,
     })() as number;
+  }
+
+  /**
+   * Stable JSON for checksumming.
+   *
+   * SECOND BUG FOUND ON WIRING: the checksum was taken over
+   * `JSON.stringify(backupData)` at create time and over
+   * `JSON.stringify(backup.data)` at restore time — but the column is
+   * Postgres `jsonb`, which does NOT preserve key order. The two strings
+   * therefore differed for the same data, the integrity check failed, and
+   * `restoreBackup` refused every restore. Combined with the id bug, the
+   * backup system could never have restored anything.
+   *
+   * Sorting keys recursively makes the serialisation canonical, so the hash
+   * is a property of the DATA rather than of how the driver happened to
+   * order it.
+   */
+  private canonicalJson(value: unknown): string {
+    const sortDeep = (v: unknown): unknown => {
+      if (Array.isArray(v)) return v.map(sortDeep);
+      if (v && typeof v === "object") {
+        return Object.keys(v as Record<string, unknown>)
+          .sort()
+          .reduce<Record<string, unknown>>((acc, k) => {
+            acc[k] = sortDeep((v as Record<string, unknown>)[k]);
+            return acc;
+          }, {});
+      }
+      return v;
+    };
+    // Normalise to pure JSON FIRST. Without this, `sortDeep` walks a live JS
+    // object: a `Date` has no enumerable own keys, so it collapsed to `{}`,
+    // while the stored copy had already become an ISO string — guaranteeing a
+    // mismatch. Round-tripping through JSON.parse/stringify converts Dates to
+    // the same strings Postgres returns and drops `undefined`, so both sides
+    // hash the same shape.
+    return JSON.stringify(sortDeep(JSON.parse(JSON.stringify(value))));
   }
 
   private calculateChecksum(data: string): string {

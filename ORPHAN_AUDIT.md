@@ -28,7 +28,7 @@ Ranked by what the player loses.
 | 2 | **Being hacked is never announced** | `hack:attempt`/`hack:detected` emit on the internal bus; nothing bridges to a socket. Client UI is complete and unreachable. (Already filed Phase 8.) | bridge only |
 | 3 | ~~IP discovery / traceroute / range scan~~ **WRONG — these are PREDECESSORS, not missing features. Deleted 2026-09-24, see correction below.** | | |
 | 4 | **Event subscriptions — dead on BOTH ends** | `eventService.createSubscription`/`removeSubscription`/`getUserSubscriptions` + 6 typed factories unreachable; `client/src/services/api.ts` has the matching dead `subscribeToEvent`/`getEventSubscriptions`/`unsubscribeFromEvent`. `loadSubscriptionsFromDatabase` runs at startup and loads rows **nothing can write**. | 212 LOC + client |
-| 5 | **Progress backup / restore** | Entire subsystem dead: `createBackup`, `restoreBackup`, `getBackups`, `deleteOldBackups`, `createBackupForAll`. `ProgressBackup` table: 0 rows. There is no recovery path for player progress. | 168 LOC |
+| 5 | ✅ **WIRED 2026-09-24 — and it was broken in TWO ways.** See below. | | |
 | 6 | **Faction standing changes are silent** | `reputation:changed` emitted, no listener. The cross-faction rivalry mechanic — hacking A helps A's rival — is invisible to the player. | wire only |
 | 7 | **Honeypot trap gives no warning** | On the `registerForumAccount` path the player sees `✓ Successfully registered` while their IP is logged and rep drops. `security:warning` is emitted and dropped. | wire only |
 | 8 | **Territory changing hands is invisible** | `faction:contest_started` / `faction:contest_resolved` are global emits with no listener. The payoff of the whole contest system produces no on-screen event. | wire only |
@@ -77,6 +77,34 @@ that restates the formula, while the named config is unreferenced 1,800 lines aw
 verification suite drives commands through that socket path.
 
 ---
+
+## Progress backup — wired, and it could never have worked
+
+This one passed the lens: nothing else provides backup or restore, so there was no live
+implementation to contradict. A genuine absence — and wiring it surfaced **two latent bugs that
+no "does it run" check would have caught**, because creation succeeded the whole time.
+
+1. **`createBackup` returned an id that did not exist.** It built a local object with a synthetic
+   `backup_<userId>_<timestamp>` id, wrote the row *without* that id so Prisma generated a cuid,
+   and returned the local object. `restoreBackup(userId, created.id)` looked up an id that was
+   never persisted.
+2. **The checksum could never match.** It was hashed from a JS object at write and from Postgres
+   `jsonb` at read — and `jsonb` does not preserve key order. Worse, my first fix (sorting keys)
+   was itself wrong: `sortDeep` treats a `Date` as an object with no enumerable keys and collapses
+   it to `{}`, while the stored copy is an ISO string. Canonicalising now normalises through
+   `JSON.parse(JSON.stringify(...))` first, so both sides hash the same shape.
+
+Either bug alone made restore impossible. **A backup system that cannot restore is worse than
+none, because it looks like insurance** — which is exactly why the harness drives a real round
+trip: snapshot, corrupt, restore, assert recovery.
+
+Now scheduled hourly (a full snapshot per online player is far too heavy for the 180s auto-save
+tick), pruning in the same job so it cannot trade a missing feature for a disk leak,
+reentrancy-guarded, and cleared in `stop()` — the last one because two timers were found the
+same day with a stop method nobody called.
+
+Also learned from the harness: `createBackup` **already self-prunes to 5 on every call**, so the
+cap held even before the scheduled job existed. My first precondition asserted the opposite.
 
 ## Correction: `getTraceDuration` is not merely unwired — it is INVERTED
 
