@@ -2,25 +2,40 @@ import { db } from "../database/client";
 import type {
   IPRange,
   IPOwner,
-  DiscoveryResult,
-  TraceRouteResult,
-  TraceRouteHop,
 } from "../types/game";
 import { IPZone } from "../types/game";
 import { injectable, inject } from "tsyringe";
 import { LOGGER } from "../di/tokens";
 import type { Logger } from "pino";
 
+/*
+ * ORPHAN AUDIT 2026-09-24 — ten superseded methods removed from this service.
+ *
+ * `discoverIP`, `traceRoute` and `scanIPRange` looked like a missing feature
+ * (IP discovery and traceroute, zero callers) and were ranked high on that
+ * basis. They are not missing — they are PREDECESSORS. Live equivalents exist
+ * and are strictly better:
+ *
+ *   traceRoute   -> `networkCommands.executeTraceroute`, which walks the real
+ *                   topology via `topoService.findPath` and masks undiscovered
+ *                   hops. The version here generated RANDOM hops with fake
+ *                   latencies and a 20% "hidden hop" roll, unrelated to the
+ *                   actual world.
+ *   scanIPRange  -> `handleSubnetSweep` + `topoService.discoverNeighbors`
+ *   discoverIP   -> the same topology-based discovery path (fixed in P5-NEW)
+ *
+ * Wiring them up would have REPLACED real topology with dice. The live surface
+ * of this service is IP *generation* and allocation bookkeeping, which is what
+ * it is actually for.
+ */
 @injectable()
 class IPService {
   private allocatedIPs: Set<string>;
   private ipRanges: Map<IPZone, IPRange>;
-  private initialized: boolean;
 
   constructor(@inject(LOGGER) private logger: Logger) {
     this.allocatedIPs = new Set();
     this.ipRanges = new Map();
-    this.initialized = false;
     this.initializeIPRanges();
   }
 
@@ -90,8 +105,6 @@ class IPService {
       servers.forEach((server) => {
         this.allocatedIPs.add(server.ipAddress);
       });
-
-      this.initialized = true;
       this.logger.info(
         { count: this.allocatedIPs.size },
         "Loaded allocated IPs",
@@ -243,15 +256,6 @@ class IPService {
     return octets.join(".");
   }
 
-  public async isIPAvailable(ip: string): Promise<boolean> {
-    // Check in-memory cache first (fast)
-    if (this.allocatedIPs.has(ip)) {
-      return false;
-    }
-
-    return this.isIPAvailableInDB(ip);
-  }
-
   /**
    * DB-only availability check — used by generateUniqueIP after in-memory reservation.
    */
@@ -318,45 +322,6 @@ class IPService {
       return ip;
     } catch (error) {
       this.logger.error({ err: error, userId }, "Error assigning IP to user");
-      throw error;
-    }
-  }
-
-  public async assignIPToServer(
-    serverId: string,
-    zone: IPZone = IPZone.CORPORATE,
-  ): Promise<string> {
-    try {
-      // Check if server already has an IP
-      const server = await db.client.gameServer.findUnique({
-        where: { id: serverId },
-        select: { ipAddress: true },
-      });
-
-      if (server?.ipAddress) {
-        this.logger.warn(
-          { serverId, ip: server.ipAddress },
-          "Server already has IP",
-        );
-        return server.ipAddress;
-      }
-
-      // Generate new unique IP
-      const ip = await this.generateUniqueIP(zone);
-
-      // Assign to server in database
-      await db.client.gameServer.update({
-        where: { id: serverId },
-        data: { ipAddress: ip },
-      });
-
-      this.logger.info({ ip, serverId }, "Assigned IP to server");
-      return ip;
-    } catch (error) {
-      this.logger.error(
-        { err: error, serverId },
-        "Error assigning IP to server",
-      );
       throw error;
     }
   }
@@ -430,175 +395,7 @@ class IPService {
     }
   }
 
-  public async discoverIP(
-    fromUserId: string,
-    targetIP: string,
-  ): Promise<DiscoveryResult> {
-    try {
-      // Validate IP format
-      if (!this.validateIPFormat(targetIP)) {
-        return {
-          success: false,
-          discovered: false,
-          message: "Invalid IP address format",
-        };
-      }
-
-      // Get attacker's skills
-      const user = await db.client.user.findUnique({
-        where: { id: fromUserId },
-        include: { progress: true },
-      });
-
-      if (!user || !user.progress) {
-        return {
-          success: false,
-          discovered: false,
-          message: "User not found",
-        };
-      }
-
-      // Try to find the target
-      const owner = await this.getIPOwner(targetIP);
-
-      if (!owner) {
-        return {
-          success: true,
-          discovered: false,
-          message: "No active system found at this IP address",
-        };
-      }
-
-      // Calculate discovery chance based on networking skill
-      // Base 50% + (networking skill * 0.5%) = max 100%
-      const baseChance = 50;
-      const skillBonus = user.progress.networking * 0.5;
-      const discoveryChance = Math.min(baseChance + skillBonus, 95);
-
-      const roll = Math.random() * 100;
-
-      if (roll < discoveryChance) {
-        // Full discovery
-        return {
-          success: true,
-          discovered: true,
-          target: owner,
-          message: `Discovered ${owner.type}: ${owner.name} at ${targetIP}`,
-          partialInfo: false,
-        };
-      } else if (roll < discoveryChance + 20) {
-        // Partial discovery (only type and zone)
-        return {
-          success: true,
-          discovered: true,
-          target: {
-            ...owner,
-            name: "???",
-            id: "unknown",
-          },
-          message: `Detected ${owner.type} at ${targetIP} but couldn't identify it`,
-          partialInfo: true,
-        };
-      } else {
-        // Failed discovery
-        return {
-          success: true,
-          discovered: false,
-          message: "Unable to identify system at this address",
-        };
-      }
-    } catch (error) {
-      this.logger.error({ err: error, targetIP }, "Error discovering IP");
-      return {
-        success: false,
-        discovered: false,
-        message: "Discovery failed due to an error",
-      };
-    }
-  }
-
   // ==================== TRACEROUTE ====================
-
-  public async traceRoute(
-    fromIP: string,
-    toIP: string,
-  ): Promise<TraceRouteResult> {
-    try {
-      // Validate IPs
-      if (!this.validateIPFormat(fromIP) || !this.validateIPFormat(toIP)) {
-        return {
-          success: false,
-          route: [],
-          totalHops: 0,
-          reachable: false,
-        };
-      }
-
-      // Check if target exists
-      const target = await this.getIPOwner(toIP);
-      const reachable = target !== null && target.isOnline;
-
-      // Generate route hops
-      const route: TraceRouteHop[] = [];
-      const minHops = 3;
-      const maxHops = 8;
-      const numHops =
-        Math.floor(Math.random() * (maxHops - minHops + 1)) + minHops;
-
-      // Add starting hop (from IP)
-      route.push({
-        hopNumber: 1,
-        ip: fromIP,
-        name: "origin",
-        latency: 1,
-        hidden: false,
-      });
-
-      // Add intermediate hops
-      for (let i = 2; i < numHops; i++) {
-        const isHidden = Math.random() < 0.2; // 20% chance of hidden hop
-        const latency = Math.floor(Math.random() * 50) + 10 + i * 5;
-
-        route.push({
-          hopNumber: i,
-          ip: isHidden
-            ? "?.?.?.?"
-            : this.generateRandomIPInRange(
-                this.ipRanges.get(IPZone.CORPORATE)!,
-              ),
-          name: isHidden ? "hidden" : `router-${i}`,
-          latency,
-          hidden: isHidden,
-        });
-      }
-
-      // Add final hop (destination)
-      if (reachable) {
-        route.push({
-          hopNumber: numHops,
-          ip: toIP,
-          name: target!.name,
-          latency: Math.floor(Math.random() * 50) + 100,
-          hidden: false,
-        });
-      }
-
-      return {
-        success: true,
-        route,
-        totalHops: route.length,
-        reachable,
-      };
-    } catch (error) {
-      this.logger.error({ err: error, fromIP, toIP }, "Error tracing route");
-      return {
-        success: false,
-        route: [],
-        totalHops: 0,
-        reachable: false,
-      };
-    }
-  }
 
   // ==================== IP VALIDATION ====================
 
@@ -648,141 +445,13 @@ class IPService {
 
   // ==================== NETWORK SCANNING ====================
 
-  public async scanIPRange(
-    fromUserId: string,
-    rangeStart: string,
-    rangeEnd: string,
-  ): Promise<IPOwner[]> {
-    try {
-      // Get user's networking skill
-      const user = await db.client.user.findUnique({
-        where: { id: fromUserId },
-        include: { progress: true },
-      });
-
-      if (!user || !user.progress) {
-        return [];
-      }
-
-      // Validate IP range
-      if (
-        !this.validateIPFormat(rangeStart) ||
-        !this.validateIPFormat(rangeEnd)
-      ) {
-        return [];
-      }
-
-      const startNum = this.ipToNumber(rangeStart);
-      const endNum = this.ipToNumber(rangeEnd);
-
-      // Limit scan range to prevent abuse
-      const maxRange = 256;
-      const rangeSize = endNum - startNum + 1;
-
-      if (rangeSize > maxRange) {
-        this.logger.warn({ rangeSize, maxRange }, "Scan range too large");
-        return [];
-      }
-
-      // Calculate scan success rate based on networking skill
-      const baseSuccessRate = 40;
-      const skillBonus = user.progress.networking * 0.5;
-      const successRate = Math.min(baseSuccessRate + skillBonus, 90);
-
-      const discovered: IPOwner[] = [];
-
-      // Scan each IP in range
-      for (let i = startNum; i <= endNum && i <= startNum + maxRange - 1; i++) {
-        const ip = this.numberToIP(i);
-
-        // Random chance to discover each IP
-        if (Math.random() * 100 < successRate) {
-          const owner = await this.getIPOwner(ip);
-          if (owner && owner.isOnline) {
-            discovered.push(owner);
-          }
-        }
-      }
-
-      this.logger.info(
-        { rangeStart, rangeEnd, found: discovered.length },
-        "IP range scan complete",
-      );
-      return discovered;
-    } catch (error) {
-      this.logger.error({ err: error }, "Error scanning IP range");
-      return [];
-    }
-  }
-
-  private numberToIP(num: number): string {
-    const octet1 = (num >>> 24) & 0xff;
-    const octet2 = (num >>> 16) & 0xff;
-    const octet3 = (num >>> 8) & 0xff;
-    const octet4 = num & 0xff;
-
-    return `${octet1}.${octet2}.${octet3}.${octet4}`;
-  }
-
   // ==================== UTILITY METHODS ====================
-
-  public getIPRanges(): Map<IPZone, IPRange> {
-    return this.ipRanges;
-  }
 
   public getAllocatedIPsCount(): number {
     return this.allocatedIPs.size;
   }
 
-  public isInitialized(): boolean {
-    return this.initialized;
-  }
-
-  public getStats() {
-    return {
-      allocatedIPs: this.allocatedIPs.size,
-      zones: Array.from(this.ipRanges.keys()),
-      initialized: this.initialized,
-    };
-  }
-
   // ==================== MAINTENANCE ====================
-
-  public async refreshAllocatedIPs(): Promise<void> {
-    this.logger.info("Refreshing allocated IPs");
-    this.allocatedIPs.clear();
-    await this.loadAllocatedIPs();
-  }
-
-  public async cleanupOrphanedIPs(): Promise<number> {
-    this.logger.info("Checking for orphaned IPs");
-
-    try {
-      let cleaned = 0;
-
-      // Check for users without IPs
-      const usersWithoutIP = await db.client.user.findMany({
-        where: {
-          homeIp: "",
-        },
-        select: { id: true },
-      });
-
-      for (const user of usersWithoutIP) {
-        await this.assignIPToUser(user.id);
-        cleaned++;
-      }
-
-      this.logger.info(
-        { count: cleaned },
-        "Cleaned up orphaned IP allocations",
-      );
-      return cleaned;
-    } catch (error) {
-      this.logger.error({ err: error }, "Error cleaning up orphaned IPs");
-      return 0;
-    }
-  }
 }
 
 export default IPService;

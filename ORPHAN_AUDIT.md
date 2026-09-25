@@ -26,7 +26,7 @@ Ranked by what the player loses.
 |---|---|---|---|
 | 1 | ~~**Faction wars can never start**~~ **PARTLY WIRED 2026-09-24** — see below | `warfareService.declareWar` has **zero callers**. `startWarMonitor` runs and the `war` command reads war rows — but nothing can ever create one. `surrender`, `updateWarScore`, `getReputationMultiplier` dead alongside it. `FactionWar` table: 0 rows. | 122 LOC |
 | 2 | **Being hacked is never announced** | `hack:attempt`/`hack:detected` emit on the internal bus; nothing bridges to a socket. Client UI is complete and unreachable. (Already filed Phase 8.) | bridge only |
-| 3 | **IP discovery / traceroute / range scan** | `ipService.discoverIP`, `traceRoute`, `scanIPRange`, `assignIPToServer`, `cleanupOrphanedIPs` — 9 of 18 methods, zero callers. Only IP *generation* is wired. traceroute is a genre-defining mechanic sitting inert. | 318 LOC |
+| 3 | ~~IP discovery / traceroute / range scan~~ **WRONG — these are PREDECESSORS, not missing features. Deleted 2026-09-24, see correction below.** | | |
 | 4 | **Event subscriptions — dead on BOTH ends** | `eventService.createSubscription`/`removeSubscription`/`getUserSubscriptions` + 6 typed factories unreachable; `client/src/services/api.ts` has the matching dead `subscribeToEvent`/`getEventSubscriptions`/`unsubscribeFromEvent`. `loadSubscriptionsFromDatabase` runs at startup and loads rows **nothing can write**. | 212 LOC + client |
 | 5 | **Progress backup / restore** | Entire subsystem dead: `createBackup`, `restoreBackup`, `getBackups`, `deleteOldBackups`, `createBackupForAll`. `ProgressBackup` table: 0 rows. There is no recovery path for player progress. | 168 LOC |
 | 6 | **Faction standing changes are silent** | `reputation:changed` emitted, no listener. The cross-faction rivalry mechanic — hacking A helps A's rival — is invisible to the player. | wire only |
@@ -77,6 +77,26 @@ that restates the formula, while the named config is unreferenced 1,800 lines aw
 verification suite drives commands through that socket path.
 
 ---
+
+## Correction: the IP cluster was superseded, not missing
+
+I ranked `ipService`'s dead methods #3 — "traceroute is a genre-defining mechanic sitting
+inert". **That was wrong, and it is the audit's own failure mode:** counting zero callers
+correctly, then not checking whether a *better* implementation had replaced them.
+
+- `traceRoute` generated **random hops** with fake latencies and a 20% "hidden hop" roll. The
+  live `networkCommands.executeTraceroute` walks the **real topology** via
+  `topoService.findPath` and masks undiscovered hops. (So PLAN's "traceroute hop-masking has no
+  implementation" is also wrong — it is implemented, just not here.)
+- `scanIPRange` / `discoverIP` predate the topology system. The live `scan` uses
+  `handleSubnetSweep` + `topoService.discoverNeighbors` — the path P5-NEW fixed.
+
+**Wiring them would have replaced real topology with dice.** Ten methods removed (789 → 458
+lines); the service keeps IP *generation* and allocation bookkeeping, which is what it is for.
+
+The lesson generalises to the rest of this document: "zero callers" answers *is it reachable*,
+not *is it wanted*. The right question — the maintainer's — is whether the capability exists
+elsewhere, and in what quality.
 
 ## Fixed immediately during the audit
 
