@@ -3,7 +3,7 @@ import { Server as SocketIOServer } from "socket.io";
 import { Logger } from "pino";
 import { db } from "../database/client";
 import { injectable, inject } from "tsyringe";
-import { CACHE_SERVICE, CONTENT_QUEUE_SERVICE, FACTION_KNOWLEDGE_SERVICE, LOGGER, MISSION_INTEGRATION_SERVICE, PLAYER_PROGRESS_REPOSITORY, SOCKET_IO } from "../di/tokens";
+import { BACKDOOR_SERVICE, CACHE_SERVICE, CONTENT_QUEUE_SERVICE, FACTION_KNOWLEDGE_SERVICE, LOGGER, MISSION_INTEGRATION_SERVICE, PLAYER_PROGRESS_REPOSITORY, SOCKET_IO } from "../di/tokens";
 import type PlayerProgressRepository from "../repositories/playerProgressRepository";
 import type { CacheService } from "./cacheService";
 import type MissionIntegrationService from "./missionIntegration";
@@ -409,6 +409,18 @@ class ServerService {
 
         if (!server) {
           throw new Error("Server not found");
+        }
+
+        // Release passive drains BEFORE the delete: Backdoor cascades off
+        // GameServer, so after this point nothing can say whose resources the
+        // backdoors on this server were costing.
+        try {
+          const { getService } = await import("../di/container");
+          const backdoors =
+            getService<import("./backdoorService").default>(BACKDOOR_SERVICE);
+          await backdoors.releaseDrainsForServers([serverId]);
+        } catch (err) {
+          this.logger.warn({ err, serverId }, "Could not release backdoor drains");
         }
 
         // Delete all connections first

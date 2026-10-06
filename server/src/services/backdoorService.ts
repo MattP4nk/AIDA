@@ -583,6 +583,42 @@ export class BackdoorService extends EventEmitter {
   }
 
   /**
+   * Release the drains for every backdoor on these servers.
+   *
+   * CALL THIS BEFORE DELETING THE SERVERS. `Backdoor.server` is
+   * `onDelete: Cascade`, so the rows vanish with the server and nothing can
+   * afterwards say who was paying for them — the passive consumer is then
+   * unreachable by every release path, including `removeBackdoor`, which
+   * reports "No backdoor installed on this server" because the row is gone.
+   *
+   * The player-visible symptom is a permanent, unexplained resource cost after
+   * a darknet dungeon regenerates: they hacked a box, installed a backdoor,
+   * and the whole network was replaced on its TTL.
+   */
+  async releaseDrainsForServers(serverIds: string[]): Promise<void> {
+    if (serverIds.length === 0) return;
+    await safeExecute({
+      fn: async () => {
+        const doomed = await db.client.backdoor.findMany({
+          where: { serverId: { in: serverIds } },
+          select: { installerId: true, serverId: true },
+        });
+        for (const b of doomed) {
+          await this.releaseBackdoorDrain(b.installerId, b.serverId);
+        }
+        if (doomed.length > 0) {
+          this.logger.info(
+            { servers: serverIds.length, drains: doomed.length },
+            "Released backdoor drains ahead of server deletion",
+          );
+        }
+      },
+      context: "Release backdoor drains for deleted servers",
+      logger: this.logger,
+    })();
+  }
+
+  /**
    * Map a hack method string to a backdoor type.
    */
   private resolveBackdoorType(method: string): string {

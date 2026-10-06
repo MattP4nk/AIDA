@@ -6,7 +6,7 @@ import { resolveNpcOwnerId } from "../../../prisma/npcOwnership";
 
 import type { ReferenceValidationService } from "../../services/referenceValidationService";
 import { normalizeAccessMethod, accessMethodList, DEFAULT_ACCESS_METHOD } from "../../utils/accessMethod";
-import { REFERENCE_VALIDATION_SERVICE } from "../../di/tokens";
+import { BACKDOOR_SERVICE, REFERENCE_VALIDATION_SERVICE } from "../../di/tokens";
 const router = Router();
 
 // GET / — List servers with filtering and pagination
@@ -225,6 +225,20 @@ router.delete("/:id", asyncHandler(async (req: any, res: any) => {
     where: { id: req.params.id },
   });
   if (!existing) throw new NotFoundError("Server not found");
+
+  // Release passive drains BEFORE the transaction: Backdoor cascades off
+  // GameServer, so once the row is gone nothing can say whose resources the
+  // backdoors on this server were costing, and the drain is unreleasable.
+  // Outside the transaction deliberately — it mutates in-memory state, which a
+  // rollback would not undo, and a failure here must not block the delete.
+  try {
+    const { getService } = await import("../../di/container");
+    const backdoors =
+      getService<import("../../services/backdoorService").default>(BACKDOOR_SERVICE);
+    await backdoors.releaseDrainsForServers([req.params.id]);
+  } catch {
+    // releaseDrainsForServers already logs; never block an admin delete on it.
+  }
 
   await prisma.$transaction(async (tx) => {
     await tx.fileSystemNode.deleteMany({ where: { serverId: req.params.id } });

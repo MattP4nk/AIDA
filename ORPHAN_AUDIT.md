@@ -1313,3 +1313,97 @@ flips `isActive`/`requiresProxy`; the notification ack is correct for an empty r
 fires the callback immediately with `[]`, so no timer is held per offline notification), for a
 partial ack, and against double-marking; and there is no ack-id collision between the broadcast
 path and the replay path's socket-level acks.
+
+---
+
+## The four open items, closed (2026-10-06)
+
+### 1. A refused authentication is now retried
+
+It was terminal. `socket.emit("authenticated")` ran once per `connect`; on failure the client set
+`socketError` and stopped — but the socket was still CONNECTED, so neither `handleReconnect`
+(driven by `disconnect`/`connect_error`) nor another `connect` ever fired. A healthy-looking
+socket in no rooms, with no state and no notification replay, recoverable only by a manual reload.
+
+`authenticateSocket(attempt)` now retries at 2s / 5s / 11s — stepping past the 10s limiter window
+rather than hammering it — and sets `userId` from the ack itself. That last part matters: the
+App.svelte bootstrap has its own one-shot attempt and a "degraded, not fatal" catch, so if it
+loses and this path wins, nothing else would set the id hack alerts are targeted by.
+
+**The sibling path that nearly got away.** `cancelAuthRetry` is called from FOUR places, not just
+the `disconnect` handler — because `connect()` and `disconnect()` both call `removeAllListeners()`
+*before* `socket.disconnect()`, so that handler does not run on either of them. A timer surviving
+`connect()` would fire against the NEW socket and run a second retry chain alongside the one
+`connect` had just started.
+
+### 2. The limiter sweep no longer hands back budgets
+
+Two defects, one cause. `lastUsed` was written only by `limitersFor`, which runs once per
+CONNECTION — so the sweep's own safety argument ("an entry untouched for longer than the window
+has an empty sliding window by definition") was false for any actively-playing user. And the
+socket CAPTURED the limiter closures, which keep working after their map entry is swept, so a
+second tab built a fresh independent budget. Together: every published limit silently became
+per-tab for tabs opened more than 60s apart — exactly the multiplication S9 exists to prevent,
+reintroduced through its own memory sweep.
+
+Fixed by resolving per event — `limitersFor(userId)[kind]()` — which makes the map the single
+source of the budget *and* stamps `lastUsed` by use.
+
+### 3. Cascade-deleted servers release their drains first
+
+`Backdoor.server` is `onDelete: Cascade` and three paths delete servers
+(`serverService`, `darknetDungeonService`, `adminApi/servers`). After the delete there is no row
+left to say whose resources the backdoor was costing, so the consumer became unreachable by every
+release path — `removeBackdoor` truthfully answers "No backdoor installed on this server" while
+the drain keeps charging. The player-visible version: hack a dungeon box, install a backdoor, and
+pay for it forever once the dungeon hits its TTL and regenerates.
+
+`releaseDrainsForServers(serverIds)` is called before the delete at all three sites. The harness
+proves the ORDERING rather than just the call: it releases, asserts the drain is gone, then
+re-registers, deletes the server, and asserts that calling it afterwards **cannot** free anything.
+
+### 4. registerForumAccount enforces the checks it was missing
+
+`forum register <forumId> <handle>` takes a raw id from the player and enforced only existence.
+Now also:
+- **Discovery.** You must have found the forum. `accessForum` auto-discovers rather than refusing,
+  so the legitimate route is unchanged — access it, then register. The error says so, because
+  "Forum not found" for a forum that plainly exists reads as a bug.
+- **The proxy requirement**, which only `accessForum` enforced. Reading a proxy-only forum needed
+  a proxy; creating an identity on one needed nothing.
+
+Checked against LIVE proxy status rather than `accessForum`'s `useProxy` flag — there is no flag
+on this path, and status is the stronger question. The two are deliberately **not** shared: one
+asks "did this request opt into the proxy", the other "is this player actually behind one", and
+collapsing them would change `accessForum` as a side effect. Stated here so the difference reads
+as a decision rather than drift.
+
+Sibling paths enumerated: the three other `forumMember.create`/`upsert` sites are all AI/NPC
+identities (`aiUserId`, `npcUserId`), so `registerForumAccount` really is the only player route.
+
+Each of the four is negative-controlled individually, including one control per deletion path and
+one per forum gate.
+
+### The suite caught both of these before they landed
+
+Running the full suite after the four fixes turned two harnesses red. Worth recording because
+they are opposite failure modes and both were mine.
+
+**A real violation.** Wiring `releaseDrainsForServers` into three deletion paths, I reached for
+`await import("../di/tokens")` out of habit. `verify-phase7-a5-cycles` forbids exactly that, and
+is right to: `di/tokens.ts` has zero imports and 60 plain-string exports, so there is no cycle to
+defer and the dynamic form is pure churn. All three files already imported from it statically; the
+fix was to add `BACKDOOR_SERVICE` to the existing import. A rule established three phases ago
+caught a lapse the same day it was written.
+
+**A brittle check of my own.** `verify-phase7-a3-socket-contract` asserted
+`/emit\("authenticated",\s*\(/` — which requires `emit(` and the event name to be ADJACENT.
+Moving the call into `authenticateSocket` wrapped the arguments across lines, and the check went
+red against code that was correct. Its sibling, `!/emit\("authenticated"\)\s*;/`, had the
+complementary bug: it would have gone vacuously GREEN against a bare wrapped emit. Both are now
+whitespace-tolerant (`/emit\(\s*"authenticated"\s*,\s*\(/`) and controlled by reintroducing a bare
+emit, which turns both red.
+
+That is the fourth time in this changeset a check has tested layout rather than behaviour. The
+pattern is specific enough to name: **if a regex spans a call boundary, assume prettier will break
+it, and allow `\s*` at every join.**

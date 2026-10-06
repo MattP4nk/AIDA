@@ -2892,3 +2892,22 @@
     "DEFENSIVE OPTIONAL CHAINING IS NOT PARANOIA WHEN HARNESSES PASS FAKES. Reaching into io.sockets.adapter.rooms unguarded crashed two harnesses that pass a fake io. Guarded all the way down AND made to fail closed: if the room cannot be seen, the alert is not claimed as seen and stays queued."
   ]
 }
+
+@open_items_closed_2026_10_06 {
+  @summary [
+    "The four items review #5 left open are now fixed, each negative-controlled individually. Three of the four turned out to be wider than filed."
+  ]
+
+  @fixed [
+    "AUTH REFUSAL IS RETRIED. socket.ts authenticateSocket(attempt) retries at 2s/5s/11s — past the 10s limiter window rather than into it — and sets userId from the ack. Previously a refusal was TERMINAL: the socket stayed connected so neither handleReconnect (driven by disconnect/connect_error) nor another connect ever fired, leaving a healthy-looking socket in no rooms with no state and no replay. THE SIBLING PATH: cancelAuthRetry is called from FOUR places, because connect() and disconnect() both removeAllListeners() BEFORE socket.disconnect(), so the disconnect HANDLER does not run on either — a timer surviving connect() would run a second retry chain against the new socket."
+    "THE LIMITER SWEEP NO LONGER HANDS BACK BUDGETS. Two defects, one cause. lastUsed was written only by limitersFor, which runs once per CONNECTION, so the sweep's own safety argument was false for any actively-playing user. And the socket CAPTURED the limiter closures, which keep working after their map entry is swept, so a second tab built a fresh independent budget. Together every published limit became per-tab for tabs opened >60s apart — the multiplication S9 exists to prevent, reintroduced through its own memory sweep. Fixed by resolving per event: limitersFor(userId)[kind]()."
+    "CASCADE-DELETED SERVERS RELEASE DRAINS FIRST. Backdoor.server is onDelete: Cascade and three paths delete servers (serverService, darknetDungeonService, adminApi/servers). After the delete no row remains to say whose resources the backdoor cost, so the consumer is unreachable by every release path — removeBackdoor truthfully answers 'No backdoor installed on this server' while the drain keeps charging. releaseDrainsForServers(serverIds) now runs before the delete at all three. The harness proves the ORDERING: release, assert gone, re-register, delete, then assert a post-delete call CANNOT free anything."
+    "registerForumAccount ENFORCES DISCOVERY AND PROXY. It took a raw forumId from `forum register` and checked only existence. Discovery is now required (accessForum auto-discovers rather than refusing, so the legitimate route is unchanged — access then register; the error says so, because 'Forum not found' for a forum that plainly exists reads as a bug). The proxy requirement, which only accessForum enforced, now applies here too — checked against LIVE proxy status rather than accessForum's useProxy flag, deliberately NOT shared: one asks 'did this request opt in', the other 'is this player actually behind one', and collapsing them would change accessForum as a side effect."
+  ]
+
+  @lessons [
+    "A CLEANUP HANDLER ON AN EVENT IS NOT A CLEANUP PATH. The client's `disconnect` listener cleared the auth retry timer and looked sufficient — but both programmatic teardowns call removeAllListeners() before socket.disconnect(), so the handler never runs on the paths that matter. When teardown strips listeners first, cleanup belongs at the CALL SITE, not in the event."
+    "A MEMORY SWEEP CAN UNDO A CORRECTNESS INVARIANT. The limiter sweep was introduced to bound a map and quietly reintroduced per-socket budget multiplication, because deleting the entry does not stop the captured closures. Whenever something is evicted for memory reasons, ask what still holds a reference to it and what rebuilding it grants."
+    "PROVE THE ORDERING, NOT JUST THE CALL. For a release-before-delete invariant, asserting the release works is half the test. The other half is showing the same call AFTER the delete cannot work — otherwise the ordering is an untested assumption and a future refactor will move it."
+  ]
+}

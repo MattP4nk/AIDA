@@ -116,7 +116,14 @@ interface UserLimiters {
    * mean the client is genuinely looping, so refusing is safe.
    */
   auth: () => boolean;
-  /** When this budget was last consulted — drives the idle sweep below. */
+  /**
+   * When this budget was last consulted — drives the idle sweep below.
+   *
+   * Only meaningful because every consultation goes through `limitersFor`.
+   * If a caller captured these functions instead, this would record the last
+   * CONNECTION rather than the last use, and the sweep would discard budgets
+   * out from under players who are actively spending them.
+   */
   lastUsed: number;
 }
 
@@ -341,13 +348,29 @@ export function setupSocketHandlers(io: SocketIOServer): void {
 
     logger.info({ socketId: socket.id, userId, perUser }, "User connected");
 
-    // Rate limiters are shared across ALL of this user's sockets (S9).
-    const limiters = limitersFor(userId);
-    const commandRateLimit = limiters.command;
-    const messageRateLimit = limiters.message;
-    const terminalRateLimit = limiters.terminal;
-    const generalRateLimit = limiters.general;
-    const authRateLimit = limiters.auth;
+    // Rate limiters are shared across ALL of this user's sockets (S9), and are
+    // RESOLVED PER EVENT rather than captured once.
+    //
+    // Capturing them here looks equivalent and is not. The idle sweep deletes a
+    // user's map entry after LIMITER_IDLE_MS, but a captured closure keeps
+    // working after its entry is gone — so a player active in one tab for a
+    // minute had their entry swept while tab 1 kept spending the old budget,
+    // and opening tab 2 built a second, independent one. That is exactly the
+    // "N x however many sockets you care to open" multiplication S9 exists to
+    // prevent, reintroduced through the sweep.
+    //
+    // Going through the map on every event also means `lastUsed` is stamped by
+    // USE. It was previously written only by `limitersFor`, which ran once per
+    // connection, so the sweep's own safety argument — "an entry untouched for
+    // longer than the window has an empty sliding window by definition" — was
+    // false for any actively-playing user.
+    const limit = (kind: Exclude<keyof UserLimiters, "lastUsed">): boolean =>
+      limitersFor(userId)[kind]();
+    const commandRateLimit = () => limit("command");
+    const messageRateLimit = () => limit("message");
+    const terminalRateLimit = () => limit("terminal");
+    const generalRateLimit = () => limit("general");
+    const authRateLimit = () => limit("auth");
 
     // Kept as defence in depth. `io.use` already authenticated this socket, so
     // this now short-circuits on the first packet rather than doing work.

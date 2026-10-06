@@ -14,7 +14,7 @@ import { injectable, inject } from "tsyringe";
 import type { Logger } from "pino";
 import crypto from "crypto";
 import { safeExecute } from "../utils/safeExecute";
-import { AI_SERVICE, EVENT_SERVICE, FORUM_SERVICE, LOGGER, PLAYER_PROGRESS_REPOSITORY, STORY_PROGRESSION_SERVICE } from "../di/tokens";
+import { AI_SERVICE, BACKDOOR_SERVICE, EVENT_SERVICE, FORUM_SERVICE, LOGGER, PLAYER_PROGRESS_REPOSITORY, STORY_PROGRESSION_SERVICE } from "../di/tokens";
 import type PlayerProgressRepository from "../repositories/playerProgressRepository";
 import { db } from "../database/client";
 import { resolveNpcOwnerId } from "../../prisma/npcOwnership";
@@ -927,6 +927,26 @@ Respond ONLY with JSON:
       await db.client.serverAccessKey.deleteMany({
         where: { server: { networkId: instance.networkId } },
       });
+
+      // Release passive drains BEFORE deleting the servers. This is the path
+      // that actually bites players: Backdoor cascades off GameServer, so a
+      // dungeon reaching its TTL silently orphans the drain of every backdoor
+      // anyone had installed in it, with no row left to identify the owner.
+      try {
+        const doomed = await db.client.gameServer.findMany({
+          where: { networkId: instance.networkId },
+          select: { id: true },
+        });
+        const { getService } = await import("../di/container");
+        const backdoors =
+          getService<import("./backdoorService").default>(BACKDOOR_SERVICE);
+        await backdoors.releaseDrainsForServers(doomed.map((s) => s.id));
+      } catch (err) {
+        this.logger.warn(
+          { err, networkId: instance.networkId },
+          "Could not release backdoor drains before dungeon teardown",
+        );
+      }
 
       // Delete server connections
       await db.client.serverConnection.deleteMany({

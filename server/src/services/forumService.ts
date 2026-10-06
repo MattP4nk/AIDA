@@ -481,12 +481,44 @@ export class ForumService extends EventEmitter {
         throw new Error("Forum not found");
       }
 
+      // YOU MUST HAVE FOUND IT FIRST.
+      //
+      // `forum register <forumId> <handle>` takes a raw id from the player, and
+      // this enforced nothing beyond existence — so anyone who learned an id,
+      // from a post, a leak or a guess, could create an identity on a forum
+      // they had never reached. `accessForum` AUTO-discovers rather than
+      // refusing, so the legitimate route is unchanged: access it, then
+      // register. The error says so, because "Forum not found" for a forum
+      // that plainly exists is the kind of message that reads as a bug.
+      const discovered = await prisma.forumDiscovery.findUnique({
+        where: { userId_forumId: { userId, forumId } },
+        select: { id: true },
+      });
+      if (!discovered) {
+        throw new Error(
+          "You have not found this forum yet. Access it first to register.",
+        );
+      }
+
+      // THE PROXY REQUIREMENT, which only `accessForum` enforced.
+      //
+      // Reading a proxy-only forum needed a proxy; registering an account on
+      // one needed nothing. Checked against the LIVE proxy status rather than
+      // against `accessForum`'s `useProxy` flag — there is no flag on this
+      // path, and status is the stronger question anyway. The two checks are
+      // deliberately not shared: one answers "did this request opt into the
+      // proxy", the other "is this player actually behind one", and collapsing
+      // them would change `accessForum`'s behaviour as a side effect.
+      const proxyStatus = await this.getProxyStatus(userId);
+      if (forum.requiresProxy && !proxyStatus.connected) {
+        throw new Error(
+          "Forum requires proxy connection. Use 'proxy connect <id>' first.",
+        );
+      }
+
       // Check if honeypot
-      if (forum.isHoneypot) {
-        const proxyStatus = await this.getProxyStatus(userId);
-        if (!proxyStatus.connected) {
-          await this.triggerHoneypot(userId, forumId);
-        }
+      if (forum.isHoneypot && !proxyStatus.connected) {
+        await this.triggerHoneypot(userId, forumId);
       }
 
       // Check if already a member

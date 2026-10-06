@@ -148,6 +148,8 @@ class SocketService {
   private warnAfterAttempts = 5;
   private registeredEvents: string[] = []; // Track registered events for clean removal
   private userId: string | null = null; // Set during authentication
+  /** Pending authentication retry, so a disconnect can cancel it. */
+  private authRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor() {
     this.connect();
@@ -168,6 +170,7 @@ class SocketService {
 
     // Clean up old socket to prevent listener leaks on reconnection
     if (this.socket) {
+      this.cancelAuthRetry();
       this.socket.removeAllListeners();
       this.socket.disconnect();
       this.socket = null;
@@ -199,6 +202,7 @@ class SocketService {
 
   public disconnect(): void {
     if (this.socket) {
+      this.cancelAuthRetry();
       // Remove all listeners before disconnecting to prevent memory leaks
       this.removeAllListeners();
       this.socket.disconnect();
@@ -248,6 +252,75 @@ class SocketService {
     this.registeredEvents = [];
   }
 
+  /**
+   * Drop a pending authentication retry.
+   *
+   * Called from every teardown path, not just the `disconnect` HANDLER —
+   * `connect()` and `disconnect()` both call `removeAllListeners()` before
+   * `socket.disconnect()`, so that handler does not run on either of them. A
+   * timer surviving `connect()` would fire against the NEW socket and run a
+   * second retry chain alongside the one `connect` just started.
+   */
+  private cancelAuthRetry(): void {
+    if (this.authRetryTimer) {
+      clearTimeout(this.authRetryTimer);
+      this.authRetryTimer = null;
+    }
+  }
+
+  /**
+   * Authenticate this socket, retrying a refusal.
+   *
+   * A refusal used to be terminal. `socket.emit("authenticated")` ran once per
+   * `connect`, and on failure the client set `socketError` and stopped — but
+   * the socket was still CONNECTED, so neither `handleReconnect` (driven by
+   * `disconnect`/`connect_error`) nor another `connect` ever fired. The result
+   * was a healthy-looking socket that had joined no rooms, received no state
+   * and no notification replay, recoverable only by a manual reload.
+   *
+   * The server's refusals are transient by construction — the handshake has
+   * already validated the token, so reaching this point and failing means a
+   * rate limit or a server-side blip, both of which a retry clears. The delays
+   * step past the 10s limiter window rather than hammering it.
+   *
+   * `setUserId` is called HERE rather than only in App.svelte's bootstrap:
+   * that path has its own one-shot attempt and a "degraded, not fatal" catch,
+   * so if it loses and this one wins, nothing else would set the id that hack
+   * alerts are targeted by.
+   */
+  private authenticateSocket(attempt = 0): void {
+    const delays = [2000, 5000, 11_000];
+
+    this.socket?.emit(
+      "authenticated",
+      (response: { success: boolean; error?: string; userId?: string }) => {
+        if (response?.success) {
+          socketError.set(null);
+          if (response.userId) this.setUserId(response.userId);
+          return;
+        }
+
+        if (attempt >= delays.length) {
+          console.error("[socket] authentication failed, giving up:", response?.error);
+          socketError.set(response?.error || "Authentication failed");
+          return;
+        }
+
+        const wait = delays[attempt]!;
+        console.warn(
+          `[socket] authentication refused (${response?.error}); retrying in ${wait}ms`,
+        );
+        this.cancelAuthRetry();
+        this.authRetryTimer = setTimeout(() => {
+          this.authRetryTimer = null;
+          // The socket may have dropped while we waited; `connect` will run
+          // this again from scratch, so retrying a dead socket is pure noise.
+          if (this.socket?.connected) this.authenticateSocket(attempt + 1);
+        }, wait);
+      },
+    );
+  }
+
   // ==================== EVENT HANDLERS ====================
 
   private setupEventHandlers(): void {
@@ -274,18 +347,15 @@ class SocketService {
       //
       // This path matters more than App.svelte's: it runs on EVERY `connect`,
       // which is what re-authenticates after a reconnect.
-      this.socket?.emit("authenticated", (response: { success: boolean; error?: string }) => {
-        if (response?.success) {
-          socketError.set(null);
-        } else {
-          console.error("[socket] authentication failed:", response?.error);
-          socketError.set(response?.error || "Authentication failed");
-        }
-      });
+      this.authenticateSocket();
     });
 
     this.on("disconnect", (reason) => {
       socketConnected.set(false);
+
+      // `connect` restarts authentication from attempt 0, so a surviving timer
+      // would run a second chain alongside it.
+      this.cancelAuthRetry();
 
       if (reason === "io server disconnect") {
         // Server disconnected us, don't auto-reconnect
