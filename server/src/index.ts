@@ -250,6 +250,52 @@ function wireServiceEvents(storyProgression: StoryProgressionService): void {
         defer(() => achievementService.checkAndAward(data.attackerId), "Achievement check error after hack");
       }
     }
+
+    // ── Tell the VICTIM they were hacked ─────────────────────────────
+    //
+    // Orphan audit #2: the client has had the whole feature — a `hackAttempts`
+    // store, a sound, a "Security Breach" notification — waiting on
+    // `hack:attempted` / `hack:successful` / `hack:blocked`, and hackService
+    // socket-emitted NOTHING. Zero `io.to(...)` calls in the entire service.
+    // The events existed only on the internal bus, so the defender never
+    // learned anything, ever.
+    //
+    // GATED ON DETECTION, which is the whole point. Firing on every attempt
+    // would tell the victim about hacks their defences did not notice, which
+    // makes the detection roll decorative and every point of stealth skill
+    // worthless. `detected` is carried on the payload for exactly this.
+    //
+    // `targetId` falls back to `attackerId` for an unowned server, so the
+    // equality guard is what stops an attacker being notified about their own
+    // hack of a neutral box.
+    if (data.detected && data.targetId && data.targetId !== data.attackerId) {
+      const victimId = data.targetId;
+      const succeeded = data.result?.success === true;
+      defer(async () => {
+        const attacker = await db.client.user.findUnique({
+          where: { id: data.attackerId },
+          select: { username: true },
+        });
+        const payload = {
+          targetUserId: victimId,
+          attackerName: attacker?.username ?? "unknown",
+          serverName: data.serverName,
+          serverId: data.targetServerId,
+          method: data.method,
+        };
+        io.to(`player:${victimId}`).emit("hack:attempted", payload);
+        // Two literal branches rather than `emit(succeeded ? a : b, …)`.
+        // A computed event name is invisible to the socket-contract check —
+        // it found these as orphaned client listeners even though the emit
+        // was right here — and equally invisible to anyone grepping for who
+        // sends `hack:successful`.
+        if (succeeded) {
+          io.to(`player:${victimId}`).emit("hack:successful", payload);
+        } else {
+          io.to(`player:${victimId}`).emit("hack:blocked", payload);
+        }
+      }, "Victim hack alert error");
+    }
   });
 
   hackService.on("ids_alert", (data: IdsAlertEvent) => {

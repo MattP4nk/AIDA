@@ -501,10 +501,11 @@ class SocketService {
       this.handleHackResult(data);
     });
 
-    this.on("hack:error", (data: any) => {
-      console.error("🔓 Hack error:", data);
-      socketError.set(`Hack error: ${data.message}`);
-    });
+    // REMOVED 2026-10-06: the `hack:error` listener. Unlike its three
+    // siblings above it had no producer of ANY kind — not a socket emit, not
+    // an internal bus event — and an error on the attacker's own hack command
+    // already reaches them through `command:error`. It was a second, unwired
+    // path for something already handled.
 
     // A3: four listeners were removed here — `faction:event`,
     // `mission:updated`, `server:file_modified` and `error`. Nothing in the
@@ -1282,13 +1283,12 @@ class SocketService {
     this.socket?.emit("typing:stop", { recipientId });
   }
 
-  public emitJoinRoom(room: string): void {
-    this.socket?.emit("join:room", { room });
-  }
-
-  public emitLeaveRoom(room: string): void {
-    this.socket?.emit("leave:room", { room });
-  }
+  // REMOVED 2026-10-06: `emitJoinRoom` / `emitLeaveRoom`. They sent
+  // `join:room` / `leave:room`, which the server has never had a handler for,
+  // and both methods had ZERO callers in the client. Rooms are joined
+  // server-side on authenticate and on forum registration, which is the only
+  // place that can decide whether a player is entitled to a room — letting a
+  // client ask to join one by name would be the bug, not the feature.
 
   // ==================== UTILITY METHODS ====================
 

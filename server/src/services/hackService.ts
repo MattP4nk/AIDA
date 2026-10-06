@@ -1392,6 +1392,11 @@ class HackService extends EventEmitter {
       // was never sent — `data.method` was undefined on every entry. It is a
       // parameter of this very function, so the producer had it all along.
       method,
+      // Carried so the victim-alert bridge can respect stealth. Without it the
+      // bridge would have to notify on every attempt, which makes the
+      // detection roll — and every point of stealth skill — worthless from the
+      // defender's side.
+      detected,
       ...(layersSolved !== undefined ? { layersSolved } : {}),
       ...(totalLayers !== undefined ? { totalLayers } : {}),
     });

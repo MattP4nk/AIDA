@@ -193,11 +193,36 @@ async function main() {
       !/process:failed/.test(serverSrc) && !/process:failed/.test(clientSrc),
       "producer and listener both removed",
     );
+    // REPLACED 2026-10-06. This used to assert that `hack:attempted` was
+    // listed as a known orphan — so fixing the orphan turned the check red.
+    // That is the third time in this phase a check has encoded a LIMITATION
+    // and expired the moment the limitation did. The orphan lists are now
+    // empty, so the durable form is a RATCHET: assert they stay empty.
     check(
-      "the near-miss names are documented",
-      KNOWN_ORPHANED_EVENTS.clientListenersWithoutEmitter.includes("hack:attempted") &&
-        /hack:attempt["'`]/.test(serverSrc),
-      "`hack:attempted` vs the real `hack:attempt` — a rename that orphaned a listener",
+      "no client listener is left without a server emitter",
+      KNOWN_ORPHANED_EVENTS.clientListenersWithoutEmitter.length === 0,
+      `${KNOWN_ORPHANED_EVENTS.clientListenersWithoutEmitter.join(", ") || "none"} — ` +
+      "an entry here is a half-built feature, and this list is the only thing that notices",
+    );
+    check(
+      "no client send is left without a server handler",
+      KNOWN_ORPHANED_EVENTS.clientEmitsWithoutListener.length === 0,
+      KNOWN_ORPHANED_EVENTS.clientEmitsWithoutListener.join(", ") || "none",
+    );
+    check(
+      "the victim hack alerts are bridged, and gated on detection",
+      /emit\("hack:attempted"/.test(serverSrc) &&
+        /emit\("hack:successful"/.test(serverSrc) &&
+        /emit\("hack:blocked"/.test(serverSrc) &&
+        /data\.detected/.test(serverSrc),
+      "bridging without the `detected` gate would tell victims about hacks their " +
+      "defences never noticed, making stealth skill worthless",
+    );
+    check(
+      "the bridge emits LITERAL event names, not a computed one",
+      !/\.emit\(\s*\w+\s*\?\s*"hack:/.test(serverSrc),
+      "a ternary event name is invisible to the contract checker and to grep — " +
+      "it reported these as orphaned listeners while the emit sat right there",
     );
   }
 

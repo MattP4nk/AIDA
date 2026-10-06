@@ -101,6 +101,11 @@ export interface HackAttemptEvent {
   result: HackResult;
   /** The hack method, e.g. "exploit" / "bruteforce". */
   method: string;
+  /**
+   * Whether the target's defences noticed. Gates the victim alert — an
+   * undetected hack must stay silent, or stealth stops meaning anything.
+   */
+  detected: boolean;
   /** Spread in conditionally — absent for non-layered hacks. */
   layersSolved?: number;
   totalLayers?: number;

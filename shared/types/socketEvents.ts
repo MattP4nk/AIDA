@@ -208,13 +208,15 @@ export interface ClientToServerEvents {
 export const KNOWN_ORPHANED_EVENTS = {
   /** Client listens; no server emits. Fix by wiring up or deleting. */
   clientListenersWithoutEmitter: [
-    // These wait on events that ARE produced — on the internal service bus,
-    // never bridged to a socket. Deleting them would discard a feature; the
-    // fix is a bridge, which is a behaviour change. See PLAN.md A3.
-    "hack:attempted", // hackService emits "hack:attempt" internally
-    "hack:successful", // would carry the "your system was compromised" alert
-    "hack:blocked",
-    "hack:error",
+    // EMPTY as of 2026-10-06. The four hack listeners that lived here are
+    // resolved: `hack:attempted`, `hack:successful` and `hack:blocked` are now
+    // bridged from the `hack:attempt` bus event in index.ts — gated on
+    // `detected`, so a stealthy hack still says nothing — and `hack:error` was
+    // deleted, being the only one of the four with no producer of any kind on
+    // either the socket or the bus.
+    //
+    // Keep this list empty. An entry here is a feature that is half-built, and
+    // the check that reads it is the only thing that notices.
   ],
   /**
    * Removed 2026-09-24: `faction:event`, `mission:updated`,
@@ -235,7 +237,13 @@ export const KNOWN_ORPHANED_EVENTS = {
     "process:failed",
   ],
   /** Client emits; no server listens. */
-  clientEmitsWithoutListener: ["join:room", "leave:room"],
+  // EMPTY as of 2026-10-06. `join:room` / `leave:room` were sent by
+  // `emitJoinRoom` / `emitLeaveRoom`, which had zero callers and no server
+  // handler. Deleted rather than implemented: room membership is decided
+  // server-side on authenticate and on forum registration, because that is the
+  // only place that can tell whether a player is entitled to a room. A client
+  // asking to join one by name would have been the bug, not the feature.
+  clientEmitsWithoutListener: [],
   /** Server listens; no client emits — commands go over REST. */
   serverListenersWithoutEmitter: ["command:execute"],
 } as const;
