@@ -243,6 +243,10 @@ export class EpochSchedulerService {
         const { getService } = await import("../di/container");
         const io = getService<SocketIOServer>(SOCKET_IO);
         if (io) {
+          // NOT routed through notifyUser, deliberately: this is a global
+          // broadcast to every connected socket, and persisting it would
+          // mean one row per user in the database for a transient world
+          // announcement. Every per-user notification does persist.
           io.emit("notification", {
             type: "world_event",
             title: payload.title || "World Event",

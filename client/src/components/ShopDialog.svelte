@@ -1,6 +1,11 @@
 <script lang="ts">
     import { onMount } from "svelte";
     import { apiClient } from "../services/api";
+    import {
+        playerCredits as storeCredits,
+        playerLevel as storeLevel,
+        playerSkills as storeSkills,
+    } from "../services/socket";
 
     export let visible = false;
     export let onClose: () => void;
@@ -32,9 +37,14 @@
     let selectedCategory: string = "ALL";
     let searchQuery: string = "";
     let selectedItem: ShopItem | null = null;
-    let playerCredits: number = 0;
-    let playerLevel: number = 1;
-    let playerSkills: any = {};
+    // ORPHAN AUDIT 2026-09-25: these were filled by running the `status`
+    // COMMAND, re-run on every open via `$: if (visible) loadPlayerData()`,
+    // because `state:update` had no listener and the REST endpoints 404. They
+    // now track the pushed state, so a purchase elsewhere updates the header
+    // immediately instead of at the next open.
+    $: playerCredits = $storeCredits;
+    $: playerLevel = $storeLevel;
+    $: playerSkills = $storeSkills;
     let purchaseQuantity: number = 1;
     let loading: boolean = true;
     let message: string = "";
@@ -61,13 +71,7 @@
 
     onMount(async () => {
         await loadShopData();
-        await loadPlayerData();
     });
-
-    // Re-fetch player credits when dialog becomes visible (covers external credit changes)
-    $: if (visible) {
-        loadPlayerData();
-    }
 
     async function loadShopData() {
         try {
@@ -83,26 +87,6 @@
             showMessage("Failed to load shop data", "error");
         } finally {
             loading = false;
-        }
-    }
-
-    async function loadPlayerData() {
-        try {
-            const response = await apiClient.executeCommand("status");
-            if (response.success && response.data?.progress) {
-                playerCredits = response.data.progress.credits || 0;
-                playerLevel = response.data.progress.level || 1;
-                playerSkills = {
-                    hacking: response.data.progress.hacking || 0,
-                    networking: response.data.progress.networking || 0,
-                    cryptography: response.data.progress.cryptography || 0,
-                    stealth: response.data.progress.stealth || 0,
-                    socialEng: response.data.progress.socialEng || 0,
-                    forensics: response.data.progress.forensics || 0,
-                };
-            }
-        } catch (error) {
-            console.error("Failed to load player data:", error);
         }
     }
 
@@ -166,7 +150,10 @@
                     `Purchased ${purchaseQuantity}x ${selectedItem.name}!`,
                     "success"
                 );
-                await loadPlayerData();
+                // No re-fetch: the server emits a credits delta for the
+                // purchase, so the header updates from the push. If that
+                // delta ever fails to apply the socket layer asks for a full
+                // resync, which is a better recovery than a blind re-poll.
                 selectedItem = null;
             } else {
                 showMessage(response.output || "Purchase failed", "error");

@@ -25,7 +25,9 @@ import {
   FACTION_KNOWLEDGE_SERVICE,
   NETWORK_TOPOLOGY_SERVICE,
   PLAYER_PROGRESS_REPOSITORY,
+  EVENT_SERVICE,
 } from "../di/tokens";
+import { EventType, EventSeverity } from "../../../shared/types";
 import type PlayerProgressRepository from "../repositories/playerProgressRepository";
 import type { CacheService } from "./cacheService";
 import type MissionIntegrationService from "./missionIntegration";
@@ -120,6 +122,54 @@ export class FileService {
     this.missionIntegration = missionIntegrationService || null;
     this.factionKnowledge = factionKnowledgeService || null;
     this.networkTopology = networkTopologyService || null;
+  }
+
+  /**
+   * A honeypot alert, routed so it actually reaches the owner.
+   *
+   * ORPHAN AUDIT 2026-09-24: both call sites used to `prisma.gameEvent.create`
+   * directly, which skips `createEvent` and therefore skips `broadcastEvent`
+   * entirely. The row was written and nothing was ever sent — and this file
+   * has no other emit of any kind, so that row was the ONLY signal a player
+   * got that someone had tripped their decoy. Going through eventService is
+   * what makes it a notification instead of a database entry.
+   *
+   * `EVENT_SERVICE` is resolved lazily: the DI container imports every
+   * service, so a static import of it here would close a require cycle.
+   *
+   * Non-throwing on purpose — the caller is in the middle of a file operation
+   * whose result must not depend on whether the owner's alert went out.
+   */
+  private async alertHoneypot(
+    ownerId: string,
+    serverId: string,
+    fileName: string,
+    attackerId: string,
+    action: "read" | "delete",
+  ): Promise<void> {
+    try {
+      const { getService } = await import("../di/container");
+      const eventService = getService<import("./eventService").EventService>(EVENT_SERVICE);
+      await eventService.createEvent(
+        EventType.HONEYPOT_TRIGGERED,
+        action === "delete" ? "Honeypot Alert — File Deleted" : "Honeypot Alert",
+        action === "delete"
+          ? `Intruder deleted decoy file '${fileName}' from your home server.`
+          : `Intruder accessed decoy file '${fileName}' on your home server.`,
+        // `targetUserId` is what makes a PLAYER tap match. Matching used to
+        // short-circuit on serverId, so only a server tap ever worked; now
+        // that it compares every candidate, naming the victim here is what
+        // gives `tap <username>` something to deliver. Safe to include: a
+        // watcher receives this metadata SCRUBBED of identifiers, only the
+        // named owner sees the raw ids.
+        { serverId, targetUserId: ownerId, fileName, attackerId, action },
+        EventSeverity.WARNING,
+        [ownerId],
+        false,
+      );
+    } catch (err) {
+      this.logger.warn({ err, ownerId, serverId, fileName }, "Failed to raise honeypot alert");
+    }
   }
 
   // ==================== FILE OPERATIONS ====================
@@ -495,19 +545,7 @@ export class FileService {
         });
         if (ownerServer?.isPlayerHome && ownerServer.ownerId && ownerServer.ownerId !== userId) {
           this.logger.info({ userId, serverId, fileName: file.name }, "Honeypot triggered: attacker read decoy file");
-          // Create a game event alert for the owner
-          await prisma.gameEvent.create({
-            data: {
-              type: "honeypot_triggered",
-              title: "Honeypot Alert",
-              description: `Intruder accessed decoy file '${file.name}' on your home server.`,
-              timestamp: new Date(),
-              affectedUsers: [ownerServer.ownerId],
-              metadata: { serverId, fileName: file.name, attackerId: userId },
-              isGlobal: false,
-              severity: "high",
-            },
-          }).catch(() => {});
+          await this.alertHoneypot(ownerServer.ownerId, serverId, file.name, userId, "read");
         }
       }
 
@@ -1021,18 +1059,7 @@ export class FileService {
           select: { ownerId: true, isPlayerHome: true },
         });
         if (ownerServer?.isPlayerHome && ownerServer.ownerId && ownerServer.ownerId !== userId) {
-          await prisma.gameEvent.create({
-            data: {
-              type: "honeypot_triggered",
-              title: "Honeypot Alert — File Deleted",
-              description: `Intruder deleted decoy file '${node.name}' from your home server.`,
-              timestamp: new Date(),
-              affectedUsers: [ownerServer.ownerId],
-              metadata: { serverId, fileName: node.name, attackerId: userId, action: "delete" },
-              isGlobal: false,
-              severity: "high",
-            },
-          }).catch(() => {});
+          await this.alertHoneypot(ownerServer.ownerId, serverId, node.name, userId, "delete");
         }
       }
 

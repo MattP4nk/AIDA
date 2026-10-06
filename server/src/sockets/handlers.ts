@@ -7,6 +7,7 @@ import {
   PROGRESS_SERVICE,
   COMMAND_PROCESSOR,
   PLAYER_PRESENCE_SERVICE,
+  FORUM_SERVICE,
   MESSAGE_SERVICE,
   TUTORIAL_SERVICE,
 } from "../di/tokens";
@@ -16,6 +17,7 @@ import type ProgressService from "../services/progressService";
 import type CommandProcessor from "../services/commandProcessor";
 import type PlayerPresenceService from "../services/playerPresenceService";
 import type MessageService from "../services/messageService";
+import type ForumService from "../services/forumService";
 import { validateCommandInput, validateCommandArgs, sanitizeSocketInput, validateMessageInput } from "../utils/inputValidation";
 
 /**
@@ -27,6 +29,7 @@ interface SocketServices {
   commandProcessor: CommandProcessor;
   presenceService: PlayerPresenceService;
   messageService: MessageService;
+  forumService: ForumService;
 }
 
 function resolveServices(): SocketServices {
@@ -36,6 +39,7 @@ function resolveServices(): SocketServices {
     commandProcessor: getService<CommandProcessor>(COMMAND_PROCESSOR),
     presenceService: getService<PlayerPresenceService>(PLAYER_PRESENCE_SERVICE),
     messageService: getService<MessageService>(MESSAGE_SERVICE),
+    forumService: getService<ForumService>(FORUM_SERVICE),
   };
 }
 
@@ -102,6 +106,16 @@ interface UserLimiters {
   message: () => boolean;
   terminal: () => boolean;
   general: () => boolean;
+  /**
+   * Authentication gets its OWN budget, spent by nothing else.
+   *
+   * This is the whole point. Charging `authenticated` to the shared `general`
+   * budget meant typing indicators could starve login — a player who typed a
+   * long mail and then reconnected got a live socket that never ran
+   * handleAuthentication. With a dedicated budget, hitting the limit can only
+   * mean the client is genuinely looping, so refusing is safe.
+   */
+  auth: () => boolean;
   /** When this budget was last consulted — drives the idle sweep below. */
   lastUsed: number;
 }
@@ -111,6 +125,15 @@ interface UserLimiters {
  * has an empty sliding window by definition, so discarding it is a no-op —
  * which is what makes the sweep safe.
  */
+/**
+ * How long a replayed notification may go unacknowledged before it is left
+ * pending. Generous on purpose: the client's notification service is a dynamic
+ * import, so a cold tab legitimately takes a moment, and the cost of waiting is
+ * one more replay next connect while the cost of giving up early is a silently
+ * destroyed security alert.
+ */
+const NOTIFICATION_ACK_TIMEOUT_MS = 10_000;
+
 const LIMITER_WINDOW_MS = 10_000;
 /** Ample margin over the window; the sweep is about memory, not precision. */
 const LIMITER_IDLE_MS = 60_000;
@@ -134,6 +157,18 @@ function limitersFor(userId: string): UserLimiters {
       message: createSocketRateLimiter(10, LIMITER_WINDOW_MS), // 10 messages per 10s
       terminal: createSocketRateLimiter(10, LIMITER_WINDOW_MS), // 10 terminal ops per 10s
       general: createSocketRateLimiter(30, LIMITER_WINDOW_MS), // 30 events per 10s
+      // 30 per 10s — sized from what the client ACTUALLY does, which is two
+      // authentications per connection, not one: `socket.ts` emits
+      // `authenticated` on every `connect`, and `App.svelte` then emits
+      // `authenticate:request` on the same socket. With
+      // MAX_SOCKETS_PER_USER = 4 a simultaneous reload of every tab is 8, so
+      // the first draft of this at 5 would have refused legitimate logins.
+      //
+      // The job here is to stop a LOOP, and a loop emits hundreds a second.
+      // 30/10s leaves ~15 page loads of headroom while still cutting an
+      // attacker to 3/s — which is what matters, because each one ends in a
+      // `socket.broadcast.emit` to every connected client.
+      auth: createSocketRateLimiter(30, LIMITER_WINDOW_MS),
       lastUsed: Date.now(),
     };
     userLimiters.set(userId, limiters);
@@ -312,18 +347,45 @@ export function setupSocketHandlers(io: SocketIOServer): void {
     const messageRateLimit = limiters.message;
     const terminalRateLimit = limiters.terminal;
     const generalRateLimit = limiters.general;
+    const authRateLimit = limiters.auth;
 
     // Kept as defence in depth. `io.use` already authenticated this socket, so
     // this now short-circuits on the first packet rather than doing work.
     setupAuthMiddleware(socket);
 
     // ── Authentication events ────────────────────────────────────
-    socket.on("authenticated", (cb) =>
-      handleAuthentication(socket, io, services, cb),
-    );
-    socket.on("authenticate:request", (cb) =>
-      handleAuthentication(socket, io, services, cb),
-    );
+    //
+    // Limited on a DEDICATED budget. This is the expensive handler on the
+    // socket — session create, room joins, a five-query state broadcast, the
+    // notification replay, a tutorial check — and it ends in a
+    // `socket.broadcast.emit` to every connected client, so an unbounded loop
+    // here is a self-amplifying fan-out, not just local load.
+    //
+    // Charging it to `generalRateLimit` was the wrong fix and was reverted:
+    // that budget is shared with typing indicators, so ordinary play could
+    // exhaust it and the next reconnect produced a live socket in no rooms
+    // with no state. `authRateLimit` is spent by nothing else, so reaching it
+    // means the client is looping, and refusing is both safe and correct.
+    //
+    // ANSWER THE ACK when refusing. Returning silently leaves the client with
+    // a promise Socket.IO never settles — it only retries on the next
+    // `connect` — so a refusal has to be a refusal the client can see.
+    const refuseAuth = (cb: unknown) => {
+      if (typeof cb === "function") {
+        (cb as (r: unknown) => void)({
+          success: false,
+          error: "Too many authentication attempts. Reconnect in a moment.",
+        });
+      }
+    };
+    socket.on("authenticated", (cb) => {
+      if (!authRateLimit()) return refuseAuth(cb);
+      handleAuthentication(socket, io, services, cb);
+    });
+    socket.on("authenticate:request", (cb) => {
+      if (!authRateLimit()) return refuseAuth(cb);
+      handleAuthentication(socket, io, services, cb);
+    });
 
     // ── Game events ──────────────────────────────────────────────
     socket.on("server:connect", (data) => {
@@ -365,6 +427,20 @@ export function setupSocketHandlers(io: SocketIOServer): void {
         success: false,
         error: "Use command:execute with hack commands instead",
       });
+    });
+
+    // ── Authoritative state resync ───────────────────────────────
+    //
+    // The client asks for this when it receives a `state:delta` it cannot
+    // apply, which means the two sides disagree about a path. Rate-limited on
+    // BOTH ends — the client throttles to one request per 5s, and this uses
+    // the general limiter — because the trigger condition can repeat for every
+    // subsequent delta and would otherwise be a self-inflicted request storm.
+    socket.on("state:request", () => {
+      if (!generalRateLimit()) return;
+      const userId = getUserId(socket);
+      if (!userId) return;
+      void services.gameStateManager.broadcastStateUpdate(userId);
     });
 
     // ── Terminal tab management ──────────────────────────────────
@@ -476,7 +552,7 @@ function setupAuthMiddleware(socket: Socket): void {
 async function handleAuthentication(
   socket: Socket,
   _io: SocketIOServer,
-  { gameStateManager, presenceService, progressService }: SocketServices,
+  { gameStateManager, presenceService, progressService, forumService }: SocketServices,
   callback?: unknown,
 ): Promise<void> {
   const userId = socket.data.user?.id;
@@ -496,6 +572,25 @@ async function handleAuthentication(
     // Join user-specific room
     socket.join(`user:${userId}`);
     socket.join(`player:${userId}`);
+
+    // Forum rooms. `forum:new-post` / `forum:new-reply` are emitted to
+    // `forum:<forumId>` and NOTHING HAS EVER JOINED THAT ROOM — the audit's
+    // subtlest find, because a name-comparison audit scores those events
+    // healthy: the server emits them and the client listens for them. An event
+    // is only wired if the listener is in the room it is sent to.
+    try {
+      // The rule lives in forumService, not here. This used to query
+      // `forumMember` directly and join every row — including memberships that
+      // had been BANNED, since `banMember` leaves the row in place and only
+      // flips a flag that the posting paths check and this one did not.
+      const forumIds = await forumService.getLiveFeedForums(userId);
+      for (const forumId of forumIds) socket.join(`forum:${forumId}`);
+      if (forumIds.length > 0) {
+        logger.debug({ userId, forums: forumIds.length }, "Joined forum rooms");
+      }
+    } catch (err) {
+      logger.warn({ err, userId }, "Could not join forum rooms");
+    }
 
     // Create or reuse session
     const existingSession = gameStateManager.getSession(userId);
@@ -529,6 +624,95 @@ async function handleAuthentication(
 
     // Broadcast full game state to client
     await gameStateManager.broadcastStateUpdate(userId);
+
+    // Replay notifications the player has not seen.
+    //
+    // ORPHAN AUDIT 2026-09-24: the `Notification` model was fully specced and
+    // never written OR read, while the client store is in-memory — so a
+    // refresh silently discarded every unseen alert, security warnings
+    // included. Persisting without this replay would have moved the dead
+    // feature rather than fixed it.
+    try {
+      const { getPendingNotifications, markNotificationsRead } = await import("../utils/notify");
+      const pending = await getPendingNotifications(userId);
+      if (pending.length > 0) {
+        // OLDEST FIRST. `getPendingNotifications` orders newest-first, and the
+        // client PREPENDS each arrival, so emitting in query order rendered the
+        // backlog upside down — and at the 50-item cap the newest alerts were
+        // the ones pushed off the end, then marked read and never replayed.
+        const ordered = [...pending].reverse();
+
+        // ACKNOWLEDGED, not fire-and-forget.
+        //
+        // The previous version marked these read straight after `socket.emit`,
+        // justified by "if the emit throws, they stay pending". `socket.emit`
+        // does NOT throw and does not report delivery, so that guard could
+        // never fire: a client on a half-dead socket, or one still resolving
+        // its notification module's dynamic import, had up to 50 alerts
+        // emitted into the void and immediately flipped to read. The rows
+        // this feature exists to preserve were the ones it destroyed.
+        //
+        // Only what the client confirms is marked read. Anything unconfirmed
+        // stays pending for the next connect — a duplicate is recoverable,
+        // a silently dropped security alert is not.
+        // NOT AWAITED, and each row settles on its own.
+        //
+        // The first version did `await Promise.all(...)` of 50 ten-second
+        // timeouts INSIDE the auth path, ahead of the tutorial bootstrap, the
+        // presence broadcast and the auth callback. A client that cannot ack —
+        // the client only acks inside `if (ns)`, so a failed dynamic import
+        // means never — stalled every login for the full timeout, forever,
+        // because unacked rows stay pending by design. The replay's own
+        // comment says it must never break authentication; awaiting it did.
+        //
+        // Marking read per-ack rather than in one batch also means a partial
+        // delivery keeps exactly the undelivered rows pending.
+        void Promise.all(
+          ordered.map((n) =>
+            new Promise<string | null>((resolve) => {
+              socket
+                .timeout(NOTIFICATION_ACK_TIMEOUT_MS)
+                .emit(
+                  "notification",
+                  {
+                    // ENVELOPE LAST, matching notify.ts. The first version
+                    // spread `n.data` after these fields, so a persisted blob
+                    // carrying `id`, `category`, `timestamp` or `priority`
+                    // overwrote them — and storyProgressionService writes a
+                    // `category` key into its metadata, so the collision is
+                    // live, not hypothetical. A producer-supplied `id` would
+                    // break the client's dedupe against the live emit.
+                    ...((n.data as Record<string, unknown>) ?? {}),
+                    id: n.id,
+                    type: n.type,
+                    title: n.title,
+                    message: n.message,
+                    priority: n.priority,
+                    category: n.category,
+                    timestamp: n.createdAt,
+                    replayed: true,
+                  },
+                  (err: unknown) => resolve(err ? null : n.id),
+                );
+            }),
+          ),
+        ).then(async (delivered) => {
+          const acked = delivered.filter((id): id is string => id !== null);
+          if (acked.length > 0) await markNotificationsRead(userId, acked);
+          if (acked.length < ordered.length) {
+            logger.warn(
+              { userId, sent: ordered.length, acked: acked.length },
+              "Some replayed notifications were not acknowledged; they stay pending",
+            );
+          }
+        }).catch((err) => {
+          logger.warn({ err, userId }, "Notification replay settlement failed");
+        });
+      }
+    } catch (err) {
+      // Never let a replay failure break authentication.
+      logger.warn({ err, userId }, "Notification replay failed");
+    }
 
     // Check if new player needs tutorial
     try {

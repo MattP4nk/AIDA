@@ -5,12 +5,12 @@ import {
   PlayerSession,
   ServerState,
   GameState,
+  InventoryItem,
   PlayerInfo,
   ValidationResult,
   StateDelta,
   NotificationType,
   NotificationPriority,
-  MissionStatus,
   TerminalTab,
 } from "../types/game";
 import { SESSION_TIMEOUT_MS } from "../config/constants";
@@ -24,7 +24,9 @@ import {
 import { injectable, inject } from "tsyringe";
 import { safeExecute } from "../utils/safeExecute";
 import { Logger } from "pino";
-import { COMMAND_PROCESSOR, EVENT_SERVICE, FACTION_SERVICE, FILE_SERVICE, LOGGER, MISSION_SERVICE, NETWORK_TOPOLOGY_SERVICE, SERVER_SERVICE, SHOP_SERVICE, SOCKET_IO } from "../di/tokens";
+import { COMMAND_PROCESSOR, EVENT_SERVICE, FACTION_SERVICE, FILE_SERVICE, LOGGER, MEMORY_SERVICE, MISSION_SERVICE, NETWORK_TOPOLOGY_SERVICE, PLAYER_MISSION_REPOSITORY, PLAYER_PROGRESS_REPOSITORY, SERVER_SERVICE, SHOP_SERVICE, SOCKET_IO } from "../di/tokens";
+import type PlayerProgressRepository from "../repositories/playerProgressRepository";
+import type { PlayerMissionRepository } from "../repositories/playerMissionRepository";
 import { getService } from "../di/container";
 import type EventService from "./eventService";
 import type CommandProcessor from "./commandProcessor";
@@ -34,6 +36,78 @@ import type { FactionService } from "./factionService";
 
 import type FileService from "./fileService";
 import type { NetworkTopologyService } from "./networkTopologyService";
+/**
+ * Shop events cluster: one `useItem` emits two, a purchase emits two. Waiting
+ * a beat collapses them into a single pair of queries.
+ */
+const SLICE_REFRESH_DEBOUNCE_MS = 50;
+
+/**
+ * The slices a producer can ask to have re-read and pushed.
+ *
+ * A one-member union with one legal value was flagged as speculative
+ * generality in review; it is a real union now that missions and credits use
+ * the same path, and the debounce coalesces a burst into ONE pass per player.
+ */
+type StateSlice = "inventory" | "credits" | "missions";
+
+/**
+ * The ONE definition of the `missions` slice's wire shape.
+ *
+ * Same reasoning as `toStateInventory` below: the moment a delta and the full
+ * state each build their own version of a path, the store's shape flips
+ * mid-session and `applyStateDelta` reports it as applied either way.
+ */
+function toStateMissions(rows: any[]): any[] {
+  return rows.map((m) => ({
+    id: m.missionId,
+    title: m.title || "Unknown Mission",
+    description: m.description || "Loading...",
+    type: m.type || "hack",
+    status: m.status,
+    difficulty: m.difficulty || 1,
+    objectives: (m.objectives ?? []).map((o: any) => ({
+      ...o,
+      progress: typeof o.current === "number" ? o.current : 0,
+      required: typeof o.target === "number" ? o.target : 1,
+      target: o.target?.toString(),
+    })),
+    reward: m.reward || { credits: 0, experience: 0 },
+    timeLimit: m.timeLimit,
+    ...(m.expiresAt ? { expiresAt: m.expiresAt } : {}),
+  }));
+}
+
+/**
+ * The ONE definition of the `inventory` slice's wire shape.
+ *
+ * Extracted 2026-09-25 because there were two. `getGameState` mapped the rows
+ * to `{id, name, type, description, quantity, metadata}` for `state:update`
+ * while the delta path pushed `getPlayerInventory`'s raw
+ * `{itemId, item, quantity, acquiredAt}` at the same path — so the store's
+ * shape flipped the first time a player bought anything, `.name` became
+ * `undefined`, and nothing noticed because `applyStateDelta` reports an opaque
+ * top-level `set` as applied either way.
+ *
+ * Two producers for one path is the bug; one function is the fix.
+ */
+function toStateInventory(
+  rows: Array<{
+    itemId: string;
+    quantity: number;
+    item: { name: string; category: string; description: string; effects?: unknown };
+  }>,
+): InventoryItem[] {
+  return rows.map((row) => ({
+    id: row.itemId,
+    name: row.item.name,
+    type: row.item.category,
+    description: row.item.description,
+    quantity: row.quantity,
+    metadata: row.item.effects,
+  }));
+}
+
 @injectable()
 class GameStateManager extends EventEmitter {
   private playerSessions: Map<string, PlayerSession>;
@@ -46,6 +120,17 @@ class GameStateManager extends EventEmitter {
   private missionService: MissionService;
   private factionService: FactionService;
   private cleanupTimer: NodeJS.Timeout | null = null;
+  /** Per-player debounce for state-slice refreshes, and what each owes. */
+  private sliceRefreshTimers = new Map<string, NodeJS.Timeout>();
+  private pendingSlices = new Map<string, Set<StateSlice>>();
+  /** Players with a refresh running, so two can never overlap. */
+  private sliceRefreshInFlight = new Set<string>();
+  /** Exactly what this class subscribed to, so `stop()` can undo just that. */
+  private bridgeSubscriptions: Array<{
+    emitter: { off: (e: string, h: (...a: any[]) => void) => unknown };
+    event: string;
+    handler: (...args: any[]) => void;
+  }> = [];
   private readonly CLEANUP_INTERVAL_MS = SESSION_CLEANUP_INTERVAL_MS;
   private readonly MAX_SESSIONS = MAX_SESSIONS_LIMIT;
   private readonly SESSION_IDLE_TIMEOUT_MS = SESSION_IDLE_TIMEOUT_MIN * 60 * 1000;
@@ -67,6 +152,10 @@ class GameStateManager extends EventEmitter {
     @inject(SHOP_SERVICE) shopService: ShopService,
     @inject(MISSION_SERVICE) missionService: MissionService,
     @inject(FACTION_SERVICE) factionService: FactionService,
+    @inject(PLAYER_PROGRESS_REPOSITORY)
+    private progressRepo: PlayerProgressRepository,
+    @inject(PLAYER_MISSION_REPOSITORY)
+    private missionRepo: PlayerMissionRepository,
   ) {
     super();
     this.io = io;
@@ -80,6 +169,226 @@ class GameStateManager extends EventEmitter {
 
     // Start automatic cleanup timer
     this.startCleanupTimer();
+
+    this.bridgeStateDeltas();
+  }
+
+  /**
+   * Turn in-process state changes into `state:delta` pushes.
+   *
+   * ORPHAN AUDIT 2026-09-25. Two dead things meet here:
+   *
+   *   - `broadcastStateDelta` had ZERO callers, so the delta channel existed
+   *     and nothing ever used it, and `state:update` fired only once per
+   *     login. A client reading the pushed state would have seen credits
+   *     frozen at the moment it authenticated.
+   *   - `shopService extends EventEmitter` and emits five events —
+   *     `item:added`, `item:removed`, `purchase:complete`, `item:sold`,
+   *     `item:used` — with **no subscribers anywhere**. The emit calls were
+   *     already at the right places; they just went nowhere.
+   *
+   * This is the subscriber. It lives in gameStateManager because that is the
+   * class that owns both `io` and the notion of a player's state — the
+   * repository is deliberately I/O-free and shopService has no `io` at all.
+   */
+  private bridgeStateDeltas(): void {
+    // ── Credits, experience, level, skills ──────────────────────────
+    //
+    // Via the repository rather than its ~23 call sites: it is the single
+    // sanctioned writer of player_progress, so one subscription covers hack
+    // rewards, mission payouts, trace penalties and command grants alike.
+    //
+    // KNOWN GAP, stated rather than hidden: nine sites still write
+    // player_progress directly (CLAUDE.md lists them) and produce no delta.
+    // Four are row CREATION, which has no delta to send. The two that matter
+    // are the admin progress editor and restoreBackup — both write absolute
+    // values, and a client watching either will be stale until its next
+    // `state:update`.
+    {
+      this.subscribe(this.progressRepo, "progress:changed", (change: { userId: string; credits?: number; experience?: number; level?: number; skill?: { name: string; value: number } }) => {
+        if (!change?.userId) return;
+        if (typeof change.credits === "number") {
+          void this.broadcastStateDelta(change.userId, "player.credits", change.credits);
+        }
+        if (typeof change.experience === "number") {
+          void this.broadcastStateDelta(change.userId, "player.experience", change.experience);
+        }
+        if (typeof change.level === "number") {
+          void this.broadcastStateDelta(change.userId, "player.level", change.level);
+        }
+        if (change.skill) {
+          void this.broadcastStateDelta(
+            change.userId,
+            `player.skills.${change.skill.name}`,
+            change.skill.value,
+          );
+        }
+      });
+    }
+
+    // ── Inventory ───────────────────────────────────────────────────
+    //
+    // The five shop events carry {userId, itemId, quantity} — enough to know
+    // something changed, not enough to rebuild the row the client holds, so
+    // the affected slices are re-read and pushed whole.
+    //
+    // CREDITS ARE REFRESHED HERE, and that is not incidental. Both money paths
+    // run inside a transaction — `spendCredits` in `purchaseItem` and
+    // `addCredits` in `sellItem`, both passing `tx` — and `announce`
+    // suppresses itself under `tx` because a read through an open transaction
+    // sees uncommitted state. So the repository CANNOT be the source of a
+    // purchase's credit delta; this post-commit event is. The first version of
+    // this bridge refreshed only `inventory`, which meant a purchase changed
+    // the item list and never the balance, while ShopDialog had just dropped
+    // its own re-poll on the strength of a comment saying otherwise.
+    for (const evt of ["item:added", "item:removed", "purchase:complete", "item:sold", "item:used"]) {
+      this.subscribe(this.shopService, evt, (payload: { userId?: string }) => {
+        if (payload?.userId) this.scheduleSliceRefresh(payload.userId, "inventory", "credits");
+      });
+    }
+
+    // ── Missions ────────────────────────────────────────────────────
+    //
+    // `PlayerMissionRepository` is the documented sole owner of mission state
+    // and holds zero direct `prisma.playerMission*` access outside itself, so
+    // one subscription covers accept, abandon, objective progress, completion
+    // and expiry across missionService, tutorialService, storyMissionService
+    // and missionGenerator alike.
+    //
+    // Until this, `missions` only ever arrived in the login snapshot while the
+    // client already exported a `playerMissions` derived store — the same trap
+    // ShopDialog fell into with credits.
+    this.subscribe(this.missionRepo, "missions:changed", (payload: { userId?: string }) => {
+      if (payload?.userId) this.scheduleSliceRefresh(payload.userId, "missions");
+    });
+  }
+
+  /**
+   * Coalesce shop refreshes per player.
+   *
+   * One logical action fires more than one event — `useItem` emits
+   * `item:removed` AND `item:used`, and a purchase emits `purchase:complete`
+   * plus `item:added` — so an un-debounced listener issues the same queries
+   * two or three times and pushes the same arrays down the socket again. A
+   * mission granting K items would do it K times.
+   */
+  public scheduleSliceRefresh(userId: string, ...slices: StateSlice[]): void {
+    const pending = this.pendingSlices.get(userId) ?? new Set<StateSlice>();
+    for (const slice of slices) pending.add(slice);
+    this.pendingSlices.set(userId, pending);
+
+    if (this.sliceRefreshTimers.has(userId)) return;
+    const timer = setTimeout(() => {
+      this.sliceRefreshTimers.delete(userId);
+      void this.flushSlices(userId);
+    }, SLICE_REFRESH_DEBOUNCE_MS);
+    (timer as NodeJS.Timeout & { unref?: () => void }).unref?.();
+    this.sliceRefreshTimers.set(userId, timer);
+  }
+
+  /**
+   * Subscribe, remembering the exact handler so teardown can be scoped.
+   *
+   * These are DI singletons this class does not own, so `stop()` must not
+   * reach for `removeAllListeners` — that would take every subscriber for the
+   * event name, not just this bridge's.
+   */
+  private subscribe(
+    emitter: { on: (e: string, h: (...a: any[]) => void) => unknown },
+    event: string,
+    handler: (...args: any[]) => void,
+  ): void {
+    emitter.on(event, handler);
+    this.bridgeSubscriptions.push({ emitter: emitter as never, event, handler });
+  }
+
+  /**
+   * Run a player's pending refreshes ONE AT A TIME.
+   *
+   * Overlapping flushes are a correctness problem, not just waste: both push
+   * whole-slice `set` deltas with no sequence number and `applyStateDelta` is
+   * last-write-wins, so a slow flush that started first can land last and
+   * leave the client stale with `applied` true, so nothing requests a resync.
+   *
+   * Serialising per player is enough — Socket.IO preserves order within a
+   * connection, so emitting in order means receiving in order.
+   */
+  private async flushSlices(userId: string): Promise<void> {
+    if (this.sliceRefreshInFlight.has(userId)) return;
+    this.sliceRefreshInFlight.add(userId);
+    let failed = false;
+    try {
+      // Drain: anything scheduled WHILE a flush runs is picked up by the next
+      // turn of this loop rather than by a competing flush.
+      for (;;) {
+        const due = this.pendingSlices.get(userId);
+        if (!due || due.size === 0) break;
+        this.pendingSlices.delete(userId);
+        if (await this.refreshStateSlices(userId, due)) continue;
+
+        // Put the work back. `refreshStateSlices` swallows its own errors, so
+        // without this a single transient query failure drops the slice for
+        // good and the client stays stale until a reconnect.
+        const back = this.pendingSlices.get(userId) ?? new Set<StateSlice>();
+        for (const slice of due) back.add(slice);
+        this.pendingSlices.set(userId, back);
+        failed = true;
+        break;
+      }
+    } finally {
+      this.sliceRefreshInFlight.delete(userId);
+      // Closes the gap between the loop's last check and releasing the lock:
+      // work scheduled in that window would otherwise sit until the next
+      // unrelated event. Skipped after a failure — re-arming on the debounce
+      // would retry every SLICE_REFRESH_DEBOUNCE_MS against a down database.
+      // The restored slices ride along with the next event instead.
+      if (!failed && (this.pendingSlices.get(userId)?.size ?? 0) > 0) {
+        this.scheduleSliceRefresh(userId);
+      }
+    }
+  }
+
+  /**
+   * Re-read the slices a shop action can change and push them as deltas.
+   *
+   * The cheap middle ground between a delta the emitter cannot construct and a
+   * full `state:update`, which runs five parallel queries.
+   *
+   * The inventory rows are mapped to the SAME shape `getGameState` builds for
+   * this path. Pushing `getPlayerInventory`'s raw rows — which is what the
+   * first version did — replaced `{id, name, …}` with `{itemId, item, …}`
+   * mid-session, and `applyStateDelta` reports a top-level `set` as applied
+   * either way, so nothing detected it and no resync corrected it.
+   */
+  /** @returns false if the refresh failed, so the caller can re-queue it. */
+  public async refreshStateSlices(userId: string, slices: Set<StateSlice>): Promise<boolean> {
+    return await safeExecute({
+      fallback: false as const,
+      fn: async () => {
+        if (!this.playerSessions.has(userId) || slices.size === 0) return true;
+
+        if (slices.has("inventory")) {
+          const items = await this.shopService.getPlayerInventory(userId);
+          await this.broadcastStateDelta(userId, "inventory", toStateInventory(items));
+        }
+        if (slices.has("credits")) {
+          const progress = await db.client.playerProgress.findUnique({
+            where: { userId },
+            select: { credits: true },
+          });
+          if (progress) {
+            await this.broadcastStateDelta(userId, "player.credits", progress.credits);
+          }
+        }
+        if (slices.has("missions")) {
+          const missions = await this.missionService.getPlayerMissions(userId);
+          await this.broadcastStateDelta(userId, "missions", toStateMissions(missions));
+        }
+        return true;
+      },
+      context: "Refresh state slices",
+      logger: this.logger,
+    })();
   }
 
   // ==================== PUBLIC ACCESSORS ====================
@@ -245,6 +554,24 @@ class GameStateManager extends EventEmitter {
         this.logger.info({ userId }, "No session found for user");
         return;
       }
+
+      // Release the drains this session owns. Only an explicit `disconnect`
+      // released the connection drain, so closing the tab leaked it. Backdoors
+      // are left alone — they outlive the session and nothing re-registers
+      // them at login.
+      try {
+        const { getService } = await import("../di/container");
+        const memory = getService<import("./memoryService").default>(MEMORY_SERVICE);
+        memory.releaseSessionConsumersFor(userId);
+      } catch (err) {
+        this.logger.warn({ err, userId }, "Could not release passive drains");
+      }
+
+      // Drop any pending slice refresh; the socket is going away.
+      const pendingTimer = this.sliceRefreshTimers.get(userId);
+      if (pendingTimer) clearTimeout(pendingTimer);
+      this.sliceRefreshTimers.delete(userId);
+      this.pendingSlices.delete(userId);
 
       // Disconnect from any connected servers
       if (session.currentServerId) {
@@ -431,31 +758,8 @@ class GameStateManager extends EventEmitter {
         const gameState: GameState = {
           player: playerInfo,
           currentServer,
-          inventory: inventoryItems.map((item) => ({
-            id: item.itemId,
-            name: item.item.name,
-            type: item.item.category,
-            description: item.item.description,
-            quantity: item.quantity,
-            metadata: item.item.effects,
-          })),
-          missions: playerMissions.map((m) => ({
-            id: m.missionId,
-            title: (m as any).title || "Unknown Mission",
-            description: (m as any).description || "Loading...",
-            type: (m as any).type || "hack",
-            status: m.status as MissionStatus,
-            difficulty: (m as any).difficulty || 1,
-            objectives: m.objectives.map((o) => ({
-              ...o,
-              progress: typeof o.current === "number" ? o.current : 0,
-              required: typeof o.target === "number" ? o.target : 1,
-              target: o.target?.toString(),
-            })),
-            reward: (m as any).reward || { credits: 0, experience: 0 },
-            timeLimit: (m as any).timeLimit,
-            ...(m.expiresAt ? { expiresAt: m.expiresAt } : {}),
-          })),
+          inventory: toStateInventory(inventoryItems),
+          missions: toStateMissions(playerMissions),
           notifications: userEvents.map((e) => ({
             id: e.id,
             type: e.type as unknown as NotificationType,
@@ -520,24 +824,26 @@ class GameStateManager extends EventEmitter {
     userId: string,
     path: string,
     value: any,
+    // `operation` was hardcoded to "set", which left `push`, `remove` and
+    // `update` implemented in the shared applier, declared in the wire
+    // contract, and unreachable from any producer — CLAUDE.md bug shape #4.
+    // It is a parameter so the applier's other branches have a way in; `set`
+    // stays the default because most callers replace a whole value.
+    operation: StateDelta["operation"] = "set",
   ): Promise<void> {
     await safeExecute({
       fn: async () => {
         const session = this.playerSessions.get(userId);
         if (!session) return;
 
-        const delta: StateDelta = {
-          path,
-          value,
-          operation: "set",
-        };
+        const delta: StateDelta = { path, value, operation };
 
         this.io.to(`user:${userId}`).emit("state:delta", {
           delta,
           timestamp: new Date(),
         });
 
-        this.logger.info({ userId, path }, "Broadcast state delta to user");
+        this.logger.debug({ userId, path, operation }, "Broadcast state delta to user");
       },
       context: "Broadcast state delta",
       logger: this.logger,
@@ -746,6 +1052,22 @@ class GameStateManager extends EventEmitter {
       // AFTER serverService's increment, so it silently overwrote it.
       await this.syncServerConnectionCount(serverId);
 
+        // Passive resource drain. `registerConnection` had ZERO callers, so
+        // holding connections open cost the player nothing and the whole
+        // passive-drain economy (PASSIVE_COSTS, addPassiveConsumer, the
+        // resource ticker) ran against an always-empty consumer set.
+        try {
+          const { getService } = await import("../di/container");
+          const memory = getService<import("./memoryService").default>(MEMORY_SERVICE);
+          const srv = await db.client.gameServer.findUnique({
+            where: { id: serverId },
+            select: { name: true },
+          });
+          memory.registerConnection(userId, serverId, srv?.name ?? serverId);
+        } catch (err) {
+          this.logger.warn({ err, userId, serverId }, "Could not register connection drain");
+        }
+
         this.emit("player:connected_to_server", { userId, serverId });
         this.logger.info({ userId, serverId }, "User connected to server");
 
@@ -834,6 +1156,16 @@ class GameStateManager extends EventEmitter {
             activeTerminal.serverId = session.homeServerId;
             activeTerminal.currentDirectory = homeDir;
           }
+        }
+
+        // Symmetric with registerConnection above: a drain that is never
+        // released is worse than one that never starts.
+        try {
+          const { getService } = await import("../di/container");
+          const memory = getService<import("./memoryService").default>(MEMORY_SERVICE);
+          memory.unregisterConnection(userId, serverId);
+        } catch (err) {
+          this.logger.warn({ err, userId, serverId }, "Could not release connection drain");
         }
 
         this.emit("player:disconnected_from_server", { userId, serverId });
@@ -1275,6 +1607,31 @@ Tips:
     this.cleanupTimer = setInterval(async () => {
       await this.cleanupIdleSessions();
     }, this.CLEANUP_INTERVAL_MS);
+  }
+
+  /**
+   * Release everything this manager holds. Called by `gracefulShutdown`.
+   *
+   * REVIEW 2026-09-25: GAME_STATE_MANAGER was absent from the shutdown table
+   * in lifecycle.ts and `stopCleanupTimer` was private, so its interval could
+   * not be stopped even in principle — and this changeset then hung the
+   * slice-refresh debounce timers and two EventEmitter subscriptions off the
+   * same object. The debounce timers are `unref`'d so they cannot hold the
+   * process open, but they fire callbacks that touch the database, which
+   * `gracefulShutdown` disconnects near the end of its sequence.
+   */
+  public stop(): void {
+    this.stopCleanupTimer();
+    for (const timer of this.sliceRefreshTimers.values()) clearTimeout(timer);
+    this.sliceRefreshTimers.clear();
+    this.pendingSlices.clear();
+    // Drop ONLY the subscriptions this class made, so a restarted container
+    // does not stack a second set and a foreign subscriber is left alone.
+    for (const { emitter, event, handler } of this.bridgeSubscriptions) {
+      (emitter as unknown as { off: (e: string, h: (...a: any[]) => void) => unknown })
+        .off(event, handler);
+    }
+    this.bridgeSubscriptions.length = 0;
   }
 
   /**

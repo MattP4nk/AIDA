@@ -84,6 +84,33 @@ export interface TopologyView {
 
 // ── Service ────────────────────────────────────────────────────────────────
 
+/**
+ * May this player learn about this link?
+ *
+ * THE ONE DEFINITION. There were two: `discoverNeighbors` (scan) enforced
+ * these three rules and `discoverPath` (traceroute) enforced none, upserting
+ * every hop on a route. So `scan` refusing a hidden link at networking 15
+ * bought nothing — the same link was obtainable by tracerouting through it,
+ * and the link-type progression was decorative. Two writers to one table with
+ * different rules is the defect; a shared predicate is the fix.
+ *
+ * @param linkType   "lan" | "wan" | "vpn" | "backbone" | "hidden"
+ * @param targetIsPublic the TARGET SERVER's `isPublic` — a private server's IP
+ *                       is meant to come from files or intel, never from a
+ *                       route that happens to pass through it
+ * @param scanLevel  the player's networking skill
+ */
+export function canDiscoverLink(
+  linkType: string,
+  targetIsPublic: boolean,
+  scanLevel: number,
+): boolean {
+  if (!targetIsPublic) return false;
+  if (linkType === "hidden" && scanLevel < 30) return false;
+  if (linkType === "vpn" && scanLevel < 15) return false;
+  return true;
+}
+
 @injectable()
 export class NetworkTopologyService {
   private static readonly ADJ_CACHE_TTL = 30; // 30s adjacency cache
@@ -409,16 +436,11 @@ export class NetworkTopologyService {
   ): Promise<DiscoveryResult[]> {
     const adjacent = await this.getAdjacentServers(serverId);
 
-    // Filter by discovery difficulty and visibility
-    const discoverable = adjacent.filter((a) => {
-      // Private servers don't show in scan — must discover IP through files/intel
-      if (!a.isPublic) return false;
-      // Hidden links require higher skill
-      if (a.link.linkType === "hidden" && scanLevel < 30) return false;
-      // VPN links require moderate skill
-      if (a.link.linkType === "vpn" && scanLevel < 15) return false;
-      return true;
-    });
+    // Filter by discovery difficulty and visibility. The rule itself lives in
+    // `canDiscoverLink` so that traceroute cannot enforce a different one.
+    const discoverable = adjacent.filter((a) =>
+      canDiscoverLink(a.link.linkType, a.isPublic, scanLevel),
+    );
 
     const results: DiscoveryResult[] = [];
 
@@ -486,6 +508,16 @@ export class NetworkTopologyService {
    * Auto-discover links along a path (used by traceroute).
    */
   async discoverPath(userId: string, path: PathHop[]): Promise<void> {
+    // Traceroute is held to the SAME rule as scan. This used to upsert every
+    // hop unconditionally, so routing through a hidden or VPN link — or
+    // through a private server — handed over what `discoverNeighbors` would
+    // have refused, making the link-type progression decorative.
+    const progress = await this.prisma.playerProgress.findUnique({
+      where: { userId },
+      select: { networking: true },
+    });
+    const scanLevel = progress?.networking ?? 0;
+
     for (let i = 0; i < path.length - 1; i++) {
       const fromId = path[i]!.serverId;
       const toId = path[i + 1]!.serverId;
@@ -500,6 +532,16 @@ export class NetworkTopologyService {
       });
 
       if (link) {
+        // `toId` is the hop being learned about, so its visibility is what
+        // matters — tracing TOWARDS a private server must not reveal it.
+        const target = await this.prisma.gameServer.findUnique({
+          where: { id: toId },
+          select: { isPublic: true },
+        });
+        if (!canDiscoverLink(link.linkType, target?.isPublic ?? false, scanLevel)) {
+          continue;
+        }
+
         await this.prisma.discoveredLink.upsert({
           where: { userId_linkId: { userId, linkId: link.id } },
           create: { userId, linkId: link.id, source: "traceroute" },

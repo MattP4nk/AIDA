@@ -135,6 +135,11 @@ export async function gracefulShutdown(
       // through teardown, past db.disconnect().
       ["MEMORY_SERVICE", "Memory/resource ticker", "destroy"],
       ["MISSION_GENERATOR_SERVICE", "Midnight mission scheduler", "stopMidnightScheduler"],
+      // Added 2026-09-25: it was never in this table and its stop method was
+      // private, so its cleanup interval could not be stopped even in
+      // principle. It now also owns the state-slice debounce timers and the
+      // delta-bridge subscriptions.
+      ["GAME_STATE_MANAGER", "Game state manager", "stop"],
     ] as const) {
       try {
         const svc = getService<Record<string, () => void>>(

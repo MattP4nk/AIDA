@@ -11,6 +11,7 @@ import { injectable, inject } from "tsyringe";
 import { PrismaClient } from "@prisma/client";
 import type { Logger } from "pino";
 import { CONTENT_QUEUE_SERVICE, LOGGER, PRISMA_CLIENT } from "../di/tokens";
+import { NotFoundError, ValidationError } from "../../../shared/types";
 import { resolveNpcOwnerId } from "../../prisma/npcOwnership";
 
 import type { ContentQueueService } from "./contentQueueService";
@@ -102,8 +103,15 @@ export class ContentDraftService {
       where: { id: draftId },
     });
 
-    if (!draft) throw new Error("Draft not found");
-    if (draft.status !== "draft") throw new Error(`Cannot approve draft with status '${draft.status}'`);
+    // TYPED errors, because these are ordinary admin outcomes and not server
+    // faults. `formatServerError` only preserves a status for `GameError`
+    // subclasses, so a bare `Error` here becomes a 500 with the reason
+    // stripped and an error-level log line — an admin double-clicking Reject
+    // saw "An unexpected error occurred" and the operator saw a 5xx.
+    if (!draft) throw new NotFoundError("Draft not found");
+    if (draft.status !== "draft") {
+      throw new ValidationError(`Cannot approve draft with status '${draft.status}'`);
+    }
 
     let resultId: string | null = null;
 
@@ -146,8 +154,11 @@ export class ContentDraftService {
       where: { id: draftId },
     });
 
-    if (!draft) throw new Error("Draft not found");
-    if (draft.status !== "draft") throw new Error(`Cannot reject draft with status '${draft.status}'`);
+    // Typed for the same reason as approveDraft above.
+    if (!draft) throw new NotFoundError("Draft not found");
+    if (draft.status !== "draft") {
+      throw new ValidationError(`Cannot reject draft with status '${draft.status}'`);
+    }
 
     const updated = await this.prisma.contentDraft.update({
       where: { id: draftId },

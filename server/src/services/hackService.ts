@@ -12,7 +12,7 @@ import { HackMethod } from "../types/game";
 import { injectable, inject } from "tsyringe";
 import { safeExecute } from "../utils/safeExecute";
 import { Logger } from "pino";
-import { BACKDOOR_SERVICE, FACTION_KNOWLEDGE_SERVICE, FACTION_SERVICE, FORUM_SERVICE, LOGGER, MEMORY_SERVICE, MISSION_INTEGRATION_SERVICE, NPC_REACTION_SERVICE, PERSONA_SERVICE, PLAYER_PROGRESS_REPOSITORY, PROGRESS_SERVICE, REPUTATION_ENGINE, SERVER_SERVICE, SOCKET_IO, TRACE_SERVICE } from "../di/tokens";
+import { BACKDOOR_SERVICE, FACTION_KNOWLEDGE_SERVICE, FACTION_SERVICE, FORUM_SERVICE, LOGGER, MEMORY_SERVICE, MISSION_INTEGRATION_SERVICE, NPC_REACTION_SERVICE, PERSONA_SERVICE, PLAYER_PROGRESS_REPOSITORY, PROGRESS_SERVICE, REPUTATION_ENGINE, SERVER_SERVICE, SOCKET_IO, TRACE_SERVICE, WARFARE_SERVICE } from "../di/tokens";
 import type MissionIntegrationService from "./missionIntegration";
 import type ProgressService from "./progressService";
 import type PlayerProgressRepository from "../repositories/playerProgressRepository";
@@ -32,6 +32,7 @@ import type { Server as SocketIOServer } from "socket.io";
 import type TraceService from "./traceService";
 import type { FactionKnowledgeService } from "./factionKnowledgeService";
 import { BOUNTY_BASE_CREDITS, BOUNTY_BASE_REP, BOUNTY_CREDITS_PER_EVIDENCE, BOUNTY_EVIDENCE_THRESHOLD, BOUNTY_EXPIRATION_H, HACK_COOLDOWN_BASE_S, MAX_TOOL_STEALTH_BONUS, MAX_TOOL_SUCCESS_BONUS, SKILL_PENALTY, SKILL_SOFT_BAND, getHackCooldown } from "../config/gameBalance";
+import { notifyUser } from "../utils/notify";
 
 /**
  * Enhanced HackService - Complete PvP hacking mechanics
@@ -1360,6 +1361,25 @@ class HackService extends EventEmitter {
       result.success,
     );
 
+    // 2b. Score the hack toward an active faction war.
+    //
+    // `updateWarScore` had no producer at all, so every declared war sat 0-0
+    // and its monitor resolved on elapsed time rather than on anything either
+    // side did. Non-blocking and silent: the overwhelmingly common case is a
+    // hack that has nothing to do with a war, and a scoring failure must not
+    // fail the hack.
+    if (result.success) {
+      void (async () => {
+        try {
+          const { getService } = await import("../di/container");
+          const warfare = getService<import("./warfareService").default>(WARFARE_SERVICE);
+          await warfare.recordHackForWar(attackerId, targetServerId);
+        } catch (err) {
+          this.logger.warn({ err, attackerId, targetServerId }, "War scoring failed");
+        }
+      })();
+    }
+
     // 3. Emit hack:attempt event
     this.emit("hack:attempt", {
       attackerId,
@@ -2054,11 +2074,15 @@ class HackService extends EventEmitter {
           critical: `[CRITICAL] ${serverName} under attack! Server locked down. Trace initiated. Evidence: ${evidenceLevel}%`,
         };
 
-        io.to(`player:${ownerId}`).emit("notification", {
+        // Through notifyUser so it survives a reload. This is the alert
+        // that most needed it: it is the owner's only warning that someone
+        // is inside their server, and it was lost on refresh.
+        await notifyUser(io, ownerId, {
           type: "security_alert",
+          category: "security",
+          title: "Security Alert",
+          message: messages[severity] ?? "",
           severity,
-          message: messages[severity],
-          timestamp: new Date(),
         });
       },
       context: "Notify server owner of security alert",
@@ -2251,10 +2275,12 @@ class HackService extends EventEmitter {
 
         for (const member of members) {
           if (member.userId !== targetUserId) {
-            io.to(`player:${member.userId}`).emit("notification", {
+            await notifyUser(io, member.userId, {
               type: "bounty_posted",
+              category: "faction",
+              title: "Bounty Posted",
               message: `BOUNTY: ${target.username} is wanted for hacking ${serverName}. Reward: ${rewardCredits}c + ${rewardReputation} rep. Use 'bounties' to view.`,
-              timestamp: new Date(),
+              data: { targetUserId, rewardCredits, rewardReputation },
             });
           }
         }
@@ -2327,7 +2353,17 @@ class HackService extends EventEmitter {
   }
 
   /**
-   * Send security alert to target
+   * An AUDIT RECORD, not a notification. The name overstates it.
+   *
+   * ORPHAN AUDIT 2026-09-24: this writes `game_events` directly, bypassing
+   * `eventService.createEvent` and therefore `broadcastEvent`. The two
+   * honeypot writers in fileService did the same thing and WERE a bug, since
+   * nothing else told the owner. This one is deliberate: `notifyServerOwner`
+   * (:1872, :1897, :1949) is the player-facing channel for exactly these
+   * detections, and it persists through notifyUser. Routing this through
+   * createEvent as well would send the owner two alerts for one intrusion.
+   *
+   * Left as a direct write on purpose. Do not "fix" it to match fileService.
    */
   private async sendSecurityAlert(
     userId: string,

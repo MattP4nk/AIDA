@@ -41,6 +41,7 @@ import { registerShutdownTimer } from "./utils/shutdownTimers";
 import {
   ARCHITECT_EVAL_INTERVAL_MS,
   DUNGEON_EXPIRATION_INTERVAL_MS,
+  NOTIFICATION_PURGE_INTERVAL_MS,
 } from "./config/gameBalance";
 
 // ── Infrastructure ────────────────────────────────────────────────
@@ -491,6 +492,24 @@ async function initialize(): Promise<void> {
     DUNGEON_EXPIRATION_INTERVAL_MS,
   ));
   logger.info("✅ DarkNet Dungeon expiration checker scheduled (every 1h)");
+
+  // Notification retention. Read/dismissed rows older than the window, and
+  // anything past its own expiry, are deleted; UNREAD rows are never touched
+  // at any age. Registered for shutdown for the same reason as the sweeps
+  // above — the callback touches the database, which gracefulShutdown
+  // disconnects near the end of its sequence.
+  registerShutdownTimer(setInterval(
+    async () => {
+      try {
+        const { purgeOldNotifications } = await import("./utils/notify");
+        await purgeOldNotifications();
+      } catch (err) {
+        logger.error({ err }, "Notification purge failed");
+      }
+    },
+    NOTIFICATION_PURGE_INTERVAL_MS,
+  ));
+  logger.info("✅ Notification retention sweep scheduled (every 6h)");
 
   // Content generation queue — reliable pipeline for server content
   try {

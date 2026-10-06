@@ -34,6 +34,7 @@
  * These are latent defects the repository prevents structurally, not a fire.
  */
 import { inject, injectable } from "tsyringe";
+import { EventEmitter } from "events";
 import { Prisma, PrismaClient } from "@prisma/client";
 import { Logger } from "pino";
 import { LOGGER, PRISMA_CLIENT } from "../di/tokens";
@@ -110,15 +111,48 @@ export function levelForExperience(experience: number): number {
   return Math.floor(Math.sqrt(Math.max(0, experience) / 100)) + 1;
 }
 
+/** What a `progress:changed` event carries. Only player-VISIBLE dials. */
+export interface ProgressChange {
+  userId: string;
+  credits?: number;
+  experience?: number;
+  level?: number;
+  skill?: { name: string; value: number };
+}
+
 @injectable()
-export class PlayerProgressRepository {
+export class PlayerProgressRepository extends EventEmitter {
   constructor(
     @inject(LOGGER) private logger: Logger,
     @inject(PRISMA_CLIENT) private prisma: PrismaClient,
-  ) {}
+  ) {
+    super();
+  }
 
   private db(tx?: PrismaLike): PrismaLike {
     return tx ?? this.prisma;
+  }
+
+  /**
+   * Announce a change so the socket layer can push a `state:delta`.
+   *
+   * THIS IS NOT I/O, and that distinction is the whole point. The class
+   * docstring on `addExperience` says the repository "deliberately does no I/O
+   * beyond the database" and returns `leveledUp` so the CALLER emits the
+   * socket event. That still holds: this is an in-process EventEmitter, and
+   * `gameStateManager` — which owns `io` — is what turns it into a socket
+   * emit. The repository stays I/O-free; it just stops being the only place
+   * that knows a value changed.
+   *
+   * SUPPRESSED INSIDE A TRANSACTION. `addCredits`/`spendCredits` end with a
+   * read through the same `tx`, so under a transaction they observe
+   * UNCOMMITTED state — announcing it would broadcast a balance that can still
+   * roll back. Transactional callers (shopService.purchaseItem) emit their own
+   * post-commit event, which the bridge picks up instead.
+   */
+  private announce(change: ProgressChange, tx?: PrismaLike): void {
+    if (tx) return;
+    this.emit("progress:changed", change);
   }
 
   // ── CREDITS ───────────────────────────────────────────────────────────
@@ -143,7 +177,9 @@ export class PlayerProgressRepository {
       this.logger.debug({ userId, amount }, "addCredits: no PlayerProgress row");
       return 0;
     }
-    return this.readCredits(userId, tx);
+    const balance = await this.readCredits(userId, tx);
+    this.announce({ userId, credits: balance }, tx);
+    return balance;
   }
 
   /**
@@ -168,7 +204,9 @@ export class PlayerProgressRepository {
       const balance = await this.readCredits(userId, tx);
       return { ok: false, balance, shortfall: Math.max(0, n - balance) };
     }
-    return { ok: true, balance: await this.readCredits(userId, tx) };
+    const balance = await this.readCredits(userId, tx);
+    this.announce({ userId, credits: balance }, tx);
+    return { ok: true, balance };
   }
 
   private async readCredits(userId: string, tx?: PrismaLike): Promise<number> {
@@ -247,9 +285,14 @@ export class PlayerProgressRepository {
       raised = rows.count > 0;
     }
 
+    const level = Math.max(previousLevel, newLevel);
+    // Announced unconditionally on experience, not only on `raised`: the XP bar
+    // moves on every grant, and only the level line is gated by the rowcount.
+    this.announce({ userId, experience: row.experience, level }, tx);
+
     return {
       experience: row.experience,
-      level: Math.max(previousLevel, newLevel),
+      level,
       previousLevel,
       leveledUp: raised,
     };
@@ -299,6 +342,7 @@ export class PlayerProgressRepository {
       this.logger.debug({ userId, skill, delta }, "addSkill: no PlayerProgress row");
       return 0;
     }
+    this.announce({ userId, skill: { name: skill, value: rows[0].value } }, tx);
     return rows[0].value;
   }
 

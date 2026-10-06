@@ -3,6 +3,11 @@ import { PrismaClient, FactionWar } from "@prisma/client";
 import { Logger } from "pino";
 import { FactionWarInfo, WarStatus } from "../../../shared/types";
 import { getService } from "../di/container";
+import {
+  WAR_POINTS_PER_HACK,
+  WAR_SCORE_COOLDOWN_MS,
+  WAR_MAX_POINTS_PER_PLAYER,
+} from "../config/gameBalance";
 import { LOGGER, PERSONA_SERVICE, RESOURCE_SERVICE, DYNAMIC_CONTENT_SERVICE } from "../di/tokens";
 import { safeExecute } from "../utils/safeExecute";
 
@@ -16,10 +21,47 @@ const WAR_RESOURCE_BLEED = { credits: 10, intel: 5, compute: 5 };
 export default class WarfareService {
   private warCheckInterval: NodeJS.Timeout | undefined;
 
+  /**
+   * War-scoring windows, held IN MEMORY.
+   *
+   *   warScoredAt    `${warId}:${userId}:${serverId}` -> last scored at (ms)
+   *   warContributed `${warId}:${userId}`             -> points contributed
+   *
+   * KNOWN LIMIT, stated rather than left to be discovered: both are REBUILT
+   * EMPTY ON RESTART, so a process restart resets every cooldown and every
+   * player's contribution total for wars still running. That is a real hole —
+   * a restart is not player-triggered, but it does mean the cap is a
+   * per-process cap rather than a per-war one.
+   *
+   * `HackLog` has the right columns to derive this durably and was rejected on
+   * purpose: it is written FIRE-AND-FORGET one step earlier in the same
+   * pipeline, so whether the current hack is present when scoring runs is a
+   * race. Making the rule durable properly needs a small schema addition and a
+   * maintainer `db:push`; it is filed rather than faked.
+   */
+  private warScoredAt = new Map<string, number>();
+  private warContributed = new Map<string, number>();
+  private warSweepInterval: NodeJS.Timeout | undefined;
+
   constructor(
     @inject("PrismaClient") private prisma: PrismaClient,
     @inject(LOGGER) private logger: Logger,
-  ) {}
+  ) {
+    // Sweep hourly so the windows cannot grow without bound. `unref` so it
+    // never holds the process open, and it only touches in-memory maps plus
+    // one indexed read.
+    this.warSweepInterval = setInterval(
+      () => {
+        void safeExecute({
+          fn: () => this.sweepWarScoreWindows(),
+          context: "Sweep war score windows",
+          logger: this.logger,
+        })();
+      },
+      WAR_SCORE_COOLDOWN_MS,
+    );
+    (this.warSweepInterval as NodeJS.Timeout & { unref?: () => void }).unref?.();
+  }
 
   /**
    * Start periodic war checks (resource bleed + safety valve).
@@ -42,6 +84,14 @@ export default class WarfareService {
     if (this.warCheckInterval) {
       clearInterval(this.warCheckInterval);
       this.warCheckInterval = undefined;
+    }
+    // The sweep is armed in the constructor, not by startWarMonitor, but it
+    // still has to stop here: it is the only shutdown hook warfareService has,
+    // and a sweep that fires after `prisma.$disconnect()` throws from inside a
+    // timer callback.
+    if (this.warSweepInterval) {
+      clearInterval(this.warSweepInterval);
+      this.warSweepInterval = undefined;
     }
   }
 
@@ -250,6 +300,127 @@ export default class WarfareService {
       where: { id: warId },
       data: { [field]: { increment: points } },
     });
+  }
+
+  /**
+   * Score a successful hack toward an active war, if the hack is part of one.
+   *
+   * ORPHAN AUDIT: `updateWarScore` had NO PRODUCER. A declared war sat 0-0 for
+   * its whole life and `startWarMonitor` resolved it on elapsed time rather
+   * than on anything either side did — which is why the feature read as
+   * "wired" (rows existed, the monitor ran) while being decorative.
+   *
+   * The war lookup lives here rather than in hackService because this service
+   * owns what a war IS; the caller only knows that a hack succeeded.
+   *
+   * Returns the war it scored, or null when the hack has nothing to do with
+   * one — which is the common case, so this must stay cheap and silent.
+   */
+  async recordHackForWar(
+    attackerUserId: string,
+    targetServerId: string,
+    points: number = WAR_POINTS_PER_HACK,
+  ): Promise<{ warId: string; factionId: string } | null> {
+    const [attacker, server] = await Promise.all([
+      this.prisma.factionMember.findFirst({
+        where: { userId: attackerUserId },
+        select: { factionId: true },
+      }),
+      this.prisma.gameServer.findUnique({
+        where: { id: targetServerId },
+        select: { factionId: true },
+      }),
+    ]);
+    if (!attacker?.factionId || !server?.factionId) return null;
+    // Hacking your own faction's server is not a war contribution.
+    if (attacker.factionId === server.factionId) return null;
+
+    const war = await this.prisma.factionWar.findFirst({
+      where: {
+        status: "active",
+        OR: [
+          { attackerFactionId: attacker.factionId, defenderFactionId: server.factionId },
+          { attackerFactionId: server.factionId, defenderFactionId: attacker.factionId },
+        ],
+      },
+      select: { id: true },
+    });
+    if (!war) return null;
+
+    // ── Two limits, because each alone is farmable ───────────────────
+    //
+    // The per-server cooldown stops re-hacking one weak target on the hack
+    // cooldown (~6/min = 3,600 points/hour before this). The per-player cap
+    // stops the obvious answer to that, which is to rotate targets. A war is
+    // decided by `forceCeasefire` comparing the two scores, so an uncapped
+    // single account decided a fourteen-day war on its own.
+    const now = Date.now();
+    const serverKey = `${war.id}:${attackerUserId}:${targetServerId}`;
+    const lastScored = this.warScoredAt.get(serverKey);
+    if (lastScored !== undefined && now - lastScored < WAR_SCORE_COOLDOWN_MS) {
+      return null;
+    }
+
+    const playerKey = `${war.id}:${attackerUserId}`;
+    const contributed = this.warContributed.get(playerKey) ?? 0;
+    if (contributed >= WAR_MAX_POINTS_PER_PLAYER) return null;
+
+    // Never overshoot the cap on the last award.
+    const award = Math.min(points, WAR_MAX_POINTS_PER_PLAYER - contributed);
+    if (award <= 0) return null;
+
+    // Claim the cooldown slot and the contribution BEFORE awaiting the write.
+    // Both maps are the shared state the two limits above are read from, so
+    // updating them afterwards leaves a window in which concurrent hacks all
+    // read the same pre-write total and all award — which is exactly the
+    // uncapped single account the cap exists to prevent.
+    this.warScoredAt.set(serverKey, now);
+    this.warContributed.set(playerKey, contributed + award);
+    try {
+      await this.updateWarScore(war.id, attacker.factionId, award);
+    } catch (err) {
+      // Undo the claim; a failed write must not consume the player's cap.
+      //
+      // SUBTRACT, do not restore the snapshot. Two hacks on DIFFERENT servers
+      // run concurrently (different serverKeys, so neither is cooldown-blocked
+      // and both reach here). A reads 0 and writes 50; B reads 50 and writes
+      // 100; B commits and A throws. Restoring A's snapshot would write 0 back
+      // over B's 100 — losing B's committed award and handing the player the
+      // whole cap again on top of it.
+      if (lastScored === undefined) this.warScoredAt.delete(serverKey);
+      else this.warScoredAt.set(serverKey, lastScored);
+      this.warContributed.set(
+        playerKey,
+        Math.max(0, (this.warContributed.get(playerKey) ?? 0) - award),
+      );
+      throw err;
+    }
+    return { warId: war.id, factionId: attacker.factionId };
+  }
+
+  /**
+   * Drop cooldown entries that have expired, and contribution totals for wars
+   * that are over.
+   *
+   * Contributions are deliberately NOT aged out — expiring them would restore
+   * the rotation exploit the cap exists to stop — so they are cleared by war
+   * status instead.
+   */
+  private async sweepWarScoreWindows(): Promise<void> {
+    const now = Date.now();
+    for (const [key, at] of this.warScoredAt) {
+      if (now - at >= WAR_SCORE_COOLDOWN_MS) this.warScoredAt.delete(key);
+    }
+    if (this.warContributed.size === 0) return;
+    const warIds = [...new Set([...this.warContributed.keys()].map((k) => k.split(":")[0]!))];
+    const live = await this.prisma.factionWar.findMany({
+      where: { id: { in: warIds }, status: "active" },
+      select: { id: true },
+    });
+    const liveIds = new Set(live.map((w) => w.id));
+    for (const key of [...this.warContributed.keys()]) {
+      if (!liveIds.has(key.split(":")[0]!)) this.warContributed.delete(key);
+    }
   }
 
   /**

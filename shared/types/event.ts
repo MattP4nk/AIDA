@@ -30,6 +30,13 @@ export enum EventType {
   SYSTEM_ALERT = "system_alert",
   MISSION_UPDATE = "mission_update",
   REPUTATION_CHANGE = "reputation_change",
+  /**
+   * Was written to `game_events` as a RAW STRING by fileService (:501, :1026)
+   * and never declared here. Since `EventSubscription.eventType` is typed
+   * `EventType`, the honeypot alert was unsubscribable by construction — you
+   * could not have watched for it even if subscriptions had worked.
+   */
+  HONEYPOT_TRIGGERED = "honeypot_triggered",
 }
 
 export enum EventSeverity {

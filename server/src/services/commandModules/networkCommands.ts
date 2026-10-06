@@ -4,7 +4,9 @@ import logger from "../../logger";
 import { spawnBackgroundProcess, successResult, errorResult, refreshComputerSpec } from "./helpers";
 import { redactSensitiveContent } from "../../utils/contentRedaction";
 import type { ContentQueueService } from "../contentQueueService";
-import { CONTENT_QUEUE_SERVICE } from "../../di/tokens";
+import { CONTENT_QUEUE_SERVICE, EVENT_SERVICE } from "../../di/tokens";
+import type { EventService } from "../eventService";
+import { TAP_ALL_EVENTS, TAP_ITEMS, MAX_ACTIVE_TAPS } from "../../config/gameBalance";
 import {
   validateIPAddress,
   validateServerId,
@@ -40,6 +42,8 @@ export class NetworkCommandsModule implements CommandModule {
     "handshake.ack",
     "signal.trace",
     "connect.abort",
+    "tap",
+    "tap.remove",
   ]);
 
   public async execute(
@@ -68,12 +72,309 @@ export class NetworkCommandsModule implements CommandModule {
           return await this.handleChallengeSubmit(command, context, "signal_trace");
         case "connect.abort":
           return this.handleConnectAbort(context);
+        case "tap":
+          return await this.handleTap(command, context);
+        case "tap.remove":
+          return await this.handleTapRemove(command, context);
         default:
           return errorResult(`Network command not implemented: ${command.command}`);
       }
     } catch (error) {
       return errorResult("Network command failed", error instanceof Error ? error.message : "Unknown error");
     }
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // TAP — the acquisition path for event subscriptions
+  //
+  // ORPHAN AUDIT 2026-09-24: `createSubscription` had zero callers and no way
+  // to reach it — no REST route (`/api/events*` is not mounted anywhere), no
+  // socket handler, no command, no item — while `loadSubscriptionsFromDatabase`
+  // ran at startup against a table nothing could write. This command is what
+  // makes the whole subscription layer reachable.
+  // ═══════════════════════════════════════════════════════════════
+
+  /**
+   * Resolve what the player pointed at.
+   *
+   * One `targetId` field covers three kinds of target because
+   * `shouldReceiveEvent` matches it against
+   * `metadata.serverId || metadata.factionId || metadata.targetUserId`. That
+   * was already true of the matcher; the command just takes advantage of it.
+   *
+   * Order is IP, then faction, then player, and it is reported back to the
+   * caller so a name that matches two things is never silently ambiguous.
+   */
+  private async resolveTapTarget(
+    raw: string,
+    context: CommandContext,
+  ): Promise<{ id: string; kind: string; label: string } | null> {
+    const q = raw.trim().replace(/^@/, "");
+    if (!q) return null;
+
+    if (validateIPAddress(q)) {
+      const server = await context.db.client.gameServer.findFirst({
+        where: { ipAddress: q },
+        select: { id: true, name: true, ipAddress: true, ownerId: true },
+      });
+      if (!server) return null;
+      if (!(await this.playerKnowsServer(context, server.id, server.ownerId))) return null;
+      return { id: server.id, kind: "server", label: `${server.name} (${server.ipAddress})` };
+    }
+
+    const faction = await context.db.client.faction.findFirst({
+      where: {
+        OR: [
+          { name: { equals: q, mode: "insensitive" } },
+          { shortName: { equals: q, mode: "insensitive" } },
+        ],
+      },
+      select: { id: true, name: true },
+    });
+    if (faction) return { id: faction.id, kind: "faction", label: faction.name };
+
+    const user = await context.db.client.user.findFirst({
+      where: { username: { equals: q, mode: "insensitive" } },
+      select: { id: true, username: true, homeServerId: true },
+    });
+    if (user) {
+      // You may only tap a player you have actually FOUND on the net. Without
+      // this, a username — which the leaderboard hands out — was enough to
+      // surveil anyone.
+      if (user.id === context.userId) return { id: user.id, kind: "player", label: user.username };
+      if (!user.homeServerId) return null;
+      if (!(await this.playerKnowsServer(context, user.homeServerId, user.id))) return null;
+      return { id: user.id, kind: "player", label: user.username };
+    }
+
+    return null;
+  }
+
+  /**
+   * Has this player discovered that server?
+   *
+   * REVIEW 2026-09-25: `tap` applied NO access check at all. A bare
+   * `findFirst({ where: { ipAddress } })` meant any player could tap any home
+   * server by IP — including one they had never scanned — and receive its
+   * honeypot alerts, which carry the decoy filename and the raw `attackerId`
+   * of whoever tripped it. That turned a surveillance item into a way to read
+   * other players' PvP and to learn which files are decoys before attacking.
+   *
+   * "Known" is the same notion `netmap` uses: a `DiscoveredLink` naming the
+   * server on either end, or owning it outright. Factions are deliberately NOT
+   * gated — they are public entities and their events are world news.
+   *
+   * Both discovery commands qualify — `scan` and `traceroute` — and that is
+   * correct rather than a hole: review #2 filed traceroute as a bypass, but it
+   * costs networking 15, a live connection, a resource check and a real
+   * topological route. What WAS wrong is that traceroute applied none of the
+   * visibility rules scan applies; `canDiscoverLink` is now the single
+   * predicate both obey (see verify-discovery-rules.ts).
+   *
+   * This gate is no longer load-bearing for confidentiality either way: a
+   * watcher receives a per-event SUMMARY, not the record, so a tap on a server
+   * you have merely seen cannot leak its owner's decoy filenames.
+   */
+  private async playerKnowsServer(
+    context: CommandContext,
+    serverId: string,
+    ownerId: string | null,
+  ): Promise<boolean> {
+    if (ownerId && ownerId === context.userId) return true;
+    const known = await context.db.client.discoveredLink.findFirst({
+      where: {
+        userId: context.userId,
+        link: { OR: [{ sourceId: serverId }, { targetId: serverId }] },
+      },
+      select: { id: true },
+    });
+    return known !== null;
+  }
+
+  private async handleTap(
+    command: Command,
+    context: CommandContext,
+  ): Promise<CommandResult> {
+    const { getService } = await import("../../di/container");
+    const eventService = getService<EventService>(EVENT_SERVICE);
+
+    // No argument: show what is already running. Taps expire, so a player
+    // needs to be able to see what is still live without guessing.
+    const rawTarget = command.args?.[0];
+    if (!rawTarget) {
+      const subs = eventService.getUserSubscriptions(context.userId);
+      if (subs.length === 0) {
+        return successResult(
+          "No active taps.\n" +
+          "Buy one from the shop (basic_tap, shielded_tap, quantum_tap), then 'tap <ip|player|faction>'.",
+        );
+      }
+      const rows = await Promise.all(
+        subs.map(async (sub) => {
+          const label = await this.describeTapTarget(sub.targetId, context);
+          const left = sub.expiresAt
+            ? Math.max(0, Math.round((sub.expiresAt.getTime() - Date.now()) / 60000))
+            : null;
+          return [label, String(sub.quality), left === null ? "—" : `${left}m`];
+        }),
+      );
+      const columns: Column[] = [
+        { header: "TARGET", width: 34 },
+        { header: "QUALITY", width: 9, align: "right" },
+        { header: "EXPIRES", width: 9, align: "right" },
+      ];
+      return successResult(
+        render(table(columns, rows, undefined, context.terminalWidth)),
+      );
+    }
+
+    const target = await this.resolveTapTarget(rawTarget, context);
+    if (!target) {
+      // ONE message for "no such target" AND "you have not discovered it".
+      // Distinguishing them is an existence oracle: `tap.remove` needs no item
+      // and costs nothing, so two different errors would let anyone sweep IPs
+      // to map which ones host real servers, bypassing `scan` and the
+      // discovery progression entirely.
+      return errorResult(
+        `No known server, faction or player matching '${rawTarget}'.`,
+        "Taps only reach targets you have already found. Try 'scan' or 'traceroute'.",
+      );
+    }
+
+    // Tapping yourself is not an error worth a database row.
+    if (target.kind === "player" && target.id === context.userId) {
+      return errorResult("You already receive your own events.");
+    }
+
+    // Pick the CHEAPEST tap held, not the best. Burning a 18000-credit
+    // quantum tap because it happened to be first in the inventory is the
+    // kind of silent loss a player only notices afterwards.
+    const tapIds = Object.keys(TAP_ITEMS);
+    const held = await context.db.client.inventoryItem.findMany({
+      where: { userId: context.userId, shopItemId: { in: tapIds }, quantity: { gt: 0 } },
+    });
+    if (held.length === 0) {
+      return errorResult(
+        "No network tap in inventory.",
+        "Buy one: 'buy basic_tap' (1200c), 'buy shielded_tap' (4500c), 'buy quantum_tap' (18000c).",
+      );
+    }
+    const cheapest = held.sort(
+      (a, b) =>
+        (TAP_ITEMS[a.shopItemId as keyof typeof TAP_ITEMS]?.quality ?? 0) -
+        (TAP_ITEMS[b.shopItemId as keyof typeof TAP_ITEMS]?.quality ?? 0),
+    )[0]!;
+    const spec = TAP_ITEMS[cheapest.shopItemId as keyof typeof TAP_ITEMS]!;
+
+    // CONSUME FIRST, atomically, THEN subscribe.
+    //
+    // This used to subscribe first and then hand-roll the decrement against
+    // raw Prisma, which was wrong twice over. The hand-rolled consume was a
+    // check-then-act, so five concurrent `tap` commands all read the same
+    // stock and placed five taps for one item. And because it bypassed
+    // shopService it emitted no `item:removed`, making it the ONLY inventory
+    // mutation in the codebase that produced no `state:delta` — in the same
+    // change that made inventory a pushed slice.
+    //
+    // `removeItemFromInventory` now puts the stock test in the WHERE clause,
+    // so it is the arbiter: exactly one concurrent caller can win.
+    const consumed = await context.services.shopService.removeItemFromInventory(
+      context.userId,
+      cheapest.shopItemId,
+      1,
+    );
+    if (!consumed) {
+      return errorResult(
+        "No network tap in inventory.",
+        "Buy one: 'buy basic_tap' (1200c), 'buy shielded_tap' (4500c), 'buy quantum_tap' (18000c).",
+      );
+    }
+
+    try {
+      await eventService.createSubscription(
+        context.userId,
+        TAP_ALL_EVENTS,
+        "bug",
+        target.id,
+        spec.quality,
+        spec.durationMinutes,
+      );
+    } catch (err) {
+      // Refund. The item is already spent, and a cap rejection must not cost
+      // the player 18000 credits.
+      //
+      // BRANCH ON THE RETURN VALUE, not on a rejection. The first version used
+      // `.catch(...)`, which can never fire: addItemToInventory wraps its whole
+      // body in try/catch and returns false on any failure, including a catalog
+      // miss. The error branch was unreachable and the boolean discarded, so a
+      // failed refund was exactly the silently-stolen item the comment warned
+      // about. CLAUDE.md bug shape #5 — a guard that guards nothing.
+      const refunded = await context.services.shopService.addItemToInventory(
+        context.userId,
+        cheapest.shopItemId,
+        1,
+      );
+      if (!refunded) {
+        logger.error(
+          { userId: context.userId, itemId: cheapest.shopItemId },
+          "Tap refund FAILED after a rejected subscription — item lost",
+        );
+        return errorResult(
+          "The tap could not be placed and the item could not be returned.",
+          "This has been logged. Contact an admin with the item name and time.",
+        );
+      }
+      return errorResult(
+        err instanceof Error ? err.message : "Could not place the tap.",
+        `You may hold ${MAX_ACTIVE_TAPS} taps at once — 'tap' lists them, 'tap.remove <target>' frees one.`,
+      );
+    }
+
+    return successResult(
+      `Tap placed on ${target.label} [${target.kind}].\n` +
+      `Quality ${spec.quality} — expires in ${spec.durationMinutes} minutes.\n` +
+      `Events from this target will now reach you.`,
+    );
+  }
+
+  private async handleTapRemove(
+    command: Command,
+    context: CommandContext,
+  ): Promise<CommandResult> {
+    const rawTarget = command.args?.[0];
+    if (!rawTarget) return errorResult("Usage: tap.remove <ip|player|faction>");
+
+    const target = await this.resolveTapTarget(rawTarget, context);
+    // Same wording as handleTap, deliberately — see the oracle note there.
+    if (!target) return errorResult(`No known server, faction or player matching '${rawTarget}'.`);
+
+    const { getService } = await import("../../di/container");
+    const eventService = getService<EventService>(EVENT_SERVICE);
+    const removed = await eventService.removeSubscription(
+      context.userId,
+      TAP_ALL_EVENTS,
+      target.id,
+    );
+    return removed
+      ? successResult(`Tap pulled from ${target.label}. The item is not refunded.`)
+      : errorResult(`No active tap on ${target.label}.`);
+  }
+
+  /** Reverse lookup for the listing — a targetId is a server, faction or user. */
+  private async describeTapTarget(
+    targetId: string | undefined,
+    context: CommandContext,
+  ): Promise<string> {
+    if (!targetId) return "(everything)";
+    const [server, faction, user] = await Promise.all([
+      context.db.client.gameServer.findUnique({ where: { id: targetId }, select: { name: true, ipAddress: true } }),
+      context.db.client.faction.findUnique({ where: { id: targetId }, select: { name: true } }),
+      context.db.client.user.findUnique({ where: { id: targetId }, select: { username: true } }),
+    ]);
+    if (server) return `${server.name} (${server.ipAddress})`;
+    if (faction) return `${faction.name} [faction]`;
+    if (user) return `${user.username} [player]`;
+    return targetId;
   }
 
   public getCommandInfo(): import("./interface").CommandInfo[] {
@@ -85,6 +386,21 @@ export class NetworkCommandsModule implements CommandModule {
           "[Network 5] Scan adjacent servers, or sweep a partial IP range",
         usage: "scan [partial-ip]",
         examples: ["scan", "scan 10.10.10", "scan 192.168.x.x", "scan 10.10"],
+      },
+      {
+        command: "tap",
+        category: "network",
+        description:
+          "Place a network tap on a server, faction or player — relays their events to you. No argument lists your active taps.",
+        usage: "tap [<ip|player|faction>]",
+        examples: ["tap", "tap 192.168.1.1", "tap Garrison", "tap n0mad"],
+      },
+      {
+        command: "tap.remove",
+        category: "network",
+        description: "Pull a tap you placed",
+        usage: "tap.remove <ip|player|faction>",
+        examples: ["tap.remove 192.168.1.1"],
       },
       {
         command: "servers",

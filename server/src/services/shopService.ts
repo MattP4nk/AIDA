@@ -1,7 +1,7 @@
 import { EventEmitter } from "events";
 import { Prisma } from "@prisma/client";
 import { prisma } from "../database/client";
-import { HARDWARE_SPECS } from "../config/gameBalance";
+import { HARDWARE_SPECS, TAP_ITEMS } from "../config/gameBalance";
 
 /**
  * Tool/Software Item Interface
@@ -112,7 +112,7 @@ export interface PurchaseResult {
 /**
  * Shop catalog organized by categories
  */
-const SHOP_CATALOG: ShopItem[] = [
+export const SHOP_CATALOG: ShopItem[] = [
   // ==================== BASIC TOOLS ====================
   {
     id: "basic_scanner",
@@ -280,6 +280,70 @@ const SHOP_CATALOG: ShopItem[] = [
     rarity: ItemRarity.EPIC,
     isConsumable: true,
     maxStack: 3,
+  },
+
+  // ==================== NETWORK TAPS ====================
+  //
+  // The acquisition path for event subscriptions, which had none: no route, no
+  // command, no item, so `createSubscription` was unreachable and
+  // `loadSubscriptionsFromDatabase` loaded a table nothing could write.
+  //
+  // QUALITY AND DURATION LIVE IN `TAP_ITEMS` (config/gameBalance.ts), which is
+  // what `handleTap` reads. They are mirrored into `effect` here ONLY so the
+  // catalog row is self-describing to an admin reading the table — nothing
+  // consumes these copies.
+  //
+  // An earlier comment here claimed `effect` "carries the payload, NOT
+  // `effects`". That was true of persona tokens and false of taps, and a code
+  // review caught it: editing the numbers below appeared to work, typechecked,
+  // and changed nothing about the tap a player actually got. That is CLAUDE.md
+  // bug shape #6 — an orphaned constant with a hardcoded twin — created fresh
+  // by the change that added these rows. `verify-balance-constants.ts` now
+  // asserts the two copies agree, so the drift cannot go unnoticed.
+  {
+    id: "basic_tap",
+    name: "Basic Network Tap",
+    description:
+      "Passive line tap. Relays critical events from a server, faction or player you point it at. Quiet events slip past it. 60 minutes.",
+    category: ItemCategory.TOOL,
+    price: 1200,
+    requiredLevel: 4,
+    requiredSkills: { networking: 20 },
+    effects: {},
+    effect: { tapQuality: 30, tapDurationMinutes: 60 },
+    rarity: ItemRarity.COMMON,
+    isConsumable: true,
+    maxStack: 5,
+  },
+  {
+    id: "shielded_tap",
+    name: "Shielded Network Tap",
+    description:
+      "Filtered tap with signal conditioning. Catches warnings as well as critical events. 3 hours.",
+    category: ItemCategory.TOOL,
+    price: 4500,
+    requiredLevel: 10,
+    requiredSkills: { networking: 45 },
+    effects: {},
+    effect: { tapQuality: 60, tapDurationMinutes: 180 },
+    rarity: ItemRarity.RARE,
+    isConsumable: true,
+    maxStack: 3,
+  },
+  {
+    id: "quantum_tap",
+    name: "Quantum Network Tap",
+    description:
+      "Entangled relay. Intercepts effectively everything the target generates, including routine traffic. 12 hours.",
+    category: ItemCategory.TOOL,
+    price: 18000,
+    requiredLevel: 18,
+    requiredSkills: { networking: 70, cryptography: 40 },
+    effects: {},
+    effect: { tapQuality: 90, tapDurationMinutes: 720 },
+    rarity: ItemRarity.EPIC,
+    isConsumable: true,
+    maxStack: 2,
   },
 
   // ==================== DEFENSE TOOLS ====================
@@ -953,19 +1017,35 @@ class ShopService extends EventEmitter {
     quantity: number = 1,
   ): Promise<boolean> {
     try {
-      const existing = await prisma.inventoryItem.findFirst({
-        where: { userId, shopItemId: itemId },
+      // ATOMIC. This was findFirst-then-delete/update — a check-then-act with
+      // two awaits between the read and the write, so N concurrent commands
+      // all saw the same stock and all proceeded. The socket limiter allows 20
+      // commands per 10s, which is ample to fire five in one tick: a player
+      // holding ONE tap could place five, one delete winning and the rest
+      // throwing P2025 into a catch that reported a generic failure.
+      //
+      // The stock test now lives in the WHERE clause, so the read and the
+      // write are one statement and `count` IS the authorization result — the
+      // same idiom `spendCredits` uses for money.
+      const decremented = await prisma.inventoryItem.updateMany({
+        where: { userId, shopItemId: itemId, quantity: { gte: quantity } },
+        data: { quantity: { decrement: quantity } },
       });
+      if (decremented.count === 0) return false;
 
-      if (!existing) return false;
-
-      if (existing.quantity <= quantity) {
-        await prisma.inventoryItem.delete({ where: { id: existing.id } });
-      } else {
-        await prisma.inventoryItem.update({
-          where: { id: existing.id },
-          data: { quantity: { decrement: quantity } },
+      // FROM HERE THE STOCK IS ALREADY SPENT, so nothing below may turn this
+      // into a `false`. The first version left the tidy-up delete and the emit
+      // inside the outer try, so a transient failure in either returned false
+      // AFTER the decrement had committed — and the caller reads false as
+      // "nothing was consumed" and skips its refund. That destroyed the item.
+      try {
+        await prisma.inventoryItem.deleteMany({
+          where: { userId, shopItemId: itemId, quantity: { lte: 0 } },
         });
+      } catch (err) {
+        // A zero-quantity row is cosmetic; the next consume's `gte` guard
+        // refuses it anyway. Never fail the consume over it.
+        this.logger.warn({ err, userId, itemId }, "Could not tidy zero-quantity inventory row");
       }
 
       this.emit("item:removed", { userId, itemId, quantity });
@@ -1368,6 +1448,18 @@ class ShopService extends EventEmitter {
       const item = this.catalog.get(itemId);
       if (!item) {
         return { success: false, message: "Item not found" };
+      }
+
+      // A tap is consumed by the `tap` command, which needs a TARGET. `useItem`
+      // has no way to ask for one, and its consumable branch below would
+      // delete the item and return success having placed nothing — silently
+      // destroying an 18000-credit quantum_tap for the player who typed the
+      // most natural verb. Refuse, and say where to go.
+      if (itemId in TAP_ITEMS) {
+        return {
+          success: false,
+          message: `${item.name} needs a target. Use 'tap <ip|player|faction>' instead.`,
+        };
       }
 
       const hasItem = await this.hasItem(userId, itemId);

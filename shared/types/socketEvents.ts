@@ -124,6 +124,50 @@ export interface ServerToClientEvents {
   "forum:new-post": (data: { postId: string; title: string; author: string }) => void;
   "forum:new-reply": (data: { postId: string; replyId: string; author: string }) => void;
   "server:discovered": (data: { count: number; subnet: string; servers: unknown[] }) => void;
+
+  /**
+   * The world feed — and the ONLY event channel eventService still has.
+   *
+   * `game:event` used to sit beside this and is now gone entirely (2026-09-24,
+   * orphan audit). It had two client listeners on one name with incompatible
+   * payloads, feeding a store no component reads and an empty
+   * `showNotification`. Targeted events moved to `notification` via notifyUser
+   * so they persist and replay; keyFragmentService's endgame announcement
+   * moved here, where a global broadcast belongs.
+   *
+   * This one is now GATED ON `isGlobal`. It previously fired for every event
+   * including targeted ones, so a breach or a tripped honeypot announced
+   * itself to every connected player — and it dropped `description` and
+   * `metadata`, so the one channel that did reach people carried the least.
+   */
+  /**
+   * The authoritative player state, and the incremental updates to it.
+   *
+   * Both had ZERO listeners until 2026-09-25, and `broadcastStateDelta` had
+   * zero CALLERS, so the channel was dead at both ends: the server computed a
+   * five-query full state on every authenticate and discarded it, while the
+   * client fell back to `/api/users/stats` and `/api/servers` — neither of
+   * which is a mounted route (both 404).
+   *
+   * `state:delta` paths are dotted and must match what
+   * `shared/utils/stateDelta.ts` walks. That agreement is the fragile part:
+   * a renamed path does not throw, it just silently stops updating the UI.
+   */
+  "state:update": (data: { fullState: unknown; timestamp: Date | string }) => void;
+  "state:delta": (data: {
+    delta: { path: string; value: unknown; operation: "set" | "push" | "remove" | "update" };
+    timestamp: Date | string;
+  }) => void;
+
+  "game:event:public": (data: {
+    id?: string;
+    type: string;
+    title: string;
+    description?: string;
+    severity?: string;
+    metadata?: Record<string, unknown>;
+    timestamp: Date | string;
+  }) => void;
 }
 
 /** Sent by the client, listened for by the server. */
@@ -142,6 +186,16 @@ export interface ClientToServerEvents {
   "authenticate:request": (
     ack?: (response: { success: boolean; userId?: string; username?: string; error?: string }) => void,
   ) => void;
+
+  /**
+   * Ask for a full `state:update`.
+   *
+   * Sent when a `state:delta` cannot be applied, which means the two sides
+   * disagree about a path. Throttled on the client (one per 5s) AND rate
+   * limited on the server, because the trigger condition repeats for every
+   * subsequent delta — unthrottled it is a self-inflicted request storm.
+   */
+  "state:request": () => void;
 
   "terminal:create": (data: { terminalId?: string; label?: string }) => void;
   "terminal:switch": (data: { terminalId?: string }) => void;
@@ -169,6 +223,10 @@ export const KNOWN_ORPHANED_EVENTS = {
    * events that were never built.
    */
   deletedDeadListeners: [
+    // Retired 2026-09-24 with the event-delivery repair: both producers moved
+    // (targeted -> `notification`, global -> `game:event:public`), so the
+    // listeners went with them rather than being left waiting on nothing.
+    "game:event",
     "faction:event",
     "mission:updated",
     "server:file_modified",

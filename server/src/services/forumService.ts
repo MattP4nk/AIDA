@@ -403,8 +403,69 @@ export class ForumService extends EventEmitter {
   }
 
   /**
+   * THE rule for who may receive a forum's live feed, as a Prisma predicate.
+   *
+   * It is not `accessForum`. That one is request-scoped and interactive: it
+   * takes a `useProxy` flag and auto-discovers the forum as a side effect, so
+   * running it per forum on every authenticate would mutate state and ask a
+   * question a socket join cannot answer.
+   *
+   * `requiresProxy` forums are excluded outright rather than proxy-checked.
+   * Room membership is decided at join time while proxy status changes during
+   * a session, so there is no answer that stays true; excluding them keeps the
+   * live feed from pushing posts `accessForum` would refuse to show. Those
+   * forums are still readable interactively, where the proxy check applies.
+   *
+   * Stated ONCE because it has four consumers — the authenticate-time join,
+   * registration, ban and unban. The first version restated it in two of them
+   * and the other two had no rule at all, so a mid-session registration
+   * subscribed a player to feeds the authenticate path would have refused, and
+   * the same player saw them in one session and not the next.
+   */
+  private static readonly LIVE_FEED_MEMBERSHIP = {
+    isBanned: false,
+    forum: { isActive: true, requiresProxy: false },
+  } as const;
+
+  public async getLiveFeedForums(userId: string): Promise<string[]> {
+    const memberships = await prisma.forumMember.findMany({
+      where: { userId, ...ForumService.LIVE_FEED_MEMBERSHIP },
+      select: { forumId: true },
+    });
+    return memberships.map((m) => m.forumId);
+  }
+
+  /**
+   * Make a player's `forum:<forumId>` room membership match the rule above —
+   * joining if they now qualify, leaving if they no longer do.
+   *
+   * Call this after ANYTHING that can change the answer. A flag flipped in the
+   * database only gates the paths that re-check it; a socket already in the
+   * room keeps receiving posts until it reconnects, which made `banMember`
+   * inert for the rest of a session and `unbanMember` inert in the other
+   * direction.
+   *
+   * Over `user:<id>` so every tab is covered — `socket.join` on one socket
+   * would leave the player's other tabs subscribed.
+   */
+  private async syncLiveFeedRoom(userId: string, forumId: string): Promise<void> {
+    try {
+      const eligible = await prisma.forumMember.findFirst({
+        where: { userId, forumId, ...ForumService.LIVE_FEED_MEMBERSHIP },
+        select: { id: true },
+      });
+      const room = `forum:${forumId}`;
+      if (eligible) this.io?.in(`user:${userId}`).socketsJoin(room);
+      else this.io?.in(`user:${userId}`).socketsLeave(room);
+    } catch (err) {
+      this.logger.warn({ err, userId, forumId }, "Could not sync forum live-feed room");
+    }
+  }
+
+  /**
    * Register an account on a forum
    */
+
   public async registerForumAccount(
     userId: string,
     forumId: string,
@@ -473,6 +534,11 @@ export class ForumService extends EventEmitter {
         });
       }
 
+      // Subscribe to the live feed if — and only if — this membership
+      // qualifies. Joining unconditionally here handed the player feeds that
+      // the authenticate-time join excludes, so the same forum streamed in
+      // this session and went quiet in the next.
+      await this.syncLiveFeedRoom(userId, forumId);
       return member;
     } catch (error) {
       this.logger.error({ err: error }, "Error registering forum account");
@@ -2739,6 +2805,8 @@ YOUR POST TITLE: "${stripPromptBoundaries(post.title, 200)}"`;
         data: { isBanned: true },
       });
 
+      await this.syncLiveFeedRoom(target.userId, forumId);
+
       this.logger.info({ userId, forumId, targetHandle }, "Member banned");
 
       return { message: `Member '${targetHandle}' has been banned` };
@@ -2774,6 +2842,11 @@ YOUR POST TITLE: "${stripPromptBoundaries(post.title, 200)}"`;
         where: { id: target.id },
         data: { isBanned: false },
       });
+
+      // Symmetric with banMember. Without this an unban is silently inert for
+      // the rest of the session: the player can read and post interactively
+      // but their live feed stays dead, with nothing on screen to explain it.
+      await this.syncLiveFeedRoom(target.userId, forumId);
 
       this.logger.info({ userId, forumId, targetHandle }, "Member unbanned");
 

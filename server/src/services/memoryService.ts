@@ -344,6 +344,26 @@ class MemoryService extends EventEmitter {
   /**
    * Convenience: register an active backdoor as passive consumer.
    */
+  /**
+   * Release the passive consumers that belong to a *session* — terminals and
+   * server connections — when that session ends.
+   *
+   * Backdoors and active traces are deliberately kept. They outlive the
+   * session that created them and nothing re-registers them at login, so
+   * dropping them here would silently refund their drain forever. They have
+   * their own release paths (`unregisterBackdoor`, `unregisterActiveTrace`).
+   */
+  releaseSessionConsumersFor(userId: string): void {
+    const consumers = this.passiveConsumers.get(userId);
+    if (!consumers) return;
+    for (const [id, consumer] of consumers) {
+      if (consumer.type === "terminal" || consumer.type === "connection") {
+        consumers.delete(id);
+      }
+    }
+    if (consumers.size === 0) this.passiveConsumers.delete(userId);
+  }
+
   registerBackdoor(userId: string, serverId: string, serverName: string): void {
     this.addPassiveConsumer(userId, "backdoor", `bdoor:${serverId}`, serverName);
   }
@@ -676,7 +696,7 @@ class MemoryService extends EventEmitter {
             }
           }
           procs.clear();
-          this.passiveConsumers.delete(userId);
+          this.releaseSessionConsumersFor(userId);
           this.baseSpecs.delete(userId);
           this.nextPid.delete(userId);
           return;

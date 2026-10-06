@@ -16,6 +16,7 @@ import type PlayerMissionRepository from "../repositories/playerMissionRepositor
 import { NO_CHANGE } from "../repositories/playerMissionRepository";
 import type { CacheService } from "./cacheService";
 import { Server as SocketIOServer } from "socket.io";
+import { notifyUser } from "../utils/notify";
 
 /**
  * Mission objective interface
@@ -1438,11 +1439,13 @@ class MissionService extends EventEmitter {
               experience: xp.experience,
               userId,
             });
-            this.io.to(`player:${userId}`).emit("notification", {
+            await notifyUser(this.io, userId, {
               type: "levelup",
+              category: "game",
               title: "Level Up!",
               message: `You reached Level ${xp.level}!`,
-              severity: "success",
+              priority: "high",
+              data: { newLevel: xp.level },
             });
           }
           // Emit for internal listeners (dynamic content, etc.)
@@ -1460,11 +1463,11 @@ class MissionService extends EventEmitter {
         if (rewards.xp > 0) parts.push(`+${rewards.xp} XP`);
         if (rewards.credits > 0) parts.push(`+${rewards.credits} Credits`);
         if (rewards.skillPoints && rewards.skillPoints > 0) parts.push(`+${rewards.skillPoints} Skill Points`);
-        this.io.to(`player:${userId}`).emit("notification", {
+        await notifyUser(this.io, userId, {
           type: "reward",
+          category: "mission",
           title: "Rewards",
           message: parts.join(", "),
-          severity: "success",
         });
       }
 
@@ -1494,11 +1497,12 @@ class MissionService extends EventEmitter {
 
             // Notify the player
             if (this.io) {
-              this.io.to(`player:${userId}`).emit("notification", {
+              await notifyUser(this.io, userId, {
                 type: "item",
+                category: "mission",
                 title: "Item Acquired",
                 message: `You received: ${shopItem.name}`,
-                severity: "success",
+                data: { itemId: shopItem.id, itemName: shopItem.name },
               });
             }
 
@@ -1635,11 +1639,12 @@ class MissionService extends EventEmitter {
 
     // Notify the player
     if (this.io) {
-      this.io.to(`player:${userId}`).emit("notification", {
+      await notifyUser(this.io, userId, {
         type: "item",
+        category: "mission",
         title: "Rare Drop!",
         message: `You found: ${shopItem.name}`,
-        severity: "info",
+        data: { itemId: shopItem.id, itemName: shopItem.name },
       });
     }
 

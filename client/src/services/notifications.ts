@@ -125,25 +125,42 @@ class NotificationService {
 
   // ==================== PUBLIC API ====================
 
-  public add(notification: Omit<Notification, "id" | "timestamp" | "read">): void {
+  /**
+   * `opts` exists for notification REPLAY (server persistence, 2026-09-24).
+   *
+   * Without it, replay was actively worse than the dead feature it replaced:
+   * `timestamp` was unconditionally stamped `new Date()`, so a three-hour-old
+   * security alert displayed as if it had just fired, and every replayed
+   * notification played its own sound — reconnecting with a backlog meant up
+   * to 50 overlapping alert tones.
+   */
+  public add(
+    notification: Omit<Notification, "id" | "timestamp" | "read">,
+    opts?: { timestamp?: Date; silent?: boolean; id?: string },
+  ): void {
     const newNotification: Notification = {
       ...notification,
-      id: this.generateId(),
-      timestamp: new Date(),
+      id: opts?.id ?? this.generateId(),
+      timestamp: opts?.timestamp ?? new Date(),
       read: false,
     };
 
     notifications.update((current) => {
+      // Replay can race a live emit of the same row; the server id makes
+      // that detectable, so dedupe on it rather than showing both.
+      if (current.some((n) => n.id === newNotification.id)) return current;
       const updated = [newNotification, ...current];
       // Keep only last N notifications
       return updated.slice(0, this.maxNotifications);
     });
 
     // Play sound via sound service based on priority
-    if (notification.priority === "critical") {
-      sound.alert();
-    } else if (notification.priority === "high") {
-      sound.notification();
+    if (!opts?.silent) {
+      if (notification.priority === "critical") {
+        sound.alert();
+      } else if (notification.priority === "high") {
+        sound.notification();
+      }
     }
 
     // Update counts

@@ -1,5 +1,6 @@
 import { io, Socket } from "socket.io-client";
-import { writable, get, type Writable } from "svelte/store";
+import { writable, derived, get, type Writable } from "svelte/store";
+import { applyStateDelta } from "../../../shared/utils/stateDelta";
 import { apiClient } from "./api";
 import { terminalTabsStore } from "./terminalTabs";
 import { sound } from "./sound";
@@ -21,6 +22,30 @@ export const hackAttempts = writable<any[]>([]);
 const gameEvents = writable<any[]>([]);
 export const typingUsers = writable<Map<string, string>>(new Map());
 export const newMailNotifications: Writable<any[]> = writable([]);
+
+/**
+ * The player's authoritative state, pushed by the server.
+ *
+ * ORPHAN AUDIT 2026-09-25: `state:update` and `state:delta` were emitted by
+ * gameStateManager and had ZERO listeners, while the client's own REST
+ * fallback (`loadInitialGameData`) called `/api/users/stats` and
+ * `/api/servers` — both of which return 404, because neither route is
+ * mounted. So the entire non-terminal state layer was empty, and components
+ * that needed a number ran a command to get it.
+ *
+ * Modelled on `playerResources` directly below: a writable the server pushes
+ * into, living here rather than in stores/gameState.ts because socket.ts
+ * cannot statically import that module (see the dynamic import at the top).
+ */
+export const playerState = writable<any | null>(null);
+
+/** Convenience views so a component subscribes to the field it needs. */
+export const playerCredits = derived(playerState, ($s) => $s?.player?.credits ?? 0);
+export const playerLevel = derived(playerState, ($s) => $s?.player?.level ?? 1);
+export const playerExperience = derived(playerState, ($s) => $s?.player?.experience ?? 0);
+export const playerSkills = derived(playerState, ($s) => $s?.player?.skills ?? {});
+export const playerInventory = derived(playerState, ($s) => $s?.inventory ?? []);
+export const playerMissions = derived(playerState, ($s) => $s?.missions ?? []);
 
 // Resource/process stores (updated by server push)
 export const playerResources = writable<{
@@ -423,28 +448,32 @@ class SocketService {
 
     // ==================== GAME EVENTS ====================
 
-    this.on("game:event", (data: any) => {
-      console.log("🎯 Game event received:", data);
-      gameEvents.update((events) => [data, ...events.slice(0, 49)]); // Keep last 50 events
-
-      // Show notification for important events
-      if (data.severity === "critical" || data.severity === "warning") {
-        this.showNotification(data.title, data.description);
-      }
-    });
-
+    // ORPHAN AUDIT 2026-09-24. `game:event` is GONE, in both directions.
+    //
+    // It had TWO listeners registered on one name with incompatible payload
+    // shapes — one reading {title, description, severity}, another ~250 lines
+    // below reading {message}. Both ran on every emit, so each saw a payload
+    // it could not read half the time. Neither mattered, because the store
+    // they fed has no component reading it and the alert they raised went to
+    // an empty showNotification.
+    //
+    // Both producers moved: eventService delivers TARGETED events through
+    // notifyUser as `notification` (so they persist and replay), and
+    // keyFragmentService's endgame announcement moved to the global channel
+    // below, where it belonged. One channel, one shape, one listener.
+    //
+    // The server used to fire the global channel for EVERY event including
+    // targeted ones, so a breach or a tripped honeypot announced itself to
+    // every connected player; it is now gated on `isGlobal` and carries
+    // `description` and `metadata`, which the old 4-field payload dropped.
     this.on("game:event:public", (data: any) => {
-      console.log("📡 Public event:", data);
-      // Handle public event broadcasts (visible to all)
+      gameEvents.update((events) => [data, ...events.slice(0, 49)]); // Keep last 50
+      this.surfaceWorldEvent(data);
     });
 
     // ==================== FRAGMENT / ENDGAME EVENTS ====================
 
     this.on("story:key-fragment", async (data: any) => {
-      this.showNotification(
-        "Fragment Found",
-        `${data.name} (${data.keyType})`,
-      );
       const ns = await getNotifService();
       if (ns) {
         ns.add({
@@ -457,10 +486,6 @@ class SocketService {
     });
 
     this.on("story:fragment-stolen", async (data: any) => {
-      this.showNotification(
-        "Fragment Stolen!",
-        data.message || `Your fragment "${data.name}" has been stolen!`,
-      );
       const ns = await getNotifService();
       if (ns) {
         ns.add({
@@ -473,10 +498,6 @@ class SocketService {
     });
 
     this.on("story:fragment-transferred", async (data: any) => {
-      this.showNotification(
-        "Fragment Sent",
-        data.message || `You transferred "${data.name}".`,
-      );
       const ns = await getNotifService();
       if (ns) {
         ns.add({
@@ -489,10 +510,6 @@ class SocketService {
     });
 
     this.on("story:endgame-unlocked", async (data: any) => {
-      this.showNotification(
-        "ENDGAME UNLOCKED",
-        data.message || "All fragments collected. The final choice awaits.",
-      );
       const ns = await getNotifService();
       if (ns) {
         ns.add({
@@ -505,10 +522,6 @@ class SocketService {
     });
 
     this.on("story:endgame-completed", async (data: any) => {
-      this.showNotification(
-        "The Endgame",
-        "A player has decided AIDA's fate. The net trembles.",
-      );
       const ns = await getNotifService();
       if (ns) {
         ns.add({
@@ -553,7 +566,10 @@ class SocketService {
       if (count <= 0) return;
       const subnet: string = data?.subnet && data.subnet !== "global" ? ` on ${data.subnet}` : "";
       const summary = `Discovered ${count} server${count === 1 ? "" : "s"}${subnet}`;
-      this.showNotification("Discovery", summary);
+      // No `showNotification` here: the `ns.add` below is the notification,
+      // and it says strictly more (it names the servers). While
+      // showNotification was an empty method the redundant call was invisible;
+      // making it real turned it into two toasts for one scan.
       const ns = await getNotifService();
       if (ns) {
         // `servers` is capped at 5 by the server; name the first few so the
@@ -674,21 +690,6 @@ class SocketService {
       }
     });
 
-
-    // Renamed from "game:state_update" — the server emits "game:event" with a
-    // compatible payload ({ type, message, timestamp }).
-    this.on("game:event", async (data: any) => {
-      const ns = await getNotifService();
-      if (ns && data.message) {
-        ns.add({
-          type: "system",
-          title: "Game State",
-          message: data.message,
-          priority: "normal",
-          data,
-        });
-      }
-    });
 
     // ==================== PLAYER PROGRESSION EVENTS ====================
 
@@ -966,23 +967,136 @@ class SocketService {
       });
     });
 
-    this.on("notification", async (data: any) => {
+    // `ack` is how the REPLAY path knows a notification actually landed.
+    //
+    // Socket.IO appends the acknowledgement callback as the last argument when
+    // the server emits with one. The server marks a replayed row read ONLY
+    // when this fires, because `socket.emit` alone proves nothing was
+    // delivered — it used to mark them read immediately and a client on a
+    // half-dead socket lost the backlog permanently. Calling it AFTER `ns.add`
+    // means we are confirming the notification is in the store, not merely
+    // that a frame arrived.
+    this.on("notification", async (data: any, ack?: () => void) => {
       // Generic server notification (used by bounty system, IDS, etc.)
       const ns = await getNotifService();
       if (ns) {
-        ns.add({
-          type: "game",
-          title: data.title || "Alert",
-          message: data.message || data.description || "Server notification",
-          // R13 REVIEW: this site maps the SERVER's severity and was missed by
-          // the urgent->critical sweep. `ns` is typed `any`, so svelte-check
-          // could not catch it — and the effect was inverted: CRITICAL alerts
-          // mapped to a value matching nothing (no sound, no red, no badge)
-          // while non-critical ones got "high" and did get the treatment.
-          priority: data.severity === "critical" ? "critical" : "high",
-          data,
-        });
+        // The server now sends a real `priority` (utils/notify.ts maps the
+        // legacy `severity` onto it once, server-side). Deriving it here a
+        // second time discarded it: everything that was not exactly
+        // "critical" — rewards, item drops, ordinary alerts — became "high"
+        // and played a sound. Prefer the server's value; keep the severity
+        // mapping only as the fallback for any emitter still bypassing
+        // notifyUser.
+        const priority =
+          data.priority ??
+          (data.severity === "critical" ? "critical" : "high");
+
+        ns.add(
+          {
+            // The client `type` is a SOURCE taxonomy, so a security alert
+            // belongs under "system", not "game".
+            type: data.category === "security" ? "system" : "game",
+            title: data.title || "Alert",
+            message: data.message || data.description || "Server notification",
+            priority,
+            data,
+          },
+          {
+            // Replayed rows carry their original time and must not each
+            // fire a sound.
+            id: typeof data.id === "string" ? data.id : undefined,
+            timestamp: data.timestamp ? new Date(data.timestamp) : undefined,
+            silent: data.replayed === true,
+          },
+        );
+        ack?.();
       }
+    });
+
+    // ==================== ORPHANED EVENTS, WIRED 2026-09-25 ====================
+    //
+    // Each of these was emitted by the server with no listener on this side.
+    // They are the payoff of systems that already work: territory changing
+    // hands, an alarm the attacker tripped, and a plot lead the game composed
+    // and then discarded.
+
+    // #8 — the payoff of the whole contest system produced no on-screen event.
+    this.on("faction:contest_started", async (data: any) => {
+      const ns = await getNotifService();
+      ns?.add({
+        type: "game",
+        title: "Territory Contested",
+        message:
+          `${data?.attackingFaction ?? "A faction"} is contesting ` +
+          `${data?.serverName ?? "a server"}` +
+          (data?.defendingFaction ? ` (held by ${data.defendingFaction})` : ""),
+        priority: "high",
+        data,
+      });
+    });
+
+    this.on("faction:contest_resolved", async (data: any) => {
+      const ns = await getNotifService();
+      ns?.add({
+        type: "game",
+        title: "Territory Resolved",
+        message: `${data?.winnerName ?? "Someone"} now holds ${data?.serverName ?? "a server"}`,
+        priority: "high",
+        data,
+      });
+    });
+
+    // #19 — the ATTACKER branch had no client equivalent, so a trace could
+    // begin with nothing on screen. Both branches route here; the payload
+    // names the server either way.
+    this.on("server:alert", async (data: any) => {
+      const ns = await getNotifService();
+      ns?.add({
+        type: "system",
+        title: "Security Alert",
+        message: data?.message || `Alert on ${data?.serverName ?? "a server"}`,
+        priority: data?.severity === "HIGH" || data?.severity === "critical" ? "critical" : "high",
+        data,
+      });
+    });
+
+    // #20 — this tells you WHO holds the fragment you need. It was composed,
+    // addressed correctly, and dropped.
+    this.on("story:fragment-intel", async (data: any) => {
+      const ns = await getNotifService();
+      ns?.add({
+        type: "game",
+        title: "Fragment Traced",
+        message: data?.message || "Intel recovered on a fragment's holder.",
+        priority: "high",
+        data,
+      });
+    });
+
+    // ==================== AUTHORITATIVE STATE ====================
+    //
+    // Both of these were emitted by the server with NO listener on this side
+    // (orphan audit 2026-09-25), so the full-state batch the server computes
+    // on every authenticate was discarded and the client fell back to REST
+    // endpoints that are not mounted.
+
+    this.on("state:update", (data: any) => {
+      if (data?.fullState) playerState.set(data.fullState);
+    });
+
+    this.on("state:delta", (data: any) => {
+      const delta = data?.delta;
+      if (!delta) return;
+      let missed = false;
+      playerState.update((current) => {
+        const { next, applied } = applyStateDelta(current, delta);
+        if (!applied) missed = true;
+        return next;
+      });
+      // A delta that cannot be applied means this client's view has drifted
+      // from the server's. Silently dropping it is how a UI goes stale and
+      // looks like a server bug, so ask for a full state instead.
+      if (missed) this.requestStateResync();
     });
 
     // ==================== RESOURCE UPDATES ====================
@@ -1126,9 +1240,68 @@ class SocketService {
     this.userId = id;
   }
 
-  private showNotification(_title: string, _message: string): void {
-    // Browser notifications disabled — in-terminal toasts handle all notifications
-    // via notificationService.add() which feeds TerminalToast component.
+  /** Last resync request, so a burst of bad deltas cannot hammer the server. */
+  private lastResyncAt = 0;
+
+
+  /**
+   * Ask the server for a full state.
+   *
+   * Throttled deliberately: an unappliable delta usually means a path the two
+   * sides disagree about, which would repeat for EVERY subsequent delta. One
+   * resync fixes the view; the rest would be a self-inflicted request storm.
+   */
+  private requestStateResync(): void {
+    const now = Date.now();
+    if (now - this.lastResyncAt < 5000) return;
+    this.lastResyncAt = now;
+    this.socket?.emit("state:request");
+  }
+
+  /**
+   * ORPHAN AUDIT 2026-09-24: this was an EMPTY METHOD with 12 call sites.
+   *
+   * The comment said in-terminal toasts handle notifications "via
+   * notificationService.add()" — true of the five story handlers, which call
+   * both. The other seven called ONLY this, so new mail, forum replies, a
+   * newly assigned mission and a server discovery announced themselves to a
+   * no-op. Bug shape #4: a method whose name promises the right thing and
+   * whose body does nothing, with no compiler or runtime complaint.
+   *
+   * Now routed to the toast service it always claimed to defer to.
+   *
+   * The redundant calls at sites that ALSO `ns.add` were removed so nothing
+   * double-notifies — five `story:*` handlers in that change, and
+   * `server:discovered`, which the first sweep missed and a code review
+   * caught. Counted rather than asserted this time: `showNotification` has
+   * seven remaining call sites and none of them is followed by an `ns.add`
+   * for the same event.
+   */
+  private async showNotification(
+    title: string,
+    message: string,
+    priority: "low" | "normal" | "high" | "critical" = "normal",
+  ): Promise<void> {
+    const ns = await getNotifService();
+    ns?.add({ type: "system", title, message, priority });
+  }
+
+  /**
+   * A world event, from either the targeted or the global channel.
+   *
+   * Accepts BOTH payload shapes the codebase produces: eventService's
+   * {title, description} and keyFragmentService's {message}. The two used to
+   * be handled by two separate listeners on the same event name, each blind
+   * to the other's shape.
+   */
+  private surfaceWorldEvent(data: any): void {
+    const message = data?.description || data?.message;
+    if (!message) return;
+    void this.showNotification(
+      data.title || "World Event",
+      message,
+      data.severity === "critical" ? "critical" : data.severity === "warning" ? "high" : "normal",
+    );
   }
 
   private handleHackResult(result: any): void {

@@ -67,6 +67,73 @@ export const MAX_TOOL_STEALTH_BONUS = 0.3;
  */
 export const QUANTUM_CHARGE_ITEM_ID = "quantum_charge";
 
+/**
+ * How long a READ or DISMISSED notification is kept. Unread rows are exempt at
+ * any age — see purgeOldNotifications.
+ */
+export const NOTIFICATION_RETENTION_DAYS = 30;
+
+/** How often the retention sweep runs. */
+export const NOTIFICATION_PURGE_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
+/** Points a successful hack contributes to its faction's war score. */
+export const WAR_POINTS_PER_HACK = 10;
+
+/**
+ * How long before the SAME player can score the SAME server again.
+ *
+ * Without this, war score was farmable: the only limiter was the hack cooldown
+ * (10-30s), so one account re-hacking the weakest enemy server produced ~3,600
+ * points/hour against a war decided purely by which score is higher.
+ */
+export const WAR_SCORE_COOLDOWN_MS = 60 * 60 * 1000;
+
+/**
+ * The most one player may contribute to a single war.
+ *
+ * The per-server cooldown alone just makes a farmer rotate targets. This is
+ * what stops one account settling a fourteen-day war the other faction never
+ * got to contest — at 10 points a hack it is 20 scoring hacks per war.
+ */
+export const WAR_MAX_POINTS_PER_PLAYER = 200;
+
+// ==================== NETWORK TAPS (event subscriptions) ====================
+
+/**
+ * A tap's reach is its `quality`, and these floors are what makes quality mean
+ * anything.
+ *
+ * ORPHAN AUDIT 2026-09-24: `EventSubscription.quality` was documented "0-100,
+ * affects event detail/reliability" and did neither. The only code that read it
+ * fired for INFO severity below 30 and nothing else, so 30 and 100 were
+ * identical and detail was never varied anywhere.
+ *
+ * Read as: an event of this severity is intercepted reliably once quality
+ * reaches this fraction. Loud events leak — a CRITICAL breach is audible to the
+ * cheapest tap. Quiet ones need a good one.
+ */
+export const TAP_SEVERITY_FLOOR: Record<string, number> = {
+  critical: 0.3,
+  warning: 0.75,
+  info: 1.0,
+};
+
+/** Wildcard `eventType`: this tap watches the target, not one kind of event. */
+export const TAP_ALL_EVENTS = "*";
+
+/** How many taps one player may run at once. */
+export const MAX_ACTIVE_TAPS = 5;
+
+/**
+ * The catalog ids, by tier. Matched by ID and never by name — see the
+ * QUANTUM_CHARGE_ITEM_ID note above for what matching on a name cost last time.
+ */
+export const TAP_ITEMS = {
+  basic_tap: { quality: 30, durationMinutes: 60 },
+  shielded_tap: { quality: 60, durationMinutes: 180 },
+  quantum_tap: { quality: 90, durationMinutes: 720 },
+} as const;
+
 /** The three resource channels a hardware part can upgrade. */
 export type HardwareChannel = "cpu" | "ram" | "bw";
 

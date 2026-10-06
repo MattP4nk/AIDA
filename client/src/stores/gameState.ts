@@ -5,6 +5,7 @@ import {
   socketService,
   socketConnected,
   socketError,
+  playerState,
 } from "../services/socket";
 import type {
   User,
@@ -319,91 +320,54 @@ export async function verifyAuthentication(): Promise<boolean> {
 
 // ==================== GAME DATA LOADING ====================
 
+/**
+ * Mirror the pushed state into the legacy stores.
+ *
+ * `playerState` (services/socket.ts), fed by `state:update` and `state:delta`,
+ * is the source of truth. This used to fetch the same data over REST from
+ * routes that are not mounted.
+ */
 async function loadInitialGameData(): Promise<void> {
-  try {
-    // Load known servers
-    const servers = await apiClient.getKnownServers();
-    knownServers.set(servers);
+  const state = get(playerState);
+  if (!state) {
+    // Not an error: `state:update` arrives just after authentication, and the
+    // subscription below picks it up whenever it lands. Failing loudly here
+    // would fire on every normal login.
+    return;
+  }
+  mirrorPlayerState(state);
+}
 
-    // Load player progress
-    const stats = await apiClient.getUserStats();
-    if (stats) {
-      playerProgress.set(stats);
-      discoveryLevel.set(stats.discoveryLevel || 0);
-    }
-
-    // Connect to user's home server
-    const user = get(currentUser);
-    if (user?.homeIp) {
-      const homeServer = servers.find((s) => s.ipAddress === user.homeIp);
-      if (homeServer) {
-        await connectToServerInternal(homeServer);
-      }
-    }
-  } catch (error) {
-    console.error("Error loading initial game data:", error);
-    addErrorOutput(
-      "Failed to load game data. Some features may not work properly.",
-    );
+/**
+ * Keep the legacy progress stores in step with the pushed state.
+ *
+ * Do NOT add `currentServer` here. `applyStateDelta` copies only along the
+ * delta's path, so `state.currentServer` stays frozen at whatever the last
+ * full `state:update` captured — mirroring it meant every credit, XP or
+ * inventory delta reverted the player to the server they were on at login.
+ * It can be mirrored once the server sends a real `currentServer` delta.
+ *
+ * New code should prefer `playerState` and its derived stores.
+ */
+function mirrorPlayerState(state: any): void {
+  if (state?.player) {
+    playerProgress.set(state.player as PlayerProgress);
+    discoveryLevel.set(state.player.discoveryLevel ?? 0);
   }
 }
+
+// One subscription for the life of the module: every `state:update` and every
+// applied `state:delta` flows through here.
+playerState.subscribe((state) => {
+  if (state) mirrorPlayerState(state);
+});
 
 // ==================== SERVER ACTIONS ====================
-
-export async function connectToServer(server: GameServer): Promise<boolean> {
-  try {
-    await connectToServerInternal(server);
-    addSuccessOutput(`Connected to ${server.name} (${server.ipAddress})`);
-    return true;
-  } catch (error) {
-    addErrorOutput(
-      `Failed to connect to ${server.name}: ${error instanceof Error ? error.message : "Unknown error"}`,
-    );
-    return false;
-  }
-}
-
-async function connectToServerInternal(server: GameServer): Promise<void> {
-  // Connect via API
-  await apiClient.connectToServer(server.id);
-
-  // Update state
-  currentServer.set(server);
-
-  // Update connected servers list
-  connectedServers.update((servers) =>
-    servers.includes(server.id) ? servers : [...servers, server.id],
-  );
-
-  // Emit socket event for real-time updates
-  socketService.emitServerConnect(server.id);
-
-  // Load server file system
-  await loadServerFileSystem(server.id);
-}
-
-export async function disconnectFromServer(server: GameServer): Promise<void> {
-  try {
-    await apiClient.disconnectFromServer(server.id);
-
-    // Update state
-    if (get(currentServer)?.id === server.id) {
-      currentServer.set(null);
-      currentDirectory.set(null);
-    }
-
-    connectedServers.update((servers) =>
-      servers.filter((id) => id !== server.id),
-    );
-
-    // Emit socket event
-    socketService.emitServerDisconnect(server.id);
-
-    addSystemOutput(`Disconnected from ${server.name}`);
-  } catch (error) {
-    console.error("Error disconnecting from server:", error);
-  }
-}
+//
+// `connectToServer` / `connectToServerInternal` / `disconnectFromServer` were
+// removed: they called `/api/servers/:id/connect` and `/api/servers/:id/
+// disconnect`, neither of which is mounted, and nothing called them. Connecting
+// to a server is `connect <ip>` through the command path.
 
 // ==================== FILE SYSTEM ACTIONS ====================
 

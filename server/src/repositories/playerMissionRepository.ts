@@ -50,6 +50,7 @@
  */
 import { AsyncLocalStorage } from "async_hooks";
 import { inject, injectable } from "tsyringe";
+import { EventEmitter } from "events";
 import { Prisma, PrismaClient } from "@prisma/client";
 import { Logger } from "pino";
 import { LOGGER, PRISMA_CLIENT } from "../di/tokens";
@@ -88,7 +89,7 @@ export const NO_CHANGE = Symbol("no-change");
 type Row = Prisma.PlayerMissionGetPayload<{ include: { objectives: true } }>;
 
 @injectable()
-export class PlayerMissionRepository {
+export class PlayerMissionRepository extends EventEmitter {
   private chains = new Map<string, Promise<unknown>>();
 
   /**
@@ -109,7 +110,27 @@ export class PlayerMissionRepository {
   constructor(
     @inject(LOGGER) private logger: Logger,
     @inject(PRISMA_CLIENT) private prisma: PrismaClient,
-  ) {}
+  ) {
+    super();
+  }
+
+  /**
+   * Announce that a player's mission set changed.
+   *
+   * Same contract as `PlayerProgressRepository.announce`: an IN-PROCESS event,
+   * no I/O, and `gameStateManager` — which owns `io` — turns it into a
+   * `state:delta`. The repository stays the single owner of mission state and
+   * gains no knowledge of sockets.
+   *
+   * Added 2026-09-25. `missions` was one of two GameState slices that only
+   * ever arrived in the login snapshot, while the client already exported a
+   * `playerMissions` derived store — the exact trap ShopDialog fell into with
+   * credits. The chokepoint argument that justified wiring progress applied
+   * here verbatim and had simply not been used.
+   */
+  private announceMissions(userId: string): void {
+    this.emit("missions:changed", { userId });
+  }
 
   // ── LOCKING ───────────────────────────────────────────────────────────
 
@@ -413,6 +434,12 @@ export class PlayerMissionRepository {
         });
       }
     });
+
+    // Announced HERE rather than in the public mutators, because this is the
+    // only place a write actually lands: `mutate` returns early on NO_CHANGE
+    // and `mutateAll` returns early unless its callback returns true, so
+    // announcing from those would emit deltas for writes that never happened.
+    this.announceMissions(userId);
   }
 
   // ── PASS 2: what the blob could not express ───────────────────────────
@@ -481,6 +508,8 @@ export class PlayerMissionRepository {
 
       const row = rows[0];
       if (!row) return null;
+      // Raw SQL, so it never touches writeMission — announce it here.
+      this.announceMissions(userId);
       return {
         current: row.current_count,
         target: row.target_count,

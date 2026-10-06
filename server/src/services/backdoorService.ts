@@ -1,7 +1,7 @@
 import { EventEmitter } from "events";
 import { injectable, inject } from "tsyringe";
 import type { Logger } from "pino";
-import { LOGGER } from "../di/tokens";
+import { LOGGER, MEMORY_SERVICE } from "../di/tokens";
 import { db } from "../database/client";
 import { safeExecute } from "../utils/safeExecute";
 import {
@@ -106,6 +106,17 @@ export class BackdoorService extends EventEmitter {
               "Backdoor upgraded",
             );
 
+            try {
+              const { getService } = await import("../di/container");
+              const memory = getService<import("./memoryService").default>(MEMORY_SERVICE);
+              const srv = await db.client.gameServer.findUnique({
+                where: { id: serverId },
+                select: { name: true },
+              });
+              memory.registerBackdoor(installerId, serverId, srv?.name ?? serverId);
+            } catch (err) {
+              this.logger.warn({ err, installerId, serverId }, "Could not register backdoor drain");
+            }
             this.emit("backdoor:installed", { installerId, serverId, type });
 
             return { success: true, backdoor: upgraded, upgraded: true };
@@ -143,6 +154,28 @@ export class BackdoorService extends EventEmitter {
           "Backdoor installed successfully",
         );
 
+        // Passive drain. `registerBackdoor` had ZERO callers, so a backdoor —
+        // the most explicitly "persistent footprint" thing in the game — cost
+        // its owner nothing to keep. Registered on BOTH the fresh-install and
+        // upgrade paths because `addPassiveConsumer` is keyed by server and so
+        // idempotent, and the in-memory consumer map is rebuilt empty on every
+        // boot: an upgrade is the cheapest chance to re-register a backdoor
+        // that predates the last restart.
+        //
+        // KNOWN GAP: backdoors that are never upgraded stay unregistered until
+        // their next install. Restoring drains from the Backdoor table at boot
+        // is the real fix and is a separate change.
+        try {
+          const { getService } = await import("../di/container");
+          const memory = getService<import("./memoryService").default>(MEMORY_SERVICE);
+          const srv = await db.client.gameServer.findUnique({
+            where: { id: serverId },
+            select: { name: true },
+          });
+          memory.registerBackdoor(installerId, serverId, srv?.name ?? serverId);
+        } catch (err) {
+          this.logger.warn({ err, installerId, serverId }, "Could not register backdoor drain");
+        }
         this.emit("backdoor:installed", { installerId, serverId, type });
 
         return { success: true, backdoor };
@@ -201,6 +234,7 @@ export class BackdoorService extends EventEmitter {
           );
 
           this.emit("backdoor:expired", { backdoorId: backdoor.id, serverId });
+          await this.releaseBackdoorDrain(userId, serverId);
 
           return { success: false, error: "Backdoor has expired" };
         }
@@ -241,6 +275,14 @@ export class BackdoorService extends EventEmitter {
             serverId,
             discoveredBy: "system",
           });
+
+          // Deactivated above by `isActive: !discovered`, which is why this
+          // site is easy to miss: it does not contain the literal
+          // `isActive: false` that every other deactivation does. The drain
+          // is unreachable afterwards — `getBackdoors` filters on
+          // `isActive: true`, so the player cannot even see the backdoor to
+          // remove it, and its cost follows them until the process restarts.
+          await this.releaseBackdoorDrain(userId, serverId);
 
           return { success: true, accessLevel: backdoor.accessLevel, discovered: true };
         }
@@ -328,6 +370,8 @@ export class BackdoorService extends EventEmitter {
           "Backdoor manually removed",
         );
 
+        await this.releaseBackdoorDrain(userId, serverId);
+
         return { success: true };
       },
       context: "Remove backdoor",
@@ -351,7 +395,9 @@ export class BackdoorService extends EventEmitter {
             isActive: true,
             expiresAt: { not: null, lte: now },
           },
-          select: { id: true, serverId: true },
+          // `installerId` is selected so the drain can be released below —
+          // without it this path cannot even identify whose resources to free.
+          select: { id: true, serverId: true, installerId: true },
         });
 
         if (expiredBackdoors.length === 0) {
@@ -367,12 +413,13 @@ export class BackdoorService extends EventEmitter {
           data: { isActive: false },
         });
 
-        // Emit individual expiry events
+        // Emit individual expiry events and release each owner's drain.
         for (const expired of expiredBackdoors) {
           this.emit("backdoor:expired", {
             backdoorId: expired.id,
             serverId: expired.serverId,
           });
+          await this.releaseBackdoorDrain(expired.installerId, expired.serverId);
         }
 
         this.logger.info(
@@ -502,6 +549,8 @@ export class BackdoorService extends EventEmitter {
           "Detected backdoor removed",
         );
 
+        await this.releaseBackdoorDrain(backdoor.installerId, backdoor.serverId);
+
         return { success: true };
       },
       context: "Remove detected backdoor",
@@ -511,6 +560,27 @@ export class BackdoorService extends EventEmitter {
   }
 
   // ==================== PRIVATE HELPERS ====================
+
+  /**
+   * Release a backdoor's passive resource drain.
+   *
+   * EVERY path that deactivates a backdoor must call this, not just the ones a
+   * player triggers. The drain used to be reclaimed incidentally — session
+   * teardown wiped a player's whole consumer map, backdoors included — and
+   * once that was correctly narrowed to session-scoped consumers, the expiry
+   * paths were the ones left holding a drain nothing would ever release. A
+   * player who let backdoors expire paid their CPU/RAM/BW until the process
+   * restarted, with no process in `ps` to kill.
+   */
+  private async releaseBackdoorDrain(installerId: string, serverId: string): Promise<void> {
+    try {
+      const { getService } = await import("../di/container");
+      const memory = getService<import("./memoryService").default>(MEMORY_SERVICE);
+      memory.unregisterBackdoor(installerId, serverId);
+    } catch (err) {
+      this.logger.warn({ err, installerId, serverId }, "Could not release backdoor drain");
+    }
+  }
 
   /**
    * Map a hack method string to a backdoor type.

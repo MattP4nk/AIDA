@@ -904,12 +904,21 @@ export class KeyFragmentService extends EventEmitter {
           completedAt: now,
         });
 
-        // Broadcast a world event — a player has completed the game
-        this.io.emit("game:event", {
+        // Broadcast a world event — a player has completed the game.
+        //
+        // Moved off `game:event` onto `game:event:public` (2026-09-24). This
+        // was the only remaining emitter of `game:event`, and it is a GLOBAL
+        // announcement sitting on what is now the targeted channel. It also
+        // sent `{message}` while eventService sent `{title, description}`, so
+        // the client had grown two listeners on one event name, each unable
+        // to read the other's payload.
+        this.io.emit("game:event:public", {
           type: "endgame_completed",
-          message:
+          title: "The Endgame",
+          description:
             "A player has made their final choice about AIDA. The net trembles.",
-          choice,
+          severity: "critical",
+          metadata: { choice },
           timestamp: now,
         });
 

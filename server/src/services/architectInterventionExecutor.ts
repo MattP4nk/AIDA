@@ -807,6 +807,45 @@ export class ArchitectInterventionExecutor {
       typeof data?.personaId === "string" ? data.personaId : "architect",
     );
 
+    // A declared war produced NO GameEvent, so `createFactionWarEvent` sat
+    // unreachable and nothing could watch a faction: its metadata
+    // (`{factionId, targetFactionId}`) is the only thing a faction tap can
+    // match on, and no live producer emitted it. Wiring it here revives the
+    // factory and makes `tap <faction>` real in the same stroke.
+    if (result.success) {
+      try {
+        // NAMES, not ids. The first version passed `Faction.id` cuids with
+        // `as never` to silence the compiler — but `FactionId` is the slug
+        // union ("garrison" | "dothackers" | ...), and createFactionWarEvent
+        // interpolates both values into a title it broadcasts to every
+        // connected player. That would have read "Faction Conflict:
+        // cm3k9x2b40001ab vs cm3k9x2b40002cd". The cast was the only reason it
+        // compiled: CLAUDE.md bug shape #2 with the compiler switched off.
+        const [attackerFaction, defenderFaction] = await Promise.all([
+          db.client.faction.findUnique({
+            where: { id: attackerFactionId },
+            select: { name: true, shortName: true },
+          }),
+          db.client.faction.findUnique({
+            where: { id: targetId },
+            select: { name: true, shortName: true },
+          }),
+        ]);
+        const eventService = await this.getEventService();
+        await eventService.createFactionWarEvent(
+          attackerFactionId,
+          targetId,
+          result.message ?? "War declared.",
+          attackerFaction?.name ?? attackerFaction?.shortName ?? "A faction",
+          defenderFaction?.name ?? defenderFaction?.shortName ?? "another faction",
+        );
+      } catch (err) {
+        // Non-fatal: the war exists either way, and failing the intervention
+        // because its announcement failed would be the worse outcome.
+        this.logger.warn({ err, attackerFactionId, targetId }, "Faction war event failed");
+      }
+    }
+
     return {
       type: "declare_war",
       success: result.success,

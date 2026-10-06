@@ -85,24 +85,19 @@ router.post("/:id/reject", asyncHandler(async (req: any, res: any) => {
     throw new ValidationError("reviewNote is required when rejecting a draft");
   }
 
-  const draft = await prisma.contentDraft.findUnique({
-    where: { id: req.params.id },
-  });
-  if (!draft) throw new NotFoundError("Draft not found");
+  // ORPHAN AUDIT: `contentDraftService.rejectDraft` was filed as having zero
+  // callers, and it did — because this route RE-IMPLEMENTED it inline against
+  // raw Prisma instead of calling it. The approve route two blocks up goes
+  // through the service. Two implementations of the same transition, one of
+  // which logged and one of which did not, is how they drift.
+  const { getService } = await import("../../di/container");
+  const draftService = getService<ContentDraftService>(CONTENT_DRAFT_SERVICE);
 
-  if (draft.status !== "draft") {
-    throw new ValidationError(`Cannot reject draft with status '${draft.status}'`);
-  }
-
-  const updated = await prisma.contentDraft.update({
-    where: { id: req.params.id },
-    data: {
-      status: "rejected",
-      reviewNote,
-      reviewedBy: req.user?.id ?? "admin",
-      reviewedAt: new Date(),
-    },
-  });
+  const updated = await draftService.rejectDraft(
+    req.params.id,
+    req.user?.id ?? "admin",
+    reviewNote,
+  );
 
   res.json({
     success: true,
