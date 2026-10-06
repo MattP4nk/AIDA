@@ -1388,6 +1388,10 @@ class HackService extends EventEmitter {
       serverName,
       difficulty,
       result,
+      // The story ledger has always recorded `method` from this event and it
+      // was never sent — `data.method` was undefined on every entry. It is a
+      // parameter of this very function, so the producer had it all along.
+      method,
       ...(layersSolved !== undefined ? { layersSolved } : {}),
       ...(totalLayers !== undefined ? { totalLayers } : {}),
     });

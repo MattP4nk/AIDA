@@ -1235,6 +1235,10 @@ class MissionService extends EventEmitter {
         userId,
         missionId,
         missionTitle: mission.title,
+        // The story ledger records the mission TYPE and read it as `data.type`,
+        // which this payload never had — only the per-objective types below.
+        // `mission.type` is in scope and is what the ledger meant.
+        missionType: mission.type,
         factionId: mission.factionId || undefined,
         targetServerId: (mission as any).targetServerId || undefined,
         objectives: ((mission.objectives as any[]) || []).map((obj: any) => ({

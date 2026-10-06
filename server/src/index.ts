@@ -29,6 +29,27 @@ import type { DarkNetDungeonService } from "./services/darknetDungeonService";
 import type { FactionService } from "./services/factionService";
 import type { ForumService } from "./services/forumService";
 
+import type {
+  BountyPostedEvent,
+  EndgameCompletedEvent,
+  EndgameUnlockedEvent,
+  FactionMembershipEvent,
+  FactionRankAchievedEvent,
+  FactionReputationChangedEvent,
+  FragmentClaimedEvent,
+  FragmentStolenEvent,
+  FragmentTransferredEvent,
+  HackAttemptEvent,
+  HackDetectedEvent,
+  IdsAlertEvent,
+  MissionCompletedEvent,
+  MissionFailedEvent,
+  MissionFeedbackEvent,
+  PlayerLevelUpEvent,
+  RewardsCreditsGrantedEvent,
+  RewardsXpGrantedEvent,
+} from "./services/serviceEvents";
+
 // Extracted modules
 import {
   setupMiddleware,
@@ -181,32 +202,38 @@ function wireServiceEvents(storyProgression: StoryProgressionService): void {
   // The old client comment "silent — shown in command output" was true when
   // rewards only came from synchronous commands. It stopped being true once they
   // started arriving asynchronously.
-  missionService.on("rewards:xp_granted", (data: any) => {
+  missionService.on("rewards:xp_granted", (data: RewardsXpGrantedEvent) => {
     if (!data?.userId) return;
     io.to(`player:${data.userId}`).emit("rewards:xp_granted", data);
   });
 
-  missionService.on("rewards:credits_granted", (data: any) => {
+  missionService.on("rewards:credits_granted", (data: RewardsCreditsGrantedEvent) => {
     if (!data?.userId) return;
     io.to(`player:${data.userId}`).emit("rewards:credits_granted", data);
   });
 
-  hackService.on("hack:detected", (data: any) => {
+  hackService.on("hack:detected", (data: HackDetectedEvent) => {
     defer(() => dynamicContent.processEvent("hack:detected", data), "Dynamic content error on hack:detected");
   });
 
   // Single unified hack:attempt handler — dynamic content, story ledger, persona, achievements
-  hackService.on("hack:attempt", (data: any) => {
+  hackService.on("hack:attempt", (data: HackAttemptEvent) => {
     defer(() => dynamicContent.processEvent("hack:attempt", data), "Dynamic content error on hack:attempt");
-    if (data.result?.success || data.success) {
+    // The `|| data.success`, `|| data.userId` and `|| data.serverId`
+    // alternatives that used to be here were DEAD: this payload has never had
+    // those names, so every one of them was an unreachable fallback that
+    // `any` kept compiling. `method` was the opposite problem — it was read
+    // and never sent, so the ledger recorded `undefined` on every hack until
+    // the emitter started including it.
+    if (data.result?.success) {
       defer(() => storyProgression.recordEvent({
         type: "hack",
         category: "combat",
-        actorId: data.attackerId || data.userId,
+        actorId: data.attackerId,
         actorType: "player",
-        summary: `Player hacked server ${data.serverName || data.targetServerId || data.serverId}`,
+        summary: `Player hacked server ${data.serverName || data.targetServerId}`,
         data: {
-          serverId: data.targetServerId || data.serverId,
+          serverId: data.targetServerId,
           serverName: data.serverName,
           method: data.method,
         },
@@ -225,7 +252,7 @@ function wireServiceEvents(storyProgression: StoryProgressionService): void {
     }
   });
 
-  hackService.on("ids_alert", (data: any) => {
+  hackService.on("ids_alert", (data: IdsAlertEvent) => {
     defer(() => dynamicContent.processEvent("ids_alert", data), "Dynamic content error on ids_alert");
     // Push IDS alert to player via Socket.IO
     io.to(`player:${(data as any).targetUserId}`).emit("command:result", {
@@ -235,7 +262,7 @@ function wireServiceEvents(storyProgression: StoryProgressionService): void {
     });
   });
 
-  hackService.on("bounty:posted", (data: any) => {
+  hackService.on("bounty:posted", (data: BountyPostedEvent) => {
     defer(() => dynamicContent.processEvent("bounty:posted", data), "Dynamic content error on bounty:posted");
   });
 
@@ -255,7 +282,7 @@ function wireServiceEvents(storyProgression: StoryProgressionService): void {
   //
   // Every branch here is `defer`-ed — fire-and-forget microtasks, each with its
   // own catch — so merging them changes no ordering that anything can observe.
-  missionService.on("mission:completed", (data: any) => {
+  missionService.on("mission:completed", (data: MissionCompletedEvent) => {
     defer(() => personaService.onMissionCompleted(data), "Persona error on mission:completed");
     defer(() => dynamicContent.processEvent("mission:completed", data), "Dynamic content error on mission:completed");
     if (data.userId)
@@ -267,8 +294,13 @@ function wireServiceEvents(storyProgression: StoryProgressionService): void {
       category: "narrative",
       actorId: data.userId,
       actorType: "player",
-      summary: `Completed mission: ${data.title || data.missionId}`,
-      data: { missionId: data.missionId, type: data.type, factionId: data.factionId },
+      // `data.title` and `data.type`, as this read until 2026-10-06, are not
+      // fields of this event — the bus payload calls them `missionTitle` and
+      // (newly) `missionType`. So EVERY ledger entry for a completed mission
+      // read "Completed mission: <cuid>" with a `type: undefined`, for as long
+      // as the feature has existed. `any` is the only reason it compiled.
+      summary: `Completed mission: ${data.missionTitle || data.missionId}`,
+      data: { missionId: data.missionId, type: data.missionType, factionId: data.factionId },
       impact: data.factionId ? { factions: { [data.factionId]: 2 } } : {},
       weight: 4,
     }), "Story ledger error on mission:completed");
@@ -276,7 +308,7 @@ function wireServiceEvents(storyProgression: StoryProgressionService): void {
       defer(() => tutorialService.advanceTutorial(data.userId, data.missionId), "Tutorial advance error on mission:completed");
   });
 
-  missionService.on("mission:failed", (data: any) => {
+  missionService.on("mission:failed", (data: MissionFailedEvent) => {
     // R12 REVIEW: abandoning is NOT a narrative failure.
     //
     // `advanceStory(id, "failed")` walks the step's `failureBranch`, which can
@@ -307,7 +339,7 @@ function wireServiceEvents(storyProgression: StoryProgressionService): void {
   });
 
   // Mission feedback → AI learns from outcomes
-  missionService.on("mission:feedback", (data: any) => {
+  missionService.on("mission:feedback", (data: MissionFeedbackEvent) => {
     defer(async () => {
       // Record as faction leader knowledge (if faction mission)
       if (data.factionId) {
@@ -344,7 +376,7 @@ function wireServiceEvents(storyProgression: StoryProgressionService): void {
   });
 
   // Faction events → story ledger
-  factionService.on("faction:member_joined", (data: any) => {
+  factionService.on("faction:member_joined", (data: FactionMembershipEvent) => {
     defer(() => storyProgression.recordEvent({
       type: "player_choice", category: "diplomacy", actorId: data.userId, actorType: "player",
       summary: `Player joined faction ${data.factionName || data.factionId}`,
@@ -354,7 +386,7 @@ function wireServiceEvents(storyProgression: StoryProgressionService): void {
     defer(() => dynamicContent.processEvent("faction:member_joined", data), "Dynamic content error on faction:member_joined");
   });
 
-  factionService.on("faction:member_left", (data: any) => {
+  factionService.on("faction:member_left", (data: FactionMembershipEvent) => {
     defer(() => storyProgression.recordEvent({
       type: "player_choice", category: "diplomacy", actorId: data.userId, actorType: "player",
       summary: `Player left faction ${data.factionName || data.factionId}`,
@@ -364,7 +396,7 @@ function wireServiceEvents(storyProgression: StoryProgressionService): void {
     defer(() => dynamicContent.processEvent("faction:member_left", data), "Dynamic content error on faction:member_left");
   });
 
-  factionService.on("faction:reputation_changed", (data: any) => {
+  factionService.on("faction:reputation_changed", (data: FactionReputationChangedEvent) => {
     defer(() => storyProgression.recordEvent({
       type: "player_choice", category: "diplomacy", actorId: data.userId, actorType: "player",
       summary: `Player reputation changed with faction ${data.factionId}: ${data.amount > 0 ? "+" : ""}${data.amount} (now ${data.newReputation})`,
@@ -373,7 +405,7 @@ function wireServiceEvents(storyProgression: StoryProgressionService): void {
     }), "Story ledger error on faction:reputation_changed");
   });
 
-  factionService.on("faction:rank_achieved", (data: any) => {
+  factionService.on("faction:rank_achieved", (data: FactionRankAchievedEvent) => {
     defer(() => storyProgression.recordEvent({
       type: "player_choice", category: "diplomacy", actorId: data.userId, actorType: "player",
       summary: `Player achieved rank ${data.newRank} in faction ${data.factionId}`,
@@ -388,7 +420,7 @@ function wireServiceEvents(storyProgression: StoryProgressionService): void {
       KEY_FRAGMENT_SERVICE,
     );
 
-  keyFragmentService.on("fragment:claimed", (data: any) => {
+  keyFragmentService.on("fragment:claimed", (data: FragmentClaimedEvent) => {
     defer(() => storyProgression.recordEvent({
       type: "fragment_claimed", category: "discovery", actorId: data.userId, actorType: "player",
       summary: `Player claimed AIDA fragment: ${data.name} (${data.keyType} ${data.fragmentNum}/3)`,
@@ -398,7 +430,7 @@ function wireServiceEvents(storyProgression: StoryProgressionService): void {
     defer(() => dynamicContent.processEvent("fragment:claimed", data), "Dynamic content error on fragment:claimed");
   });
 
-  keyFragmentService.on("fragment:stolen", (data: any) => {
+  keyFragmentService.on("fragment:stolen", (data: FragmentStolenEvent) => {
     defer(() => storyProgression.recordEvent({
       type: "fragment_stolen", category: "conflict", actorId: data.attackerUserId, actorType: "player",
       targetId: data.victimUserId, targetType: "player",
@@ -409,7 +441,7 @@ function wireServiceEvents(storyProgression: StoryProgressionService): void {
     defer(() => dynamicContent.processEvent("fragment:stolen", data), "Dynamic content error on fragment:stolen");
   });
 
-  keyFragmentService.on("fragment:transferred", (data: any) => {
+  keyFragmentService.on("fragment:transferred", (data: FragmentTransferredEvent) => {
     defer(() => storyProgression.recordEvent({
       type: "fragment_transferred", category: "social", actorId: data.fromUserId, actorType: "player",
       targetId: data.toUserId, targetType: "player",
@@ -419,7 +451,7 @@ function wireServiceEvents(storyProgression: StoryProgressionService): void {
     }), "Story ledger error on fragment:transferred");
   });
 
-  keyFragmentService.on("endgame:unlocked", (data: any) => {
+  keyFragmentService.on("endgame:unlocked", (data: EndgameUnlockedEvent) => {
     defer(() => storyProgression.recordEvent({
       type: "endgame_unlocked", category: "milestone", actorId: data.userId, actorType: "player",
       summary: "A player has collected all 9 AIDA fragments. The endgame is unlocked.",
@@ -428,7 +460,7 @@ function wireServiceEvents(storyProgression: StoryProgressionService): void {
     }), "Story ledger error on endgame:unlocked");
   });
 
-  keyFragmentService.on("endgame:completed", (data: any) => {
+  keyFragmentService.on("endgame:completed", (data: EndgameCompletedEvent) => {
     defer(() => storyProgression.recordEvent({
       type: "endgame_completed", category: "milestone", actorId: data.userId, actorType: "player",
       summary: `A player has completed the endgame. Choice: ${data.choice}`,
@@ -439,7 +471,7 @@ function wireServiceEvents(storyProgression: StoryProgressionService): void {
   });
 
   // Level up → dynamic content (home server log)
-  missionService.on("player:levelup", (data: any) => {
+  missionService.on("player:levelup", (data: PlayerLevelUpEvent) => {
     defer(() => dynamicContent.processEvent("player:levelup", data), "Dynamic content error on player:levelup");
   });
 
