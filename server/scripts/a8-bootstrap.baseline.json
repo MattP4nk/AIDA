@@ -1,0 +1,52 @@
+{
+  "listeners": [
+    "factionService.on(faction:member_joined)",
+    "factionService.on(faction:member_left)",
+    "factionService.on(faction:rank_achieved)",
+    "factionService.on(faction:reputation_changed)",
+    "hackService.on(bounty:posted)",
+    "hackService.on(hack:attempt)",
+    "hackService.on(hack:detected)",
+    "hackService.on(ids_alert)",
+    "keyFragmentService.on(endgame:completed)",
+    "keyFragmentService.on(endgame:unlocked)",
+    "keyFragmentService.on(fragment:claimed)",
+    "keyFragmentService.on(fragment:stolen)",
+    "keyFragmentService.on(fragment:transferred)",
+    "missionService.on(mission:completed)",
+    "missionService.on(mission:completed)",
+    "missionService.on(mission:failed)",
+    "missionService.on(mission:feedback)",
+    "missionService.on(player:levelup)",
+    "missionService.on(rewards:credits_granted)",
+    "missionService.on(rewards:xp_granted)"
+  ],
+  "services": [
+    "ACHIEVEMENT_SERVICE",
+    "AI_SCHEDULER_SERVICE",
+    "CONTENT_QUEUE_SERVICE",
+    "EVENT_SERVICE",
+    "FACTION_SERVICE",
+    "FORUM_SERVICE",
+    "GAME_STATE_MANAGER",
+    "HACK_SERVICE",
+    "IP_SERVICE",
+    "IP_SERVICE",
+    "MESSAGE_SERVICE",
+    "MISSION_SERVICE",
+    "PERSONA_SERVICE",
+    "PROGRESS_SERVICE",
+    "RESOURCE_SERVICE",
+    "SERVER_CONTENT_SERVICE",
+    "SHOP_SERVICE",
+    "STORY_MISSION_SERVICE",
+    "TUTORIAL_SERVICE",
+    "WARFARE_SERVICE"
+  ],
+  "intervals": [
+    "ARCHITECT_EVAL_INTERVAL_MS",
+    "DUNGEON_EXPIRATION_INTERVAL_MS",
+    "NOTIFICATION_PURGE_INTERVAL_MS"
+  ],
+  "deferCount": 32
+}

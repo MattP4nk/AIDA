@@ -11,14 +11,27 @@ cd server && npm run dev                          # tsx watch, port 3001
 cd client && npm run dev                          # vite, port 8080
 ```
 
-There is **no unit-test runner** (no `test` script, no jest config; `jest`/`ts-jest`/
-`@types/jest` linger as dead devDependencies). Verification is done with hand-written
-harnesses in `server/scripts/`, run as `cd server && npx tsx scripts/<name>.ts`.
-`.gitignore:36` ignores that directory, but **5 harnesses are git-tracked anyway**
-(gitignore cannot untrack) — **31 of the 36 are local-only**, including every
-`verify-phase5-*.ts`. CI cannot run any of them,
-so every harness result in the prose docs rests on a maintainer-local run.
-Socket/HTTP harnesses need the dev server already running.
+There is **no unit-test runner** (no jest config; `jest`/`ts-jest`/`@types/jest` linger
+as dead devDependencies). Verification is done with hand-written harnesses in
+`server/scripts/`:
+
+```
+cd server && npm run verify            # the whole suite, exits non-zero on failure
+cd server && npm run verify:golden     # the command characterization master
+cd server && npx tsx scripts/<name>.ts # one harness
+```
+
+**`server/scripts/` is tracked as of 2026-10-06** (decision 17 closed), baselines
+included. Before that the directory was blanket-ignored with five files tracked by
+accident, so ~49 harnesses existed on one machine only and every result quoted in the
+prose docs was unreproducible by anyone else. The ignore rule was *removed* rather than
+bypassed with `git add -f`, because forcing the add leaves the directory ignored and
+silently untracks the next harness written.
+
+**~10 harnesses need the dev server already running** and fail with `ECONNREFUSED`
+without it — environmental, not a regression. `npm run verify` says so when it reports
+failures. Editing `src/` mid-run also restarts `tsx watch` under them; that has produced
+a phantom failure before.
 
 ---
 

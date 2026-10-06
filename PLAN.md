@@ -4289,13 +4289,20 @@ passively while other phases proceed.
 - Verify against a running server, not just `tsc`. Every gate above names a behaviour to observe.
 - **No feature loss.** Phase 7 is behaviour-preserving; if a refactor would drop a capability,
   it stops and gets raised instead.
-- **Decision 17 (2026-09-24): the `verify-*` harnesses stay untracked until the refactor is
-  done.** `.gitignore:36` keeps `server/scripts/` out, and that stands for now — the harnesses
-  are still changing shape with the code they test, and committing them mid-refactor just
-  bakes in churn. They get `git add -f`'d in one batch once Phase 7 settles and they are in
-  their final form. Until then they are **local-only on the maintainer's machine**, so a fresh
-  clone or a lost disk loses all of them (162 checks as of this writing, with their negative
-  controls). That is an accepted, deliberate risk, not an oversight — and it is the reason no
-  harness result in these docs can be reproduced by anyone but the maintainer.
+- **Decision 17 — CLOSED 2026-10-06. The harnesses are tracked.** 54 harnesses, 3 baselines
+  and a runner, ~890 checks with their negative controls. The deferral held while they were
+  still changing shape with the code; what it cost in the meantime was that every number in
+  every commit message was unreproducible by anyone but the maintainer, and one disk failure
+  would have taken the lot.
+  - The `server/scripts/` ignore rule was **removed**, not bypassed with `git add -f`. Forcing
+    the add leaves the directory ignored, so the next harness written is silently untracked and
+    the gap reopens one file at a time — which is exactly how it reached 49 files without
+    anyone deciding to. The original rule had already leaked five files tracked by accident.
+  - `npm run verify` runs the suite and exits non-zero; `npm run verify:golden` runs the
+    characterization master. Both are in `server/package.json`.
+  - Baselines are tracked too. A golden master whose reference differs per developer is not a
+    golden master.
+  - **Still true:** ~10 harnesses need a running dev server, so CI cannot be fully green
+    without one. That is now a visible, fixable infrastructure gap rather than an invisible one.
 - These docs are **internal** — notes for the two of us, not for an outside audience. Keep them
   true (I re-read them and act on them), but skip the framing written for imaginary readers.

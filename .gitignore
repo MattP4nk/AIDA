@@ -30,10 +30,22 @@ pids/
 .agents/
 .claude/
 
-# Scripts (dev-only utilities, not production code)
-# NOTE: 5 files here are already tracked; gitignore does not apply to tracked
-# files, so this rule only affects new additions. See PLAN.md (O8).
-server/scripts/
+# server/scripts/ IS TRACKED as of 2026-10-06 (decision 17 closed).
+#
+# It used to be blanket-ignored, with five files tracked by accident because
+# gitignore does not apply to files already added. The effect was that the
+# verification for this entire refactor — 54 harnesses, ~890 checks and their
+# negative controls — existed only on one machine, so every result quoted in
+# every commit message was unreproducible by anyone else, and a lost disk lost
+# all of it.
+#
+# The rule is REMOVED rather than worked around with `git add -f`, deliberately.
+# Forcing the add leaves the directory ignored, so the next harness written is
+# silently untracked again and the gap reopens one file at a time. That is
+# precisely how it got to 49 untracked files without anyone deciding to.
+#
+# Baselines (*.baseline.json) are tracked too: a golden master whose reference
+# differs per developer is not a golden master.
 
 # Documentation / notes
 # Previously this blanket-ignored *.md and *.toon, which meant a fresh clone got

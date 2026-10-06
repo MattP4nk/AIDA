@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
+    "verify": "bash scripts/run-verify.sh",
+    "verify:golden": "tsx scripts/characterize-commands.ts",
     "start": "node dist/server/src/index.js",
     "db:migrate": "npx prisma migrate dev",
     "db:generate": "npx prisma generate",

@@ -1,0 +1,169 @@
+{
+  "00:systemCommands:pwd": {
+    "dataKeys": null,
+    "output": "/",
+    "outputType": "string",
+    "success": true
+  },
+  "01:systemCommands:ls": {
+    "dataKeys": null,
+    "output": "bin/+  data/  etc/   home/  logs/  tmp/   var/\n\n7 directories, 0 files  (+ protected)",
+    "outputType": "string",
+    "success": true
+  },
+  "02:helpCommands:help": {
+    "dataKeys": null,
+    "output": "╔════════════════════════════════════════════════════════════════════════╗\n║ COMMAND CATEGORIES                                                     ║\n╠════════════════════════════════════════════════════════════════════════╣\n║   help system       File operations and navigation (11)                ║\n║   help file         Advanced file operations (3/5)                     ║\n║   help process      Process and resource management (9)                ║\n║   help math         Mathematics and calculations (9/10)                ║\n║   help network      Network and connection tools (8/9)                 ║\n║   help social       Communication and messaging (7)                    ║\n║   help player       Status, skills, and intel reporting (10/11)        ║\n║   help faction      Faction membership and management (1)              ║\n║   help mission      Missions, stories, and objectives (7)              ║\n║   help shop         Shop, inventory, and equipment (9)                 ║\n║   help hack         Hacking and exploitation tools (13/23)             ║\n║   help file_access  Hidden file detection and encryption cracking (1/2 ║\n║   help alias        Identity alias management (1)                      ║\n║   help defense      Home server defenses (2/5)                         ║\n║   help help         Help and documentation (4)                         ║\n╚════════════════════════════════════════════════════════════════════════╝\n\n Type 'help <category>' to see commands.\n Raise skills to unlock hidden commands.",
+    "outputType": "string",
+    "success": true
+  },
+  "03:helpCommands:stats": {
+    "dataKeys": [
+      "commandsByCategory",
+      "mostUsedCommands",
+      "recentActivity",
+      "successRate",
+      "totalCommands"
+    ],
+    "output": "╔════════════════════════════════════════════════════╗\n║ COMMAND STATISTICS                                 ║\n╠════════════════════════════════════════════════════╣\n║   Total Commands:  4                               ║\n╠════════════════════════════════════════════════════╣\n║ Commands by Category                               ║\n╠════════════════════════════════════════════════════╣\n║   system       2 (50.<pct>)                           ║\n║   help         2 (50.<pct>)                           ║\n╠════════════════════════════════════════════════════╣\n║ Most Used Commands                                 ║\n╠════════════════════════════════════════════════════╣\n║   1. pwd          1 times                          ║\n║   2. ls           1 times                          ║\n║   3. help         1 times                          ║\n║   4. stats        1 times                          ║\n╠════════════════════════════════════════════════════╣\n║ Recent Activity                                    ║\n╠════════════════════════════════════════════════════╣\n║   2026-09-25  4 commands                           ║\n╚════════════════════════════════════════════════════╝",
+    "outputType": "string",
+    "success": true
+  },
+  "04:playerInfoCommands:status": {
+    "dataKeys": [
+      "progress",
+      "user"
+    ],
+    "output": "╔══════════════════════════════════════════════╗\n║ [◉_◉] PLAYER STATUS                          ║\n╠══════════════════════════════════════════════╣\n║   Username:           p54814957              ║\n║   Home IP:            <ip>           ║\n║   Level:              1                      ║\n║   Experience:         0                      ║\n║   Credits:            $1000                  ║\n║   Faction:            None                   ║\n╠══════════════════════════════════════════════╣\n║ FACTION STANDINGS                            ║\n╠══════════════════════════════════════════════╣\n║   The Garrison:       0                      ║\n║   CyberCorp:          0                      ║\n║   dotHackers:         0                      ║\n╠══════════════════════════════════════════════╣\n║ STORY PROGRESS                               ║\n╠══════════════════════════════════════════════╣\n║   Explore the network. The truth is out ther ║\n╚══════════════════════════════════════════════╝",
+    "outputType": "string",
+    "success": true
+  },
+  "05:playerInfoCommands:skills": {
+    "dataKeys": [
+      "skills"
+    ],
+    "output": "╔══════════════════════════════════════════════╗\n║ PLAYER SKILLS                                ║\n╠══════════════════════════════════════════════╣\n║   Hacking:            [█░░░░░░░░░] <pct>  10/1 ║\n║   Networking:         [█░░░░░░░░░] <pct>  10/1 ║\n║   Cryptography:       [█░░░░░░░░░] <pct>   5/10 ║\n║   Stealth:            [█░░░░░░░░░] <pct>  10/1 ║\n║   Social Eng:         [█░░░░░░░░░] <pct>   5/10 ║\n║   Forensics:          [█░░░░░░░░░] <pct>   5/10 ║\n╚══════════════════════════════════════════════╝",
+    "outputType": "string",
+    "success": true
+  },
+  "06:playerInfoCommands:leaderboard": {
+    "dataKeys": null,
+    "output": "<world-dependent>",
+    "outputType": "string",
+    "success": true
+  },
+  "07:processCommands:ps": {
+    "dataKeys": null,
+    "output": "╔════════════════════════════════════════════════════════════════╗\n║                           PROCESSES                            ║\n╠════════════════════════════════════════════════════════════════╣\n║  PASSIVE CONSUMERS                                             ║\n╠════════════════════════════════════════════════════════════════╣\n║  [connection] p54814957's Terminal     RAM 8MB  BW 15          ║\n╠════════════════════════════════════════════════════════════════╣\n║  [system] OS overhead                     CPU 10  RAM 24MB     ║\n╠════════════════════════════════════════════════════════════════╣\n║  Total: CPU 10/200  RAM 32/256MB  BW 15/100Mbps                ║\n╚════════════════════════════════════════════════════════════════╝",
+    "outputType": "string",
+    "success": true
+  },
+  "08:processCommands:specs": {
+    "dataKeys": [
+      "bwTotal",
+      "cpuTotal",
+      "installed",
+      "ramTotal"
+    ],
+    "output": "╔══════════════════════════════════════════════════╗\n║              SYSTEM SPECIFICATIONS               ║\n╠══════════════════════════════════════════════════╣\n║  CPU     10 / 200   units                        ║\n║  RAM     32 / 256   MB                           ║\n║  NET     15 / 100   Mbps                         ║\n╠══════════════════════════════════════════════════╣\n║  INSTALLED HARDWARE                              ║\n║   CPU   (none — stock)                           ║\n║   RAM   (none — stock)                           ║\n║   NET   (none — stock)                           ║\n╚══════════════════════════════════════════════════╝",
+    "outputType": "string",
+    "success": true
+  },
+  "09:networkCommands:servers": {
+    "dataKeys": null,
+    "output": "╔════════════════════════════════════════════════════════════╗\n║                       KNOWN SERVERS                        ║\n╠════════════════════════════════════════════════════════════╣\n║   HOME SERVER << CONNECTED                                 ║\n║     <ip>  p54814957's Terminal                     ║\n╠════════════════════════════════════════════════════════════╣\n║   'scan' to discover adjacent servers                      ║\n║   'connect <ip>' to traverse a link                        ║\n║   'netmap' to see network topology                         ║\n╚════════════════════════════════════════════════════════════╝",
+    "outputType": "string",
+    "success": true
+  },
+  "10:missionCommands:missions": {
+    "dataKeys": null,
+    "error": "Rate limit exceeded. Max 10 commands per second.",
+    "output": "Rate limit exceeded. Max 10 commands per second.",
+    "outputType": "string",
+    "success": false
+  },
+  "11:shopCommands:shop": {
+    "dataKeys": null,
+    "error": "Rate limit exceeded. Max 10 commands per second.",
+    "output": "Rate limit exceeded. Max 10 commands per second.",
+    "outputType": "string",
+    "success": false
+  },
+  "12:socialCommands:inbox": {
+    "dataKeys": null,
+    "error": "Rate limit exceeded. Max 10 commands per second.",
+    "output": "Rate limit exceeded. Max 10 commands per second.",
+    "outputType": "string",
+    "success": false
+  },
+  "13:factionCommands:faction list": {
+    "dataKeys": null,
+    "error": "Rate limit exceeded. Max 10 commands per second.",
+    "output": "Rate limit exceeded. Max 10 commands per second.",
+    "outputType": "string",
+    "success": false
+  },
+  "14:defenseCommands:defenses": {
+    "dataKeys": null,
+    "error": "Rate limit exceeded. Max 10 commands per second.",
+    "output": "Rate limit exceeded. Max 10 commands per second.",
+    "outputType": "string",
+    "success": false
+  },
+  "15:fragmentCommands:fragments": {
+    "dataKeys": null,
+    "error": "Rate limit exceeded. Max 10 commands per second.",
+    "output": "Rate limit exceeded. Max 10 commands per second.",
+    "outputType": "string",
+    "success": false
+  },
+  "16:aliasCommands:alias info": {
+    "dataKeys": null,
+    "error": "Rate limit exceeded. Max 10 commands per second.",
+    "output": "Rate limit exceeded. Max 10 commands per second.",
+    "outputType": "string",
+    "success": false
+  },
+  "17:mathCommands:calc 2+2": {
+    "dataKeys": null,
+    "error": "Rate limit exceeded. Max 10 commands per second.",
+    "output": "Rate limit exceeded. Max 10 commands per second.",
+    "outputType": "string",
+    "success": false
+  },
+  "18:hackCommands:hack": {
+    "dataKeys": null,
+    "error": "Rate limit exceeded. Max 10 commands per second.",
+    "output": "Rate limit exceeded. Max 10 commands per second.",
+    "outputType": "string",
+    "success": false
+  },
+  "19:fileCommands:download": {
+    "dataKeys": null,
+    "error": "Rate limit exceeded. Max 10 commands per second.",
+    "output": "Rate limit exceeded. Max 10 commands per second.",
+    "outputType": "string",
+    "success": false
+  },
+  "20:fileAccessCommands:sweep": {
+    "dataKeys": null,
+    "error": "Rate limit exceeded. Max 10 commands per second.",
+    "output": "Rate limit exceeded. Max 10 commands per second.",
+    "outputType": "string",
+    "success": false
+  },
+  "21:unknown:definitely_not_a_command": {
+    "dataKeys": null,
+    "error": "Rate limit exceeded. Max 10 commands per second.",
+    "output": "Rate limit exceeded. Max 10 commands per second.",
+    "outputType": "string",
+    "success": false
+  },
+  "22:systemCommands:cd /nonexistent-dir-xyz": {
+    "dataKeys": null,
+    "error": "Rate limit exceeded. Max 10 commands per second.",
+    "output": "Rate limit exceeded. Max 10 commands per second.",
+    "outputType": "string",
+    "success": false
+  }
+}
