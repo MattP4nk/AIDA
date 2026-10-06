@@ -48,6 +48,24 @@ import {
 const app = express();
 const server = createServer(app);
 
+/**
+ * Fire-and-forget async work without blocking the event emitter.
+ *
+ * Every cross-service reaction wired below goes through this. The EventEmitter
+ * returns immediately, so one slow handler — an AI call, a database write —
+ * cannot delay delivery to the other listeners on the same event, and one
+ * failing handler cannot reject into an emitter that has nowhere to put the
+ * error. The label is what turns that swallowed rejection into a log line.
+ *
+ * Module scope rather than a local, so the wiring phases can be lifted out of
+ * `initialize()` without each one redefining it.
+ */
+function defer(fn: () => Promise<unknown>, label: string): void {
+  queueMicrotask(() => {
+    fn().catch((err) => logger.error({ err }, label));
+  });
+}
+
 const io = new SocketIOServer(server, {
   cors: {
     origin: CORS_ORIGINS,
@@ -57,80 +75,92 @@ const io = new SocketIOServer(server, {
   transports: ["websocket", "polling"],
 });
 
-// ── Initialization ────────────────────────────────────────────────
-async function initialize(): Promise<void> {
-  // 1. Validate configuration
-  validateConfig();
-  logger.info("✅ Configuration validated");
+/**
+ * Long-running work owned by services: the two generation queues, the resource
+ * and warfare monitors, mission expiry, and the censorship ruleset.
+ *
+ * Split out of `initialize()`, which had grown to 519 lines. Services are
+ * re-resolved here rather than threaded in as parameters — every token is a
+ * tsyringe singleton, so resolution is a registry lookup and the alternative
+ * is a six-argument signature that has to change every time a phase gains a
+ * dependency.
+ *
+ * THE TWO QUEUES FAIL SOFT, the four monitors do not. That asymmetry is
+ * deliberate and predates this split: content generation and persona mail are
+ * enrichment, and a server that boots without them is degraded but playable,
+ * whereas a failure to start resource generation or load censorship rules is a
+ * broken world and should take the boot down.
+ */
+async function startQueuesAndMonitors(): Promise<void> {
+  // Content generation queue — reliable pipeline for server content
+  try {
+    const contentQueue = getService<import("./services/contentQueueService").ContentQueueService>(CONTENT_QUEUE_SERVICE);
+    const contentService = getService<import("./services/serverContentService").ServerContentService>(SERVER_CONTENT_SERVICE);
+    contentQueue.setServerContentService(contentService);
+    await contentQueue.start();
+    await contentQueue.enqueueAllUnpopulated();
+    logger.info("✅ Content generation queue started");
+  } catch (err) {
+    logger.warn({ err }, "Content queue initialization failed (non-critical)");
+  }
 
-  // 2. Connect to database
-  await db.connect();
-  logger.info("✅ Database connection established");
+  // Deferred persona mail — replies arrive after a human-plausible delay, and
+  // generation happens when an item comes due so bursts spread over time.
+  try {
+    const mailQueue =
+      getService<import("./services/personaMailQueueService").PersonaMailQueueService>(
+        PERSONA_MAIL_QUEUE_SERVICE,
+      );
+    mailQueue.start();
+    logger.info("✅ Persona mail queue started");
+  } catch (err) {
+    logger.warn({ err }, "Persona mail queue initialization failed (non-critical)");
+  }
 
-  // 3. Initialize DI Container (registers all services)
-  initializeContainer(io, db.client, logger);
-  logger.info("✅ DI Container initialized");
+  const resourceService =
+    getService<import("./services/resourceService").default>(RESOURCE_SERVICE);
+  resourceService.startResourceGeneration();
+  logger.info("✅ Resource generation started");
 
-  // 4. Eager-initialize services that need startup work
-  const ipService = getService<IPService>(IP_SERVICE);
-  await ipService.loadAllocatedIPs();
-  logger.info("✅ IP Service initialized");
+  // Start warfare monitor
+  const warfareService =
+    getService<import("./services/warfareService").default>(WARFARE_SERVICE);
+  warfareService.startWarMonitor();
+  logger.info("✅ Warfare monitor started");
 
-  const progressService = getService<ProgressService>(PROGRESS_SERVICE);
-  progressService.start();
-  logger.info("✅ Progress Service started");
+  // Start mission expiration checker (every 15 min)
+  const missionService = getService<MissionService>(MISSION_SERVICE);
+  missionService.startExpirationChecker();
+  logger.info("✅ Mission expiration checker started");
 
-  const eventService = getService<EventService>(EVENT_SERVICE);
-  await eventService.loadSubscriptionsFromDatabase();
-  logger.info("✅ Event subscriptions loaded");
+  // Load censorship rules (seed defaults if none exist)
+  const censorshipService =
+    getService<import("./services/censorshipService").default>(
+      CENSORSHIP_SERVICE,
+    );
+  await censorshipService.seedDefaultRules();
+  logger.info("✅ Censorship rules loaded");
+}
 
-  // Shop catalog must exist as ShopItem rows before any purchase — InventoryItem
-  // has a required FK to it. Idempotent upsert, so adding a catalog entry can
-  // never again produce an item that lists but cannot be bought.
-  const shopService = getService<ShopService>(SHOP_SERVICE);
-  await shopService.syncCatalogToDatabase();
-  logger.info("✅ Shop catalog synced");
-
-  // Retire the old `seed_*` item universe. This has to run at BOOT, not only in
-  // the seed: existing databases already hold those rows and will never be
-  // reseeded. Must follow the sync, which creates the catalog rows it repoints
-  // onto. Idempotent — a no-op once there is nothing left to move.
-  await reconcileShopItems(db.client);
-
-  // GameStateManager is resolved to trigger its constructor/cleanup timer
-  getService<GameStateManager>(GAME_STATE_MANAGER);
-  logger.info("✅ Game State Manager initialized");
-
-  // 5. Wire AI integration: connect persona event listeners and start scheduler
+/**
+ * Bridge in-process service events onto sockets and onto other services.
+ *
+ * This is the largest phase and the one most worth isolating: it is a flat
+ * list of `X.on("event", …)` registrations, and the failure mode when it lives
+ * inline is that a reader scanning `initialize()` for "what happens when a
+ * mission completes" finds one block and stops. Every body here is `defer`-ed.
+ *
+ * `storyProgression` is a parameter, not a re-resolution, because the caller
+ * has already awaited `initializeFirstEpoch()` on that instance — the ledger
+ * writes below depend on Epoch 0 existing, and a parameter makes that ordering
+ * visible rather than implicit.
+ */
+function wireServiceEvents(storyProgression: StoryProgressionService): void {
   const personaService = getService<PersonaService>(PERSONA_SERVICE);
   const hackService = getService<HackService>(HACK_SERVICE);
   const missionService = getService<MissionService>(MISSION_SERVICE);
   const factionService = getService<FactionService>(FACTION_SERVICE);
-  void getService<ForumService>(FORUM_SERVICE); // side-effect initialization
 
-  // 5b. Initialize Story Progression (The Architect's staging engine)
-  const storyProgression = getService<StoryProgressionService>(
-    STORY_PROGRESSION_SERVICE,
-  );
-  await storyProgression.initializeFirstEpoch();
-  logger.info("✅ Story Progression initialized (Epoch 0)");
-
-  // 5c. Initialize AI content review pipeline + epoch scheduler
-  const { ContentDraftService } = await import("./services/contentDraftService");
-  const { ReferenceValidationService } = await import("./services/referenceValidationService");
-  const { EpochSchedulerService } = await import("./services/epochSchedulerService");
-
-  const contentDraftService = getService<InstanceType<typeof ContentDraftService>>(CONTENT_DRAFT_SERVICE);
-  const refValidation = getService<InstanceType<typeof ReferenceValidationService>>(REFERENCE_VALIDATION_SERVICE);
-  const epochScheduler = getService<InstanceType<typeof EpochSchedulerService>>(EPOCH_SCHEDULER_SERVICE);
-
-  // Late-bind services to avoid circular DI
-  refValidation.setDraftService(contentDraftService);
-  epochScheduler.setDraftService(contentDraftService);
-  epochScheduler.start();
-  logger.info("✅ Content Draft + Reference Validation + Epoch Scheduler initialized");
-
-  // 6. Wire dynamic content hooks to game events
   //
   // All event side-effects are deferred via queueMicrotask so the EventEmitter
   // returns immediately. This prevents slow handlers (AI calls, DB writes)
@@ -139,12 +169,6 @@ async function initialize(): Promise<void> {
     DYNAMIC_CONTENT_SERVICE,
   );
 
-  /** Fire-and-forget async work without blocking the event emitter. */
-  const defer = (fn: () => Promise<unknown>, label: string) => {
-    queueMicrotask(() => {
-      fn().catch((err) => logger.error({ err }, label));
-    });
-  };
 
   // ── Reward notifications: bridge service events to the player's socket ──
   //
@@ -218,7 +242,19 @@ async function initialize(): Promise<void> {
   // Resolve services needed by event handlers below
   const storyMissionService = getService<StoryMissionService>(STORY_MISSION_SERVICE);
   const achievementService = getService<import("./services/achievementService").AchievementService>(ACHIEVEMENT_SERVICE);
+  const tutorialService = getService<TutorialService>(TUTORIAL_SERVICE);
 
+  // ONE registration for this event, not two.
+  //
+  // The tutorial advance used to live in its own `missionService.on(
+  // "mission:completed", …)` 190 lines further down, purely because that is
+  // where `tutorialService` happened to be resolved. Two registrations for one
+  // event is how two sets of consequences drift: a reader checking "what
+  // happens when a mission completes" finds the first block and stops, and
+  // nothing in the type system or the tests says there is a second.
+  //
+  // Every branch here is `defer`-ed — fire-and-forget microtasks, each with its
+  // own catch — so merging them changes no ordering that anything can observe.
   missionService.on("mission:completed", (data: any) => {
     defer(() => personaService.onMissionCompleted(data), "Persona error on mission:completed");
     defer(() => dynamicContent.processEvent("mission:completed", data), "Dynamic content error on mission:completed");
@@ -236,6 +272,8 @@ async function initialize(): Promise<void> {
       impact: data.factionId ? { factions: { [data.factionId]: 2 } } : {},
       weight: 4,
     }), "Story ledger error on mission:completed");
+    if (data.userId)
+      defer(() => tutorialService.advanceTutorial(data.userId, data.missionId), "Tutorial advance error on mission:completed");
   });
 
   missionService.on("mission:failed", (data: any) => {
@@ -405,14 +443,8 @@ async function initialize(): Promise<void> {
     defer(() => dynamicContent.processEvent("player:levelup", data), "Dynamic content error on player:levelup");
   });
 
-  // Tutorial system: advance tutorial when tutorial missions complete
-  const tutorialService = getService<TutorialService>(TUTORIAL_SERVICE);
-
-  missionService.on("mission:completed", (data: any) => {
-    if (data.userId) {
-      defer(() => tutorialService.advanceTutorial(data.userId, data.missionId), "Tutorial advance error on mission:completed");
-    }
-  });
+  // Tutorial mission completion is handled by the single `mission:completed`
+  // registration above; `tutorialService` is resolved there.
 
   // Wire message hook: intercept replies to The Architect for training hints
   const msgSvc = getService<MessageService>(MESSAGE_SERVICE);
@@ -421,6 +453,84 @@ async function initialize(): Promise<void> {
   });
 
   logger.info("✅ Tutorial service initialized");
+}
+
+// ── Initialization ────────────────────────────────────────────────
+async function initialize(): Promise<void> {
+  // 1. Validate configuration
+  validateConfig();
+  logger.info("✅ Configuration validated");
+
+  // 2. Connect to database
+  await db.connect();
+  logger.info("✅ Database connection established");
+
+  // 3. Initialize DI Container (registers all services)
+  initializeContainer(io, db.client, logger);
+  logger.info("✅ DI Container initialized");
+
+  // 4. Eager-initialize services that need startup work
+  const ipService = getService<IPService>(IP_SERVICE);
+  await ipService.loadAllocatedIPs();
+  logger.info("✅ IP Service initialized");
+
+  const progressService = getService<ProgressService>(PROGRESS_SERVICE);
+  progressService.start();
+  logger.info("✅ Progress Service started");
+
+  const eventService = getService<EventService>(EVENT_SERVICE);
+  await eventService.loadSubscriptionsFromDatabase();
+  logger.info("✅ Event subscriptions loaded");
+
+  // Shop catalog must exist as ShopItem rows before any purchase — InventoryItem
+  // has a required FK to it. Idempotent upsert, so adding a catalog entry can
+  // never again produce an item that lists but cannot be bought.
+  const shopService = getService<ShopService>(SHOP_SERVICE);
+  await shopService.syncCatalogToDatabase();
+  logger.info("✅ Shop catalog synced");
+
+  // Retire the old `seed_*` item universe. This has to run at BOOT, not only in
+  // the seed: existing databases already hold those rows and will never be
+  // reseeded. Must follow the sync, which creates the catalog rows it repoints
+  // onto. Idempotent — a no-op once there is nothing left to move.
+  await reconcileShopItems(db.client);
+
+  // GameStateManager is resolved to trigger its constructor/cleanup timer
+  getService<GameStateManager>(GAME_STATE_MANAGER);
+  logger.info("✅ Game State Manager initialized");
+
+  // 5. Wire AI integration: connect persona event listeners and start scheduler
+  //
+  // hackService / missionService / factionService used to be resolved here too
+  // and are now resolved inside `wireServiceEvents`, which is their only
+  // consumer. `personaService` stays because `setupEventListeners()` below
+  // needs it; forumService is resolved purely for its constructor side effect.
+  const personaService = getService<PersonaService>(PERSONA_SERVICE);
+  void getService<ForumService>(FORUM_SERVICE); // side-effect initialization
+
+  // 5b. Initialize Story Progression (The Architect's staging engine)
+  const storyProgression = getService<StoryProgressionService>(
+    STORY_PROGRESSION_SERVICE,
+  );
+  await storyProgression.initializeFirstEpoch();
+  logger.info("✅ Story Progression initialized (Epoch 0)");
+
+  // 5c. Initialize AI content review pipeline + epoch scheduler
+  const { ContentDraftService } = await import("./services/contentDraftService");
+  const { ReferenceValidationService } = await import("./services/referenceValidationService");
+  const { EpochSchedulerService } = await import("./services/epochSchedulerService");
+
+  const contentDraftService = getService<InstanceType<typeof ContentDraftService>>(CONTENT_DRAFT_SERVICE);
+  const refValidation = getService<InstanceType<typeof ReferenceValidationService>>(REFERENCE_VALIDATION_SERVICE);
+  const epochScheduler = getService<InstanceType<typeof EpochSchedulerService>>(EPOCH_SCHEDULER_SERVICE);
+
+  // Late-bind services to avoid circular DI
+  refValidation.setDraftService(contentDraftService);
+  epochScheduler.setDraftService(contentDraftService);
+  epochScheduler.start();
+  logger.info("✅ Content Draft + Reference Validation + Epoch Scheduler initialized");
+
+  wireServiceEvents(storyProgression);
 
   await personaService.setupEventListeners();
   logger.info("✅ Persona event listeners configured");
@@ -431,6 +541,46 @@ async function initialize(): Promise<void> {
   });
   logger.info("✅ AI Scheduler started");
 
+  scheduleBackgroundJobs(storyProgression);
+
+  await startQueuesAndMonitors();
+
+  // 6. Setup Express middleware & routes
+  setupMiddleware(app);
+  logger.info("✅ Middleware configured");
+
+  await setupRoutes(app);
+  logger.info("✅ Routes configured");
+
+  // 7. Setup Socket.IO handlers
+  setupSocketHandlers(io);
+  logger.info("✅ Socket.IO handlers configured");
+
+  // 8. Setup error handling & graceful shutdown
+  setupErrorHandling(app);
+  registerShutdownHandlers(server, io);
+  logger.info("✅ Error handling configured");
+
+  logger.info("AIDA Server initialized successfully");
+}
+
+/**
+ * The three periodic jobs owned by `index.ts` rather than by a service.
+ *
+ * ALL THREE ARE REGISTERED FOR SHUTDOWN (O9). Each callback touches the
+ * database, and `gracefulShutdown` disconnects Prisma near the end of its
+ * sequence — a timer still armed at that point throws from inside a callback
+ * where nothing is left to catch it. The one that is easy to get wrong is the
+ * Architect evaluation: it was the one that captured no handle at all.
+ *
+ * `storyProgression` is passed in rather than re-resolved because the caller
+ * has already awaited `initializeFirstEpoch()` on that exact instance, and
+ * taking it as a parameter makes that ordering dependency visible instead of
+ * leaving it to luck.
+ */
+function scheduleBackgroundJobs(
+  storyProgression: StoryProgressionService,
+): void {
   // Resolve the Architect Intervention Executor
   const interventionExecutor = getService<ArchitectInterventionExecutor>(
     ARCHITECT_INTERVENTION_EXECUTOR,
@@ -510,72 +660,6 @@ async function initialize(): Promise<void> {
     NOTIFICATION_PURGE_INTERVAL_MS,
   ));
   logger.info("✅ Notification retention sweep scheduled (every 6h)");
-
-  // Content generation queue — reliable pipeline for server content
-  try {
-    const contentQueue = getService<import("./services/contentQueueService").ContentQueueService>(CONTENT_QUEUE_SERVICE);
-    const contentService = getService<import("./services/serverContentService").ServerContentService>(SERVER_CONTENT_SERVICE);
-    contentQueue.setServerContentService(contentService);
-    await contentQueue.start();
-    await contentQueue.enqueueAllUnpopulated();
-    logger.info("✅ Content generation queue started");
-  } catch (err) {
-    logger.warn({ err }, "Content queue initialization failed (non-critical)");
-  }
-
-  // Deferred persona mail — replies arrive after a human-plausible delay, and
-  // generation happens when an item comes due so bursts spread over time.
-  try {
-    const mailQueue =
-      getService<import("./services/personaMailQueueService").PersonaMailQueueService>(
-        PERSONA_MAIL_QUEUE_SERVICE,
-      );
-    mailQueue.start();
-    logger.info("✅ Persona mail queue started");
-  } catch (err) {
-    logger.warn({ err }, "Persona mail queue initialization failed (non-critical)");
-  }
-
-  const resourceService =
-    getService<import("./services/resourceService").default>(RESOURCE_SERVICE);
-  resourceService.startResourceGeneration();
-  logger.info("✅ Resource generation started");
-
-  // Start warfare monitor
-  const warfareService =
-    getService<import("./services/warfareService").default>(WARFARE_SERVICE);
-  warfareService.startWarMonitor();
-  logger.info("✅ Warfare monitor started");
-
-  // Start mission expiration checker (every 15 min)
-  missionService.startExpirationChecker();
-  logger.info("✅ Mission expiration checker started");
-
-  // Load censorship rules (seed defaults if none exist)
-  const censorshipService =
-    getService<import("./services/censorshipService").default>(
-      CENSORSHIP_SERVICE,
-    );
-  await censorshipService.seedDefaultRules();
-  logger.info("✅ Censorship rules loaded");
-
-  // 6. Setup Express middleware & routes
-  setupMiddleware(app);
-  logger.info("✅ Middleware configured");
-
-  await setupRoutes(app);
-  logger.info("✅ Routes configured");
-
-  // 7. Setup Socket.IO handlers
-  setupSocketHandlers(io);
-  logger.info("✅ Socket.IO handlers configured");
-
-  // 8. Setup error handling & graceful shutdown
-  setupErrorHandling(app);
-  registerShutdownHandlers(server, io);
-  logger.info("✅ Error handling configured");
-
-  logger.info("AIDA Server initialized successfully");
 }
 
 // ── Start ─────────────────────────────────────────────────────────
