@@ -39,6 +39,15 @@ interface QueuedRequest {
   onSuccess: (response: string) => void | Promise<void>;
   attempts: number;
   createdAt: number;
+  /**
+   * Dropping this entry has a SAFETY consequence, not a cosmetic one.
+   *
+   * Only moderation re-checks set it. Every other queue user — NPC mail,
+   * ambient content, discovery text — loses flavour when evicted; a dropped
+   * moderation re-check leaves player content published and never reviewed,
+   * silently breaking the promise `moderationGate` makes when it fails open.
+   */
+  critical?: boolean;
 }
 
 /**
@@ -93,10 +102,42 @@ export class AIService {
     retrySuccesses: 0,
     /** R14c: how many times a caller had to serve static fallback content. */
     fallbacksServed: 0,
+    /**
+     * S7: queued moderation re-checks that were given up on.
+     *
+     * Each one is a piece of player content that was published without a
+     * verdict and will now never get one. A log line alone was not enough —
+     * the age purge below used to discard these with no counter and no
+     * message at all.
+     */
+    moderationRechecksAbandoned: 0,
   };
 
   /** R14c: when a fallback was last served, and for what. */
   private lastFallback: { at: string; context: string } | null = null;
+
+  /**
+   * S7: single place where a queued request is given up on.
+   *
+   * There are four ways out of this queue that are not success — overflow
+   * eviction, the age purge, max attempts, and max attempts after a throw —
+   * and a moderation re-check taking any of them means player content stays
+   * published and unreviewed forever. Routing them all through here is what
+   * makes that one fact countable instead of four separate log lines, one of
+   * which did not exist.
+   */
+  private abandon(req: QueuedRequest, reason: string): void {
+    this.metrics.retryQueueDropped++;
+    if (req.critical) {
+      this.metrics.moderationRechecksAbandoned++;
+      this.logger.error(
+        { id: req.id, attempts: req.attempts, reason },
+        "S7: moderation re-check abandoned — that content stays published unreviewed",
+      );
+    } else {
+      this.logger.warn({ id: req.id, attempts: req.attempts, reason }, "Retry queue: request dropped");
+    }
+  }
 
   /** Queue of failed requests to retry later. */
   private retryQueue: QueuedRequest[] = [];
@@ -458,6 +499,7 @@ export class AIService {
     systemPrompt: string | undefined,
     onSuccess: (response: string) => void | Promise<void>,
     expectedFormat?: string,
+    critical = false,
   ): void {
     // R14: dropping the oldest entry used to drop the IN-FLIGHT one.
     //
@@ -468,15 +510,23 @@ export class AIService {
     // untried request. Requests vanished without ever running.
     //
     // The in-flight request is now removed from the array while it runs (see
-    // processRetryQueue), so it cannot be the victim here and this shift()
-    // only ever drops a genuinely queued, untried entry.
+    // processRetryQueue), so it cannot be the victim here and the eviction
+    // below only ever drops a genuinely queued, untried entry.
     if (this.retryQueue.length >= this.RETRY_QUEUE_MAX) {
-      const dropped = this.retryQueue.shift();
-      this.metrics.retryQueueDropped++;
-      this.logger.warn(
-        { id: dropped?.id, max: this.RETRY_QUEUE_MAX },
-        "AI retry queue full — dropped the oldest queued request",
-      );
+      // EVICT A NON-CRITICAL ENTRY FIRST.
+      //
+      // This queue is shared by seven callers, and plain FIFO meant a burst of
+      // NPC mail or ambient content generation could evict a queued moderation
+      // re-check. The failure modes are CORRELATED, which is what makes it
+      // sharp: `unavailable` only happens during an AI outage, and an AI
+      // outage is exactly when the retry queue fills with everything else that
+      // just failed. So the one entry whose loss means unreviewed player
+      // content stays published forever is the one most likely to be evicted,
+      // precisely when it matters.
+      const victim = this.retryQueue.findIndex((r) => !r.critical);
+      const dropped =
+        victim >= 0 ? this.retryQueue.splice(victim, 1)[0] : this.retryQueue.shift();
+      if (dropped) this.abandon(dropped, "queue full");
     }
 
     const id = `retry_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -488,6 +538,7 @@ export class AIService {
       onSuccess,
       attempts: 0,
       createdAt: Date.now(),
+      ...(critical ? { critical: true } : {}),
     });
 
     this.metrics.retryQueueSize = this.retryQueue.length;
@@ -525,9 +576,12 @@ export class AIService {
 
     // Purge expired entries
     const now = Date.now();
-    this.retryQueue = this.retryQueue.filter(
-      (req) => now - req.createdAt < this.RETRY_MAX_AGE_MS,
-    );
+    const fresh: QueuedRequest[] = [];
+    for (const req of this.retryQueue) {
+      if (now - req.createdAt < this.RETRY_MAX_AGE_MS) fresh.push(req);
+      else this.abandon(req, "exceeded max age");
+    }
+    this.retryQueue = fresh;
 
     if (this.retryQueue.length === 0) return;
 
@@ -563,9 +617,8 @@ export class AIService {
         }
       } else if (req.attempts >= this.RETRY_MAX_ATTEMPTS) {
         // Max attempts reached — leave it removed.
-        this.metrics.retryQueueDropped++;
+        this.abandon(req, "max attempts");
         this.metrics.retryQueueSize = this.retryQueue.length;
-        this.logger.warn({ id: req.id, attempts: req.attempts }, "Retry queue: request dropped after max attempts");
       } else {
         // Not done — put it BACK at the front so it keeps its place in line.
         this.retryQueue.unshift(req);
@@ -573,7 +626,7 @@ export class AIService {
       }
     } catch (err) {
       if (req.attempts >= this.RETRY_MAX_ATTEMPTS) {
-        this.metrics.retryQueueDropped++;
+        this.abandon(req, "max attempts after error");
       } else {
         this.retryQueue.unshift(req);
       }
@@ -729,9 +782,20 @@ export class AIService {
             // queue by processRetryQueueOnce, so returning quietly means the
             // content stays published forever with no record that its
             // re-check gave up — a silent permanent fail-open.
+            this.metrics.moderationRechecksAbandoned++;
             this.logger.warn("S7: moderation re-check returned no JSON — content stays published unchecked");
             return;
           }
+          // PARSE AND ENFORCE ARE SEPARATE.
+          //
+          // `await onVerdict(...)` used to sit inside this try, under a bare
+          // `catch {}` whose comment read "the content simply stays visible".
+          // That is true for a parse failure and catastrophic for the other
+          // case it also caught: moderation correctly returning UNSAFE and the
+          // hide/notify action then throwing. The verdict was right, the
+          // enforcement was lost, and nothing was logged — CLAUDE.md bug shape
+          // #1, an enclosing catch hiding a failure the compiler could not see.
+          let verdict: ModerationResult;
           try {
             const parsed = JSON.parse(match[0]) as Record<string, unknown>;
             const safe = readModerationVerdict(parsed.safe);
@@ -742,18 +806,38 @@ export class AIService {
                 { raw: JSON.stringify(parsed.safe) },
                 "S7: moderation re-check verdict still illegible — content stays published unchecked",
               );
+              this.metrics.moderationRechecksAbandoned++;
               return;
             }
             const reason =
               typeof parsed.reason === "string" && parsed.reason.trim()
                 ? parsed.reason.trim().slice(0, 500)
                 : "Content policy violation";
-            await onVerdict(safe ? { verdict: "safe" } : { verdict: "unsafe", reason });
-          } catch {
-            /* unparseable on re-check — the content simply stays visible */
+            verdict = safe ? { verdict: "safe" } : { verdict: "unsafe", reason };
+          } catch (err) {
+            this.metrics.moderationRechecksAbandoned++;
+            this.logger.warn(
+              { err },
+              "S7: moderation re-check response unparseable — content stays published unchecked",
+            );
+            return;
+          }
+
+          try {
+            await onVerdict(verdict);
+          } catch (err) {
+            // Loud, and loudest when the verdict was `unsafe`: content the
+            // model positively identified as a violation is still visible.
+            this.logger.error(
+              { err, verdict: verdict.verdict },
+              verdict.verdict === "unsafe"
+                ? "S7: moderation found UNSAFE content but the hide/notify action FAILED — it is still published"
+                : "S7: moderation re-check verdict handler failed",
+            );
           }
         },
         '{ "safe": true|false, "reason": "string|null" }',
+        true, // critical: never evict this in favour of NPC mail or ambient prose
       );
     })();
   }

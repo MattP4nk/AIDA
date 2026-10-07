@@ -27,6 +27,22 @@
  * narrower than what it replaces: previously *every* outcome, including an
  * explicit "unsafe", could fail open through a truthy string or a swallowed
  * throw.
+ *
+ * HOW FAR THAT PROMISE ACTUALLY REACHES. "The re-check later runs" is a claim
+ * about a queue, and the queue can give up: it is shared with six other AI
+ * callers, holds 20 entries, and expires anything older than 10 minutes. Three
+ * of its four give-up paths used to be invisible — overflow evicted the oldest
+ * entry regardless of kind, and the age purge dropped entries with no counter
+ * and no log at all. So the honest statement of the policy is:
+ *
+ *   - a queued re-check is never evicted to make room for ordinary AI work
+ *     (NPC mail, ambient prose); those are dropped first;
+ *   - if one is abandoned anyway, it increments
+ *     `AIService` metric `moderationRechecksAbandoned` and logs at ERROR, so
+ *     it is countable on the admin health endpoint rather than merely lost.
+ *
+ * Content can still end up published and never reviewed. What changed is that
+ * it can no longer happen *silently*.
  */
 import type { Logger } from "pino";
 import type { AIService } from "../services/aiService";
