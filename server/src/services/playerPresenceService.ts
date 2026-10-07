@@ -1,9 +1,8 @@
 import { EventEmitter } from "events";
 import { Logger } from "pino";
-import { Server as SocketIOServer } from "socket.io";
 import { prisma } from "../database/client";
 import { injectable, inject } from "tsyringe";
-import { LOGGER, SOCKET_IO } from "../di/tokens";
+import { LOGGER } from "../di/tokens";
 import { safeExecute } from "../utils/safeExecute";
 
 /**
@@ -84,10 +83,14 @@ export class PlayerPresenceService extends EventEmitter {
   private activityTimeouts: Map<string, NodeJS.Timeout>;
   private readonly ACTIVITY_TIMEOUT = 5 * 60 * 1000; // 5 minutes
 
-  constructor(
-    @inject(LOGGER) private logger: Logger,
-    @inject(SOCKET_IO) private io: SocketIOServer,
-  ) {
+  /**
+   * No `io`. This service no longer emits anything: its two global broadcasts
+   * duplicated `user:status_change` and its two per-server ones duplicated the
+   * room emit in gameStateManager. What it does is TRACK — `playersByServer`
+   * is what `who` reads — and that tracking is now actually reached from the
+   * live connect path.
+   */
+  constructor(@inject(LOGGER) private logger: Logger) {
     super();
     this.onlinePlayers = new Map();
     this.playersByServer = new Map();
@@ -143,13 +146,11 @@ export class PlayerPresenceService extends EventEmitter {
         data: { isOnline: true, lastLogin: new Date() },
       });
 
-      // Broadcast to all other players
-      this.io.emit("presence:player_online", {
-        userId: user.id,
-        username: user.username,
-        level: user.progress?.level || 1,
-        timestamp: new Date(),
-      });
+      // GLOBAL BROADCAST REMOVED 2026-10-07. `presence:player_online` was a
+      // duplicate of `user:status_change`, which `handlers.ts` emits on this
+      // same authenticate path and the client HAS always handled — it feeds
+      // the online list in ChatDialog. Two global broadcasts for one fact,
+      // only one of which anything listened to.
 
       this.emit("player_online", onlinePlayer);
       this.logger.info({ username: user.username }, "Player is now online");
@@ -189,11 +190,9 @@ export class PlayerPresenceService extends EventEmitter {
       });
 
       // Broadcast to all players
-      this.io.emit("presence:player_offline", {
-        userId,
-        username: player.username,
-        timestamp: new Date(),
-      });
+      // Removed with its twin above, for the same reason: `user:status_change`
+      // is emitted on the disconnect path in `handlers.ts` and is the one the
+      // client consumes.
 
       this.emit("player_offline", { userId, username: player.username });
       this.logger.info({ username: player.username }, "Player is now offline");
@@ -285,19 +284,18 @@ export class PlayerPresenceService extends EventEmitter {
       this.playersByServer.get(serverId)!.add(userId);
 
       // Broadcast to players on that server
-      const playersOnServer = this.getPlayersOnServer(serverId);
-      playersOnServer.forEach((p) => {
-        if (p.userId !== userId) {
-          this.io.to(p.socketId).emit("presence:player_joined_server", {
-            userId: player.userId,
-            username: player.username,
-            level: player.level,
-            serverId,
-            serverName: player.currentServerName,
-            timestamp: new Date(),
-          });
-        }
-      });
+      // PER-SOCKET BROADCAST REMOVED 2026-10-07.
+      //
+      // It looped occupants and emitted to `p.socketId`, so a player with two
+      // tabs was told on one of them. `gameStateManager` emits the same fact to
+      // the `server:<id>` ROOM, which covers every tab, and now carries the
+      // username this payload was richer for. Two events for one fact, with the
+      // worse delivery kept only because it had the better payload.
+      //
+      // The tracking above is what matters here and is now actually reached:
+      // `playerJoinedServer` was called ONLY from the dead `server:connect`
+      // socket handler, so `playersByServer` was never populated for a real
+      // connection and `who` always answered "No other players on this server."
 
       this.emit("player_joined_server", { userId, serverId });
       this.logger.info({ username: player.username, serverName: server?.name || serverId }, "Player joined server");
@@ -319,17 +317,18 @@ export class PlayerPresenceService extends EventEmitter {
       if (!player) return;
 
       // Broadcast to players on that server
-      const playersOnServer = this.getPlayersOnServer(serverId);
-      playersOnServer.forEach((p) => {
-        if (p.userId !== userId) {
-          this.io.to(p.socketId).emit("presence:player_left_server", {
-            userId: player.userId,
-            username: player.username,
-            serverId,
-            timestamp: new Date(),
-          });
-        }
-      });
+      // PER-SOCKET BROADCAST REMOVED 2026-10-07.
+      //
+      // It looped occupants and emitted to `p.socketId`, so a player with two
+      // tabs was told on one of them. `gameStateManager` emits the same fact to
+      // the `server:<id>` ROOM, which covers every tab, and now carries the
+      // username this payload was richer for. Two events for one fact, with the
+      // worse delivery kept only because it had the better payload.
+      //
+      // The tracking above is what matters here and is now actually reached:
+      // `playerJoinedServer` was called ONLY from the dead `server:connect`
+      // socket handler, so `playersByServer` was never populated for a real
+      // connection and `who` always answered "No other players on this server."
 
       // Remove from server player list
       const serverPlayers = this.playersByServer.get(serverId);

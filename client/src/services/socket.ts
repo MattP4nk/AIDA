@@ -16,9 +16,7 @@ export const socketError = writable<string | null>(null);
 
 // Real-time data stores
 export const onlineUsers = writable<string[]>([]);
-export const serverActivity = writable<any[]>([]);
 export const liveMessages = writable<any[]>([]);
-export const hackAttempts = writable<any[]>([]);
 const gameEvents = writable<any[]>([]);
 export const typingUsers = writable<Map<string, string>>(new Map());
 export const newMailNotifications: Writable<any[]> = writable([]);
@@ -394,18 +392,32 @@ class SocketService {
 
     // ==================== SERVER ACTIVITY EVENTS ====================
 
+    // Someone else joined or left the server you are on.
+    //
+    // These wrote a `serverActivity` store that NO COMPONENT READ, so the
+    // information arrived and stopped there — the player could only find out
+    // by typing `who`. (And `who` was itself broken: the occupancy map it
+    // reads was only ever populated by a socket handler no client calls, so it
+    // always answered "No other players on this server." Fixed server-side.)
+    //
+    // Rendered into the terminal rather than a notification: it is ambient
+    // colour, not something that needs acknowledging, and the terminal is
+    // where this game says everything else. `addOutputLine` is the same
+    // mechanism server-pushed `command:result` text already uses.
+    const serverPresenceLine = (text: string) => {
+      const tab = terminalTabsStore.getActiveTerminal();
+      if (tab) terminalTabsStore.addOutputLine(tab.id, text, "output");
+    };
+
     this.on("server:user_connected", (data: any) => {
-      serverActivity.update((activities) => [
-        { type: "user_connected", data, timestamp: new Date() },
-        ...activities.slice(0, 49), // Keep last 50 activities
-      ]);
+      // The room includes the joiner, so skip your own arrival.
+      if (data.userId === this.getCurrentUserId()) return;
+      serverPresenceLine(`[+] ${data.username ?? "A user"} connected to this server.`);
     });
 
     this.on("server:user_disconnected", (data: any) => {
-      serverActivity.update((activities) => [
-        { type: "user_disconnected", data, timestamp: new Date() },
-        ...activities.slice(0, 49),
-      ]);
+      if (data.userId === this.getCurrentUserId()) return;
+      serverPresenceLine(`[-] ${data.username ?? "A user"} disconnected from this server.`);
     });
 
 
@@ -459,10 +471,6 @@ class SocketService {
     // ==================== HACKING EVENTS ====================
 
     this.on("hack:attempted", (data: any) => {
-      hackAttempts.update((attempts) => [
-        { type: "attempted", data, timestamp: new Date() },
-        ...attempts.slice(0, 19), // Keep last 20 attempts
-      ]);
 
       if (data.targetUserId === this.getCurrentUserId()) {
         this.showNotification(
@@ -474,10 +482,6 @@ class SocketService {
 
     this.on("hack:successful", (data: any) => {
       sound.hackSuccess();
-      hackAttempts.update((attempts) => [
-        { type: "successful", data, timestamp: new Date() },
-        ...attempts.slice(0, 19),
-      ]);
 
       if (data.targetUserId === this.getCurrentUserId()) {
         this.showNotification(
@@ -489,10 +493,6 @@ class SocketService {
 
     this.on("hack:blocked", (data: any) => {
       console.log("🛡️ Hack blocked:", data);
-      hackAttempts.update((attempts) => [
-        { type: "blocked", data, timestamp: new Date() },
-        ...attempts.slice(0, 19),
-      ]);
     });
 
     this.on("hack:result", (data: any) => {

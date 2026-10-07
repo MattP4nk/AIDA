@@ -24,7 +24,7 @@ import {
 import { injectable, inject } from "tsyringe";
 import { safeExecute } from "../utils/safeExecute";
 import { Logger } from "pino";
-import { COMMAND_PROCESSOR, EVENT_SERVICE, FACTION_SERVICE, FILE_SERVICE, LOGGER, MEMORY_SERVICE, MISSION_SERVICE, NETWORK_TOPOLOGY_SERVICE, PLAYER_MISSION_REPOSITORY, PLAYER_PROGRESS_REPOSITORY, SERVER_SERVICE, SHOP_SERVICE, SOCKET_IO } from "../di/tokens";
+import { COMMAND_PROCESSOR, EVENT_SERVICE, FACTION_SERVICE, FILE_SERVICE, LOGGER, MEMORY_SERVICE, MISSION_SERVICE, NETWORK_TOPOLOGY_SERVICE, PLAYER_MISSION_REPOSITORY, PLAYER_PRESENCE_SERVICE, PLAYER_PROGRESS_REPOSITORY, SERVER_SERVICE, SHOP_SERVICE, SOCKET_IO } from "../di/tokens";
 import type PlayerProgressRepository from "../repositories/playerProgressRepository";
 import type { PlayerMissionRepository } from "../repositories/playerMissionRepository";
 import { getService } from "../di/container";
@@ -1038,9 +1038,41 @@ class GameStateManager extends EventEmitter {
       // MAX_SOCKETS_PER_USER permits four.
       await this.io.in(`user:${userId}`).socketsJoin(`server:${serverId}`);
 
-      // Broadcast to others on server
+      // PRESENCE TRACKING RUNS HERE, on the live path.
+      //
+      // `playerPresenceService.playerJoinedServer` was called from exactly one
+      // place — the `server:connect` SOCKET handler — and no client has ever
+      // emitted `server:connect`: `emitServerConnect` had zero callers and
+      // connecting is `connect <ip>` through the command path, which lands
+      // here. So `playersByServer` was never populated for a real connection,
+      // and `who` has always answered "No other players on this server."
+      //
+      // That is also why the four `presence:*` events looked orphaned in the
+      // socket-contract audit: they could not fire, because the map they
+      // iterate was always empty. Fixing the tracking is what makes them real.
+      try {
+        const { getService } = await import("../di/container");
+        const presence =
+          getService<import("./playerPresenceService").default>(PLAYER_PRESENCE_SERVICE);
+        await presence.playerJoinedServer(userId, serverId);
+      } catch (err) {
+        this.logger.warn({ err, userId, serverId }, "Could not record server presence");
+      }
+
+      // Broadcast to others on server. ENRICHED with the username because the
+      // bare `{userId, serverId}` payload is unusable for display — the client
+      // listener wrote it to a store no component read, which is how it stayed
+      // bare. `playerPresenceService` emitted a rich twin
+      // (`presence:player_joined_server`) in a per-socket loop; that is deleted
+      // in favour of this one, because a room emit reaches ALL of a player's
+      // tabs and the loop only reached `p.socketId`.
+      const joiner = await db.client.user.findUnique({
+        where: { id: userId },
+        select: { username: true },
+      });
       this.io.to(`server:${serverId}`).emit("server:user_connected", {
         userId,
+        username: joiner?.username ?? "unknown",
         serverId,
         timestamp: new Date(),
       });
@@ -1131,9 +1163,25 @@ class GameStateManager extends EventEmitter {
         // longer on.
         await this.io.in(`user:${userId}`).socketsLeave(`server:${serverId}`);
 
+        // Symmetric with the join above — without this the occupancy map
+        // would only ever grow, and `who` would list players who had left.
+        try {
+          const { getService } = await import("../di/container");
+          const presence =
+            getService<import("./playerPresenceService").default>(PLAYER_PRESENCE_SERVICE);
+          await presence.playerLeftServer(userId, serverId);
+        } catch (err) {
+          this.logger.warn({ err, userId, serverId }, "Could not clear server presence");
+        }
+
         // Broadcast to others on server
+        const leaver = await db.client.user.findUnique({
+          where: { id: userId },
+          select: { username: true },
+        });
         this.io.to(`server:${serverId}`).emit("server:user_disconnected", {
           userId,
+          username: leaver?.username ?? "unknown",
           serverId,
           timestamp: new Date(),
         });
