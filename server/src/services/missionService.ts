@@ -1856,7 +1856,7 @@ class MissionService extends EventEmitter {
 export default MissionService;
 
 // Backward compatibility
-import { container } from "../di/container";
+import { container } from "tsyringe";
 import { MISSION_SERVICE } from "../di/tokens";
 import { missionExpiresAt, missionTimeLimitMs } from "../utils/missionTime";
 import { requiredObjectivesComplete } from "../utils/missionCompletion";

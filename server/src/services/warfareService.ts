@@ -2,7 +2,7 @@ import { injectable, inject } from "tsyringe";
 import { PrismaClient, FactionWar } from "@prisma/client";
 import { Logger } from "pino";
 import { FactionWarInfo, WarStatus } from "../../../shared/types";
-import { getService } from "../di/container";
+import { getService } from "../di/resolve";
 import {
   WAR_POINTS_PER_HACK,
   WAR_SCORE_COOLDOWN_MS,

@@ -131,10 +131,12 @@ async function main() {
     }
   }
 
-  // A BUDGET, not a target of zero. Cycles here are structural and Phase 7
-  // reduces them over several items; the point is that the number cannot grow
-  // unnoticed, and that it is now a real measurement rather than folklore.
-  const BUDGET = 40;
+  // ZERO, and held there. This was a budget of 40 while Phase 7 reduced a
+  // 14-module cycle through the DI hub; A4 removed it (2026-10-07) by moving
+  // getService into the leaf module di/resolve.ts, so services no longer
+  // import di/container. A budget above the real count lets a new cycle in
+  // silently — the ratchet is the point.
+  const BUDGET = 0;
   console.log("");
   check(
     `modules in a cycle are within budget (${BUDGET})`,

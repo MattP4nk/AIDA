@@ -3,7 +3,7 @@ import { PrismaClient } from "@prisma/client";
 import { Logger } from "pino";
 import { Server as SocketIOServer } from "socket.io";
 import { ServerContestInfo, FactionResources } from "../../../shared/types";
-import { getService } from "../di/container";
+import { getService } from "../di/resolve";
 import { LOGGER, PERSONA_SERVICE, DYNAMIC_CONTENT_SERVICE } from "../di/tokens";
 import { safeExecute } from "../utils/safeExecute";
 import * as TOKENS from "../di/tokens";

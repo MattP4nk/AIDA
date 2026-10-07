@@ -3,7 +3,7 @@ import { PrismaClient } from "@prisma/client";
 import { Logger } from "pino";
 import { PersonaService } from "./personaService";
 import { CronJob } from "cron";
-import { getService } from "../di/container";
+import { getService } from "../di/resolve";
 import { LOGGER, RESOURCE_SERVICE, FACTION_KNOWLEDGE_SERVICE } from "../di/tokens";
 import ResourceService from "./resourceService";
 import type { FactionKnowledgeService } from "./factionKnowledgeService";

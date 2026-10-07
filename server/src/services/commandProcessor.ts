@@ -46,7 +46,7 @@ import {
   GAME_STATE_MANAGER,
 } from "../di/tokens";
 import { safeExecute } from "../utils/safeExecute";
-import { getService } from "../di/container";
+import { getService } from "../di/resolve";
 import * as TOKENS from "../di/tokens";
 import {
   validateCommand,

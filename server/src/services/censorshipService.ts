@@ -2,7 +2,7 @@ import { injectable, inject } from "tsyringe";
 import { PrismaClient, CensorshipRule } from "@prisma/client";
 import { Logger } from "pino";
 import { CensorshipAlert } from "../../../shared/types";
-import { getService } from "../di/container";
+import { getService } from "../di/resolve";
 import {
   CENSORSHIP_SERVICE,
   DARKNET_DISCOVERY_SERVICE,

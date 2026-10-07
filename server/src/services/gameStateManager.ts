@@ -26,7 +26,7 @@ import { Logger } from "pino";
 import { COMMAND_PROCESSOR, EVENT_SERVICE, FACTION_SERVICE, FILE_SERVICE, LOGGER, MEMORY_SERVICE, MISSION_SERVICE, NETWORK_TOPOLOGY_SERVICE, PLAYER_MISSION_REPOSITORY, PLAYER_PRESENCE_SERVICE, PLAYER_PROGRESS_REPOSITORY, SERVER_SERVICE, SHOP_SERVICE, SOCKET_IO } from "../di/tokens";
 import type PlayerProgressRepository from "../repositories/playerProgressRepository";
 import type { PlayerMissionRepository } from "../repositories/playerMissionRepository";
-import { getService } from "../di/container";
+import { getService } from "../di/resolve";
 import type EventService from "./eventService";
 import type CommandProcessor from "./commandProcessor";
 import type ShopService from "./shopService";

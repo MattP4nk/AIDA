@@ -240,12 +240,8 @@ export function setupContainer(
 // Alias for backward compatibility
 export const initializeContainer = setupContainer;
 
-/**
- * Get a service from the container
- */
-export function getService<T>(token: string | symbol): T {
-  return container.resolve<T>(token as any);
-}
+/** Get a service from the container. Lives in the leaf module ./resolve — see there. */
+export { getService } from "./resolve";
 
 /**
  * Clear all registrations (useful for testing)

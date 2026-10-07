@@ -3896,7 +3896,7 @@ Write them per-refactor, immediately before touching the code:
       - [x] **All raw-string `getService` calls → `TOKENS`.** The count was 13, not 11 — and two of
         them were **multi-line**, which every single-line grep in this project had missed. The
         harness caught them by reading whole files; my own grep did not.
-      - [ ] **Deferred to A4, deliberately:** the 7 services that statically import `di/container`
+      - [x] **DONE 2026-10-07 (A4) — 14 -> 0 modules in cycles.** Was deferred: the 7 services that statically import `di/container`
         are what actually close the cycle. Their `getService` calls are real and synchronous, so
         converting them means making those call sites async — that is the DI refactor A4 owns, not a
         mechanical sweep. The budget in the harness (40) holds the line meanwhile.
