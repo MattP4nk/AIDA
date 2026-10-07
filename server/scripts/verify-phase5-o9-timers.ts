@@ -41,13 +41,22 @@ function walk(dir: string, out: string[] = []): string[] {
   return out;
 }
 
+/**
+ * Strip comments before matching. Without this, prose that QUOTES a timer —
+ * "setInterval(fn, NaN) fires about every millisecond", explaining why an env
+ * var is validated — registered its file as a timer owner, and the audit
+ * demanded a shutdown hook for a module that has no timer at all. CLAUDE.md §2.
+ */
+const code = (f: string) =>
+  readFileSync(f, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+
 async function main() {
   console.log("\n=== Phase 5 O9 — timer shutdown ===\n");
 
   const files = walk(SRC);
 
   // ── Inventory every recurring timer ───────────────────────────────────
-  const owners = files.filter((f) => /setInterval\(/.test(readFileSync(f, "utf8")));
+  const owners = files.filter((f) => /setInterval\(/.test(code(f)));
   check(
     "PRECONDITION: recurring timers were found to audit",
     owners.length > 0,
@@ -144,7 +153,7 @@ async function main() {
     // services their names suggest — both are inline `setInterval`s in
     // index.ts that captured no handle, so they could not be stopped even in
     // principle. That is why the shutdown-timer registry exists.
-    const index = readFileSync(join(SRC, "index.ts"), "utf8");
+    const index = code(join(SRC, "index.ts"));
     const wrapped = [...index.matchAll(/registerShutdownTimer\(setInterval\(/g)].length;
     const total = [...index.matchAll(/setInterval\(/g)].length;
     // ASSERT THE INVARIANT, NOT A COUNT. This used to require exactly 2 and

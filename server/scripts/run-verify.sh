@@ -47,8 +47,16 @@ done
 # Aggregate the per-check totals, not just the per-harness ones. A harness can
 # exit 0 having run far fewer checks than it used to — a drop in this number is
 # the signal that something stopped being exercised.
+#
+# The numbers are EXTRACTED, not counted by field position. This used to be
+# `awk -F'[ /]' '{p+=$2; f+=$5}'`, and with a one-character separator the
+# " / " in "=== 8 PASS / 1 FAIL ===" yields two EMPTY fields — so $5 was always
+# the blank between "/" and the space, and the fail total was hard-wired to 0
+# for as long as this script existed. The suite's exit code stayed honest
+# (it comes from each harness's exit status); this line never could.
 checks=$(grep -h -oE '=== [0-9]+ PASS / [0-9]+ FAIL ===' "$OUT"/*.log 2>/dev/null |
-  awk -F'[ /]' '{p+=$2; f+=$5} END{printf "%d pass, %d fail", p, f}')
+  sed -E 's#^=== ([0-9]+) PASS / ([0-9]+) FAIL ===$#\1 \2#' |
+  awk '{p+=$1; f+=$2} END{printf "%d pass, %d fail", p, f}')
 
 echo
 echo "=== SUITE: $ok ok / $fail fail ==="
