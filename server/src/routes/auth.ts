@@ -1,6 +1,7 @@
 import { Router } from "express";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+import { randomUUID } from "node:crypto";
 
 import logger from "../logger";
 import { prisma } from "../database/client";
@@ -22,9 +23,19 @@ import {
 const router = Router();
 
 // Helper function to generate JWT token
+//
+// `jwtid` makes every token unique. Without it the payload was only
+// { userId, iat, exp }, and `iat` has ONE-SECOND resolution while HMAC is
+// deterministic — so two tokens issued to one user in the same second were
+// byte-identical, and `userSession.token` is @unique. Logging in during the
+// second you registered answered 409 "A record with this session token
+// already exists"; two tabs logging in together failed the same way; and a
+// refresh in the same second as its login deactivated the old session, then
+// failed to create the "new" one with the same token — signing the user out.
 function generateToken(userId: string): string {
   return jwt.sign({ userId }, config.JWT_SECRET, {
     expiresIn: config.JWT_EXPIRES_IN,
+    jwtid: randomUUID(),
   } as jwt.SignOptions);
 }
 

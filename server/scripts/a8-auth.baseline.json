@@ -1,0 +1,425 @@
+{
+ "register": {
+  "status": 201,
+  "body": {
+   "message": "Account created successfully",
+   "success": true,
+   "token": "<string>",
+   "user": {
+    "createdAt": "<string>",
+    "email": "<tag>_1@fixture.invalid",
+    "homeIp": "<string>",
+    "id": "<string>",
+    "isActive": true,
+    "isOnline": true,
+    "lastLogin": "<string>",
+    "role": "player",
+    "username": "<tag>_1"
+   }
+  },
+  "cookies": [
+   "HttpOnly; Max-Age=86400; Path=/; SameSite=None; Secure; aida_token=<v>"
+  ]
+ },
+ "register-duplicate": {
+  "status": 409,
+  "body": {
+   "code": "CONFLICT",
+   "error": "Username or email already in use",
+   "success": false,
+   "timestamp": "<string>"
+  },
+  "cookies": []
+ },
+ "register-invalid": {
+  "status": 400,
+  "body": {
+   "details": [
+    {
+     "field": "username",
+     "message": "Username must be 3-20 characters"
+    },
+    {
+     "field": "email",
+     "message": "Invalid email address"
+    },
+    {
+     "field": "password",
+     "message": "Password must be 8-128 characters"
+    },
+    {
+     "field": "password",
+     "message": "Password must contain uppercase, lowercase, and number"
+    }
+   ],
+   "error": "Validation failed",
+   "success": false,
+   "timestamp": "<string>"
+  },
+  "cookies": []
+ },
+ "wrong-password-x10": [
+  401,
+  401,
+  401,
+  401,
+  401,
+  401,
+  401,
+  401,
+  401,
+  401
+ ],
+ "login-after-lockout": {
+  "status": 429,
+  "body": {
+   "code": "ACCOUNT_LOCKED",
+   "error": "Too many failed attempts. Try again in 15 minutes.",
+   "success": false,
+   "timestamp": "<string>"
+  },
+  "cookies": []
+ },
+ "login-unknown-user": {
+  "status": 401,
+  "body": {
+   "code": "AUTH_FAILED",
+   "error": "Invalid username or password",
+   "success": false,
+   "timestamp": "<string>"
+  },
+  "cookies": []
+ },
+ "register-2": {
+  "status": 201,
+  "body": {
+   "message": "Account created successfully",
+   "success": true,
+   "token": "<string>",
+   "user": {
+    "createdAt": "<string>",
+    "email": "<tag>_2@fixture.invalid",
+    "homeIp": "<string>",
+    "id": "<string>",
+    "isActive": true,
+    "isOnline": true,
+    "lastLogin": "<string>",
+    "role": "player",
+    "username": "<tag>_2"
+   }
+  },
+  "cookies": [
+   "HttpOnly; Max-Age=86400; Path=/; SameSite=None; Secure; aida_token=<v>"
+  ]
+ },
+ "login": {
+  "status": 200,
+  "body": {
+   "message": "Login successful",
+   "success": true,
+   "token": "<string>",
+   "user": {
+    "createdAt": "<string>",
+    "email": "<tag>_2@fixture.invalid",
+    "homeIp": "<string>",
+    "id": "<string>",
+    "isActive": true,
+    "isOnline": true,
+    "lastLogin": "<string>",
+    "role": "player",
+    "username": "<tag>_2"
+   }
+  },
+  "cookies": [
+   "HttpOnly; Max-Age=86400; Path=/; SameSite=None; Secure; aida_token=<v>"
+  ]
+ },
+ "login-by-email": {
+  "status": 200,
+  "body": {
+   "message": "Login successful",
+   "success": true,
+   "token": "<string>",
+   "user": {
+    "createdAt": "<string>",
+    "email": "<tag>_2@fixture.invalid",
+    "homeIp": "<string>",
+    "id": "<string>",
+    "isActive": true,
+    "isOnline": true,
+    "lastLogin": "<string>",
+    "role": "player",
+    "username": "<tag>_2"
+   }
+  },
+  "cookies": [
+   "HttpOnly; Max-Age=86400; Path=/; SameSite=None; Secure; aida_token=<v>"
+  ]
+ },
+ "verify": {
+  "status": 200,
+  "body": {
+   "success": true,
+   "timestamp": "<string>",
+   "token": "<string>",
+   "user": {
+    "createdAt": "<string>",
+    "email": "<tag>_2@fixture.invalid",
+    "homeIp": "<string>",
+    "id": "<string>",
+    "isActive": true,
+    "isOnline": true,
+    "lastLogin": "<string>",
+    "role": "player",
+    "username": "<tag>_2"
+   }
+  },
+  "cookies": []
+ },
+ "refresh": {
+  "status": 403,
+  "body": {
+   "error": "CSRF token required",
+   "success": false,
+   "timestamp": "<string>"
+  },
+  "cookies": []
+ },
+ "verify-stale-after-refresh": {
+  "status": 200,
+  "body": {
+   "success": true,
+   "timestamp": "<string>",
+   "token": "<string>",
+   "user": {
+    "createdAt": "<string>",
+    "email": "<tag>_2@fixture.invalid",
+    "homeIp": "<string>",
+    "id": "<string>",
+    "isActive": true,
+    "isOnline": true,
+    "lastLogin": "<string>",
+    "role": "player",
+    "username": "<tag>_2"
+   }
+  },
+  "cookies": []
+ },
+ "verify-refreshed": {
+  "status": 401,
+  "body": {
+   "code": "AUTH_REQUIRED",
+   "error": "No token provided",
+   "success": false,
+   "timestamp": "<string>"
+  },
+  "cookies": []
+ },
+ "logout": {
+  "status": 403,
+  "body": {
+   "error": "CSRF token required",
+   "success": false,
+   "timestamp": "<string>"
+  },
+  "cookies": []
+ },
+ "verify-after-logout": {
+  "status": 401,
+  "body": {
+   "code": "AUTH_REQUIRED",
+   "error": "No token provided",
+   "success": false,
+   "timestamp": "<string>"
+  },
+  "cookies": []
+ },
+ "verify-no-token": {
+  "status": 401,
+  "body": {
+   "code": "AUTH_REQUIRED",
+   "error": "No token provided",
+   "success": false,
+   "timestamp": "<string>"
+  },
+  "cookies": []
+ },
+ "verify-garbage": {
+  "status": 500,
+  "body": {
+   "code": "INTERNAL_ERROR",
+   "error": "An unexpected error occurred",
+   "success": false,
+   "timestamp": "<string>"
+  },
+  "cookies": []
+ },
+ "db": {
+  "user": {
+   "isActive": true,
+   "isOnline": true,
+   "role": "player",
+   "hasHomeServer": true
+  },
+  "progress": {
+   "discoveryLevel": 0,
+   "credits": 1000,
+   "level": 1,
+   "experience": 0,
+   "hacking": 10,
+   "networking": 10,
+   "cryptography": 5,
+   "stealth": 10,
+   "socialEng": 5,
+   "forensics": 5,
+   "missionProgress": {},
+   "achievements": []
+  },
+  "server": {
+   "name": "<tag>_2's Terminal",
+   "type": "player_home",
+   "isPlayerHome": true,
+   "ownerIsUser": true,
+   "encryptionLevel": 1,
+   "isOnline": true,
+   "maxConnections": 5,
+   "accessRules": [
+    {
+     "type": "allow",
+     "value": "<user>",
+     "target": "user"
+    }
+   ]
+  },
+  "nodes": [
+   {
+    "name": "/",
+    "type": "directory",
+    "permissions": {
+     "owner": 15,
+     "others": 0,
+     "faction": 5
+    },
+    "createdBy": "<user>",
+    "isProtected": false,
+    "isHidden": false,
+    "size": 0
+   },
+   {
+    "name": "<tag>_2",
+    "type": "directory",
+    "permissions": {
+     "owner": 15,
+     "others": 0,
+     "faction": 0
+    },
+    "createdBy": "<user>",
+    "isProtected": false,
+    "isHidden": false,
+    "size": 0
+   },
+   {
+    "name": "data",
+    "type": "directory",
+    "permissions": {
+     "owner": 15,
+     "others": 1,
+     "faction": 5
+    },
+    "createdBy": "<user>",
+    "isProtected": false,
+    "isHidden": false,
+    "size": 0
+   },
+   {
+    "name": "etc",
+    "type": "directory",
+    "permissions": {
+     "owner": 15,
+     "others": 1,
+     "faction": 5
+    },
+    "createdBy": "<user>",
+    "isProtected": false,
+    "isHidden": false,
+    "size": 0
+   },
+   {
+    "name": "home",
+    "type": "directory",
+    "permissions": {
+     "owner": 15,
+     "others": 1,
+     "faction": 5
+    },
+    "createdBy": "<user>",
+    "isProtected": false,
+    "isHidden": false,
+    "size": 0
+   },
+   {
+    "name": "logs",
+    "type": "directory",
+    "permissions": {
+     "owner": 15,
+     "others": 1,
+     "faction": 5
+    },
+    "createdBy": "<user>",
+    "isProtected": false,
+    "isHidden": false,
+    "size": 0
+   },
+   {
+    "name": "tmp",
+    "type": "directory",
+    "permissions": {
+     "owner": 15,
+     "others": 1,
+     "faction": 5
+    },
+    "createdBy": "<user>",
+    "isProtected": false,
+    "isHidden": false,
+    "size": 0
+   },
+   {
+    "name": "var",
+    "type": "directory",
+    "permissions": {
+     "owner": 15,
+     "others": 1,
+     "faction": 5
+    },
+    "createdBy": "<user>",
+    "isProtected": false,
+    "isHidden": false,
+    "size": 0
+   },
+   {
+    "name": "welcome.txt",
+    "type": "file",
+    "permissions": {
+     "owner": 15,
+     "others": 1,
+     "faction": 0
+    },
+    "createdBy": "<user>",
+    "isProtected": true,
+    "isHidden": false,
+    "size": 200
+   }
+  ],
+  "sessions": [
+   "true|a8-auth-characterization",
+   "true|a8-auth-characterization",
+   "true|a8-auth-characterization"
+  ],
+  "audit": [
+   "user_login|user|a8-auth-characterization",
+   "user_login|user|a8-auth-characterization",
+   "user_registered|user|a8-auth-characterization"
+  ],
+  "standings": 3
+ }
+}
