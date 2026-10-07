@@ -1,43 +1,36 @@
 import { Router } from "express";
-import bcrypt from "bcryptjs";
-import jwt from "jsonwebtoken";
-import { randomUUID } from "node:crypto";
 
-import logger from "../logger";
-import { prisma } from "../database/client";
-import { config } from "../config/environment";
-import { authenticateToken, invalidateAuthCache, AUTH_COOKIE_NAME, AUTH_COOKIE_OPTIONS } from "../middleware/auth";
+import { authenticateToken, AUTH_COOKIE_NAME, AUTH_COOKIE_OPTIONS } from "../middleware/auth";
 import { asyncHandler } from "../middleware/setup";
 import { getService } from "../di/container";
-import { FACTION_SERVICE, IP_SERVICE, NETWORK_TOPOLOGY_SERVICE } from "../di/tokens";
-import type { FactionService } from "../services/factionService";
-import type IPService from "../services/ipService";
-import { GameError, type AuthRequest, type AuthResponse, type User } from "../../../shared/types";
-import type { NetworkTopologyService } from "../services/networkTopologyService";
+import { AUTH_SERVICE } from "../di/tokens";
+import type { AuthService, AuthRequestMeta } from "../services/authService";
+import { GameError, type AuthRequest, type AuthResponse } from "../../../shared/types";
 import {
   validateRegistration,
   validateLogin,
   handleValidationErrors,
 } from "../middleware/validation";
 
+/**
+ * HTTP adapters for the auth domain. A8: every rule — provisioning, lockout,
+ * sessions, audit — lives in services/authService.ts. These only validate,
+ * call, set or clear the cookie, and shape the response.
+ */
 const router = Router();
 
-// Helper function to generate JWT token
-//
-// `jwtid` makes every token unique. Without it the payload was only
-// { userId, iat, exp }, and `iat` has ONE-SECOND resolution while HMAC is
-// deterministic — so two tokens issued to one user in the same second were
-// byte-identical, and `userSession.token` is @unique. Logging in during the
-// second you registered answered 409 "A record with this session token
-// already exists"; two tabs logging in together failed the same way; and a
-// refresh in the same second as its login deactivated the old session, then
-// failed to create the "new" one with the same token — signing the user out.
-function generateToken(userId: string): string {
-  return jwt.sign({ userId }, config.JWT_SECRET, {
-    expiresIn: config.JWT_EXPIRES_IN,
-    jwtid: randomUUID(),
-  } as jwt.SignOptions);
-}
+const auth = () => getService<AuthService>(AUTH_SERVICE);
+
+const meta = (req: any): AuthRequestMeta => ({
+  ip: req.ip || null,
+  userAgent: req.get("User-Agent") || null,
+  lockoutIp: req.ip || req.socket.remoteAddress || "unknown",
+});
+
+/** The token from the httpOnly cookie, or a Bearer header (Socket.IO clients). */
+const requestToken = (req: any): string | undefined =>
+  req.cookies?.[AUTH_COOKIE_NAME] ||
+  req.headers.authorization?.replace("Bearer ", "");
 
 // User Registration
 router.post(
@@ -45,251 +38,28 @@ router.post(
   validateRegistration(),
   handleValidationErrors,
   asyncHandler(async (req: any, res: any) => {
-    const { username, email, password } = req.body as {
-      username: string;
-      email: string;
-      password: string;
+    const { token, user } = await auth().register(
+      req.body as { username: string; email: string; password: string },
+      meta(req),
+    );
+
+    // Set httpOnly cookie with JWT
+    res.cookie(AUTH_COOKIE_NAME, token, AUTH_COOKIE_OPTIONS);
+
+    // Note: Token is returned in both the cookie AND the JSON body.
+    // The body token is needed for Socket.IO auth (cookies can't be sent via WebSocket handshake).
+    // This is an intentional security tradeoff — XSS can access the body token,
+    // but the httpOnly cookie remains the primary session mechanism.
+    const response: AuthResponse = {
+      success: true,
+      token,
+      user,
+      message: "Account created successfully",
     };
 
-    // Check if user already exists
-    const existingUser = await prisma.user.findFirst({
-      where: {
-        OR: [{ username }, ...(email ? [{ email }] : [])],
-      },
-    });
-
-    if (existingUser) {
-      throw new GameError(
-        "Username or email already in use",
-        "CONFLICT",
-        409,
-      );
-    }
-
-    // Generate unique home IP on an isolated /16 subnet via IPService
-    const ipService = getService<IPService>(IP_SERVICE);
-    const homeIp = await ipService.generatePlayerHomeIP();
-
-      // Hash password
-      const hashedPassword = await bcrypt.hash(password, config.BCRYPT_ROUNDS);
-
-      // Create user with transaction
-      const result = await prisma.$transaction(async (tx: any) => {
-        // Create user
-        const user = await tx.user.create({
-          data: {
-            username,
-            email,
-            password: hashedPassword,
-            homeIp,
-            isActive: true,
-            isOnline: true,
-          },
-          select: {
-            id: true,
-            username: true,
-            email: true,
-            homeIp: true,
-            createdAt: true,
-            lastLogin: true,
-            isActive: true,
-            isOnline: true,
-            role: true,
-          },
-        });
-
-        // Create player progress
-        await tx.playerProgress.create({
-          data: {
-            userId: user.id,
-            discoveryLevel: 0,
-            credits: 1000,
-            level: 1,
-            experience: 0,
-            hacking: 10,
-            networking: 10,
-            cryptography: 5,
-            stealth: 10,
-            socialEng: 5,
-            forensics: 5,
-            missionProgress: {},
-            achievements: [],
-          },
-        });
-
-        // Create user's home server
-        const homeServer = await tx.gameServer.create({
-          data: {
-            name: `${username}'s Terminal`,
-            ipAddress: homeIp,
-            type: "player_home",
-            isPlayerHome: true,
-            ownerId: user.id,
-            encryptionLevel: 1,
-            accessRules: [{ type: "allow", target: "user", value: user.id }],
-            isOnline: true,
-            maxConnections: 5,
-            currentConnections: 0,
-          },
-        });
-
-        // Link user to home server
-        await tx.user.update({
-          where: { id: user.id },
-          data: { homeServerId: homeServer.id },
-        });
-
-        // Create root filesystem
-        const root = await tx.fileSystemNode.create({
-          data: {
-            serverId: homeServer.id,
-            parentId: null,
-            name: "/",
-            type: "directory",
-            permissions: { owner: 15, faction: 5, others: 0 },
-            createdBy: user.id,
-            size: 0,
-          },
-        });
-
-        // Create standard directories under root
-        const baseDirs = ["home", "etc", "var", "tmp", "logs", "data"];
-        const dirMap: Record<string, string> = {};
-        for (const dirName of baseDirs) {
-          const dir = await tx.fileSystemNode.create({
-            data: {
-              serverId: homeServer.id,
-              parentId: root.id,
-              name: dirName,
-              type: "directory",
-              permissions: { owner: 15, faction: 5, others: 1 },
-              createdBy: user.id,
-              size: 0,
-            },
-          });
-          dirMap[dirName] = dir.id;
-        }
-
-        // Create user home directory under /home
-        const userHome = await tx.fileSystemNode.create({
-          data: {
-            serverId: homeServer.id,
-            parentId: dirMap["home"]!,
-            name: username,
-            type: "directory",
-            permissions: { owner: 15, faction: 0, others: 0 },
-            createdBy: user.id,
-            size: 0,
-          },
-        });
-
-        // Create welcome file in user home
-        await tx.fileSystemNode.create({
-          data: {
-            serverId: homeServer.id,
-            parentId: userHome.id,
-            name: "welcome.txt",
-            type: "file",
-            content: `NEURAL LINK TERMINAL — ${username}\n═══════════════════════════════════\n\nTerminal IP: ${homeIp}\nSecurity Clearance: Basic\nNetwork Gateway: 10.0.0.1 (Internet Exchange)\n\nQUICK START:\n  scan          — Discover servers on your network\n  connect 10.0.0.1  — Connect to the Internet Exchange\n  help          — List all available commands\n  status        — View your profile and skills\n  tutorial      — Check training progress\n\nThe network is vast. Every server holds secrets.\nEvery faction has an agenda. Trust is earned.\n\n— System Administrator`,
-            permissions: { owner: 15, faction: 0, others: 1 },
-            createdBy: user.id,
-            size: 200,
-            isEncrypted: false,
-            isHidden: false,
-            isProtected: true,
-          },
-        });
-
-        return { user, homeServerId: homeServer.id };
-      });
-
-      const { homeServerId } = result;
-      // result.user is the User object — but result also has .id from user spread
-
-      // Initialize faction standings for new user
-      try {
-        const factionService = getService<FactionService>(FACTION_SERVICE);
-        await factionService.initializeStandings(result.user.id);
-      } catch (factionErr) {
-        // Non-critical: standings will be created on first interaction
-        logger.warn({ err: factionErr, userId: result.user.id }, "Failed to initialize faction standings");
-      }
-
-      // Link home server to Internet Exchange (using ID from transaction, no re-query)
-      try {
-        const topoService = getService<NetworkTopologyService>(NETWORK_TOPOLOGY_SERVICE);
-        if (homeServerId) {
-          await topoService.createHomeLink(homeServerId);
-          logger.info({ homeServerId }, "Home server linked to Internet Exchange");
-        }
-      } catch (err) {
-        logger.warn({ err, homeIp }, "Failed to link home server to IX on registration (will retry on session)");
-      }
-
-      // Generate JWT token
-      const token = generateToken(result.user.id);
-
-      // Create session
-      await prisma.userSession.create({
-        data: {
-          userId: result.user.id,
-          token,
-          expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours
-          ipAddress: req.ip || null,
-          userAgent: req.get("User-Agent") || null,
-        },
-      });
-
-      // Log successful registration
-      await prisma.auditLog.create({
-        data: {
-          userId: result.user.id,
-          action: "user_registered",
-          resource: "user",
-          resourceId: result.user.id,
-          ipAddress: req.ip || null,
-          userAgent: req.get("User-Agent") || null,
-          metadata: {
-            username,
-            homeIp,
-          },
-        },
-      });
-
-      // Set httpOnly cookie with JWT
-      res.cookie(AUTH_COOKIE_NAME, token, AUTH_COOKIE_OPTIONS);
-
-      // Note: Token is returned in both the cookie AND the JSON body.
-      // The body token is needed for Socket.IO auth (cookies can't be sent via WebSocket handshake).
-      // This is an intentional security tradeoff — XSS can access the body token,
-      // but the httpOnly cookie remains the primary session mechanism.
-      const response: AuthResponse = {
-        success: true,
-        token,
-        user: result.user,
-        message: "Account created successfully",
-      };
-
-      res.status(201).json(response);
+    res.status(201).json(response);
   }),
 );
-
-// Per-account lockout after repeated failed login attempts
-const LOGIN_ATTEMPT_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
-const MAX_LOGIN_ATTEMPTS = 10;
-const MAX_IP_LOGIN_ATTEMPTS = 30; // Per-IP limit across all usernames
-const loginAttempts = new Map<string, { count: number; firstAttempt: number }>();
-
-// Periodic cleanup of expired lockout entries (every 5 minutes)
-const loginAttemptsCleanupTimer = setInterval(() => {
-  const now = Date.now();
-  for (const [key, entry] of loginAttempts) {
-    if (now - entry.firstAttempt > LOGIN_ATTEMPT_WINDOW_MS) {
-      loginAttempts.delete(key);
-    }
-  }
-}, 5 * 60 * 1000);
-loginAttemptsCleanupTimer.unref();
 
 // User Login
 router.post(
@@ -298,138 +68,19 @@ router.post(
   handleValidationErrors,
   asyncHandler(async (req: any, res: any) => {
     const { username, password }: AuthRequest = req.body;
+    const { token, user } = await auth().login({ username, password }, meta(req));
 
-      const ip = req.ip || req.socket.remoteAddress || "unknown";
+    // Set httpOnly cookie with JWT
+    res.cookie(AUTH_COOKIE_NAME, token, AUTH_COOKIE_OPTIONS);
 
-      // Check per-IP lockout (blocks entire IP after too many failed attempts across all usernames)
-      const ipLockoutKey = `ip:${ip}`;
-      const ipAttempts = loginAttempts.get(ipLockoutKey);
-      if (ipAttempts) {
-        if (Date.now() - ipAttempts.firstAttempt > LOGIN_ATTEMPT_WINDOW_MS) {
-          loginAttempts.delete(ipLockoutKey);
-        } else if (ipAttempts.count >= MAX_IP_LOGIN_ATTEMPTS) {
-          const remainingMs = LOGIN_ATTEMPT_WINDOW_MS - (Date.now() - ipAttempts.firstAttempt);
-          const remainingMin = Math.ceil(remainingMs / 60000);
-          throw new GameError(
-            `Too many failed attempts from this IP. Try again in ${remainingMin} minute${remainingMin > 1 ? "s" : ""}.`,
-            "IP_LOCKED",
-            429,
-          );
-        }
-      }
+    const response: AuthResponse = {
+      success: true,
+      token,
+      user,
+      message: "Login successful",
+    };
 
-      // Check per-account lockout (keyed by IP + username to prevent cross-user lockout attacks)
-      const lockoutKey = `${ip}:${username.toLowerCase()}`;
-      const attempts = loginAttempts.get(lockoutKey);
-      if (attempts) {
-        if (Date.now() - attempts.firstAttempt > LOGIN_ATTEMPT_WINDOW_MS) {
-          loginAttempts.delete(lockoutKey); // Window expired, reset
-        } else if (attempts.count >= MAX_LOGIN_ATTEMPTS) {
-          const remainingMs = LOGIN_ATTEMPT_WINDOW_MS - (Date.now() - attempts.firstAttempt);
-          const remainingMin = Math.ceil(remainingMs / 60000);
-          throw new GameError(
-            `Too many failed attempts. Try again in ${remainingMin} minute${remainingMin > 1 ? "s" : ""}.`,
-            "ACCOUNT_LOCKED",
-            429,
-          );
-        }
-      }
-
-      // Find user
-      const user = await prisma.user.findFirst({
-        where: {
-          OR: [
-            { username },
-            { email: username }, // Allow login with email
-          ],
-          isActive: true,
-        },
-        select: {
-          id: true,
-          username: true,
-          email: true,
-          password: true,
-          homeIp: true,
-          createdAt: true,
-          lastLogin: true,
-          isActive: true,
-          isOnline: true,
-          role: true,
-        },
-      });
-
-      if (!user) {
-        // Record failed attempt (per IP+username and per IP)
-        const prev = loginAttempts.get(lockoutKey);
-        if (prev) { prev.count++; } else { loginAttempts.set(lockoutKey, { count: 1, firstAttempt: Date.now() }); }
-        const ipPrev = loginAttempts.get(ipLockoutKey);
-        if (ipPrev) { ipPrev.count++; } else { loginAttempts.set(ipLockoutKey, { count: 1, firstAttempt: Date.now() }); }
-        throw new GameError("Invalid username or password", "AUTH_FAILED", 401);
-      }
-
-      // Verify password
-      const validPassword = await bcrypt.compare(password, user.password);
-      if (!validPassword) {
-        // Record failed attempt (per IP+username and per IP)
-        const prev = loginAttempts.get(lockoutKey);
-        if (prev) { prev.count++; } else { loginAttempts.set(lockoutKey, { count: 1, firstAttempt: Date.now() }); }
-        const ipPrev = loginAttempts.get(ipLockoutKey);
-        if (ipPrev) { ipPrev.count++; } else { loginAttempts.set(ipLockoutKey, { count: 1, firstAttempt: Date.now() }); }
-        throw new GameError("Invalid username or password", "AUTH_FAILED", 401);
-      }
-
-      // Clear lockout on successful login
-      loginAttempts.delete(lockoutKey);
-
-      // Update last login and online status
-      await prisma.user.update({
-        where: { id: user.id },
-        data: {
-          lastLogin: new Date(),
-          isOnline: true,
-        },
-      });
-
-      // Generate JWT token
-      const token = generateToken(user.id);
-
-      // Create session
-      await prisma.userSession.create({
-        data: {
-          userId: user.id,
-          token,
-          expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours
-          ipAddress: req.ip || null,
-          userAgent: req.get("User-Agent") || null,
-        },
-      });
-
-      // Log successful login
-      await prisma.auditLog.create({
-        data: {
-          userId: user.id,
-          action: "user_login",
-          resource: "user",
-          resourceId: user.id,
-          ipAddress: req.ip || null,
-          userAgent: req.get("User-Agent") || null,
-        },
-      });
-
-      // Set httpOnly cookie with JWT
-      res.cookie(AUTH_COOKIE_NAME, token, AUTH_COOKIE_OPTIONS);
-
-      // Remove password from response
-      const { password: _, ...userWithoutPassword } = user;
-
-      const response: AuthResponse = {
-        success: true,
-        token,
-        user: userWithoutPassword as unknown as User,
-        message: "Login successful",
-      };
-
-      res.json(response);
+    res.json(response);
   }),
 );
 
@@ -438,39 +89,8 @@ router.post("/logout", authenticateToken, asyncHandler(async (req, res) => {
     const userId = req.user?.id;
     if (!userId) throw new GameError("Not authenticated", "AUTH_REQUIRED", 401);
 
-    // Read token from cookie or header
-    const token =
-      req.cookies?.[AUTH_COOKIE_NAME] ||
-      req.headers.authorization?.replace("Bearer ", "");
-
-    if (token) {
-      // Evict from auth cache immediately so the token stops working at once
-      invalidateAuthCache(token);
-
-      // Deactivate only sessions belonging to the authenticated user
-      await prisma.userSession.updateMany({
-        where: { token, userId },
-        data: { isActive: false },
-      });
-
-      // Update user offline status
-      await prisma.user.update({
-        where: { id: userId },
-        data: { isOnline: false },
-      });
-
-      // Log logout
-      await prisma.auditLog.create({
-        data: {
-          userId,
-          action: "user_logout",
-          resource: "user",
-          resourceId: userId,
-          ipAddress: req.ip || null,
-          userAgent: req.get("User-Agent") || null,
-        },
-      });
-    }
+    const token = requestToken(req);
+    if (token) await auth().logout(userId, token, meta(req));
 
     // Clear the httpOnly cookie
     res.clearCookie(AUTH_COOKIE_NAME, { path: "/" });
@@ -484,44 +104,10 @@ router.post("/logout", authenticateToken, asyncHandler(async (req, res) => {
 
 // Verify Token
 router.get("/verify", asyncHandler(async (req: any, res: any) => {
-    const token =
-      req.cookies?.[AUTH_COOKIE_NAME] ||
-      req.headers.authorization?.replace("Bearer ", "");
-
+    const token = requestToken(req);
     if (!token) throw new GameError("No token provided", "AUTH_REQUIRED", 401);
 
-    const decoded = jwt.verify(token, config.JWT_SECRET, {
-      algorithms: ["HS256"],
-    }) as { userId: string };
-
-    // Check if session is active
-    const session = await prisma.userSession.findFirst({
-      where: {
-        token,
-        isActive: true,
-        expiresAt: { gt: new Date() },
-      },
-    });
-
-    if (!session) throw new GameError("Session expired or invalid", "SESSION_EXPIRED", 401);
-
-    // Get user info
-    const user = await prisma.user.findUnique({
-      where: { id: decoded.userId },
-      select: {
-        id: true,
-        username: true,
-        email: true,
-        homeIp: true,
-        createdAt: true,
-        lastLogin: true,
-        isActive: true,
-        isOnline: true,
-        role: true,
-      },
-    });
-
-    if (!user || !user.isActive) throw new GameError("User not found or inactive", "AUTH_FAILED", 401);
+    const user = await auth().verify(token);
 
     res.json({
       success: true,
@@ -536,29 +122,7 @@ router.post("/refresh", authenticateToken, asyncHandler(async (req, res) => {
     const userId = req.user?.id;
     if (!userId) throw new GameError("Not authenticated", "AUTH_REQUIRED", 401);
 
-    // Deactivate old session
-    const oldToken =
-      req.cookies?.[AUTH_COOKIE_NAME] ||
-      req.headers.authorization?.replace("Bearer ", "");
-    if (oldToken) {
-      invalidateAuthCache(oldToken);
-      await prisma.userSession.updateMany({
-        where: { token: oldToken, userId },
-        data: { isActive: false },
-      });
-    }
-
-    // Issue new token + session
-    const newToken = generateToken(userId);
-    await prisma.userSession.create({
-      data: {
-        userId,
-        token: newToken,
-        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
-        ipAddress: req.ip || null,
-        userAgent: req.get("User-Agent") || null,
-      },
-    });
+    const newToken = await auth().refresh(userId, requestToken(req), meta(req));
 
     // Set new cookie
     res.cookie(AUTH_COOKIE_NAME, newToken, AUTH_COOKIE_OPTIONS);

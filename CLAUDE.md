@@ -209,7 +209,7 @@ Each was re-verified against source on 2026-09-24; the verdict is marked.
   such calls. `MAX_SOCKETS_PER_USER = 4` ([handlers.ts:125](server/src/sockets/handlers.ts:125)).
 - **`PlayerProgressRepository` is the only sanctioned writer of `player_progress`.**
   ⚠️ **Currently violated by 9 direct write sites** — `adminApi/players.ts:141`,
-  `auth.ts:91`, `achievementService.ts:108`, `progressService.ts:184,349`,
+  `authService.ts:158` (was `routes/auth.ts:91` before A8 moved registration), `achievementService.ts:108`, `progressService.ts:184,349`,
   `missionService.ts:405,1389`, `tutorialService.ts:1023`,
   `darknetDungeonService.ts:1205`. (Re-verified 2026-09-24: still exactly 9, but two
   citations had drifted — 1362→1389 and 997→1023 now land on *comments*, which is how

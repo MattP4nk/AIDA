@@ -3952,8 +3952,22 @@ Write them per-refactor, immediately before touching the code:
         Seven harness source-reads re-pointed to read the whole hack domain; one built its path
         from a template literal and was invisible to grep — the suite found it.
       - [ ] `Terminal.svelte` (2,867) — CSS + `handleSubmit`.
-- [ ] **A8** Introduce `authService` — move the auth domain out of `routes/auth.ts` (561 lines,
-      security-critical, currently unreachable without an HTTP request).
+- [x] **A8 `authService` DONE 2026-10-07.** `routes/auth.ts` 563 -> 138 (thin adapters);
+      `services/authService.ts` (488) owns registration provisioning, lockout, sessions, audit.
+      Verified by `verify-phase7-a8-auth.ts`: an end-to-end characterization of the HTTP API (18
+      steps — status, code, message, cookie attributes — plus every DB row registration and the
+      session lifecycle leave) recorded BEFORE the move; 18/18 identical after; one changed
+      message in the new service fails exactly its step.
+      - **Bug found by the characterization and fixed first (43a13f5):** tokens issued to one user
+        in the same second were byte-identical (`iat` is 1-second, HMAC deterministic,
+        `userSession.token` @unique) — login right after register 409'd, and a same-second refresh
+        signed the user out. Every token now carries a random `jwtid`.
+      - [ ] **Open question — session TTL.** `SESSION_TTL_MS` (24h, was 3 literals) is not derived
+        from `config.JWT_EXPIRES_IN`; deriving it changes behaviour if the deployed .env differs,
+        which cannot be checked here.
+      - [ ] **Logout sets `isOnline: false`** even when the user has other active sessions.
+      - [ ] Registration's `playerProgress.create` is still one of CLAUDE.md §3's direct writes —
+        now in one service, the natural place to route it through PlayerProgressRepository.
 - [x] **A8 (index.ts) DONE — 367ec80, 894e546.** Re-verified against source 2026-10-07:
       `initialize()` is 107 lines, ONE `mission:completed` listener, ZERO `(data: any)` handlers.
       Original item: break up `index.ts`'s 438-line `initialize()`; consolidate the two
