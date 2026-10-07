@@ -838,6 +838,62 @@ export class NetworkTopologyService {
   /**
    * Check if a player has a stored access key for a server.
    */
+  /**
+   * Has this player discovered that server?
+   *
+   * REVIEW 2026-09-25: `tap` applied NO access check at all. A bare
+   * `findFirst({ where: { ipAddress } })` meant any player could tap any home
+   * server by IP — including one they had never scanned — and receive its
+   * honeypot alerts, which carry the decoy filename and the raw `attackerId`
+   * of whoever tripped it. That turned a surveillance item into a way to read
+   * other players' PvP and to learn which files are decoys before attacking.
+   *
+   * "Known" is the same notion `netmap` uses: a `DiscoveredLink` naming the
+   * server on either end, or owning it outright. Factions are deliberately NOT
+   * gated — they are public entities and their events are world news.
+   *
+   * Both discovery commands qualify — `scan` and `traceroute` — and that is
+   * correct rather than a hole: review #2 filed traceroute as a bypass, but it
+   * costs networking 15, a live connection, a resource check and a real
+   * topological route. What WAS wrong is that traceroute applied none of the
+   * visibility rules scan applies; `canDiscoverLink` is now the single
+   * predicate both obey (see verify-discovery-rules.ts).
+   *
+   * This gate is no longer load-bearing for confidentiality either way: a
+   * watcher receives a per-event SUMMARY, not the record, so a tap on a server
+   * you have merely seen cannot leak its owner's decoy filenames.
+   *
+   * A4: moved here from networkCommands (a private helper) so every command
+   * that reveals a server by id obeys the same rule — `share_intel server`
+   * applied none.
+   */
+  async playerKnowsServer(userId: string, serverId: string, ownerId?: string | null): Promise<boolean> {
+    const owner = ownerId !== undefined
+      ? ownerId
+      : (await this.prisma.gameServer.findUnique({ where: { id: serverId }, select: { ownerId: true } }))?.ownerId ?? null;
+    if (owner && owner === userId) return true;
+    const known = await this.prisma.discoveredLink.findFirst({
+      where: { userId, link: { OR: [{ sourceId: serverId }, { targetId: serverId }] } },
+      select: { id: true },
+    });
+    return known !== null;
+  }
+
+  /** Every server at either end of a link the player has discovered. */
+  async knownServerIds(userId: string): Promise<Set<string>> {
+    const rows = await this.prisma.discoveredLink.findMany({
+      where: { userId },
+      select: { link: { select: { sourceId: true, targetId: true } } },
+    });
+    const ids = new Set<string>();
+    for (const r of rows) { ids.add(r.link.sourceId); ids.add(r.link.targetId); }
+    return ids;
+  }
+
+  async getNetworkInfo(networkId: string): Promise<{ name: string; zone: string } | null> {
+    return this.prisma.network.findUnique({ where: { id: networkId }, select: { name: true, zone: true } });
+  }
+
   async playerHasAccessKey(userId: string, serverId: string): Promise<boolean> {
     const key = await this.prisma.serverAccessKey.findUnique({
       where: { userId_serverId: { userId, serverId } },

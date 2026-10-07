@@ -12,6 +12,7 @@ export const PRISMA_CLIENT = "PrismaClient";
 
 // Repositories — the single writer for a table (Phase 3 D4/D5/D8)
 export const PLAYER_PROGRESS_REPOSITORY = "PlayerProgressRepository";
+export const USER_REPOSITORY = "UserRepository";
 export const PLAYER_MISSION_REPOSITORY = "PlayerMissionRepository";
 
 // Core Services

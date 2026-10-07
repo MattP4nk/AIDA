@@ -1,6 +1,9 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext, CommandInfo } from "./interface";
 import { getSession, successResult, errorResult } from "./helpers";
+import { getService } from "../../di/resolve";
+import { USER_REPOSITORY } from "../../di/tokens";
+import type { UserRepository } from "../../repositories/userRepository";
 import {
   boxTop,
   boxBottom,
@@ -20,6 +23,8 @@ import {
  *   honeypot      — Toggle honeypot decoy directory
  *   upgrade       — Purchase defense upgrades
  */
+
+const users = () => getService<UserRepository>(USER_REPOSITORY);
 export class DefenseCommandsModule implements CommandModule {
   public category = "defense";
   public commands: Set<string> = new Set([
@@ -52,9 +57,7 @@ export class DefenseCommandsModule implements CommandModule {
 
   // ── defenses — show current defense status ──
   private async handleDefenses(context: CommandContext): Promise<CommandResult> {
-    const progress = await context.db.client.playerProgress.findUnique({
-      where: { userId: context.userId },
-    });
+    const progress = await context.playerProgress.get(context.userId);
 
     if (!progress) {
       return errorResult("No player data found.");
@@ -108,13 +111,7 @@ export class DefenseCommandsModule implements CommandModule {
     // Protected folders
     const session = getSession(context);
     if (session?.homeServerId) {
-      const protectedDirs = await context.db.client.fileSystemNode.count({
-        where: {
-          serverId: session.homeServerId,
-          type: "directory",
-          isProtected: true,
-        },
-      });
+      const protectedDirs = await context.fileService.countProtectedDirectories(session.homeServerId);
       lines.push(boxRow(` Protected Folders: ${protectedDirs}`, W));
     }
 
@@ -171,10 +168,7 @@ export class DefenseCommandsModule implements CommandModule {
       return errorResult("No home server.");
     }
 
-    const progress = await context.db.client.playerProgress.findUnique({
-      where: { userId: context.userId },
-      select: { homeVault: true },
-    });
+    const progress = await context.playerProgress.get(context.userId);
 
     if (!progress || progress.homeVault === 0) {
       return errorResult("You don't have a vault installed. Use 'upgrade vault 1' to purchase one.");
@@ -184,21 +178,15 @@ export class DefenseCommandsModule implements CommandModule {
 
     if (!action || action === "status") {
       // Show vault contents
-      const user = await context.db.client.user.findUnique({
-        where: { id: context.userId },
-        select: { username: true },
-      });
-      const vaultPath = `/home/${user?.username || "user"}/.vault`;
+      const home = await users().homeDirectory(context.userId);
+      const vaultPath = `${home}/.vault`;
 
       const vaultDir = await this.findNode(context, session.homeServerId, vaultPath, "directory");
       if (!vaultDir) {
         return successResult(`Vault (Level ${progress.homeVault}) — Empty.\nUse 'safevault move <file>' to secure files.`);
       }
 
-      const files = await context.db.client.fileSystemNode.findMany({
-        where: { parentId: vaultDir.id, type: "file" },
-        select: { name: true, size: true },
-      });
+      const files = await context.fileService.listChildFiles(vaultDir.id);
 
       if (files.length === 0) {
         return successResult(`Vault (Level ${progress.homeVault}) — Empty.\nUse 'safevault move <file>' to secure files.`);
@@ -224,13 +212,9 @@ export class DefenseCommandsModule implements CommandModule {
         return errorResult("Usage: safevault move <file>\nMoves a file from ~/downloads/ into the vault.");
       }
 
-      const user = await context.db.client.user.findUnique({
-        where: { id: context.userId },
-        select: { username: true },
-      });
-      const username = user?.username || "user";
-      const downloadsPath = `/home/${username}/downloads`;
-      const vaultPath = `/home/${username}/.vault`;
+      const home = await users().homeDirectory(context.userId);
+      const downloadsPath = `${home}/downloads`;
+      const vaultPath = `${home}/.vault`;
 
       // Find the file in downloads
       const downloadsDir = await this.findNode(context, session.homeServerId, downloadsPath, "directory");
@@ -238,9 +222,7 @@ export class DefenseCommandsModule implements CommandModule {
         return errorResult("No downloads directory found.");
       }
 
-      const file = await context.db.client.fileSystemNode.findFirst({
-        where: { parentId: downloadsDir.id, name: filename, type: "file" },
-      });
+      const file = await context.fileService.findChild(downloadsDir.id, filename, "file");
       if (!file) {
         return errorResult(`File '${filename}' not found in ~/downloads/.`);
       }
@@ -272,22 +254,16 @@ export class DefenseCommandsModule implements CommandModule {
         return errorResult("Usage: safevault retrieve <file>\nMoves a file from vault back to ~/downloads/.");
       }
 
-      const user = await context.db.client.user.findUnique({
-        where: { id: context.userId },
-        select: { username: true },
-      });
-      const username = user?.username || "user";
-      const downloadsPath = `/home/${username}/downloads`;
-      const vaultPath = `/home/${username}/.vault`;
+      const home = await users().homeDirectory(context.userId);
+      const downloadsPath = `${home}/downloads`;
+      const vaultPath = `${home}/.vault`;
 
       const vaultDir = await this.findNode(context, session.homeServerId, vaultPath, "directory");
       if (!vaultDir) {
         return errorResult("Vault is empty.");
       }
 
-      const file = await context.db.client.fileSystemNode.findFirst({
-        where: { parentId: vaultDir.id, name: filename, type: "file" },
-      });
+      const file = await context.fileService.findChild(vaultDir.id, filename, "file");
       if (!file) {
         return errorResult(`File '${filename}' not found in vault.`);
       }
@@ -325,10 +301,7 @@ export class DefenseCommandsModule implements CommandModule {
       return errorResult("No home server.");
     }
 
-    const progress = await context.db.client.playerProgress.findUnique({
-      where: { userId: context.userId },
-      select: { homeHoneypot: true },
-    });
+    const progress = await context.playerProgress.get(context.userId);
 
     if (!progress) {
       return errorResult("No player data found.");
@@ -341,21 +314,12 @@ export class DefenseCommandsModule implements CommandModule {
     const action = command.args[0] || "status";
 
     if (action === "status") {
-      const user = await context.db.client.user.findUnique({
-        where: { id: context.userId },
-        select: { username: true },
-      });
-      const decoyPath = `/home/${user?.username || "user"}/downloads`;
+      const home = await users().homeDirectory(context.userId);
+      const decoyPath = `${home}/downloads`;
 
       // Check if decoy directory exists with decoy files
       const decoyDir = await this.findNode(context, session.homeServerId, decoyPath, "directory");
-      const decoyFiles = decoyDir ? await context.db.client.fileSystemNode.count({
-        where: {
-          parentId: decoyDir.id,
-          type: "file",
-          metadata: { path: ["isDecoy"], equals: true },
-        },
-      }) : 0;
+      const decoyFiles = decoyDir ? await context.fileService.countDecoys(decoyDir.id) : 0;
 
       return successResult(`Honeypot Status: ACTIVE\nDecoy files deployed: ${decoyFiles}\nAttackers who delete decoy files waste time and trigger additional alerts.`);
     }
@@ -398,9 +362,7 @@ export class DefenseCommandsModule implements CommandModule {
       return successResult(render(lines));
     }
 
-    const progress = await context.db.client.playerProgress.findUnique({
-      where: { userId: context.userId },
-    });
+    const progress = await context.playerProgress.get(context.userId);
     if (!progress) {
       return errorResult("No player data found.");
     }
@@ -445,11 +407,8 @@ export class DefenseCommandsModule implements CommandModule {
       // Create vault directory on home server
       const session = getSession(context);
       if (session?.homeServerId) {
-        const user = await context.db.client.user.findUnique({
-          where: { id: context.userId },
-          select: { username: true },
-        });
-        const vaultPath = `/home/${user?.username || "user"}/.vault`;
+        const home = await users().homeDirectory(context.userId);
+        const vaultPath = `${home}/.vault`;
         await context.fileService.createDirectory(session.homeServerId, context.userId, vaultPath).catch(() => {});
         // Mark vault dir as hidden + protected
         const vaultDir = await this.findNode(context, session.homeServerId, vaultPath, "directory");
@@ -533,11 +492,8 @@ export class DefenseCommandsModule implements CommandModule {
 
   // ── Helper: generate decoy files ──
   private async generateDecoyFiles(context: CommandContext, homeServerId: string): Promise<void> {
-    const user = await context.db.client.user.findUnique({
-      where: { id: context.userId },
-      select: { username: true },
-    });
-    const downloadsPath = `/home/${user?.username || "user"}/downloads`;
+    const home = await users().homeDirectory(context.userId);
+    const downloadsPath = `${home}/downloads`;
 
     // Ensure downloads dir exists
     await context.fileService.createDirectory(homeServerId, context.userId, downloadsPath).catch(() => {});
@@ -595,38 +551,12 @@ export class DefenseCommandsModule implements CommandModule {
     path: string,
     type: "file" | "directory",
   ): Promise<{ id: string; name: string; isProtected: boolean; isHidden: boolean } | null> {
-    const parts = path.split("/").filter(Boolean);
-    if (parts.length === 0) return null;
-
-    // Walk path from root
-    let parentId: string | null = null;
-
-    // Find root
-    const root = await context.db.client.fileSystemNode.findFirst({
-      where: { serverId, name: "/", parentId: null },
-      select: { id: true, name: true, isProtected: true, isHidden: true },
-    });
-    if (!root) return null;
-    parentId = root.id;
-
-    // Walk to target
-    for (let i = 0; i < parts.length; i++) {
-      const isLast = i === parts.length - 1;
-      const node: { id: string; name: string; isProtected: boolean; isHidden: boolean } | null = await context.db.client.fileSystemNode.findFirst({
-        where: {
-          serverId,
-          parentId,
-          name: parts[i]!,
-          type: isLast ? type : "directory",
-        },
-        select: { id: true, name: true, isProtected: true, isHidden: true },
-      });
-      if (!node) return null;
-      if (isLast) return node;
-      parentId = node.id;
-    }
-
-    return null;
+    // The root is never a target here (findNode always returned null for it).
+    if (path.split("/").filter(Boolean).length === 0) return null;
+    // A4: was a hand-written root-to-leaf walk — fileService.resolvePath.
+    const r = await context.fileService.resolvePath(serverId, path);
+    if (!r.exists || !r.node || r.node.type !== type) return null;
+    return { id: r.node.id, name: r.node.name, isProtected: r.node.isProtected, isHidden: r.node.isHidden };
   }
 
   public getCommandInfo(): CommandInfo[] {

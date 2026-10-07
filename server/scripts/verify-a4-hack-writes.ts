@@ -51,6 +51,7 @@ async function main() {
     data: { serverId: user.homeServerId!, parentId: home.id, name: "locked.dat", type: "file", content: "x", size: 1, isProtected: true },
   });
 
+  let sub: { id: string } | null = null, relFile: { id: string } | null = null, item2: { id: string } | null = null;
   const s = ioClient(BASE, { auth: { token: reg.token }, transports: ["websocket"], reconnection: false });
   try {
     await new Promise<void>((res, rej) => {
@@ -85,9 +86,31 @@ async function main() {
     check("the file is no longer protected", after?.isProtected === false);
     check("the client was PUSHED its new inventory (it never was)", deltas.includes("inventory"),
       deltas.length ? `deltas: ${[...new Set(deltas)].join(", ")}` : "no state:delta at all");
+
+    // A RELATIVE path resolves against the directory the player `cd`'d into.
+    // Six commands read `session.terminals[0].currentDirectory`, which `cd`
+    // never writes — it stays the home directory from connect time — so
+    // `crack.protected rel.dat` after `cd sub` looked for /home/<tag>/rel.dat.
+    console.log("\nrelative paths follow `cd`");
+    {
+      sub = await prisma.fileSystemNode.create({ data: { serverId: user.homeServerId!, parentId: home.id, name: "sub", type: "directory" } });
+      relFile = await prisma.fileSystemNode.create({
+        data: { serverId: user.homeServerId!, parentId: sub.id, name: "rel.dat", type: "file", content: "x", size: 1, isProtected: true },
+      });
+      item2 = await prisma.inventoryItem.create({ data: { userId, shopItemId: "quantum_charge", quantity: 1 } });
+      const cd = await run(`cd /home/${tag}/sub`);
+      check("PRECONDITION: cd into the subdirectory", !/error|not found|no such/i.test(cd), cd.split("\n")[0] || "(ok)");
+      const rel = await run("crack.protected rel.dat");
+      const relAfter = await prisma.fileSystemNode.findUnique({ where: { id: relFile.id }, select: { isProtected: true } });
+      check("`crack.protected rel.dat` cracks <cwd>/rel.dat (was: <home>/rel.dat)",
+        /Protection layer dissolved/.test(rel) && relAfter?.isProtected === false, rel.split("\n")[0]);
+    }
   } finally {
     s.disconnect();
     try {
+      if (relFile) await prisma.fileSystemNode.deleteMany({ where: { id: relFile.id } });
+      if (sub) await prisma.fileSystemNode.deleteMany({ where: { id: sub.id } });
+      if (item2) await prisma.inventoryItem.deleteMany({ where: { id: item2.id } });
       await prisma.fileSystemNode.deleteMany({ where: { id: file.id } });
       await prisma.inventoryItem.deleteMany({ where: { id: item.id } });
     } catch (err) { fail++; console.log(`  [FAIL] cleanup — ${(err as Error).message}`); }

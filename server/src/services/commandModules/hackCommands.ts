@@ -26,6 +26,9 @@ import {
 } from "./asciiBox";
 import { successResult, errorResult, refreshComputerSpec } from "./helpers";
 import logger from "../../logger";
+import { getService } from "../../di/resolve";
+import { SERVER_SERVICE } from "../../di/tokens";
+import type ServerService from "../serverService";
 
 /**
  * HackCommandsModule
@@ -48,6 +51,7 @@ interface FileCrackSession {
   attemptsLeft: number;
 }
 
+const servers = () => getService<ServerService>(SERVER_SERVICE);
 const activeFileCrackSessions = new Map<string, FileCrackSession>();
 const activeStormSessions = new Map<string, FileCrackSession>();
 
@@ -375,10 +379,7 @@ export class HackCommandsModule implements CommandModule {
     // Get player's hacking skill (duration scaling) and the soft-gate shortfall.
     // Hoisted above the resource branch because BOTH the process path and the
     // legacy direct path below need to pass the penalty into the hack session.
-    const progress = await context.db.client.playerProgress.findUnique({
-      where: { userId: context.userId },
-      select: { hacking: true, level: true },
-    });
+    const progress = await context.playerProgress.get(context.userId);
     const hackingSkill = progress?.hacking ?? 1;
 
     // Soft skill gate: `hack` has a baseline of Hacking 20, but a player within
@@ -732,20 +733,15 @@ export class HackCommandsModule implements CommandModule {
     error?: string;
   }> {
     try {
-      const { db } = context;
-
-      // Try to find server by IP address or name
-      const server = await db.client.gameServer.findFirst({
-        where: {
-          OR: [{ ipAddress: targetIdentifier }, { name: targetIdentifier }],
-        },
-        select: {
-          id: true,
-          ownerId: true,
-          name: true,
-          ipAddress: true,
-        },
-      });
+      // By IP, or by a name only when the name is unambiguous.
+      const found = await servers().resolveByIpOrName(targetIdentifier);
+      if (found && "ambiguous" in found) {
+        return {
+          success: false,
+          error: `${found.ambiguous} servers are named '${targetIdentifier}'. Use its IP address.`,
+        };
+      }
+      const server = found?.server;
 
       if (!server) {
         return {
@@ -890,7 +886,7 @@ export class HackCommandsModule implements CommandModule {
 
     // Try resolving as a file first (file crack flow)
     if (session.currentServerId) {
-      const currentDir = session.terminals?.[0]?.currentDirectory || "/";
+      const currentDir = session.currentDirectory || "/"; // not terminals[0]: `cd` never updates it (helpers.ts getSessionContext)
       const filePath = target.startsWith("/") ? target : `${currentDir === "/" ? "" : currentDir}/${target}`;
       const fileResult = await context.fileService.readFile(session.currentServerId, context.userId, filePath);
 
@@ -930,12 +926,7 @@ export class HackCommandsModule implements CommandModule {
       return errorResult("File crack session already active. Choose a strategy (crack.dict, crack.mask, crack.pattern) or wait for it to expire.");
     }
 
-    const progress = await context.db.client.playerProgress.findUnique({
-      where: { userId: context.userId },
-      // `hacking` is what the GATE reads (`crack` is Hacking 30); `cryptography`
-      // is what the challenge generator uses for hints.
-      select: { cryptography: true, hacking: true },
-    });
+    const progress = await context.playerProgress.get(context.userId);
     const cryptography = progress?.cryptography ?? 0;
 
     // Determine encryption metadata
@@ -1006,14 +997,7 @@ export class HackCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     const memoryService = context.services.memoryService;
     if (memoryService) {
-      const progress = await context.db.client.playerProgress.findUnique({
-        where: { userId: context.userId },
-        // `hacking` is here for the SKILL GATE, `cryptography` for the work:
-        // `crack` is gated on Hacking 30 (skillRequirements.ts), so selecting
-        // only cryptography made getSkillShortfall read a missing field and
-        // silently return severity 0 — a soft gate that never bites.
-        select: { cryptography: true, hacking: true, level: true },
-      });
+      const progress = await context.playerProgress.get(context.userId);
       await refreshComputerSpec(context, progress?.level ?? 1);
 
       // NOTE: no shortfall penalty on this path. `crack`'s message branch just
@@ -1083,10 +1067,7 @@ export class HackCommandsModule implements CommandModule {
     const { isCorrect, successMultiplier } = validateCrackStrategy(crackSession.challenge, strategy);
 
     // Get crypto skill for success calculation
-    const progress = await context.db.client.playerProgress.findUnique({
-      where: { userId: context.userId },
-      select: { cryptography: true },
-    });
+    const progress = await context.playerProgress.get(context.userId);
     const cryptography = progress?.cryptography ?? 0;
 
     // Success chance: base 50% + skill modifier, scaled by strategy correctness
@@ -1167,7 +1148,7 @@ export class HackCommandsModule implements CommandModule {
     const session = context.gameStateManager.getSession(context.userId);
     if (!session?.currentServerId) return errorResult("Not connected to any server.");
 
-    const currentDir = session.terminals?.[0]?.currentDirectory || "/";
+    const currentDir = session.currentDirectory || "/"; // not terminals[0]: `cd` never updates it (helpers.ts getSessionContext)
     const filePath = fileName.startsWith("/") ? fileName : `${currentDir === "/" ? "" : currentDir}/${fileName}`;
 
     const resolution = await context.fileService.resolvePath(session.currentServerId, filePath);
@@ -1183,14 +1164,7 @@ export class HackCommandsModule implements CommandModule {
     // does not contain that substring, so the find always failed and this
     // command was unusable by everyone. The error below even names the item the
     // player was holding. Match the id instead; see QUANTUM_CHARGE_ITEM_ID.
-    const charge = await context.db.client.inventoryItem.findFirst({
-      where: {
-        userId: context.userId,
-        shopItemId: QUANTUM_CHARGE_ITEM_ID,
-        quantity: { gt: 0 },
-      },
-    });
-    if (!charge) {
+    if (!(await context.services.shopService.hasItem(context.userId, QUANTUM_CHARGE_ITEM_ID))) {
       return errorResult(
         "Requires a Quantum Decryptor Charge.\n" +
         "Buy one from the shop, or try 'crack.storm' (near-impossible minigame) or 'fragment.crack' (risky).",
@@ -1236,7 +1210,7 @@ export class HackCommandsModule implements CommandModule {
       return errorResult("Storm session already active. Submit your answer with 'crack.storm.submit'.");
     }
 
-    const currentDir = session.terminals?.[0]?.currentDirectory || "/";
+    const currentDir = session.currentDirectory || "/"; // not terminals[0]: `cd` never updates it (helpers.ts getSessionContext)
     const filePath = fileName.startsWith("/") ? fileName : `${currentDir === "/" ? "" : currentDir}/${fileName}`;
 
     const resolution = await context.fileService.resolvePath(session.currentServerId, filePath);
@@ -1245,10 +1219,7 @@ export class HackCommandsModule implements CommandModule {
     const fileNode = resolution.node as any;
     if (!fileNode.isProtected) return errorResult(`${fileName} is not protected. Use 'crack' instead.`);
 
-    const progress = await context.db.client.playerProgress.findUnique({
-      where: { userId: context.userId },
-      select: { cryptography: true, hacking: true },
-    });
+    const progress = await context.playerProgress.get(context.userId);
     const skills = { cryptography: progress?.cryptography ?? 0, hacking: progress?.hacking ?? 0 };
 
     // Randomly pick cipher storm or entropy overload
@@ -1387,10 +1358,7 @@ export class HackCommandsModule implements CommandModule {
     const memoryService = context.services.memoryService;
 
     if (memoryService) {
-      const progress = await context.db.client.playerProgress.findUnique({
-        where: { userId: context.userId },
-        select: { hacking: true, level: true },
-      });
+      const progress = await context.playerProgress.get(context.userId);
       await refreshComputerSpec(context, progress?.level ?? 1);
 
       // U3c-0: these commands are declared `mode: "soft"`, so an under-skilled
@@ -1432,10 +1400,7 @@ export class HackCommandsModule implements CommandModule {
     // Fallback path (no resource system). The soft-gate penalty must apply here
     // too — otherwise an under-skilled attempt is free whenever memoryService is
     // unavailable, which is exactly the U3c-0 hole being closed.
-    const fbProgress = await context.db.client.playerProgress.findUnique({
-      where: { userId: context.userId },
-      select: { hacking: true },
-    });
+    const fbProgress = await context.playerProgress.get(context.userId);
     const fbSeverity =
       getSkillShortfall(
         command.command,
@@ -1470,12 +1435,7 @@ export class HackCommandsModule implements CommandModule {
     const memoryService = context.services.memoryService;
 
     if (memoryService) {
-      const progress = await context.db.client.playerProgress.findUnique({
-        where: { userId: context.userId },
-        // `hacking` is required by the gate (Hacking 50); `stealth` is used by
-        // the work. Selecting only stealth made the shortfall silently zero.
-        select: { stealth: true, hacking: true, level: true },
-      });
+      const progress = await context.playerProgress.get(context.userId);
       await refreshComputerSpec(context, progress?.level ?? 1);
 
       // U3c-0: `backdoor` is declared `mode: "soft"`, so an under-skilled player
@@ -1518,10 +1478,7 @@ export class HackCommandsModule implements CommandModule {
     // Fallback path (no resource system). The soft-gate penalty must apply here
     // too — otherwise an under-skilled attempt is free whenever memoryService is
     // unavailable, which is exactly the U3c-0 hole being closed.
-    const fbProgress = await context.db.client.playerProgress.findUnique({
-      where: { userId: context.userId },
-      select: { hacking: true },
-    });
+    const fbProgress = await context.playerProgress.get(context.userId);
     const fbSeverity =
       getSkillShortfall(
         command.command,
@@ -1556,10 +1513,7 @@ export class HackCommandsModule implements CommandModule {
     const memoryService = context.services.memoryService;
 
     if (memoryService) {
-      const progress = await context.db.client.playerProgress.findUnique({
-        where: { userId: context.userId },
-        select: { stealth: true, hacking: true, level: true },
-      });
+      const progress = await context.playerProgress.get(context.userId);
       await refreshComputerSpec(context, progress?.level ?? 1);
 
       // U3c-0: these commands are declared `mode: "soft"`, so an under-skilled
@@ -1604,10 +1558,7 @@ export class HackCommandsModule implements CommandModule {
     // Fallback path (no resource system). The soft-gate penalty must apply here
     // too — otherwise an under-skilled attempt is free whenever memoryService is
     // unavailable, which is exactly the U3c-0 hole being closed.
-    const fbProgress = await context.db.client.playerProgress.findUnique({
-      where: { userId: context.userId },
-      select: { hacking: true },
-    });
+    const fbProgress = await context.playerProgress.get(context.userId);
     const fbSeverity =
       getSkillShortfall(
         command.command,
@@ -1698,10 +1649,7 @@ export class HackCommandsModule implements CommandModule {
     }
 
     // Resolve IP to server ID
-    const server = await context.db.client.gameServer.findUnique({
-      where: { ipAddress: targetIp },
-      select: { id: true, name: true },
-    });
+    const server = await servers().findBasicByIp(targetIp);
     if (!server) {
       return errorResult(`No server found at ${targetIp}`);
     }
@@ -1755,10 +1703,7 @@ export class HackCommandsModule implements CommandModule {
       return errorResult("Backdoor service unavailable");
     }
 
-    const server = await context.db.client.gameServer.findUnique({
-      where: { ipAddress: targetIp },
-      select: { id: true, name: true },
-    });
+    const server = await servers().findBasicByIp(targetIp);
     if (!server) {
       return errorResult(`No server found at ${targetIp}`);
     }
@@ -1801,10 +1746,7 @@ export class HackCommandsModule implements CommandModule {
     }
 
     // Verify the player owns the server
-    const server = await context.db.client.gameServer.findUnique({
-      where: { ipAddress: serverIp },
-      select: { id: true, name: true, ownerId: true },
-    });
+    const server = await servers().findBasicByIp(serverIp);
     if (!server) {
       return errorResult(`No server found at ${serverIp}`);
     }
@@ -1813,10 +1755,7 @@ export class HackCommandsModule implements CommandModule {
     }
 
     // Get player forensics skill
-    const progress = await context.db.client.playerProgress.findUnique({
-      where: { userId: context.userId },
-      select: { forensics: true },
-    });
+    const progress = await context.playerProgress.get(context.userId);
     const forensics = progress?.forensics ?? 5;
 
     const discovered = await backdoorService.scanForBackdoors(
@@ -1974,10 +1913,7 @@ export class HackCommandsModule implements CommandModule {
     const memoryService = context.services.memoryService;
 
     if (memoryService) {
-      const progress = await context.db.client.playerProgress.findUnique({
-        where: { userId: context.userId },
-        select: { stealth: true, level: true },
-      });
+      const progress = await context.playerProgress.get(context.userId);
       await refreshComputerSpec(context, progress?.level ?? 1);
 
       // NOTE: `trace.evade` is still mode "hard" (U3c), so there is deliberately

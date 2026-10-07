@@ -261,7 +261,6 @@ class CommandProcessor {
       userId,
       role: userRole ?? "player",
       terminalWidth: terminalCols && terminalCols > 40 ? Math.min(terminalCols - 2, 200) : TERM_WIDTH,
-      db,
       fileService,
       ...(this.io ? { io: this.io } : {}),
       commandHistory: this.commandHistory,

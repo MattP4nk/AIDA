@@ -469,27 +469,38 @@ async function main() {
       void processor;
 
       const net = read("../src/services/commandModules/networkCommands.ts");
+      // A4 moved the rule into networkTopologyService.playerKnowsServer, so
+      // it is tested BEHAVIOURALLY here, against fixtures; only the call
+      // sites stay structural (labelled).
+      const topo = gs2<any>(TOKENS.NETWORK_TOPOLOGY_SERVICE);
+      check("ownership counts as knowing", (await topo.playerKnowsServer(victim.id, server.id)) === true);
       check(
         "server targets are gated on discovery",
-        /playerKnowsServer\(context, server\.id, server\.ownerId\)/.test(net),
+        (await topo.playerKnowsServer(watcher.id, server.id)) === false,
         "a bare findFirst on ipAddress let anyone tap any home server they had never scanned",
       );
+      const other = await prisma.gameServer.create({
+        data: { name: `${tag}_srv2`, ipAddress: `10.79.0.${process.pid % 250}`, type: "corporate" },
+      });
+      created.servers.push(other.id); // links and discoveries cascade from it
+      const link = await prisma.serverLink.create({ data: { sourceId: other.id, targetId: server.id } });
+      await prisma.discoveredLink.create({ data: { userId: watcher.id, linkId: link.id, source: "scan" } });
       check(
-        "player targets are gated on discovering their home server",
-        /playerKnowsServer\(context, user\.homeServerId, user\.id\)/.test(net),
+        "discovery means a DiscoveredLink, the same notion netmap uses",
+        (await topo.playerKnowsServer(watcher.id, server.id)) === true,
+      );
+      check(
+        "(structural) tap gates server targets through it",
+        /topology\(\)\.playerKnowsServer\(context\.userId, server\.id, server\.ownerId\)/.test(net),
+      );
+      check(
+        "(structural) and player targets on their home server",
+        /topology\(\)\.playerKnowsServer\(context\.userId, user\.homeServerId, user\.id\)/.test(net),
         "a username from the leaderboard was otherwise enough to surveil anyone",
       );
       check(
-        "ownership counts as knowing",
-        /if \(ownerId && ownerId === context\.userId\) return true;/.test(net),
-      );
-      check(
-        "discovery means a DiscoveredLink, the same notion netmap uses",
-        /discoveredLink\.findFirst/.test(net),
-      );
-      check(
         "factions are deliberately NOT gated",
-        !/playerKnowsServer\(context, faction/.test(net),
+        !/playerKnowsServer\([^)]*faction/.test(net),
         "they are public entities and their events are world news",
       );
       check(

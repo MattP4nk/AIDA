@@ -202,9 +202,7 @@ export class FactionCommandsModule implements CommandModule {
 
   private async handleNeutral(context: CommandContext): Promise<CommandResult> {
     // Check if player is already in a faction
-    const membership = await context.db.client.factionMember.findFirst({
-      where: { userId: context.userId },
-    });
+    const membership = await context.services.factionService.getUserFaction(context.userId);
 
     if (membership) {
       return errorResult("You are already in a faction. Use 'faction leave' first if you want to go neutral.");
@@ -659,9 +657,7 @@ export class FactionCommandsModule implements CommandModule {
     }
 
     // Calculate contribution based on player skills
-    const progress = await context.db.client.playerProgress.findUnique({
-      where: { userId: context.userId },
-    });
+    const progress = await context.playerProgress.get(context.userId);
 
     if (!progress) {
       return errorResult("Could not load player skills.");
@@ -692,9 +688,7 @@ export class FactionCommandsModule implements CommandModule {
     }
 
     // Find server by IP
-    const server = await context.db.client.gameServer.findFirst({
-      where: { ipAddress: serverIp },
-    });
+    const server = await context.services.serverService.findBasicByIp(serverIp);
 
     if (!server) {
       return errorResult(`No server found at ${serverIp}.`);

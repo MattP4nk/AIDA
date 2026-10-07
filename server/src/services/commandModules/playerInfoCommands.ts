@@ -3,7 +3,12 @@ import { CommandModule, CommandContext } from "./interface";
 import { successResult, errorResult, spawnBackgroundProcess } from "./helpers";
 import logger from "../../logger";
 import { getService } from "../../di/resolve";
-import { BOUNTY_SERVICE } from "../../di/tokens";
+import { BOUNTY_SERVICE, KEY_FRAGMENT_SERVICE, NETWORK_TOPOLOGY_SERVICE, SERVER_SERVICE, USER_REPOSITORY } from "../../di/tokens";
+import type ServerService from "../serverService";
+import type NetworkTopologyService from "../networkTopologyService";
+import type { KeyFragmentService } from "../keyFragmentService";
+import type { FactionService } from "../factionService";
+import type { UserRepository } from "../../repositories/userRepository";
 import type BountyService from "../bountyService";
 import {
   boxTop,
@@ -27,6 +32,10 @@ import type { PlayerDetails } from "../playerPresenceService";
 
 
 const bountyService = () => getService<BountyService>(BOUNTY_SERVICE);
+const servers = () => getService<ServerService>(SERVER_SERVICE);
+const users = () => getService<UserRepository>(USER_REPOSITORY);
+const topology = () => getService<NetworkTopologyService>(NETWORK_TOPOLOGY_SERVICE);
+const fragments = () => getService<KeyFragmentService>(KEY_FRAGMENT_SERVICE);
 export class PlayerInfoCommandsModule implements CommandModule {
   public category = "player";
   public commands: Set<string> = new Set([
@@ -182,14 +191,15 @@ export class PlayerInfoCommandsModule implements CommandModule {
     _command: Command,
     context: CommandContext,
   ): Promise<CommandResult> {
-    const user = await context.db.client.user.findUnique({
-      where: { id: context.userId },
-      include: { progress: true },
-    });
+    const [userRow, progressRow] = await Promise.all([
+      users().findById(context.userId),
+      context.playerProgress.get(context.userId),
+    ]);
 
-    if (!user || !user.progress) {
+    if (!userRow || !progressRow) {
       return errorResult("User data not found");
     }
+    const user = { ...userRow, progress: progressRow };
 
     // Build dynamic faction standings
     const standings = await context.services.factionService.getAllStandings(
@@ -212,11 +222,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
 
     // Query story/fragment progress — HIDDEN until player reaches discoveryLevel >= 3
     // Players must discover the existence of fragments through gameplay, not the status screen
-    const storyProgress = await context.db.client.storyProgress.findUnique({
-      where: { userId: context.userId },
-      select: { discoveryLevel: true },
-    });
-    const discoveryLevel = storyProgress?.discoveryLevel ?? 0;
+    const discoveryLevel = await fragments().getDiscoveryLevel(context.userId);
 
     let storyRows: { label: string; value: string }[];
     if (discoveryLevel >= 3) {
@@ -317,9 +323,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
     _command: Command,
     context: CommandContext,
   ): Promise<CommandResult> {
-    const progress = await context.db.client.playerProgress.findUnique({
-      where: { userId: context.userId },
-    });
+    const progress = await context.playerProgress.get(context.userId);
 
     if (!progress) {
       return errorResult("Player progress not found");
@@ -416,18 +420,12 @@ export class PlayerInfoCommandsModule implements CommandModule {
     context: CommandContext,
   ): Promise<CommandResult> {
     // Get current server connection
-    const connection = await context.db.client.serverConnection.findFirst({
-      where: {
-        userId: context.userId,
-        disconnectedAt: null,
-      },
-      include: {
-        server: true,
-      },
-      orderBy: {
-        connectedAt: "desc",
-      },
-    });
+    // The game session is where "current server" lives. This read the newest
+    // connection row with `disconnectedAt: null` — a second source of truth
+    // that a session ending without a clean disconnect leaves stale.
+    const currentServerId = context.gameStateManager.getSession(context.userId)?.currentServerId;
+    const current = currentServerId ? await servers().findBasicById(currentServerId) : null;
+    const connection = current ? { serverId: current.id, server: current } : null;
 
     if (!connection) {
       return errorResult("You are not connected to any server.");
@@ -675,9 +673,8 @@ export class PlayerInfoCommandsModule implements CommandModule {
     }
 
     // Check faction rank — must be at least operative
-    const member = await context.db.client.factionMember.findFirst({
-      where: { userId: context.userId, factionId },
-    });
+    const membership = await context.services.factionService.getUserFaction(context.userId);
+    const member = membership?.factionId === factionId ? membership : null;
     const allowedRanks = ["operative", "elite", "council_member"];
     if (!member || !allowedRanks.includes(member.rank)) {
       const currentRank = member?.rank?.toUpperCase() ?? "UNKNOWN";
@@ -687,17 +684,14 @@ export class PlayerInfoCommandsModule implements CommandModule {
     // Verify the asset exists
     let assetMeta: Record<string, unknown> = {};
     if (assetType === "server") {
-      const server = await context.db.client.gameServer.findUnique({
-        where: { id: assetId },
-        select: {
-          id: true,
-          name: true,
-          ipAddress: true,
-          type: true,
-          securityLevel: true,
-          ownerId: true,
-        },
-      });
+      const server = await servers().findById(assetId);
+      // A4: the file branch already reported only what you can read (S10);
+      // this one wrote ANY server's name, IP, security level and owner into
+      // faction knowledge — including servers the player had never found.
+      // Report only servers you know, by the rule `tap` uses.
+      if (server && !(await topology().playerKnowsServer(context.userId, server.id, server.ownerId))) {
+        return errorResult(`Server not found: ${assetId}`);
+      }
       if (!server) {
         return errorResult(`Server not found: ${assetId}`);
       }
@@ -709,17 +703,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
         ownerId: server.ownerId,
       };
     } else if (assetType === "file") {
-      const file = await context.db.client.fileSystemNode.findUnique({
-        where: { id: assetId },
-        select: {
-          id: true,
-          name: true,
-          serverId: true,
-          type: true,
-          isHidden: true,
-          isEncrypted: true,
-        },
-      });
+      const file = await context.fileService.findNodeById(assetId);
       if (!file) {
         return errorResult(`File not found: ${assetId}`);
       }
@@ -746,10 +730,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
         isEncrypted: file.isEncrypted,
       };
     } else if (assetType === "player") {
-      const player = await context.db.client.user.findUnique({
-        where: { id: assetId },
-        select: { id: true, username: true },
-      });
+      const player = await users().findById(assetId);
       if (!player) {
         return errorResult(`Player not found: ${assetId}`);
       }
@@ -784,31 +765,18 @@ export class PlayerInfoCommandsModule implements CommandModule {
     context: CommandContext,
   ): Promise<CommandResult> {
     // Show active bounties — all public, plus highlight ones from player's faction
-    const bounties = await context.db.client.bounty.findMany({
-      where: {
-        status: "active",
-        expiresAt: { gt: new Date() },
-      },
-      orderBy: { rewardCredits: "desc" },
-      take: 20,
-    });
+    const bounties = await bountyService().listLive(20);
 
     if (bounties.length === 0) {
       return successResult("No active bounties. The network is quiet... for now.");
     }
 
     // Get player's faction for highlighting
-    const membership = await context.db.client.factionMember.findFirst({
-      where: { userId: context.userId },
-      select: { factionId: true },
-    });
+    const membership = await context.services.factionService.getUserFaction(context.userId);
 
     // Get faction names
     const factionIds = [...new Set(bounties.map((b) => b.issuedByFactionId))];
-    const factions = await context.db.client.faction.findMany({
-      where: { id: { in: factionIds } },
-      select: { id: true, name: true, shortName: true },
-    });
+    const factions = await context.services.factionService.getFactionsByIds(factionIds);
     const factionMap = new Map(
       factions.map((f) => [f.id, f.shortName || f.name]),
     );
@@ -1094,7 +1062,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
   private async resolveReportTarget(
     args: string[],
     userId: string,
-    db: any,
+    factionService: FactionService,
   ): Promise<{ targetFactionId: string; targetFactionName: string; cleanArgs: string[] } | { error: string }> {
     // Check for "to <faction>" at the end of args
     const toIdx = args.findIndex((a) => a.toLowerCase() === "to");
@@ -1108,10 +1076,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
 
     if (targetFactionName) {
       // Explicit target faction
-      const faction = await db.client.faction.findFirst({
-        where: { name: { equals: targetFactionName, mode: "insensitive" } },
-        select: { id: true, name: true },
-      });
+      const faction = await factionService.getFactionByName(targetFactionName);
       if (!faction) {
         return { error: `Faction not found: "${targetFactionName}". Use 'faction list' to see factions.` };
       }
@@ -1119,10 +1084,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
     }
 
     // Default to player's own faction
-    const membership = await db.client.factionMember.findFirst({
-      where: { userId },
-      include: { faction: { select: { id: true, name: true } } },
-    });
+    const membership = await factionService.getUserFaction(userId);
 
     if (!membership) {
       return { error: "No faction specified. Use: report ... to <faction>\nOr join a faction with 'faction join <name>'." };
@@ -1135,7 +1097,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
     command: Command,
     context: CommandContext,
   ): Promise<CommandResult> {
-    const { userId, db } = context;
+    const { userId } = context;
     const subCommand = command.args?.[0]?.toLowerCase();
     const session = context.gameStateManager?.getSession(userId);
     const serverId = session?.currentServerId || session?.homeServerId;
@@ -1148,21 +1110,13 @@ export class PlayerInfoCommandsModule implements CommandModule {
 
     // ── report (no args) — show current server intel summary ──
     if (!subCommand) {
-      const server = await db.client.gameServer.findUnique({
-        where: { id: serverId },
-        select: { name: true, ipAddress: true, role: true, securityLevel: true, factionId: true, faction: { select: { name: true } } },
-      });
+      const server = await servers().findById(serverId);
 
       if (!server) {
         return errorResult("Server not found.");
       }
 
-      const fileCount = await db.client.fileSystemNode.count({
-        where: { serverId, type: "file" },
-      });
-      const dirCount = await db.client.fileSystemNode.count({
-        where: { serverId, type: "directory" },
-      });
+      const { files: fileCount, directories: dirCount } = await context.fileService.countNodes(serverId);
 
       const lines: string[] = [];
       lines.push(boxTop(W));
@@ -1186,15 +1140,12 @@ export class PlayerInfoCommandsModule implements CommandModule {
 
     // ── report server [to <faction>] — add current server to faction knowledge ──
     if (subCommand === "server") {
-      const targetResult = await this.resolveReportTarget(command.args?.slice(1) || [], userId, db);
+      const targetResult = await this.resolveReportTarget(command.args?.slice(1) || [], userId, context.services.factionService);
       if ("error" in targetResult) {
         return errorResult(targetResult.error);
       }
 
-      const server = await db.client.gameServer.findUnique({
-        where: { id: serverId },
-        select: { id: true, name: true, ipAddress: true, role: true, type: true, securityLevel: true },
-      });
+      const server = await servers().findById(serverId);
 
       if (!server) {
         return errorResult("Server not found.");
@@ -1239,7 +1190,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
     // ── report file <filename> [to <faction>] — report a specific file as intel ──
     if (subCommand === "file") {
       const restArgs = command.args?.slice(1) || [];
-      const targetResult = await this.resolveReportTarget(restArgs, userId, db);
+      const targetResult = await this.resolveReportTarget(restArgs, userId, context.services.factionService);
       if ("error" in targetResult) {
         return errorResult(targetResult.error);
       }
@@ -1270,26 +1221,12 @@ export class PlayerInfoCommandsModule implements CommandModule {
       // partway". `report file /etc/keys.txt` on a server with no `/etc` then
       // silently re-scoped to the cwd and reported `<cwd>/keys.txt` instead,
       // naming the requested path in the success line.
-      let current = await db.client.fileSystemNode.findFirst({
-        where: { serverId, parentId: null, type: "directory" },
-        select: { id: true },
-      });
-      for (const part of pathParts) {
-        if (!current) break;
-        current = await db.client.fileSystemNode.findFirst({
-          where: { serverId, parentId: current.id, name: part },
-          select: { id: true },
-        });
-      }
-      if (!current) {
-        return errorResult(`File not found: ${filename}`);
-      }
-      const parentId: string = current.id;
-
-      const file = await db.client.fileSystemNode.findFirst({
-        where: { serverId, name: targetName, type: "file", parentId },
-        select: { id: true, name: true, content: true, isEncrypted: true },
-      });
+      // Resolved through fileService from the root of the absolute path —
+      // the scoping S10 needed (a bare name used to match ANYWHERE).
+      const resolved = await context.fileService.resolvePath(serverId, filePath);
+      const file = resolved.exists && resolved.node?.type === "file" && resolved.node.name === targetName
+        ? resolved.node
+        : null;
 
       if (!file) {
         return errorResult(`File not found: ${filename}`);

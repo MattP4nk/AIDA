@@ -102,6 +102,18 @@ export class ChatService {
   // ==================== CHAT CONTACTS ====================
 
   /**
+   * The caller's contact list. Selects only the contact's username: the
+   * command module did `include: { contact: true }`, loading every field of
+   * every contact's User row — password hash included — to print a name.
+   */
+  async listContacts(userId: string) {
+    return prisma.contact.findMany({
+      where: { userId },
+      select: { handle: true, status: true, contact: { select: { username: true } } },
+    });
+  }
+
+  /**
    * Add a user to the caller's contacts. A4: was a find-then-create in
    * socialCommands — two concurrent adds hit `@@unique([userId,
    * contactUserId])` and the loser surfaced as "Command execution failed";

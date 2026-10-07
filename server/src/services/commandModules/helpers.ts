@@ -191,14 +191,7 @@ export async function refreshComputerSpec(
   const memoryService = context.services.memoryService;
   if (!memoryService) return;
 
-  const owned = await context.db.client.inventoryItem.findMany({
-    where: {
-      userId: context.userId,
-      quantity: { gt: 0 },
-      shopItemId: { in: HARDWARE_ITEM_IDS },
-    },
-    select: { shopItemId: true },
-  });
+  const owned = await context.services.shopService.heldItems(context.userId, HARDWARE_ITEM_IDS);
 
   memoryService.initComputerSpec(
     context.userId,
@@ -219,10 +212,7 @@ export async function spawnBackgroundProcess(
   const memoryService = context.services.memoryService;
   if (!memoryService) return null; // Caller should handle fallback
 
-  const progress = await context.db.client.playerProgress.findUnique({
-    where: { userId: context.userId },
-    select: { [skillKey]: true, level: true } as any,
-  });
+  const progress = await context.playerProgress.get(context.userId);
 
   await refreshComputerSpec(context, progress?.level ?? 1);
 

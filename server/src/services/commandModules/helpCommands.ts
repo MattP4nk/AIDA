@@ -14,7 +14,12 @@ import {
   fullyMeetsSkillRequirement,
 } from "./skillRequirements";
 import { successResult, errorResult } from "./helpers";
+import { getService as resolveService } from "../../di/resolve";
+import { KEY_FRAGMENT_SERVICE } from "../../di/tokens";
+import type { KeyFragmentService } from "../keyFragmentService";
 
+
+const fragments = () => resolveService<KeyFragmentService>(KEY_FRAGMENT_SERVICE);
 export class HelpCommandsModule implements CommandModule {
   public category = "help";
   public commands: Set<string> = new Set(["help", "man", "history", "stats"]);
@@ -81,9 +86,7 @@ export class HelpCommandsModule implements CommandModule {
     const category = command.args?.[0]?.toLowerCase();
 
     // Fetch player progress for skill-based filtering
-    const progress = await context.db.client.playerProgress.findUnique({
-      where: { userId: context.userId },
-    });
+    const progress = await context.playerProgress.get(context.userId);
     const skills: Record<string, unknown> = progress
       ? (progress as unknown as Record<string, unknown>)
       : {};
@@ -95,15 +98,8 @@ export class HelpCommandsModule implements CommandModule {
     );
 
     // Check if player knows about AIDA (has intel reports about AIDA or fragment discoveries)
-    const [aidaIntel, fragmentDiscovery] = await Promise.all([
-      context.db.client.intelligenceReport.count({
-        where: { userId: context.userId, category: "aida" },
-      }).catch(() => 0),
-      context.db.client.keyFragmentDiscovery.count({
-        where: { userId: context.userId },
-      }).catch(() => 0),
-    ]);
-    const knowsAboutAida = aidaIntel > 0 || fragmentDiscovery > 0;
+    // The same rule fragmentCommands gates on (keyFragmentService).
+    const knowsAboutAida = await fragments().hasFragmentAccess(context.userId);
 
     // If no category specified, show only categories
     if (!category) {
@@ -266,9 +262,7 @@ export class HelpCommandsModule implements CommandModule {
     }
 
     // Fetch player progress for skill-based filtering
-    const progress = await context.db.client.playerProgress.findUnique({
-      where: { userId: context.userId },
-    });
+    const progress = await context.playerProgress.get(context.userId);
     const skills: Record<string, unknown> = progress
       ? (progress as unknown as Record<string, unknown>)
       : {};
@@ -513,14 +507,7 @@ export class HelpCommandsModule implements CommandModule {
     }> = [];
 
     // Check discovery level — hide fragment/endgame commands until player discovers them
-    let discoveryLevel = 0;
-    try {
-      const storyProg = await context.db.client.storyProgress.findUnique({
-        where: { userId: context.userId },
-        select: { discoveryLevel: true },
-      });
-      discoveryLevel = storyProg?.discoveryLevel ?? 0;
-    } catch { /* non-critical */ }
+    const discoveryLevel = await fragments().getDiscoveryLevel(context.userId);
 
     const HIDDEN_UNTIL_DISCOVERY = new Set(["fragment", "fragments", "endgame"]);
 

@@ -65,6 +65,16 @@ export class AccountAdminService {
     }
   }
 
+  /** The most recent actions an account TOOK (as actor), newest first. */
+  async auditTrail(actorId: string, limit: number) {
+    return prisma.auditLog.findMany({
+      where: { userId: actorId },
+      orderBy: { timestamp: "desc" },
+      take: limit,
+      select: { action: true, resource: true, timestamp: true, ipAddress: true },
+    });
+  }
+
   /** Change a role and make every cache that holds it agree, immediately. */
   async setRole(targetId: string, newRole: string): Promise<{ oldRole: string }> {
     const before = await prisma.user.findUniqueOrThrow({ where: { id: targetId }, select: { role: true } });

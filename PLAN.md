@@ -3861,9 +3861,13 @@ Write them per-refactor, immediately before touching the code:
       - [ ] **Still open:** `EventSubscription` (near-identical — shared has `id`+`isActive`, local
         has `createdAt`) and `MissionObjective` (shared `progress`/`required` vs local `current` —
         a genuine divergence that is serialized to clients, so it belongs with A3).
-- [ ] **A4** Decompose `CommandContext`: per-module interfaces instead of 26 services + raw
+- [~] **A4** Decompose `CommandContext`: per-module interfaces instead of 26 services + raw
       Prisma handed to every command. Remove `db.client` from `CommandContext` and migrate the
       **170 direct Prisma calls** in command modules onto services.
+      **2026-10-07: the Prisma half is DONE** — writes (below) and reads (below); `db` is gone from
+      `CommandContext`. Still open: the "26 services" half (per-module interfaces). Modules now
+      resolve what they need through `di/resolve` accessors, which is the direction, but
+      `context.services` still exists.
 - [x] **A4 (partial) DONE 2026-09-24 — the 60s DI cache is deleted.** Both halves of the claim
       held. It bought **nothing**: every token it cached resolves to a tsyringe singleton, so it
       replaced one registry lookup with a Map lookup plus a timestamp compare. And it cost
@@ -3942,6 +3946,44 @@ Write them per-refactor, immediately before touching the code:
            nowhere). Build an accept flow, or stop printing the status?
         6. Session TTL vs JWT_EXPIRES_IN; logout sets `isOnline=false` despite other live
            sessions; in-game vs panel role policy differ (in game an admin cannot create admins).
+- [x] **A4 part 2, READS — DONE 2026-10-07. 133 `db.client` handles in commandModules → 0, and
+      `db` removed from `CommandContext`** (the compiler now refuses `context.db`; the ratchet in
+      `verify-a4-command-writes.ts` guards the one thing it cannot — a module importing a client
+      directly). New: `UserRepository` (fixed field set, never the password hash),
+      `PlayerProgressRepository.get/getMany`, and narrow reads on the owning services. Defects:
+      - **Username case.** By-name lookups disagreed (exact in admin/contacts/msg/mail,
+        case-insensitive `findFirst` in fragment give/tap/alias) while registration let "Bob" and
+        "bob" coexist — a case-insensitive `findFirst` then picks one arbitrarily (`fragment give
+        bob` → Bob). Registration now refuses a case-insensitive duplicate (0 exist today); one
+        lookup, `findByUsername`, case-insensitive. Side fix: `msg aida …` was refused as "user not
+        found" by the exact lookup before the (case-insensitive) persona routing could run. Email
+        was never a gap: the route `normalizeEmail()`s it.
+      - **`hack <name>` picked a random server.** Names are not unique (dev world: "Pinnacle
+        Financial" ×41; homes are named after players). `serverService.resolveByIpOrName` refuses an
+        ambiguous name and asks for the IP.
+      - **`share_intel server <id>` leaked any server** (name, IP, security level, owner) into
+        faction knowledge; the file branch had been limited (S10), this one never was. Now gated on
+        `networkTopologyService.playerKnowsServer` (moved out of networkCommands, where it was
+        private to `tap`).
+      - **Relative paths ignored `cd`** in six commands (`crack`, `crack.protected`, `crack.storm`,
+        `collar.shield`, `fragment.crack`, `sweep`): they read
+        `session.terminals[0].currentDirectory`, which `cd` never writes (see the R12 note in
+        `helpers.getSessionContext`). Now `session.currentDirectory`.
+      - **`who`** read "current server" from the newest connection row instead of the session.
+      - **`contact list`** loaded every contact's full User row (password hash included) to print
+        a name → `chatService.listContacts` selects the username.
+      - **Fragment visibility gate** counted with `.catch(() => 0)`: a DB failure read as "Command
+        not found" → `keyFragmentService.hasFragmentAccess`, failures propagate. `help` uses it too.
+      - Three skill reads had once selected too few fields, so a gate read a missing skill and
+        silently passed (comments in hackCommands); a full-row `get` makes that unrepresentable.
+      - Harnesses: `verify-a4-intel.ts` (share_intel, report-file scoping, who, registration case),
+        relative-path check in `verify-a4-hack-writes.ts`; every fix negative-controlled.
+        `verify-event-subscriptions.ts` ES-10 asserted the tap gate by regex on networkCommands'
+        source; with the rule moved it is now tested BEHAVIOURALLY against the service (ownership,
+        no-link, DiscoveredLink — each negative-controlled), call sites kept as labelled structural.
+      - **OPEN Q7: which rule reveals the fragment commands?** The commands and `help <category>`
+        use "has AIDA intel or a fragment discovery"; the full command listing in `help` hides them
+        until `discoveryLevel >= 3`. Two rules for one question — pick one.
       - **Found in passing, NOT fixed (named so it is not lost):** `prisma/npcOwnership.ts` merges a
         duplicate NPC by moving servers, sent messages and forum memberships, then `user.delete`.
         Five required User FKs have no `onDelete` and so default to RESTRICT — `Contact.contact`

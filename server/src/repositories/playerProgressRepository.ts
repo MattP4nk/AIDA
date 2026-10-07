@@ -35,7 +35,7 @@
  */
 import { inject, injectable } from "tsyringe";
 import { EventEmitter } from "events";
-import { Prisma, PrismaClient } from "@prisma/client";
+import { Prisma, PrismaClient, type PlayerProgress } from "@prisma/client";
 import { Logger } from "pino";
 import { LOGGER, PRISMA_CLIENT } from "../di/tokens";
 
@@ -153,6 +153,18 @@ export class PlayerProgressRepository extends EventEmitter {
   private announce(change: ProgressChange, tx?: PrismaLike): void {
     if (tx) return;
     this.emit("progress:changed", change);
+  }
+
+  // ── READS ─────────────────────────────────────────────────────────────
+
+  /** The player's progress row (skills, level, credits, home defenses). */
+  public async get(userId: string): Promise<PlayerProgress | null> {
+    return this.prisma.playerProgress.findUnique({ where: { userId } });
+  }
+
+  public async getMany(userIds: string[]): Promise<PlayerProgress[]> {
+    if (userIds.length === 0) return [];
+    return this.prisma.playerProgress.findMany({ where: { userId: { in: userIds } } });
   }
 
   // ── CREDITS ───────────────────────────────────────────────────────────

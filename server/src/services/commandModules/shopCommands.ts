@@ -248,9 +248,7 @@ export class ShopCommandsModule implements CommandModule {
     context: CommandContext,
   ): Promise<CommandResult> {
     const shopService = context.services.shopService;
-    const progress = await context.db.client.playerProgress.findUnique({
-      where: { userId: context.userId },
-    });
+    const progress = await context.playerProgress.get(context.userId);
 
     if (!progress) {
       return errorResult("Player progress not found");

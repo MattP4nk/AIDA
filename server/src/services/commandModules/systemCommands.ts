@@ -11,7 +11,12 @@ import {
 } from "./helpers";
 import { VAULT_PAYLOAD_FILENAME, AIDA_FILE_PREFIX } from "../../config/gameBalance";
 import { redactSensitiveContent } from "../../utils/contentRedaction";
+import { getService as resolveService } from "../../di/resolve";
+import { USER_REPOSITORY } from "../../di/tokens";
+import type { UserRepository } from "../../repositories/userRepository";
 
+
+const users = () => resolveService<UserRepository>(USER_REPOSITORY);
 export class SystemCommandsModule implements CommandModule {
   public category = "system";
   public commands: Set<string> = new Set([
@@ -314,10 +319,7 @@ export class SystemCommandsModule implements CommandModule {
         if (!isHomeServer) {
           return errorResult("cd: no home directory on this host");
         }
-        const user = await context.db.client.user.findUnique({
-          where: { id: context.userId },
-          select: { username: true },
-        });
+        const user = await users().findById(context.userId);
         if (!user?.username) {
           return errorResult("cd: could not resolve home directory");
         }
@@ -412,10 +414,7 @@ export class SystemCommandsModule implements CommandModule {
         // Get player's crypto skill for partial reveals
         let cryptoSkill = 0;
         try {
-          const progress = await context.db.client.playerProgress.findUnique({
-            where: { userId: context.userId },
-            select: { cryptography: true },
-          });
+          const progress = await context.playerProgress.get(context.userId);
           cryptoSkill = progress?.cryptography ?? 0;
         } catch { /* non-critical */ }
 

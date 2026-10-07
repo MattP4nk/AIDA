@@ -35,6 +35,7 @@ import ForumService from "../services/forumService";
 import { AuthService } from "../services/authService";
 import { AccountAdminService } from "../services/accountAdminService";
 import { BountyService } from "../services/bountyService";
+import { UserRepository } from "../repositories/userRepository";
 import { ForumAccessService } from "../services/forumAccessService";
 import { ForumModerationService } from "../services/forumModerationService";
 import { ForumContentService } from "../services/forumContentService";
@@ -98,6 +99,7 @@ export function setupContainer(
     TOKENS.PLAYER_PROGRESS_REPOSITORY,
     PlayerProgressRepository,
   );
+  container.registerSingleton(TOKENS.USER_REPOSITORY, UserRepository);
   container.registerSingleton(
     TOKENS.PLAYER_MISSION_REPOSITORY,
     PlayerMissionRepository,

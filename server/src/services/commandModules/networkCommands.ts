@@ -28,6 +28,15 @@ import {
   sBoxRow,
   sBoxBottom,
 } from "./asciiBox";
+import { getService as resolveService } from "../../di/resolve";
+import { NETWORK_TOPOLOGY_SERVICE, SERVER_SERVICE, USER_REPOSITORY } from "../../di/tokens";
+import type ServerService from "../serverService";
+import type NetworkTopologyService from "../networkTopologyService";
+import type { UserRepository } from "../../repositories/userRepository";
+
+const servers = () => resolveService<ServerService>(SERVER_SERVICE);
+const users = () => resolveService<UserRepository>(USER_REPOSITORY);
+const topology = () => resolveService<NetworkTopologyService>(NETWORK_TOPOLOGY_SERVICE);
 
 export class NetworkCommandsModule implements CommandModule {
   public category = "network";
@@ -113,82 +122,27 @@ export class NetworkCommandsModule implements CommandModule {
     if (!q) return null;
 
     if (validateIPAddress(q)) {
-      const server = await context.db.client.gameServer.findFirst({
-        where: { ipAddress: q },
-        select: { id: true, name: true, ipAddress: true, ownerId: true },
-      });
+      const server = await servers().findBasicByIp(q);
       if (!server) return null;
-      if (!(await this.playerKnowsServer(context, server.id, server.ownerId))) return null;
+      if (!(await topology().playerKnowsServer(context.userId, server.id, server.ownerId))) return null;
       return { id: server.id, kind: "server", label: `${server.name} (${server.ipAddress})` };
     }
 
-    const faction = await context.db.client.faction.findFirst({
-      where: {
-        OR: [
-          { name: { equals: q, mode: "insensitive" } },
-          { shortName: { equals: q, mode: "insensitive" } },
-        ],
-      },
-      select: { id: true, name: true },
-    });
+    const faction = await context.services.factionService.getFactionByName(q);
     if (faction) return { id: faction.id, kind: "faction", label: faction.name };
 
-    const user = await context.db.client.user.findFirst({
-      where: { username: { equals: q, mode: "insensitive" } },
-      select: { id: true, username: true, homeServerId: true },
-    });
+    const user = await users().findByUsername(q);
     if (user) {
       // You may only tap a player you have actually FOUND on the net. Without
       // this, a username — which the leaderboard hands out — was enough to
       // surveil anyone.
       if (user.id === context.userId) return { id: user.id, kind: "player", label: user.username };
       if (!user.homeServerId) return null;
-      if (!(await this.playerKnowsServer(context, user.homeServerId, user.id))) return null;
+      if (!(await topology().playerKnowsServer(context.userId, user.homeServerId, user.id))) return null;
       return { id: user.id, kind: "player", label: user.username };
     }
 
     return null;
-  }
-
-  /**
-   * Has this player discovered that server?
-   *
-   * REVIEW 2026-09-25: `tap` applied NO access check at all. A bare
-   * `findFirst({ where: { ipAddress } })` meant any player could tap any home
-   * server by IP — including one they had never scanned — and receive its
-   * honeypot alerts, which carry the decoy filename and the raw `attackerId`
-   * of whoever tripped it. That turned a surveillance item into a way to read
-   * other players' PvP and to learn which files are decoys before attacking.
-   *
-   * "Known" is the same notion `netmap` uses: a `DiscoveredLink` naming the
-   * server on either end, or owning it outright. Factions are deliberately NOT
-   * gated — they are public entities and their events are world news.
-   *
-   * Both discovery commands qualify — `scan` and `traceroute` — and that is
-   * correct rather than a hole: review #2 filed traceroute as a bypass, but it
-   * costs networking 15, a live connection, a resource check and a real
-   * topological route. What WAS wrong is that traceroute applied none of the
-   * visibility rules scan applies; `canDiscoverLink` is now the single
-   * predicate both obey (see verify-discovery-rules.ts).
-   *
-   * This gate is no longer load-bearing for confidentiality either way: a
-   * watcher receives a per-event SUMMARY, not the record, so a tap on a server
-   * you have merely seen cannot leak its owner's decoy filenames.
-   */
-  private async playerKnowsServer(
-    context: CommandContext,
-    serverId: string,
-    ownerId: string | null,
-  ): Promise<boolean> {
-    if (ownerId && ownerId === context.userId) return true;
-    const known = await context.db.client.discoveredLink.findFirst({
-      where: {
-        userId: context.userId,
-        link: { OR: [{ sourceId: serverId }, { targetId: serverId }] },
-      },
-      select: { id: true },
-    });
-    return known !== null;
   }
 
   private async handleTap(
@@ -250,9 +204,7 @@ export class NetworkCommandsModule implements CommandModule {
     // quantum tap because it happened to be first in the inventory is the
     // kind of silent loss a player only notices afterwards.
     const tapIds = Object.keys(TAP_ITEMS);
-    const held = await context.db.client.inventoryItem.findMany({
-      where: { userId: context.userId, shopItemId: { in: tapIds }, quantity: { gt: 0 } },
-    });
+    const held = await context.services.shopService.heldItems(context.userId, tapIds);
     if (held.length === 0) {
       return errorResult(
         "No network tap in inventory.",
@@ -367,9 +319,9 @@ export class NetworkCommandsModule implements CommandModule {
   ): Promise<string> {
     if (!targetId) return "(everything)";
     const [server, faction, user] = await Promise.all([
-      context.db.client.gameServer.findUnique({ where: { id: targetId }, select: { name: true, ipAddress: true } }),
-      context.db.client.faction.findUnique({ where: { id: targetId }, select: { name: true } }),
-      context.db.client.user.findUnique({ where: { id: targetId }, select: { username: true } }),
+      servers().findBasicById(targetId),
+      context.services.factionService.getFactionById(targetId),
+      users().findById(targetId),
     ]);
     if (server) return `${server.name} (${server.ipAddress})`;
     if (faction) return `${faction.name} [faction]`;
@@ -485,10 +437,7 @@ export class NetworkCommandsModule implements CommandModule {
       return errorResult("Not connected to any server. Use 'connect home' first.");
     }
 
-    const progress = await context.db.client.playerProgress.findUnique({
-      where: { userId: context.userId },
-      select: { networking: true, level: true },
-    });
+    const progress = await context.playerProgress.get(context.userId);
     const scanLevel = progress?.networking ?? 1;
 
     // ── Resource check: spawn scan as a background process ──
@@ -607,10 +556,7 @@ export class NetworkCommandsModule implements CommandModule {
     const memoryService = context.services.memoryService;
     const session = context.gameStateManager.getSession(context.userId);
 
-    const progress = await context.db.client.playerProgress.findUnique({
-      where: { userId: context.userId },
-      select: { networking: true, level: true },
-    });
+    const progress = await context.playerProgress.get(context.userId);
     const scanLevel = progress?.networking ?? 1;
 
     // ── Resource check: spawn as a background process if available ──
@@ -880,10 +826,7 @@ export class NetworkCommandsModule implements CommandModule {
       }
 
       // ── 2. Owned servers (non-home) ──
-      const ownedServers = await context.db.client.gameServer.findMany({
-        where: { ownerId: context.userId, isPlayerHome: false },
-        orderBy: { name: "asc" },
-      });
+      const ownedServers = await servers().listOwnedNonHome(context.userId);
 
       if (ownedServers.length > 0) {
         lines.push(boxDivider(W));
@@ -1103,10 +1046,7 @@ export class NetworkCommandsModule implements CommandModule {
       }
 
       // Check if this is a first visit
-      const previousConn = await context.db.client.serverConnection.findFirst({
-        where: { userId: context.userId, serverId: targetServer.id },
-      });
-      const isFirstVisit = !previousConn;
+      const isFirstVisit = !(await servers().hasVisited(context.userId, targetServer.id));
 
       // Check for active backdoor on this server (bypasses challenge on revisit)
       let hasBackdoorOnServer = false;
@@ -1121,18 +1061,12 @@ export class NetworkCommandsModule implements CommandModule {
 
       if (check.needed) {
         // Get player networking skill
-        const prog = await context.db.client.playerProgress.findUnique({
-          where: { userId: context.userId },
-          select: { networking: true },
-        });
+        const prog = await context.playerProgress.get(context.userId);
 
         // Get network zone for challenge type selection
         let networkZone: string | null = null;
         if (targetServer.networkId) {
-          const net = await context.db.client.network.findUnique({
-            where: { id: targetServer.networkId },
-            select: { zone: true },
-          });
+          const net = await topology().getNetworkInfo(targetServer.networkId);
           networkZone = net?.zone ?? null;
         }
 
@@ -1236,10 +1170,7 @@ export class NetworkCommandsModule implements CommandModule {
 
       const serverRole = (targetServer as any).role || "general";
       const network = targetServer.networkId
-        ? await context.db.client.network.findUnique({
-            where: { id: targetServer.networkId },
-            select: { name: true },
-          })
+        ? await topology().getNetworkInfo(targetServer.networkId)
         : null;
 
       const infoRows: Array<{ label: string; value: string }> = [
@@ -1295,10 +1226,7 @@ export class NetworkCommandsModule implements CommandModule {
       );
 
       // Get home info for client context update
-      const user = await context.db.client.user.findUnique({
-        where: { id: context.userId },
-        select: { homeIp: true },
-      });
+      const user = await users().findById(context.userId);
 
       return {
         success: true,
@@ -1443,10 +1371,7 @@ export class NetworkCommandsModule implements CommandModule {
 
     // Network info
     if (server.networkId) {
-      const network = await context.db.client.network.findUnique({
-        where: { id: server.networkId },
-        select: { name: true, zone: true },
-      });
+      const network = await topology().getNetworkInfo(server.networkId);
       if (network) {
         probeRows.push({ label: "Network:     ", value: network.name });
         probeRows.push({ label: "Zone:        ", value: network.zone });
@@ -1461,10 +1386,7 @@ export class NetworkCommandsModule implements CommandModule {
         value: `${adjacent.length} connections`,
       });
 
-      const progress = await context.db.client.playerProgress.findUnique({
-        where: { userId: context.userId },
-        select: { networking: true },
-      });
+      const progress = await context.playerProgress.get(context.userId);
 
       // Show linked server names if networking >= 30
       if ((progress?.networking ?? 0) >= 30 && adjacent.length > 0) {
@@ -1520,10 +1442,7 @@ export class NetworkCommandsModule implements CommandModule {
     // ── Spawn as background process ──
     const memoryService = context.services.memoryService;
     if (memoryService && topoService) {
-      const progress = await context.db.client.playerProgress.findUnique({
-        where: { userId: context.userId },
-        select: { networking: true, level: true },
-      });
+      const progress = await context.playerProgress.get(context.userId);
       await refreshComputerSpec(context, progress?.level ?? 1);
 
       const check = memoryService.canSpawnProcess(context.userId, "traceroute");
@@ -1543,7 +1462,6 @@ export class NetworkCommandsModule implements CommandModule {
         targetSrv.id,
         async () => {
           const output = await this.executeTraceroute(
-            context,
             topoService,
             curServerId,
             targetSrv,
@@ -1570,7 +1488,6 @@ export class NetworkCommandsModule implements CommandModule {
     // Use real topology path if available (no process system — direct execution)
     if (topoService) {
       const output = await this.executeTraceroute(
-        context,
         topoService,
         currentServerId,
         targetServer,
@@ -1584,7 +1501,6 @@ export class NetworkCommandsModule implements CommandModule {
   }
 
   private async executeTraceroute(
-    context: CommandContext,
     topoService: any,
     currentServerId: string,
     targetServer: { id: string; name: string; ipAddress: string },
@@ -1598,25 +1514,9 @@ export class NetworkCommandsModule implements CommandModule {
 
     await topoService.discoverPath(userId, path);
 
-    const discoveredLinks = await context.db.client.discoveredLink.findMany({
-      where: { userId },
-      select: { linkId: true },
-    });
-    const discoveredLinkIds = new Set(
-      discoveredLinks.map((d: any) => d.linkId),
-    );
-
-    const knownServerIds = new Set<string>();
+    const knownServerIds = await topology().knownServerIds(userId);
     knownServerIds.add(currentServerId);
     knownServerIds.add(targetServer.id);
-    const allLinks = await context.db.client.serverLink.findMany({
-      where: { id: { in: [...discoveredLinkIds] } },
-      select: { sourceId: true, targetId: true },
-    });
-    for (const l of allLinks) {
-      knownServerIds.add(l.sourceId);
-      knownServerIds.add(l.targetId);
-    }
 
     const columns: Column[] = [
       { header: "HOP", width: 4, align: "right" },
@@ -1845,9 +1745,7 @@ export class NetworkCommandsModule implements CommandModule {
 
       if (result.correct) {
         // Challenge passed — complete the connection
-        const targetServer = await context.db.client.gameServer.findUnique({
-          where: { id: session.targetServerId },
-        });
+        const targetServer = await servers().findById(session.targetServerId);
         if (!targetServer) {
           return { success: false, output: "Target server no longer exists.", data: { connectionResolved: true }, timestamp: new Date() };
         }

@@ -260,6 +260,80 @@ class ServerService {
    * @param serverId - Server ID
    * @returns Server details
    */
+  /** Id, name, owner and IP of the server at an address — no state, no cache. */
+  public async findBasicByIp(ipAddress: string) {
+    return this.prisma.gameServer.findUnique({
+      where: { ipAddress },
+      select: { id: true, name: true, ownerId: true, ipAddress: true },
+    });
+  }
+
+  /**
+   * A server by IP, or by NAME when that name is unambiguous.
+   *
+   * A4: `hack`-family commands resolved `{ OR: [ip, name] }` with findFirst.
+   * Names are not unique — the dev world has "Pinnacle Financial" 41 times,
+   * and a player's home is named after them — so a name picked one of many
+   * at random. An ambiguous name is now refused with a pointer to the IP.
+   */
+  public async resolveByIpOrName(
+    identifier: string,
+  ): Promise<{ server: { id: string; name: string; ownerId: string | null; ipAddress: string } } | { ambiguous: number } | null> {
+    const byIp = await this.findBasicByIp(identifier);
+    if (byIp) return { server: byIp };
+    const byName = await this.prisma.gameServer.findMany({
+      where: { name: identifier },
+      select: { id: true, name: true, ownerId: true, ipAddress: true },
+      take: 2,
+    });
+    if (byName.length === 1 && byName[0]) return { server: byName[0] };
+    if (byName.length > 1) return { ambiguous: await this.prisma.gameServer.count({ where: { name: identifier } }) };
+    return null;
+  }
+
+  /** The raw row, uncached — for code that must see the current state. */
+  public async findById(id: string) {
+    return this.prisma.gameServer.findUnique({ where: { id } });
+  }
+
+  public async findBasicById(id: string) {
+    return this.prisma.gameServer.findUnique({
+      where: { id },
+      select: { id: true, name: true, ownerId: true, ipAddress: true },
+    });
+  }
+
+  /** Servers the player owns, other than their home. */
+  public async listOwnedNonHome(userId: string) {
+    return this.prisma.gameServer.findMany({ where: { ownerId: userId, isPlayerHome: false }, orderBy: { name: "asc" } });
+  }
+
+  /** The player's live connection row on a server, with the server. */
+  public async activeConnection(userId: string, serverId: string) {
+    return this.prisma.serverConnection.findFirst({
+      where: { userId, serverId, isActive: true },
+      include: { server: true },
+      orderBy: { connectedAt: "desc" },
+    });
+  }
+
+  /** Has the player ever connected to this server? */
+  public async hasVisited(userId: string, serverId: string): Promise<boolean> {
+    return (await this.prisma.serverConnection.findFirst({ where: { userId, serverId }, select: { id: true } })) !== null;
+  }
+
+  /** Every server, by name — the `admin servers` overview. */
+  public async listForAdmin(limit: number) {
+    return this.prisma.gameServer.findMany({
+      select: {
+        id: true, name: true, ipAddress: true, type: true, isOnline: true,
+        currentConnections: true, maxConnections: true, resourceType: true,
+      },
+      orderBy: { name: "asc" },
+      take: limit,
+    });
+  }
+
   public async getServer(serverId: string): Promise<ServerDetails | null> {
     return (await safeExecute({
       fn: async () => {

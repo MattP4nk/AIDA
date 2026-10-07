@@ -95,10 +95,7 @@ export class ProcessCommandsModule implements CommandModule {
    * Reload the player's rig from level + installed hardware before a readout.
    */
   private async refreshSpec(context: CommandContext): Promise<void> {
-    const progress = await context.db.client.playerProgress.findUnique({
-      where: { userId: context.userId },
-      select: { level: true },
-    });
+    const progress = await context.playerProgress.get(context.userId);
     await refreshComputerSpec(context, progress?.level ?? 1);
   }
 
@@ -110,14 +107,7 @@ export class ProcessCommandsModule implements CommandModule {
       return errorResult("Resource system unavailable.");
     }
 
-    const owned = await context.db.client.inventoryItem.findMany({
-      where: {
-        userId: context.userId,
-        quantity: { gt: 0 },
-        shopItemId: { in: Object.keys(HARDWARE_SPECS) },
-      },
-      select: { shopItemId: true },
-    });
+    const owned = await context.services.shopService.heldItems(context.userId, Object.keys(HARDWARE_SPECS));
     const { installed } = resolveInstalledHardware(
       owned.map((r) => r.shopItemId),
     );

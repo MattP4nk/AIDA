@@ -52,7 +52,6 @@ async function main() {
     const { saveDownload } = await import("../src/services/commandModules/fileCommands");
     const fileService = getService<any>(TOKENS.FILE_SERVICE);
     const context: any = {
-      db: { client: prisma },
       fileService,
       services: { networkTopologyService: getService<any>(TOKENS.NETWORK_TOPOLOGY_SERVICE) },
     };

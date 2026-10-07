@@ -95,6 +95,11 @@ export class FactionService extends EventEmitter {
     });
   }
 
+  public async getFactionsByIds(ids: string[]): Promise<Faction[]> {
+    if (ids.length === 0) return [];
+    return this.prisma.faction.findMany({ where: { id: { in: ids } } });
+  }
+
   /** Case-insensitive search by name or shortName. */
   public async getFactionByName(name: string): Promise<Faction | null> {
     return this.prisma.faction.findFirst({

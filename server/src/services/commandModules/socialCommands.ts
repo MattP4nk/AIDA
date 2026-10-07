@@ -23,9 +23,12 @@ import {
   resolvePersonaName,
   shouldRequireToken,
 } from "../../utils/tokenConsumption";
+import { USER_REPOSITORY } from "../../di/tokens";
+import type { UserRepository } from "../../repositories/userRepository";
 
 
 const chat = () => getService<ChatService>(CHAT_SERVICE);
+const users = () => getService<UserRepository>(USER_REPOSITORY);
 export class SocialCommandsModule implements CommandModule {
   public category = "social";
   public commands: Set<string> = new Set([
@@ -159,10 +162,9 @@ export class SocialCommandsModule implements CommandModule {
 
     const sanitizedContent = sanitizeMessageContent(content);
 
-    const { db } = context;
-    const recipient = await db.client.user.findFirst({
-      where: { username: recipientUsername },
-    });
+    // Case-insensitive, as persona detection below already was: an exact
+    // match refused `msg aida …` before persona routing could run.
+    const recipient = await users().findByUsername(recipientUsername);
 
     if (!recipient) {
       return errorResult(`User '${recipientUsername}' not found`);
@@ -175,7 +177,6 @@ export class SocialCommandsModule implements CommandModule {
     // in an active tutorial with The Architect, require a token.
     if (isAIPersonaUsername(recipientUsername)) {
       const requiresToken = await shouldRequireToken(
-        db.client,
         userId,
         recipientUsername,
       );
@@ -355,10 +356,7 @@ export class SocialCommandsModule implements CommandModule {
     const sanitizedContent = sanitizeMessageContent(content);
     const sanitizedSubject = sanitizeMessageContent(subject);
 
-    const { db } = context;
-    const recipient = await db.client.user.findFirst({
-      where: { username: recipientUsername },
-    });
+    const recipient = await users().findByUsername(recipientUsername);
 
     if (!recipient) {
       return errorResult(`User '${recipientUsername}' not found`);
@@ -369,7 +367,6 @@ export class SocialCommandsModule implements CommandModule {
     // ── AI Persona token-gated routing ──────────────────────────
     if (isAIPersonaUsername(recipientUsername)) {
       const requiresToken = await shouldRequireToken(
-        db.client,
         userId,
         recipientUsername,
       );
@@ -454,22 +451,19 @@ export class SocialCommandsModule implements CommandModule {
     command: Command,
     context: CommandContext,
   ): Promise<CommandResult> {
-    const { userId, db } = context;
+    const { userId } = context;
     const action = command.args[0]?.toLowerCase() || "list";
     const targetUsername = command.args[1];
 
     if (action === "list") {
-      const contacts = await db.client.contact.findMany({
-        where: { userId },
-        include: { contact: true },
-      });
+      const contacts = await chat().listContacts(userId);
 
       if (contacts.length === 0) {
         return successResult("No contacts found.");
       }
 
       const items = contacts.map(
-        (c: any) => `${c.contact?.username || c.handle} (${c.status})`,
+        (c) => `${c.contact?.username || c.handle} (${c.status})`,
       );
       return {
         success: true,

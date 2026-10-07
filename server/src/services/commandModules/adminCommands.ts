@@ -2,10 +2,13 @@ import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext, CommandInfo } from "./interface";
 import { successResult, errorResult } from "./helpers";
 import { getService } from "../../di/resolve";
-import { ACCOUNT_ADMIN_SERVICE } from "../../di/tokens";
+import { ACCOUNT_ADMIN_SERVICE, SERVER_SERVICE, USER_REPOSITORY } from "../../di/tokens";
+import type { UserRepository } from "../../repositories/userRepository";
+import type ServerService from "../serverService";
 import type { AccountAdminService } from "../accountAdminService";
 
 const accounts = () => getService<AccountAdminService>(ACCOUNT_ADMIN_SERVICE);
+const users = () => getService<UserRepository>(USER_REPOSITORY);
 
 const ROLE_HIERARCHY: Record<string, number> = {
   player: 0,
@@ -80,7 +83,7 @@ export class AdminCommandsModule implements CommandModule {
       case "whois":
         return this.handleWhois(command, context);
       case "audit":
-        return this.handleAudit(command, context);
+        return this.handleAudit(command);
       case "kick":
         return this.handleKick(command, context);
       case "mute":
@@ -98,7 +101,7 @@ export class AdminCommandsModule implements CommandModule {
       case "cleanup":
         return this.handleCleanup(context);
       case "servers":
-        return this.handleServers(context);
+        return this.handleServers();
       case "resetpw":
         return this.handleResetPassword(command, context);
       case "reports":
@@ -122,10 +125,7 @@ export class AdminCommandsModule implements CommandModule {
     const rss = Math.round(mem.rss / 1024 / 1024);
     const heap = Math.round(mem.heapUsed / 1024 / 1024);
 
-    const userCount = await context.db.client.user.count();
-    const activeUsers = await context.db.client.user.count({
-      where: { isActive: true },
-    });
+    const { total: userCount, active: activeUsers } = await users().counts();
 
     const w = 44;
     const lines = [
@@ -162,17 +162,11 @@ export class AdminCommandsModule implements CommandModule {
 
     // Fetch usernames and roles for all online users
     const userIds = stats.sessions.map((s) => s.userId);
-    const users = await context.db.client.user.findMany({
-      where: { id: { in: userIds } },
-      select: { id: true, username: true, role: true },
-    });
-    const userMap = new Map(users.map((u) => [u.id, u]));
+    const online = await users().findManyByIds(userIds);
+    const userMap = new Map(online.map((u) => [u.id, u]));
 
     // Fetch levels
-    const progress = await context.db.client.playerProgress.findMany({
-      where: { userId: { in: userIds } },
-      select: { userId: true, level: true },
-    });
+    const progress = await context.playerProgress.getMany(userIds);
     const levelMap = new Map(progress.map((p) => [p.userId, p.level]));
 
     const header = `┌${"─".repeat(16)}┬${"─".repeat(7)}┬${"─".repeat(18)}┬${"─".repeat(8)}┬${"─".repeat(10)}┐`;
@@ -212,45 +206,15 @@ export class AdminCommandsModule implements CommandModule {
       return errorResult("Usage: admin whois <username>");
     }
 
-    const user = await context.db.client.user.findUnique({
-      where: { username: target },
-      select: {
-        id: true,
-        username: true,
-        email: true,
-        homeIp: true,
-        role: true,
-        isActive: true,
-        isOnline: true,
-        createdAt: true,
-        lastLogin: true,
-        mutedUntil: true,
-      },
-    });
+    const user = await users().findByUsername(target);
 
     if (!user) {
       return errorResult(`User '${target}' not found.`);
     }
 
-    const progress = await context.db.client.playerProgress.findUnique({
-      where: { userId: user.id },
-      select: {
-        level: true,
-        experience: true,
-        credits: true,
-        hacking: true,
-        networking: true,
-        cryptography: true,
-        stealth: true,
-        socialEng: true,
-        forensics: true,
-      },
-    });
+    const progress = await context.playerProgress.get(user.id);
 
-    const faction = await context.db.client.factionMember.findFirst({
-      where: { userId: user.id },
-      include: { faction: { select: { name: true } } },
-    });
+    const faction = await context.services.factionService.getUserFaction(user.id);
 
     const w = 44;
     const lines = [
@@ -311,10 +275,7 @@ export class AdminCommandsModule implements CommandModule {
     return successResult(lines.join("\n"));
   }
 
-  private async handleAudit(
-    command: Command,
-    context: CommandContext,
-  ): Promise<CommandResult> {
+  private async handleAudit(command: Command): Promise<CommandResult> {
     const target = command.args[1];
     if (!target) {
       return errorResult("Usage: admin audit <username> [limit]");
@@ -322,26 +283,13 @@ export class AdminCommandsModule implements CommandModule {
 
     const limit = Math.min(parseInt(command.args[2] ?? "10") || 10, 50);
 
-    const user = await context.db.client.user.findUnique({
-      where: { username: target },
-      select: { id: true },
-    });
+    const user = await users().findByUsername(target);
 
     if (!user) {
       return errorResult(`User '${target}' not found.`);
     }
 
-    const logs = await context.db.client.auditLog.findMany({
-      where: { userId: user.id },
-      orderBy: { timestamp: "desc" },
-      take: limit,
-      select: {
-        action: true,
-        resource: true,
-        timestamp: true,
-        ipAddress: true,
-      },
-    });
+    const logs = await accounts().auditTrail(user.id, limit);
 
     if (logs.length === 0) {
       return successResult(`No audit log entries for '${target}'.`);
@@ -367,10 +315,7 @@ export class AdminCommandsModule implements CommandModule {
       return errorResult("Usage: admin kick <username> [reason]");
     }
 
-    const user = await context.db.client.user.findUnique({
-      where: { username: target },
-      select: { id: true, role: true },
-    });
+    const user = await users().findByUsername(target);
 
     if (!user) {
       return errorResult(`User '${target}' not found.`);
@@ -416,10 +361,7 @@ export class AdminCommandsModule implements CommandModule {
       return errorResult("Usage: admin mute <username> <minutes>");
     }
 
-    const user = await context.db.client.user.findUnique({
-      where: { username: target },
-      select: { id: true, role: true },
-    });
+    const user = await users().findByUsername(target);
 
     if (!user) {
       return errorResult(`User '${target}' not found.`);
@@ -449,10 +391,7 @@ export class AdminCommandsModule implements CommandModule {
       return errorResult("Usage: admin unmute <username>");
     }
 
-    const user = await context.db.client.user.findUnique({
-      where: { username: target },
-      select: { id: true },
-    });
+    const user = await users().findByUsername(target);
 
     if (!user) {
       return errorResult(`User '${target}' not found.`);
@@ -478,10 +417,7 @@ export class AdminCommandsModule implements CommandModule {
       return errorResult("Usage: admin ban <username> [reason]");
     }
 
-    const user = await context.db.client.user.findUnique({
-      where: { username: target },
-      select: { id: true, role: true, isActive: true },
-    });
+    const user = await users().findByUsername(target);
 
     if (!user) {
       return errorResult(`User '${target}' not found.`);
@@ -518,10 +454,7 @@ export class AdminCommandsModule implements CommandModule {
       return errorResult("Usage: admin unban <username>");
     }
 
-    const user = await context.db.client.user.findUnique({
-      where: { username: target },
-      select: { id: true, isActive: true },
-    });
+    const user = await users().findByUsername(target);
 
     if (!user) {
       return errorResult(`User '${target}' not found.`);
@@ -553,10 +486,7 @@ export class AdminCommandsModule implements CommandModule {
       return errorResult("Invalid role. Must be: player, moderator, or admin");
     }
 
-    const user = await context.db.client.user.findUnique({
-      where: { username: target },
-      select: { id: true, role: true, username: true },
-    });
+    const user = await users().findByUsername(target);
 
     if (!user) {
       return errorResult(`User '${target}' not found.`);
@@ -622,21 +552,8 @@ export class AdminCommandsModule implements CommandModule {
     return successResult(`Cleaned up ${count} idle session(s).`);
   }
 
-  private async handleServers(context: CommandContext): Promise<CommandResult> {
-    const servers = await context.db.client.gameServer.findMany({
-      select: {
-        id: true,
-        name: true,
-        ipAddress: true,
-        type: true,
-        isOnline: true,
-        currentConnections: true,
-        maxConnections: true,
-        resourceType: true,
-      },
-      orderBy: { name: "asc" },
-      take: 50,
-    });
+  private async handleServers(): Promise<CommandResult> {
+    const servers = await getService<ServerService>(SERVER_SERVICE).listForAdmin(50);
 
     if (servers.length === 0) {
       return successResult("No game servers found.");
@@ -673,10 +590,7 @@ export class AdminCommandsModule implements CommandModule {
       return errorResult("Usage: admin resetpw <username>");
     }
 
-    const user = await context.db.client.user.findUnique({
-      where: { username: target },
-      select: { id: true, role: true },
-    });
+    const user = await users().findByUsername(target);
 
     if (!user) {
       return errorResult(`User '${target}' not found.`);

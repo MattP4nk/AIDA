@@ -14,6 +14,7 @@
  */
 
 import type { PrismaClient } from "@prisma/client";
+import { prisma as defaultPrisma } from "../database/client";
 
 // ── Known AI Persona Names ──────────────────────────────────────────
 // Authoritative list of persona names the system recognises.
@@ -239,9 +240,9 @@ export async function hasActiveTutorial(
  * Returns `true` (require token) otherwise.
  */
 export async function shouldRequireToken(
-  prisma: PrismaClient,
   userId: string,
   recipientUsername: string,
+  prisma: PrismaClient = defaultPrisma,
 ): Promise<boolean> {
   const personaName = resolvePersonaName(recipientUsername);
   if (!personaName) return false; // Not a persona — normal message

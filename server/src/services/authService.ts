@@ -117,10 +117,18 @@ export class AuthService {
   ): Promise<{ token: string; user: User }> {
     const { username, email, password } = input;
 
-    // Check if user already exists
+    // Check if user already exists. The USERNAME check is case-insensitive:
+    // the column is a case-sensitive @unique, so an exact check let "Bob"
+    // register beside "bob", and every by-name lookup in the game
+    // (userRepository.findByUsername) relies on there being only one. Email
+    // needs no such care — the route's validator `normalizeEmail()`s it, and
+    // every stored email is lowercase.
     const existingUser = await prisma.user.findFirst({
       where: {
-        OR: [{ username }, ...(email ? [{ email }] : [])],
+        OR: [
+          { username: { equals: username, mode: "insensitive" } },
+          ...(email ? [{ email }] : []),
+        ],
       },
     });
 

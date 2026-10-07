@@ -82,7 +82,7 @@ export class FileAccessCommandsModule implements CommandModule {
     }
 
     const serverId = session.currentServerId;
-    const currentDir = session.terminals?.[0]?.currentDirectory || "/";
+    const currentDir = session.currentDirectory || "/"; // not terminals[0]: `cd` never updates it (helpers.ts getSessionContext)
 
     // Check if already in a sweep session
     if (activeSweepSessions.has(context.userId)) {
@@ -90,10 +90,7 @@ export class FileAccessCommandsModule implements CommandModule {
     }
 
     // Get player skills
-    const progress = await context.db.client.playerProgress.findUnique({
-      where: { userId: context.userId },
-      select: { forensics: true },
-    });
+    const progress = await context.playerProgress.get(context.userId);
     const forensics = progress?.forensics ?? 0;
 
     // Spawn background process
@@ -145,35 +142,17 @@ export class FileAccessCommandsModule implements CommandModule {
     }
 
     // Query hidden files in this directory
-    const hiddenNodes = await context.db.client.fileSystemNode.findMany({
-      where: {
-        serverId,
-        parentId: dirResult.nodeId,
-        isHidden: true,
-      },
-      select: { id: true, name: true, type: true, size: true, createdAt: true },
-    });
+    const { hidden: hiddenNodes, visible: visibleNodes } =
+      await context.fileService.listChildrenByVisibility(dirResult.nodeId);
 
     if (hiddenNodes.length === 0) {
       this.emitResult(context, true, "Sweep complete. No hidden anomalies detected in this directory.");
       return;
     }
 
-    // Get visible files too (for anomaly scan context)
-    const visibleNodes = await context.db.client.fileSystemNode.findMany({
-      where: {
-        serverId,
-        parentId: dirResult.nodeId,
-        isHidden: false,
-      },
-      select: { name: true, type: true, size: true, createdAt: true },
-    });
 
     // Get server security level
-    const server = await context.db.client.gameServer.findUnique({
-      where: { id: serverId },
-      select: { securityLevel: true },
-    });
+    const server = await context.services.serverService.findById(serverId);
     const securityLevel = server?.securityLevel ?? 3;
 
     // Generate challenge based on security level

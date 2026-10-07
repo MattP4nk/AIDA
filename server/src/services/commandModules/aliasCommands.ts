@@ -2,7 +2,12 @@ import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
 import { successResult, errorResult } from "./helpers";
 import * as TOKENS from "../../di/tokens";
+import { getService as resolveService } from "../../di/resolve";
+import { USER_REPOSITORY } from "../../di/tokens";
+import type { UserRepository } from "../../repositories/userRepository";
 
+
+const users = () => resolveService<UserRepository>(USER_REPOSITORY);
 export class AliasCommandsModule implements CommandModule {
   public category = "alias";
   public commands: Set<string> = new Set(["alias"]);
@@ -130,9 +135,7 @@ export class AliasCommandsModule implements CommandModule {
     }
 
     // Find target user by username
-    const targetUser = await context.db.client.user.findFirst({
-      where: { username: { equals: targetName, mode: "insensitive" } },
-    });
+    const targetUser = await users().findByUsername(targetName);
 
     if (!targetUser) {
       return errorResult(`Player "${targetName}" not found.`);

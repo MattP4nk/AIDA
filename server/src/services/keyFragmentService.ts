@@ -1205,6 +1205,38 @@ export class KeyFragmentService extends EventEmitter {
   }
 
   /**
+   * Whether the fragment commands exist for this player yet: they stay hidden
+   * ("Command not found") until the player has AIDA intel or a fragment
+   * discovery. A4: the command module counted both with `.catch(() => 0)`,
+   * so a database failure ALSO read as "Command not found" — an outage
+   * disguised as a missing feature. Failures now propagate.
+   */
+  async hasFragmentAccess(userId: string): Promise<boolean> {
+    const [intel, discoveries] = await Promise.all([
+      this.prisma.intelligenceReport.count({ where: { userId, category: "aida" } }),
+      this.prisma.keyFragmentDiscovery.count({ where: { userId } }),
+    ]);
+    return intel > 0 || discoveries > 0;
+  }
+
+  async getFragment(keyType: string, fragmentNum: number) {
+    return this.prisma.keyFragment.findUnique({ where: { keyType_fragmentNum: { keyType, fragmentNum } } });
+  }
+
+  /** Active (not bricked) fragments the player holds, optionally of one type. */
+  async heldActiveFragments(userId: string, keyType?: string) {
+    return this.prisma.keyFragment.findMany({
+      where: { heldByUserId: userId, status: "active", ...(keyType ? { keyType } : {}) },
+    });
+  }
+
+  /** How far into the AIDA story the player has got (0 with no record yet). */
+  async getDiscoveryLevel(userId: string): Promise<number> {
+    const row = await this.prisma.storyProgress.findUnique({ where: { userId }, select: { discoveryLevel: true } });
+    return row?.discoveryLevel ?? 0;
+  }
+
+  /**
    * Ensure a StoryProgress record exists for the given user.
    * Creates one with defaults if it doesn't exist yet.
    */

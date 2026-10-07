@@ -12,7 +12,12 @@ import {
   successResult,
   errorResult,
 } from "./helpers";
+import { getService as resolveService } from "../../di/resolve";
+import { USER_REPOSITORY } from "../../di/tokens";
+import type { UserRepository } from "../../repositories/userRepository";
 
+
+const users = () => resolveService<UserRepository>(USER_REPOSITORY);
 export class FileCommandsModule implements CommandModule {
   public category = "file";
   public commands: Set<string> = new Set([
@@ -498,10 +503,7 @@ export class FileCommandsModule implements CommandModule {
     // ── Resource check: spawn decrypt as background process ──
     if (memoryService) {
       // With key → faster (use skill override). Without → brute force at actual skill.
-      const cryptoProgress = await context.db.client.playerProgress.findUnique({
-        where: { userId: context.userId },
-        select: { cryptography: true },
-      });
+      const cryptoProgress = await context.playerProgress.get(context.userId);
       const cryptoSkill = cryptoProgress?.cryptography ?? 1;
       const effectiveSkill = password ? Math.max(cryptoSkill, 30) : undefined;
 
@@ -695,10 +697,7 @@ export class FileCommandsModule implements CommandModule {
     // U3c soft gate: `analyze` has a baseline of Forensics 10 but a new player
     // starts at 5, so it was refused outright. Now it runs and degrades — see
     // buildAnalysisReport for the currency.
-    const progress = await context.db.client.playerProgress.findUnique({
-      where: { userId: context.userId },
-      select: { forensics: true },
-    });
+    const progress = await context.playerProgress.get(context.userId);
     const shortfall = getSkillShortfall(
       command.command,
       command.args,
@@ -845,11 +844,7 @@ export async function saveDownload(
       .catch((err) => logger.warn({ err, userId: d.userId }, "download: mission hook failed"));
   }
 
-  const user = await context.db.client.user.findUnique({
-    where: { id: d.userId },
-    select: { username: true },
-  });
-  const downloadDir = `/home/${user?.username || "user"}/downloads`;
+  const downloadDir = `${await users().homeDirectory(d.userId)}/downloads`;
   // Usually already exists; a real failure surfaces from createFile below.
   await context.fileService.createDirectory(d.homeServerId, d.userId, downloadDir).catch(() => undefined);
 

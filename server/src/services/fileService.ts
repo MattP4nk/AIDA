@@ -1772,6 +1772,48 @@ export class FileService {
     await prisma.fileSystemNode.update({ where: { id: nodeId }, data: flags });
   }
 
+  /** A node by id. System read: no access check — gate with canUserReadFile. */
+  public async findNodeById(id: string) {
+    return prisma.fileSystemNode.findUnique({ where: { id } });
+  }
+
+  public async countNodes(serverId: string): Promise<{ files: number; directories: number }> {
+    const [files, directories] = await Promise.all([
+      prisma.fileSystemNode.count({ where: { serverId, type: "file" } }),
+      prisma.fileSystemNode.count({ where: { serverId, type: "directory" } }),
+    ]);
+    return { files, directories };
+  }
+
+  /** A directory's children, hidden and visible — for `sweep`, whose job is finding the hidden ones. */
+  public async listChildrenByVisibility(parentId: string) {
+    const rows = await prisma.fileSystemNode.findMany({
+      where: { parentId },
+      select: { id: true, name: true, type: true, size: true, createdAt: true, isHidden: true },
+    });
+    return { hidden: rows.filter((r) => r.isHidden), visible: rows.filter((r) => !r.isHidden) };
+  }
+
+  /** A child of a directory by exact name (and type). System read: no access check. */
+  public async findChild(parentId: string, name: string, type: "file" | "directory") {
+    return prisma.fileSystemNode.findFirst({ where: { parentId, name, type } });
+  }
+
+  /** The files directly inside a directory. System read: no access check. */
+  public async listChildFiles(parentId: string): Promise<Array<{ name: string; size: number }>> {
+    return prisma.fileSystemNode.findMany({ where: { parentId, type: "file" }, select: { name: true, size: true } });
+  }
+
+  public async countProtectedDirectories(serverId: string): Promise<number> {
+    return prisma.fileSystemNode.count({ where: { serverId, type: "directory", isProtected: true } });
+  }
+
+  public async countDecoys(parentId: string): Promise<number> {
+    return prisma.fileSystemNode.count({
+      where: { parentId, type: "file", metadata: { path: ["isDecoy"], equals: true } },
+    });
+  }
+
   /**
    * Move a node to another directory as a SYSTEM action (the vault), setting
    * its flags in the same write. A same-named node already at the destination

@@ -216,13 +216,21 @@ Each was re-verified against source on 2026-09-24; the verdict is marked.
   such calls. `MAX_SOCKETS_PER_USER = 4` ([handlers.ts:125](server/src/sockets/handlers.ts:125)).
 - **`PlayerProgressRepository` is the only sanctioned writer of `player_progress`.**
   ⚠️ **Currently violated by 9 direct write sites** — `adminApi/players.ts:141`,
-  `authService.ts:158` (was `routes/auth.ts:91` before A8 moved registration), `achievementService.ts:108`, `progressService.ts:184,349`,
+  `authService.ts:166` (was `routes/auth.ts:91` before A8 moved registration), `achievementService.ts:108`, `progressService.ts:184,349`,
   `missionService.ts:405,1389`, `tutorialService.ts:1023`,
   `darknetDungeonService.ts:1205`. (Re-verified 2026-09-24: still exactly 9, but two
   citations had drifted — 1362→1389 and 997→1023 now land on *comments*, which is how
   a stale line number disguises itself as a fixed bug.) The repository puts the credit check inside the
   UPDATE's WHERE and clamps skills in raw SQL; these bypass both. Treat the rule as the
   target state, not a description.
+- **Command modules hold no database handle.** ✅ Holds as of 2026-10-07 (A4): `db` is gone
+  from `CommandContext`, so `context.db` does not compile, and
+  `scripts/verify-a4-command-writes.ts` fails on any `db.client` or direct client import in
+  `commandModules/`. A command that needs data calls a service or repository — the
+  service is where the invariant lives (atomic guards, cache invalidation, events). Look up
+  players by name with `UserRepository.findByUsername` (case-insensitive; registration keeps
+  that unambiguous), and resolve relative paths against `session.currentDirectory`, never a
+  terminal's own `currentDirectory` (`cd` does not maintain it).
 - **Use `import type` for services resolved inside `await import()` blocks.** Those
   dynamic imports break require cycles; a static import reintroduces them.
 - Errors go through `safeExecute` / `safeAI`; routes through `asyncHandler`

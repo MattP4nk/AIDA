@@ -2,7 +2,11 @@ import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
 import { successResult, errorResult } from "./helpers";
 import type { AIService } from "../aiService";
-import { AI_SERVICE } from "../../di/tokens";
+import { AI_SERVICE, KEY_FRAGMENT_SERVICE, SERVER_SERVICE, USER_REPOSITORY } from "../../di/tokens";
+import { getService as resolveService } from "../../di/resolve";
+import type { KeyFragmentService } from "../keyFragmentService";
+import type ServerService from "../serverService";
+import type { UserRepository } from "../../repositories/userRepository";
 import {
   boxTop,
   boxBottom,
@@ -12,6 +16,10 @@ import {
   render,
 } from "./asciiBox";
 
+
+const fragments = () => resolveService<KeyFragmentService>(KEY_FRAGMENT_SERVICE);
+const servers = () => resolveService<ServerService>(SERVER_SERVICE);
+const users = () => resolveService<UserRepository>(USER_REPOSITORY);
 export class FragmentCommandsModule implements CommandModule {
   public category = "fragment";
   public commands: Set<string> = new Set([
@@ -29,15 +37,7 @@ export class FragmentCommandsModule implements CommandModule {
   ): Promise<CommandResult> {
     try {
       // Gate all fragment commands behind AIDA discovery
-      const [aidaIntel, fragmentDiscovery] = await Promise.all([
-        context.db.client.intelligenceReport.count({
-          where: { userId: context.userId, category: "aida" },
-        }).catch(() => 0),
-        context.db.client.keyFragmentDiscovery.count({
-          where: { userId: context.userId },
-        }).catch(() => 0),
-      ]);
-      if (aidaIntel === 0 && fragmentDiscovery === 0) {
+      if (!(await fragments().hasFragmentAccess(context.userId))) {
         return errorResult("Command not found. Type 'help' for available commands.");
       }
 
@@ -272,17 +272,13 @@ export class FragmentCommandsModule implements CommandModule {
       return errorResult(`Invalid fragment number: '${num}'. Must be 1, 2, or 3.`);
     }
 
-    const fragment = await context.db.client.keyFragment.findUnique({
-      where: { keyType_fragmentNum: { keyType: type, fragmentNum } },
-    });
+    const fragment = await fragments().getFragment(type, fragmentNum);
 
     if (!fragment) {
       return errorResult(`Fragment ${type} #${fragmentNum} not found.`);
     }
 
-    const targetUser = await context.db.client.user.findFirst({
-      where: { username: { equals: targetUsername, mode: "insensitive" } },
-    });
+    const targetUser = await users().findByUsername(targetUsername);
 
     if (!targetUser) {
       return errorResult(`Player not found: '${targetUsername}'.`);
@@ -336,15 +332,7 @@ export class FragmentCommandsModule implements CommandModule {
     if (!currentServerId) {
       return errorResult("Not connected to any server.");
     }
-    const connection = await context.db.client.serverConnection.findFirst({
-      where: {
-        userId: context.userId,
-        serverId: currentServerId,
-        isActive: true,
-      },
-      include: { server: true },
-      orderBy: { connectedAt: "desc" },
-    });
+    const connection = await servers().activeConnection(context.userId, currentServerId);
     if (!connection || !connection.server) {
       return errorResult("Not connected to any server.");
     }
@@ -392,10 +380,7 @@ export class FragmentCommandsModule implements CommandModule {
         return successResult("This player holds no fragments.");
       }
 
-      const ownerUser = await context.db.client.user.findUnique({
-        where: { id: ownerId },
-        select: { username: true },
-      });
+      const ownerUser = await users().findById(ownerId);
 
       const W = 58;
       const lines: string[] = [];
@@ -436,9 +421,7 @@ export class FragmentCommandsModule implements CommandModule {
       return errorResult(`Invalid fragment number: '${num}'. Must be 1, 2, or 3.`);
     }
 
-    const fragment = await context.db.client.keyFragment.findUnique({
-      where: { keyType_fragmentNum: { keyType: type, fragmentNum } },
-    });
+    const fragment = await fragments().getFragment(type, fragmentNum);
 
     if (!fragment) {
       return errorResult(`Fragment ${type} #${fragmentNum} not found.`);
@@ -635,7 +618,7 @@ export class FragmentCommandsModule implements CommandModule {
     const session = context.gameStateManager.getSession(context.userId);
     if (!session?.currentServerId) return errorResult("Not connected to any server.");
 
-    const currentDir = session.terminals?.[0]?.currentDirectory || "/";
+    const currentDir = session.currentDirectory || "/"; // not terminals[0]: `cd` never updates it (helpers.ts getSessionContext)
     const filePath = fileName.startsWith("/") ? fileName : `${currentDir === "/" ? "" : currentDir}/${fileName}`;
 
     // Check file exists and is protected
@@ -649,9 +632,7 @@ export class FragmentCommandsModule implements CommandModule {
     const fragmentService = context.services.keyFragmentService;
     if (!fragmentService) return errorResult("Fragment system unavailable.");
 
-    const heldFragments = await context.db.client.keyFragment.findMany({
-      where: { heldByUserId: context.userId, status: "active" },
-    });
+    const heldFragments = await fragments().heldActiveFragments(context.userId);
 
     // Sword fragments are required for offensive use (cracking protected files)
     const swordFragments = heldFragments.filter((f: any) => f.keyType === "sword");
@@ -679,10 +660,7 @@ export class FragmentCommandsModule implements CommandModule {
     }
 
     // Calculate success chance
-    const progress = await context.db.client.playerProgress.findUnique({
-      where: { userId: context.userId },
-      select: { hacking: true },
-    });
+    const progress = await context.playerProgress.get(context.userId);
     const hacking = progress?.hacking ?? 0;
     const successChance = 0.4 + (hacking / 100) * 0.3; // 40-70%
     const success = Math.random() < successChance;
@@ -746,14 +724,12 @@ export class FragmentCommandsModule implements CommandModule {
     if (!session?.currentServerId) return errorResult("Not connected to any server.");
 
     // Check for Collar fragment
-    const collarFragments = await context.db.client.keyFragment.findMany({
-      where: { heldByUserId: context.userId, keyType: "collar", status: "active" },
-    });
+    const collarFragments = await fragments().heldActiveFragments(context.userId, "collar");
     if (collarFragments.length === 0) {
       return errorResult("collar.shield requires a COLLAR fragment (defensive power).");
     }
 
-    const currentDir = session.terminals?.[0]?.currentDirectory || "/";
+    const currentDir = session.currentDirectory || "/"; // not terminals[0]: `cd` never updates it (helpers.ts getSessionContext)
     const filePath = target.startsWith("/") ? target : `${currentDir === "/" ? "" : currentDir}/${target}`;
 
     const resolution = await context.fileService.resolvePath(session.currentServerId, filePath);
@@ -787,9 +763,7 @@ export class FragmentCommandsModule implements CommandModule {
     const message = command.args?.join(" ") || "";
 
     // Check for Key fragment
-    const keyFragments = await context.db.client.keyFragment.findMany({
-      where: { heldByUserId: context.userId, keyType: "key", status: "active" },
-    });
+    const keyFragments = await fragments().heldActiveFragments(context.userId, "key");
     if (keyFragments.length === 0) {
       return errorResult("key.contact requires a KEY fragment (communication power).");
     }

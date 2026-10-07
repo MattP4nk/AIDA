@@ -70,10 +70,13 @@ async function main() {
   const baseCtx = (userId: string) => ({
     userId,
     terminalWidth: 80,
-    db: { client: prisma },
+    // A4: commands read player_progress through the repository, not `db`.
+    playerProgress: getService<any>(TOKENS.PLAYER_PROGRESS_REPOSITORY),
     services: {
       serverService: getService<any>(TOKENS.SERVER_SERVICE),
       networkTopologyService: getService<any>(TOKENS.NETWORK_TOPOLOGY_SERVICE),
+      // The real context carries it; the hardware spec read goes through it.
+      shopService: getService<any>(TOKENS.SHOP_SERVICE),
     } as any,
   });
 

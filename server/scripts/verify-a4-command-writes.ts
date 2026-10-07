@@ -55,21 +55,25 @@ check("the ratchet is tight (lower MAX to the current count)", hits.length === M
   hits.length < MAX ? `${hits.length} < ${MAX}: lower MAX` : `${hits.length}`);
 for (const h of hits) console.log(`        ${h}`);
 
-// A4 part 2, READS: any database handle at all. The end state is no `db` on
-// CommandContext, at which point the compiler enforces this; until then, a
-// second ratchet. A bare `db.client` passed to a helper counts too.
-const READS_MAX = 133;
+// A4 part 2, READS — done 2026-10-07: 133 handles -> 0, and `db` is gone from
+// CommandContext, so the compiler now refuses `context.db`. What it cannot
+// refuse is a module importing a client directly; that is what this guards.
+const READS_MAX = 0;
 const ANY = /\bdb\.client\b/g;
+const IMPORT = /from\s+["'](?:[./]*database\/client|@prisma\/client)["']|import\(\s*["'][./]*database\/client["']\s*\)/g;
 const any: Record<string, number> = {};
 let total = 0;
 for (const f of readdirSync(dir).filter((x) => x.endsWith(".ts"))) {
-  const n = [...strip(readFileSync(join(dir, f), "utf8")).matchAll(ANY)].length;
+  const src = strip(readFileSync(join(dir, f), "utf8"));
+  const n = [...src.matchAll(ANY)].length + [...src.matchAll(IMPORT)].length;
   if (n) { any[f] = n; total += n; }
 }
 const bare = strip("await shouldRequireToken(db.client, userId);\n// db.client.user.findMany()");
 check("POSITIVE CONTROL: a bare handle counts, a comment does not", [...bare.matchAll(ANY)].length === 1);
-check(`at most ${READS_MAX} database handles remain in command modules (ratchet)`, total <= READS_MAX, `${total} found`);
-check("the read ratchet is tight", total === READS_MAX, total < READS_MAX ? `${total} < ${READS_MAX}: lower READS_MAX` : `${total}`);
+const imp = strip('import { prisma } from "../../database/client";\nimport type { Prisma } from "@prisma/client";\nconst m = await import("../../database/client");');
+check("POSITIVE CONTROL: a direct client import counts (static, type, dynamic)", [...imp.matchAll(IMPORT)].length === 3);
+check(`command modules hold no database handle and import no client (max ${READS_MAX})`, total <= READS_MAX, `${total} found`);
 for (const [f, n] of Object.entries(any).sort((a, b) => b[1] - a[1])) console.log(`        ${f}: ${n}`);
+
 console.log(`\n=== ${pass} PASS / ${fail} FAIL ===`);
 process.exitCode = fail ? 1 : 0;

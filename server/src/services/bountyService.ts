@@ -64,6 +64,15 @@ export class BountyService {
     @inject(PLAYER_PROGRESS_REPOSITORY) private progress: PlayerProgressRepository,
   ) {}
 
+  /** Bounties open for claiming, richest first. */
+  async listLive(limit: number): Promise<Bounty[]> {
+    return prisma.bounty.findMany({
+      where: { status: "active", expiresAt: { gt: new Date() } },
+      orderBy: { rewardCredits: "desc" },
+      take: limit,
+    });
+  }
+
   /** Full id, or the unambiguous prefix `bounties` displays. */
   async resolve(idOrPrefix: string): Promise<Resolved> {
     const exact = await prisma.bounty.findUnique({ where: { id: idOrPrefix } });
