@@ -1,5 +1,6 @@
 import dotenv from "dotenv";
 import path from "path";
+import { AI_ACTIONS_PER_DAY, AI_LEADER_INTERVAL_H, AI_OTHER_INTERVAL_H } from "./gameBalance";
 
 // Load environment variables
 dotenv.config();
@@ -43,6 +44,11 @@ interface EnvironmentConfig {
   // Logging
   LOG_LEVEL: string;
   LOG_FILE_PATH: string;
+
+  // AI persona scheduler (defaults live in gameBalance)
+  AI_INTERVAL_HOURS: number;
+  AI_FACTION_LEADER_INTERVAL_HOURS: number;
+  AI_MAX_ACTIONS_PER_DAY: number;
 }
 
 const getEnvVar = (key: string, defaultValue?: string): string => {
@@ -119,6 +125,18 @@ export const config: EnvironmentConfig = {
     "LOG_FILE_PATH",
     path.join(process.cwd(), "logs", "app.log"),
   ),
+
+  // AI persona scheduler. aiSchedulerService used to read these with raw
+  // parseInt, bypassing getEnvNumber — so a typo gave NaN, and
+  // setInterval(fn, NaN) fires about every millisecond: a malformed env var
+  // became a tight loop of AI calls. The same NaN class this file already
+  // fixed once for MAX_FILE_SIZE_MB.
+  AI_INTERVAL_HOURS: getEnvNumber("AI_INTERVAL_HOURS", AI_OTHER_INTERVAL_H),
+  AI_FACTION_LEADER_INTERVAL_HOURS: getEnvNumber(
+    "AI_FACTION_LEADER_INTERVAL_HOURS",
+    AI_LEADER_INTERVAL_H,
+  ),
+  AI_MAX_ACTIONS_PER_DAY: getEnvNumber("AI_MAX_ACTIONS_PER_DAY", AI_ACTIONS_PER_DAY),
 };
 
 export const isDevelopment = config.NODE_ENV === "development";
@@ -204,6 +222,18 @@ export const validateConfig = (): void => {
 
   if (config.MAX_CONCURRENT_PLAYERS < 1) {
     throw new Error("MAX_CONCURRENT_PLAYERS must be at least 1");
+  }
+
+  // Finite is not enough: getEnvNumber truncates, so "0.5" hours becomes 0,
+  // and a 0ms interval is the same tight loop as NaN by a different door.
+  for (const key of ["AI_INTERVAL_HOURS", "AI_FACTION_LEADER_INTERVAL_HOURS"] as const) {
+    if (config[key] < 1) {
+      throw new Error(`${key} must be a whole number of hours >= 1, got ${config[key]}`);
+    }
+  }
+  // 0 is legitimate: it disables unprompted persona actions.
+  if (config.AI_MAX_ACTIONS_PER_DAY < 0) {
+    throw new Error("AI_MAX_ACTIONS_PER_DAY must be >= 0");
   }
 };
 

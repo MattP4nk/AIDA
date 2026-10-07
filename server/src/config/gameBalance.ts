@@ -215,10 +215,25 @@ export function getHackCooldown(hackingSkill: number): number {
   );
 }
 
-/** Detection floor — minimum detection chance regardless of stealth. */
-export const DETECTION_FLOOR_PCT = 5;
-export const DETECTION_AGGRESSIVE_BONUS_PCT = 30;
-export const DETECTION_STEALTH_REDUCTION_PCT = 8;
+/**
+ * Detection bounds, as FRACTIONS (0.05 = 5%) — the unit every consumer uses.
+ *
+ * These were `*_PCT` integers (5, 30, 8) with zero consumers, while the code
+ * that actually decides detection carried fraction literals. Bridging the two
+ * with `/ 100` at each site invites exactly the 100x bug that kept them apart,
+ * so the constants changed unit instead.
+ *
+ * DETECTION_STEALTH_REDUCTION was 8 and matched NOTHING: the real stealth cap
+ * in memoryService.applyPriority is 0.20, and the comment above that function
+ * agrees. The constant described a game that does not exist. Phase 7 is
+ * behaviour-preserving, so the constant took the code's value, not the reverse.
+ */
+/** Minimum detection chance after every modifier — max stealth cannot beat it. */
+export const DETECTION_FLOOR = 0.05;
+/** Max detection penalty for running a hack at aggressive priority (-10). */
+export const DETECTION_AGGRESSIVE_BONUS = 0.30;
+/** Max detection reduction for running a hack at stealth priority. */
+export const DETECTION_STEALTH_REDUCTION = 0.20;
 
 // ═══════════════════════════════════════════════════════════════════
 // Backdoors
@@ -371,6 +386,13 @@ export const ARCHITECT_EVAL_INTERVAL_MS = 2 * 60 * 60 * 1000; // 2 hours
 export const ARCHITECT_MIN_EVENTS = 5;
 
 /** AI persona action limits. */
+/**
+ * Persona scheduler cadence — DEFAULTS. The env vars AI_MAX_ACTIONS_PER_DAY,
+ * AI_FACTION_LEADER_INTERVAL_HOURS and AI_INTERVAL_HOURS override them (see
+ * config/environment.ts), so a deployed .env keeps working. Before, these
+ * three had zero consumers: aiSchedulerService parsed the env vars itself with
+ * hardcoded "8"/"4"/"3" fallbacks, so editing them here did nothing.
+ */
 export const AI_ACTIONS_PER_DAY = 3;
 export const AI_LEADER_INTERVAL_H = 4;
 export const AI_OTHER_INTERVAL_H = 8;
@@ -411,18 +433,22 @@ export const DUNGEON_EXPIRATION_INTERVAL_MS = 60 * 60 * 1000;
 /** Bounty expiration (hours). */
 export const BOUNTY_EXPIRATION_H = 48;
 
-/** Evidence threshold for bounty posting. */
 /**
- * NOTE (orphan audit 2026-09-24): the reward FORMULA now uses this, but the
- * three `evidenceLevel > 80` gates in hackService deliberately do not.
- *
- * Those gates gate the whole CRITICAL-EVIDENCE BAND (81-100) — lockdown, alert
- * severity, and the -15 rep penalty — not bounties specifically. Substituting
- * a `BOUNTY_*` name there would mislabel two of the three. They want their own
- * `CRITICAL_EVIDENCE_THRESHOLD`, which is a rename with a real decision behind
- * it rather than part of this sweep.
+ * Evidence ABOVE this is the critical band (81-100): lockdown, trace, access
+ * revocation, "critical" alert severity, the -15 rep penalty — and the bounty.
  */
-export const BOUNTY_EVIDENCE_THRESHOLD = 81;
+export const CRITICAL_EVIDENCE_THRESHOLD = 80;
+
+/**
+ * First evidence level that earns a bounty. DERIVED, not independent.
+ *
+ * `postBounty` is only ever called from inside hackService's critical-band
+ * block, so this never gated bounty posting — it only set where the reward
+ * formula starts counting. As a separate literal it was a knob that lied:
+ * lowering it to 71 raised every payout without posting a single extra
+ * bounty. Tie it to the band and the two cannot disagree.
+ */
+export const BOUNTY_EVIDENCE_THRESHOLD = CRITICAL_EVIDENCE_THRESHOLD + 1;
 
 /** Bounty reward scaling. */
 export const BOUNTY_BASE_CREDITS = 1000;

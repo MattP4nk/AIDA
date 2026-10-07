@@ -9,6 +9,7 @@ import ResourceService from "./resourceService";
 import type { FactionKnowledgeService } from "./factionKnowledgeService";
 import { safeExecute } from "../utils/safeExecute";
 import { FACTION_LOW_RESOURCE_THRESHOLD } from "../config/gameBalance";
+import { config } from "../config/environment";
 
 /**
  * AISchedulerService - Automated AI Persona Actions
@@ -29,9 +30,10 @@ export class AISchedulerService {
   private isRunning: boolean = false;
 
   // Configuration
-  private readonly INTERVAL_HOURS = parseInt(process.env.AI_INTERVAL_HOURS || "8");
-  private readonly FACTION_LEADER_INTERVAL_HOURS = parseInt(process.env.AI_FACTION_LEADER_INTERVAL_HOURS || "4");
-  private readonly MAX_ACTIONS_PER_DAY = parseInt(process.env.AI_MAX_ACTIONS_PER_DAY || "3");
+  // Validated in config/environment.ts; defaults come from gameBalance.
+  private readonly INTERVAL_HOURS = config.AI_INTERVAL_HOURS;
+  private readonly FACTION_LEADER_INTERVAL_HOURS = config.AI_FACTION_LEADER_INTERVAL_HOURS;
+  private readonly MAX_ACTIONS_PER_DAY = config.AI_MAX_ACTIONS_PER_DAY;
   private readonly EVENT_ACTIONS_ENABLED = process.env.AI_EVENT_ACTION_ENABLED !== "false";
   private gameStateCheckInterval: NodeJS.Timeout | undefined;
 

@@ -20,9 +20,12 @@ import {
   DUNGEON_TTL_DAYS, DUNGEON_REGEN_DELAY_MS,
   MISSION_EXPIRATION_INTERVAL_MS, DAILY_MISSIONS_PER_PLAYER,
   ARCHITECT_MIN_EVENTS, FACTION_LOW_RESOURCE_THRESHOLD,
-  DETECTION_FLOOR_PCT, DETECTION_AGGRESSIVE_BONUS_PCT,
+  DETECTION_FLOOR, DETECTION_AGGRESSIVE_BONUS, DETECTION_STEALTH_REDUCTION,
+  CRITICAL_EVIDENCE_THRESHOLD,
+  AI_ACTIONS_PER_DAY, AI_LEADER_INTERVAL_H, AI_OTHER_INTERVAL_H,
 } from "../src/config/gameBalance";
 import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 
 let pass = 0, fail = 0;
 function check(n: string, ok: boolean, d = "") {
@@ -48,6 +51,16 @@ async function main() {
     ["DAILY_MISSIONS_PER_PLAYER", DAILY_MISSIONS_PER_PLAYER, 3],
     ["ARCHITECT_MIN_EVENTS", ARCHITECT_MIN_EVENTS, 5],
     ["FACTION_LOW_RESOURCE_THRESHOLD", FACTION_LOW_RESOURCE_THRESHOLD, 50],
+    // A10 closing pass — each equals the literal it replaced.
+    ["CRITICAL_EVIDENCE_THRESHOLD", CRITICAL_EVIDENCE_THRESHOLD, 80],
+    ["BOUNTY_EVIDENCE_THRESHOLD", BOUNTY_EVIDENCE_THRESHOLD, 81],
+    ["DETECTION_FLOOR", DETECTION_FLOOR, 0.05],
+    ["DETECTION_AGGRESSIVE_BONUS", DETECTION_AGGRESSIVE_BONUS, 0.3],
+    // 0.20, NOT the 8 the old _PCT constant claimed: the code's value wins.
+    ["DETECTION_STEALTH_REDUCTION", DETECTION_STEALTH_REDUCTION, 0.2],
+    ["AI_OTHER_INTERVAL_H", AI_OTHER_INTERVAL_H, 8],
+    ["AI_LEADER_INTERVAL_H", AI_LEADER_INTERVAL_H, 4],
+    ["AI_ACTIONS_PER_DAY", AI_ACTIONS_PER_DAY, 3],
   ] as const) {
     check(`${name} === ${expected}`, actual === expected, `${actual}`);
   }
@@ -99,21 +112,87 @@ async function main() {
     check("faction threshold uses the constant", /= FACTION_LOW_RESOURCE_THRESHOLD/.test(sched));
   }
 
-  console.log("\nBC-4 — what was deliberately NOT substituted");
+  console.log("\nBC-4 — the last four: every twin now reads its constant");
   {
     const hack = read("../src/services/hackService.ts");
+    const mem = read("../src/services/memoryService.ts");
+    check("no bare `evidenceLevel > 80` remains", !/evidenceLevel > 80\b/.test(hack));
     check(
-      "the three `> 80` gates are untouched",
-      (hack.match(/evidenceLevel > 80/g) || []).length === 3,
-      "they gate the CRITICAL-EVIDENCE band (lockdown, alert severity, rep penalty), " +
-        "not bounties — a BOUNTY_* name would mislabel two of three",
+      "all three critical-band gates use the constant",
+      (hack.match(/evidenceLevel > CRITICAL_EVIDENCE_THRESHOLD/g) || []).length === 3,
     );
     check(
-      "DETECTION_*_PCT still unsubstituted, and the unit gap is why",
-      DETECTION_FLOOR_PCT === 5 && DETECTION_AGGRESSIVE_BONUS_PCT === 30,
-      "constants are PERCENT, the twins are FRACTIONS (0.05 / 0.30) — and one of " +
-        "the three 0.05 sites clamps successRate, a different concept sharing a value",
+      "the bounty threshold is DERIVED from the band, so they cannot disagree",
+      BOUNTY_EVIDENCE_THRESHOLD === CRITICAL_EVIDENCE_THRESHOLD + 1,
+      "postBounty is only reachable inside the > CRITICAL block",
     );
+    check(
+      "the three detection floors use DETECTION_FLOOR",
+      (hack.match(/Math\.max\(DETECTION_FLOOR,/g) || []).length === 3,
+    );
+    check(
+      "the successRate clamp was NOT swept — same value, different concept",
+      /successRate = Math\.max\(0\.05, Math\.min\(0\.95, successRate\)\)/.test(hack),
+    );
+    check(
+      "applyPriority's caps read the constants",
+      /Math\.max\(-DETECTION_STEALTH_REDUCTION, Math\.min\(DETECTION_AGGRESSIVE_BONUS, detMod\)\)/.test(mem) &&
+        !/Math\.min\(0\.30?, detMod\)/.test(mem),
+    );
+  }
+
+  console.log("\nBC-5 — AI scheduler env: validated, defaults from gameBalance (BEHAVIOURAL)");
+  {
+    // Spawn the real config module with controlled env. An empty string
+    // counts as "set" to dotenv, so it is not overwritten from .env and
+    // reaches getEnvNumber's default path.
+    const probe = (env: Record<string, string>) => {
+      const r = spawnSync(
+        "node_modules/.bin/tsx",
+        ["-e", `import("./src/config/environment").then((ns) => {
+          // tsx -e evaluates as CJS, so the named exports arrive on .default.
+          const m = ns.validateConfig ? ns : ns.default; m.validateConfig();
+          console.log("CFG=" + JSON.stringify([m.config.AI_INTERVAL_HOURS,
+            m.config.AI_FACTION_LEADER_INTERVAL_HOURS, m.config.AI_MAX_ACTIONS_PER_DAY])); })`],
+        {
+          cwd: new URL("..", import.meta.url).pathname,
+          env: { ...process.env, NODE_ENV: "development", AI_INTERVAL_HOURS: "",
+                 AI_FACTION_LEADER_INTERVAL_HOURS: "", AI_MAX_ACTIONS_PER_DAY: "", ...env },
+          encoding: "utf8",
+          timeout: 60_000,
+        },
+      );
+      const out = `${r.stdout}${r.stderr}`;
+      const m = out.match(/CFG=(\[[^\]]*\])/);
+      return { ok: r.status === 0 && !!m, cfg: m ? (JSON.parse(m[1]!) as number[]) : null, out };
+    };
+
+    const unset = probe({});
+    check(
+      "unset -> the gameBalance defaults",
+      JSON.stringify(unset.cfg) === JSON.stringify([AI_OTHER_INTERVAL_H, AI_LEADER_INTERVAL_H, AI_ACTIONS_PER_DAY]),
+      unset.cfg ? JSON.stringify(unset.cfg) : unset.out.slice(-200),
+    );
+
+    // POSITIVE CONTROL: env is still authoritative, so a deployed .env keeps working.
+    const set = probe({ AI_INTERVAL_HOURS: "6", AI_MAX_ACTIONS_PER_DAY: "0" });
+    check("a valid env value still overrides the default", set.cfg?.[0] === 6 && set.cfg?.[2] === 0,
+      set.cfg ? JSON.stringify(set.cfg) : set.out.slice(-200));
+
+    const garbage = probe({ AI_INTERVAL_HOURS: "abc" });
+    check(
+      "garbage is REFUSED at boot (was NaN -> setInterval ~1ms)",
+      !garbage.ok && /must be a finite number/.test(garbage.out),
+    );
+
+    const fraction = probe({ AI_FACTION_LEADER_INTERVAL_HOURS: "0.5" });
+    check(
+      "a sub-hour interval is REFUSED (truncates to 0 -> the same tight loop)",
+      !fraction.ok && /AI_FACTION_LEADER_INTERVAL_HOURS must be a whole number of hours >= 1/.test(fraction.out),
+    );
+
+    const sched = read("../src/services/aiSchedulerService.ts");
+    check("the scheduler no longer parses env itself", !/parseInt\(process\.env/.test(sched));
   }
 
   // ── The tap tiers exist in two places; make drift impossible to miss ──

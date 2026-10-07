@@ -31,7 +31,7 @@ import type MemoryService from "./memoryService";
 import type { Server as SocketIOServer } from "socket.io";
 import type TraceService from "./traceService";
 import type { FactionKnowledgeService } from "./factionKnowledgeService";
-import { BOUNTY_BASE_CREDITS, BOUNTY_BASE_REP, BOUNTY_CREDITS_PER_EVIDENCE, BOUNTY_EVIDENCE_THRESHOLD, BOUNTY_EXPIRATION_H, HACK_COOLDOWN_BASE_S, MAX_TOOL_STEALTH_BONUS, MAX_TOOL_SUCCESS_BONUS, SKILL_PENALTY, SKILL_SOFT_BAND, getHackCooldown } from "../config/gameBalance";
+import { BOUNTY_BASE_CREDITS, BOUNTY_BASE_REP, BOUNTY_CREDITS_PER_EVIDENCE, BOUNTY_EVIDENCE_THRESHOLD, BOUNTY_EXPIRATION_H, CRITICAL_EVIDENCE_THRESHOLD, DETECTION_FLOOR, HACK_COOLDOWN_BASE_S, MAX_TOOL_STEALTH_BONUS, MAX_TOOL_SUCCESS_BONUS, SKILL_PENALTY, SKILL_SOFT_BAND, getHackCooldown } from "../config/gameBalance";
 import { notifyUser } from "../utils/notify";
 
 /**
@@ -1086,8 +1086,8 @@ class HackService extends EventEmitter {
       (r, i) => r && r.timeUsed < (session.layers[i]?.timeLimit ?? 30) * 0.5,
     );
     const finalDetectionRate = allFast
-      ? Math.max(0.05, detectionRate - 0.15)
-      : Math.max(0.05, detectionRate); // Floor: even max stealth can't go below 5%
+      ? Math.max(DETECTION_FLOOR, detectionRate - 0.15)
+      : Math.max(DETECTION_FLOOR, detectionRate); // Floor: even max stealth can't go below 5%
     const detected = Math.random() < finalDetectionRate;
 
     const evidenceLeft = this.calculateEvidence(
@@ -1699,7 +1699,7 @@ class HackService extends EventEmitter {
 
     // 11. Clamp values to valid ranges
     successRate = Math.max(0.05, Math.min(0.95, successRate));
-    detectionRate = Math.max(0.05, Math.min(0.95, detectionRate));
+    detectionRate = Math.max(DETECTION_FLOOR, Math.min(0.95, detectionRate));
 
     return {
       successRate,
@@ -1944,7 +1944,7 @@ class HackService extends EventEmitter {
       }
 
       // ── Critical evidence (81-100): Lockdown + trace + access revocation ──
-      if (evidenceLevel > 80) {
+      if (evidenceLevel > CRITICAL_EVIDENCE_THRESHOLD) {
         // R5 REVIEW: announce only what is actually done.
         //
         // This pushed "trace_initiated" and "access_revoked" before either was
@@ -2054,7 +2054,7 @@ class HackService extends EventEmitter {
 
       // Create audit log entry for all detection levels
       await this.sendSecurityAlert(targetUserId, serverId, evidenceLevel,
-        evidenceLevel > 80 ? "critical" : evidenceLevel > 60 ? "high" : "warning");
+        evidenceLevel > CRITICAL_EVIDENCE_THRESHOLD ? "critical" : evidenceLevel > 60 ? "high" : "warning");
 
       return counterMeasures;
     } catch (error) {
@@ -2351,7 +2351,7 @@ class HackService extends EventEmitter {
         const factionService = getService<FactionService>(FACTION_SERVICE);
 
         // Penalty scales with evidence: 61-80% → -5 rep, 81-100% → -15 rep
-        const penalty = evidenceLevel > 80 ? -15 : -5;
+        const penalty = evidenceLevel > CRITICAL_EVIDENCE_THRESHOLD ? -15 : -5;
         await factionService.addReputation(
           attackerId,
           factionId,

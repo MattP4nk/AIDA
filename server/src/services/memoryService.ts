@@ -3,7 +3,7 @@ import { injectable, inject } from "tsyringe";
 import type { Logger } from "pino";
 import { Server as SocketIOServer } from "socket.io";
 import { LOGGER, SOCKET_IO } from "../di/tokens";
-import { resolveInstalledHardware } from "../config/gameBalance";
+import { DETECTION_AGGRESSIVE_BONUS, DETECTION_STEALTH_REDUCTION, resolveInstalledHardware } from "../config/gameBalance";
 
 /**
  * MemoryService — Player Computer Resource Management
@@ -150,19 +150,10 @@ function applyPriority(baseCpu: number, baseDuration: number, priority: number):
   return {
     cpuCost: Math.max(1, Math.round(baseCpu * cpuMult)),
     duration: Math.max(1000, Math.round(baseDuration * durMult)),
-    detectionModifier: Math.max(-0.20, Math.min(0.30, detMod)),
+    detectionModifier: Math.max(-DETECTION_STEALTH_REDUCTION, Math.min(DETECTION_AGGRESSIVE_BONUS, detMod)),
   };
 }
 
-/**
- * Get the detection modifier for a given priority level.
- * Exported so HackService can use it when calculating detection rates.
- */
-export function getDetectionModifierForPriority(priority: number): number {
-  const p = Math.max(-10, Math.min(10, priority));
-  const detMod = p * -0.03;
-  return Math.max(-0.20, Math.min(0.30, detMod));
-}
 
 function calculateBaseSpec(playerLevel: number, hardwareBonuses?: { cpu?: number; ram?: number; bw?: number }): { cpuTotal: number; ramTotal: number; bwTotal: number } {
   return {
@@ -571,6 +562,17 @@ class MemoryService extends EventEmitter {
     process.priority = newPriority;
     process.cpuCost = newAdj.cpuCost;
     process.duration = elapsed + newRemaining;
+    // The detection half of the trade. `newAdj` always carried it, but only
+    // cost and duration were written back — and hackCommands reads
+    // `proc.detectionModifier` when the prep completes. So `renice -10` on a
+    // running hack prep bought double speed with NO detection penalty, and
+    // `renice 10` paid stealth's +50% duration for none of its -20%.
+    //
+    // A zero-caller `getDetectionModifierForPriority` ("exported so HackService
+    // can use it") sat a few lines up since v1.0, duplicating applyPriority's
+    // detection math with its own copy of the caps. It was the right idea
+    // pointed at nothing; this line is the wiring it never got.
+    process.detectionModifier = newAdj.detectionModifier;
 
     const cpuDelta = newAdj.cpuCost - oldCpuCost;
 

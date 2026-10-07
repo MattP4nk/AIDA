@@ -3908,11 +3908,13 @@ Write them per-refactor, immediately before touching the code:
       295-line `handleSubmit`.
 - [ ] **A8** Introduce `authService` — move the auth domain out of `routes/auth.ts` (561 lines,
       security-critical, currently unreachable without an HTTP request).
-- [ ] **A8** Break up `index.ts`'s 438-line `initialize()`; consolidate the two
+- [x] **A8 (index.ts) DONE — 367ec80, 894e546.** Re-verified against source 2026-10-07:
+      `initialize()` is 107 lines, ONE `mission:completed` listener, ZERO `(data: any)` handlers.
+      Original item: break up `index.ts`'s 438-line `initialize()`; consolidate the two
       `mission:completed` listeners; type the 18 `(data: any)` handlers.
 - [ ] **A9** Remaining duplication: profile builder, `probeRows`, the two content-plan
       persistence paths, `di/serviceRegistry.ts` (0 callers).
-- [ ] **A10** Delete the dead code. Corrected counts (2026-09-24): **18** genuinely dead
+- [x] **A10** Delete the dead code. Corrected counts (2026-09-24): **18** genuinely dead
       `gameBalance` constants, not 29 — 28 have no external consumer but 10 of those are used by
       exported functions in-file, and the parenthetical "tuning that file does nothing" is false,
       since 33 of 61 have external consumers.
@@ -3922,7 +3924,30 @@ Write them per-refactor, immediately before touching the code:
         identical to being used.** Removing it also drops `CommandContext` from 30 injected
         dependencies to 29 — a down payment on A4.
       - [x] **`di/serviceRegistry.ts` DELETED** — 139 lines, 0 importers.
-      - [ ] The 18 genuinely dead `gameBalance` constants remain.
+      - [x] **The 18 `gameBalance` constants — CLOSED 2026-10-07.** 11 unified in 2eed4d9. The
+        last four groups had been parked "for a decision"; none of them actually needed one, and
+        two were hiding defects:
+        - **Critical evidence band.** New `CRITICAL_EVIDENCE_THRESHOLD = 80` at all three `> 80`
+          gates. `BOUNTY_EVIDENCE_THRESHOLD` is now DERIVED (`+ 1`), because `postBounty` is only
+          reachable inside the critical block — as an independent literal it was a knob that lied:
+          lowering it raised payouts without posting one extra bounty.
+        - **Detection caps.** The `*_PCT` integers became fractions, removing the unit gap instead
+          of bridging it. `DETECTION_STEALTH_REDUCTION_PCT = 8` matched NOTHING — the real stealth
+          cap is 0.20; the constant took the code's value (phase is behaviour-preserving).
+        - **The harness's negative check found a THIRD copy of the caps:** a zero-caller
+          `getDetectionModifierForPriority` ("exported so HackService can use it", since v1.0).
+          Asking what it was for led to a live bug: **`reniceProcess` never wrote back
+          `detectionModifier`**, so `renice -10` on a running hack prep gave double speed with no
+          detection penalty (exploit) and `renice 10` paid stealth's cost for none of its benefit.
+          Fixed with one assignment; the helper is deleted, superseded by `applyPriority`.
+        - **AI scheduler cadence.** aiSchedulerService parsed its env vars with raw `parseInt`,
+          bypassing `getEnvNumber` — so a typo gave NaN and `setInterval(fn, NaN)` fires ~every
+          1ms, a tight AI-call loop. Same NaN class environment.ts already fixed once
+          (MAX_FILE_SIZE_MB). Now read through `config` with gameBalance defaults; env stays
+          authoritative so a deployed .env keeps working; `validateConfig` rejects intervals < 1h
+          (truncation turns "0.5" into the same 0ms loop).
+        - Harnesses: `verify-balance-constants.ts` (BC-4 rewritten, BC-5 behavioural — spawns the
+          real config module), `verify-phase7-a10-renice-detection.ts`. Four negative controls.
 
 **Gate:** CI green, characterization tests green, `VERIFY.md` playthrough unchanged. No feature
 regressions — this phase is behaviour-preserving by definition.
