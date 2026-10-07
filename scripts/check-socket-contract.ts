@@ -63,10 +63,24 @@ const ON_HANDLER = /\.(?:on|once)\(\s*["'`]([a-z_]+:[a-zA-Z_-]+)["'`]/g;
 // subnet-sweep path with no client listener at all, and the check reported a
 // clean bill of health because it never saw the name.
 
+/**
+ * Strip comments before matching.
+ *
+ * Without this the checker matches event names quoted in PROSE. It reported
+ * `authentication:complete` as a live server emit when the only remaining
+ * mention was the sentence explaining why the emit had been deleted — so
+ * documenting a removal re-created the finding. CLAUDE.md lists this exact
+ * trap ("strip comments before matching source in a harness"); the sibling
+ * harness `verify-phase7-a3-socket-contract.ts` already did it and this did
+ * not.
+ */
+const stripComments = (src: string): string =>
+  src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+
 function collect(files: string[], re: RegExp): Ref[] {
   const out: Ref[] = [];
   for (const f of files) {
-    const src = readFileSync(f, "utf8");
+    const src = stripComments(readFileSync(f, "utf8"));
     for (const m of src.matchAll(new RegExp(re.source, re.flags))) {
       out.push({ event: m[1]!, where: relative(ROOT, f) });
     }

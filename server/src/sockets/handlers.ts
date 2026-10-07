@@ -429,7 +429,7 @@ export function setupSocketHandlers(io: SocketIOServer): void {
         });
         return;
       }
-      handleCommandExecute(socket, io, services, data);
+      handleCommandExecute(socket, services, data);
     });
 
     // ── Messaging ────────────────────────────────────────────────
@@ -843,7 +843,6 @@ async function handleServerDisconnect(
  */
 async function handleCommandExecute(
   socket: Socket,
-  io: SocketIOServer,
   { commandProcessor }: SocketServices,
   data: {
     command: string;
@@ -917,13 +916,11 @@ async function handleCommandExecute(
     // Send result
     socket.emit("command:result", result);
 
-    // Broadcast to user's room for multi-device sync
-    io.to(`user:${userId}`).emit("command:executed", {
-      command: parsed.command,
-      args: parsed.args,
-      result,
-      timestamp: new Date(),
-    });
+    // `command:executed` DELETED 2026-10-07. Its stated job — multi-device
+    // sync — could never happen: no client listens for it, and no client
+    // reaches this handler at all, because commands go over REST
+    // (`api.ts` POSTs /command/execute) whose HTTP response IS the result.
+    // The enclosing handler stays: 16 harness call sites drive it.
   } catch (error) {
     logger.error({ err: error }, "Command execution error");
     socket.emit("command:error", {

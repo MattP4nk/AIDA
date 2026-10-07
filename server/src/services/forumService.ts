@@ -223,13 +223,9 @@ export class ForumService extends EventEmitter {
         },
       });
 
-      // Emit scan event
-      if (this.io) {
-        this.io.to(`user:${userId}`).emit("forum:scan-complete", {
-          discovered: newForums.length,
-          total: availableForums.length,
-        });
-      }
+      // `forum:scan-complete` DELETED 2026-10-07 — no listener anywhere, and
+      // `scanForForums`'s one caller (socialCommands:583) renders a FORUM SCAN
+      // RESULTS box carrying the same counts.
 
       return {
         forums: [...alreadyDiscovered, ...newForums],
@@ -379,14 +375,9 @@ export class ForumService extends EventEmitter {
         await this.triggerHoneypot(userId, forumId);
       }
 
-      // Emit forum access event
-      if (this.io) {
-        this.io.to(`user:${userId}`).emit("forum:accessed", {
-          forumId: forum.id,
-          forumName: forum.name,
-          isHoneypot: forum.isHoneypot,
-        });
-      }
+      // `forum:accessed` DELETED 2026-10-07 — no listener anywhere, and
+      // `accessForum`'s one caller (socialCommands:620) prints the honeypot
+      // warning and the proxy requirement inline.
 
       return {
         forum: forum as ForumWithPosts,
@@ -558,13 +549,9 @@ export class ForumService extends EventEmitter {
         },
       });
 
-      // Emit event
-      if (this.io) {
-        this.io.to(`user:${userId}`).emit("forum:registered", {
-          forumId,
-          handle,
-        });
-      }
+      // `forum:registered` DELETED 2026-10-07 — no listener anywhere, and
+      // `registerForumAccount`'s one caller (socialCommands:702) returns
+      // "Successfully registered on forum as '<handle>'".
 
       // Subscribe to the live feed if — and only if — this membership
       // qualifies. Joining unconditionally here handed the player feeds that
@@ -1615,14 +1602,9 @@ YOUR POST TITLE: "${stripPromptBoundaries(post.title, 200)}"`;
         },
       });
 
-      // Emit event
-      if (this.io) {
-        this.io.to(`user:${userId}`).emit("proxy:connected", {
-          server: proxy.name,
-          location: proxy.location,
-          expiresAt,
-        });
-      }
+      // `proxy:connected` DELETED 2026-10-07 — no listener anywhere, and
+      // `connectToProxy`'s one caller (socialCommands:1419) renders a PROXY
+      // CONNECTED box with Status/Server/Location/Expires, a superset of this.
 
       return connection;
     } catch (error) {
@@ -1640,10 +1622,9 @@ YOUR POST TITLE: "${stripPromptBoundaries(post.title, 200)}"`;
         where: { userId },
       });
 
-      // Emit event
-      if (this.io) {
-        this.io.to(`user:${userId}`).emit("proxy:disconnected", {});
-      }
+      // `proxy:disconnected` DELETED 2026-10-07 — no listener anywhere, it
+      // carried an EMPTY payload, and `disconnectProxy`'s one caller
+      // (socialCommands:1447) returns "Disconnected from proxy server".
     } catch (error) {
       this.logger.error({ err: error }, "Error disconnecting proxy");
       throw error;

@@ -271,13 +271,10 @@ export class ChatService {
         data: { isRead: true },
       });
 
-      // Send read receipts for each marked message
-      if (result.count > 0) {
-        this.io.to(`user:${senderId}`).emit("message:conversation_read", {
-          readBy: userId,
-          count: result.count,
-        });
-      }
+      // `message:conversation_read` DELETED 2026-10-07. No listener anywhere,
+      // and nothing to feed: ChatDialog assigns `isRead` (:132, :295) but never
+      // renders it — zero references in its template — so there is no read
+      // state in the chat UI for a live receipt to update.
 
       return {
         success: true,

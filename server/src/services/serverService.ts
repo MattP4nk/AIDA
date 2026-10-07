@@ -944,12 +944,10 @@ class ServerService {
             connectionDuration: Date.now() - connection.connectedAt.getTime(),
           });
 
-          // Emit Socket.IO event
-          if (this.io) {
-            this.io.to(`player:${userId}`).emit("server:disconnected", {
-              serverId,
-            });
-          }
+          // `server:disconnected` DELETED 2026-10-07. No listener anywhere,
+          // and both callers are command paths that say so themselves:
+          // networkCommands:996 returns "Returned to home server." and
+          // :1292 returns "Disconnected. Returned to home server."
         }
       },
       context: "Disconnect from server",

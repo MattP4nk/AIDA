@@ -655,12 +655,9 @@ class MissionService extends EventEmitter {
         missionId,
       });
 
-      // Emit Socket.IO event
-      if (this.io) {
-        this.io.to(`player:${userId}`).emit("mission:accepted", {
-          missionId,
-        });
-      }
+      // `mission:accepted` DELETED 2026-10-07. No listener anywhere, and
+      // `acceptMission`'s one caller (missionCommands:522) renders a
+      // "MISSION ACCEPTED" box with the title and difficulty.
     } catch (error) {
       this.logger.error({ err: error }, "Error accepting mission");
       throw new Error(
@@ -747,12 +744,9 @@ class MissionService extends EventEmitter {
         missionId,
       });
 
-      // Emit Socket.IO event
-      if (this.io) {
-        this.io.to(`player:${userId}`).emit("mission:abandoned", {
-          missionId,
-        });
-      }
+      // `mission:abandoned` DELETED 2026-10-07. No listener anywhere, and
+      // `abandonMission`'s one caller (missionCommands:612) renders
+      // "[!] MISSION ABANDONED" plus the reputation warning.
 
       // Feedback: abandoned missions are important signal
       const mission = await this.getMission(missionId);

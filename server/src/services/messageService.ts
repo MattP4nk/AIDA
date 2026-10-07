@@ -793,9 +793,6 @@ export class MessageService {
         data: { isRead: true },
       });
 
-      // Send read receipt to sender in real-time
-      await this.sendReadReceipt(message.senderId, messageId);
-
       await this.logMessageActivity(userId, "read", messageId);
 
       return {
@@ -953,25 +950,14 @@ export class MessageService {
     }
   }
 
-  /**
-   * Send read receipt to sender
-   */
-  private async sendReadReceipt(
-    senderId: string,
-    messageId: string,
-  ): Promise<void> {
-    await safeExecute({
-      fn: async () => {
-        this.io.to(`user:${senderId}`).emit("message:read_receipt", {
-          messageId,
-          readAt: new Date(),
-        });
-      },
-      context: "Send read receipt",
-      logger: this.logger,
-      silent: true,
-    })();
-  }
+  // `sendReadReceipt` DELETED 2026-10-07 along with the `message:read_receipt`
+  // emit that was its entire body. No listener existed anywhere, so the live
+  // receipt never happened; MailDialog shows read state in the Sent list and
+  // gets it by refetching on open.
+  //
+  // Adding this back would ADD live read receipts — a feature decision, not a
+  // repair. The DB field and the UI field both already exist if that is wanted.
+
 
   /**
    * Queue message for later delivery
@@ -1509,7 +1495,9 @@ export class MessageService {
     const report = await prisma.messageReport.create({
       data: { reporterId, messageId, reason },
     });
-    this.io?.to(`user:${reporterId}`).emit("message:reported", { reportId: report.id, messageId });
+    // `message:reported` DELETED 2026-10-07. No listener, and it was addressed
+    // to the REPORTER — who already receives "Report submitted" from this
+    // method's own return value.
     this.logger.info({ reporterId, messageId, reportId: report.id }, "Message reported");
     return { success: true, message: "Report submitted", report };
   }
