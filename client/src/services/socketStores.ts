@@ -1,5 +1,6 @@
 export {
   newMailNotifications,
+  readReceipts,
   typingUsers,
   onlineUsers,
   liveMessages,

@@ -20,6 +20,14 @@ export const liveMessages = writable<any[]>([]);
 const gameEvents = writable<any[]>([]);
 export const typingUsers = writable<Map<string, string>>(new Map());
 export const newMailNotifications: Writable<any[]> = writable([]);
+/**
+ * Ids of your SENT messages that the recipient has just read.
+ *
+ * Append-only; MailDialog patches the matching message and consumes it. The
+ * server emit for this existed with no listener until 2026-10-07, so the Sent
+ * list only ever learned read state by refetching on open.
+ */
+export const readReceipts: Writable<string[]> = writable([]);
 
 /**
  * The player's authoritative state, pushed by the server.
@@ -440,6 +448,15 @@ class SocketService {
       // subscriber re-rendered the whole list each time. `gameEvents` a few
       // lines above already caps at 50; mail simply never adopted it.
       newMailNotifications.update((list) => [data, ...list].slice(0, 50));
+    });
+
+    // The recipient opened something you sent. MailDialog renders read state in
+    // the Sent list (`{message.isRead ? " " : "►"}`) and previously only
+    // refreshed it by refetching, so a sender watching the folder saw nothing.
+    this.on("message:read_receipt", (data: any) => {
+      if (data?.messageId) {
+        readReceipts.update((ids) => [...ids, data.messageId]);
+      }
     });
 
     // Was listening for "message:error", which the server never emits. The real

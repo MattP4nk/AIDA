@@ -67,6 +67,19 @@ export interface ServerToClientEvents {
     priority?: string;
   }) => void;
   "message:new_mail": (data: Record<string, unknown>) => void;
+  /**
+   * The recipient opened a message you sent.
+   *
+   * Emitted and listened for as of 2026-10-07. It previously existed as a
+   * server emit with NO listener, so the Sent list only learned read state by
+   * refetching on open — the emit was deleted as dead, then restored properly
+   * with the client half that makes it mean something.
+   */
+  "message:read_receipt": (data: {
+    messageId: string;
+    readBy: string;
+    readAt: string;
+  }) => void;
   "moderation:flagged": (data: { type: string; id: string; reason: string }) => void;
 
   // ── wired 2026-09-24 (orphan audit group B) ────────────────────────────

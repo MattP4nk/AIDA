@@ -3,7 +3,7 @@
     import { createEventDispatcher } from "svelte";
     import AsciiDialog from "./AsciiDialog.svelte";
     import { terminalService } from "../services/terminal";
-    import { newMailNotifications } from "../services/socketStores";
+    import { newMailNotifications, readReceipts } from "../services/socketStores";
     import { currentUser } from "../stores/gameState";
     import { notificationService } from "../services/notifications";
 
@@ -84,6 +84,7 @@
 
     // Real-time mail subscription
     let unsubscribeNewMail: any;
+    let unsubscribeReceipts: any;
 
     // ==================== LIFECYCLE ====================
 
@@ -117,10 +118,29 @@
                 }
             },
         );
+
+        // A recipient opened something we sent — patch it in place so the Sent
+        // list's read marker updates live instead of only on the next refetch.
+        // Ids are consumed as they are applied, so the store cannot grow for
+        // the life of the session.
+        unsubscribeReceipts = readReceipts.subscribe((ids: string[]) => {
+            if (ids.length === 0) return;
+            let changed = false;
+            for (const id of ids) {
+                const msg = messages.find((m) => m.id === id);
+                if (msg && !msg.isRead) {
+                    msg.isRead = true;
+                    changed = true;
+                }
+            }
+            if (changed) messages = messages; // trigger reactivity
+            readReceipts.set([]);
+        });
     });
 
     onDestroy(() => {
         if (unsubscribeNewMail) unsubscribeNewMail();
+        if (unsubscribeReceipts) unsubscribeReceipts();
     });
 
     // ==================== API CALLS ====================

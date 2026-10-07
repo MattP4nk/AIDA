@@ -793,6 +793,21 @@ export class MessageService {
         data: { isRead: true },
       });
 
+      // Live read receipt to the SENDER.
+      //
+      // Restored 2026-10-07 as a real feature rather than the half-built
+      // version that was deleted: that one emitted with no client listener, so
+      // nothing ever updated and the sender only learned by reopening their
+      // Sent folder. The listener now exists and patches the message in place.
+      //
+      // Guarded by the `isRead` early-return above, so re-reading a message
+      // cannot emit twice.
+      this.io?.to(`user:${message.senderId}`).emit("message:read_receipt", {
+        messageId,
+        readBy: userId,
+        readAt: new Date().toISOString(),
+      });
+
       await this.logMessageActivity(userId, "read", messageId);
 
       return {
@@ -949,14 +964,6 @@ export class MessageService {
       return false;
     }
   }
-
-  // `sendReadReceipt` DELETED 2026-10-07 along with the `message:read_receipt`
-  // emit that was its entire body. No listener existed anywhere, so the live
-  // receipt never happened; MailDialog shows read state in the Sent list and
-  // gets it by refetching on open.
-  //
-  // Adding this back would ADD live read receipts — a feature decision, not a
-  // repair. The DB field and the UI field both already exist if that is wanted.
 
 
   /**
