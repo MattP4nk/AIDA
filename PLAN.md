@@ -3901,7 +3901,7 @@ Write them per-refactor, immediately before touching the code:
         converting them means making those call sites async — that is the DI refactor A4 owns, not a
         mechanical sweep. The budget in the harness (40) holds the line meanwhile.
 
-- [~] **A8** Split the oversized modules — extract `serverContentService`'s 1,473 lines of
+- [x] **A8** Split the oversized modules — extract `serverContentService`'s 1,473 lines of
       module-scope data; move `missionTemplatePool`'s 1,911-line array to JSON/DB; split
       `forumService` (the proxy network is a separate domain); split `hackService` into
       session-store / scoring / countermeasures; extract `Terminal.svelte`'s CSS and break up the
@@ -3957,7 +3957,22 @@ Write them per-refactor, immediately before touching the code:
         `verify-phase7-a8-bootstrap` caught the re-point exactly (one baseline line).
         Seven harness source-reads re-pointed to read the whole hack domain; one built its path
         from a template literal and was invisible to grep — the suite found it.
-      - [ ] `Terminal.svelte` (2,867) — CSS + `handleSubmit`.
+      - [x] **`Terminal.svelte` 2,867 -> 2,370 (2026-10-07).** `handleSubmit` 292 -> 155: dialog
+        routing, challenge state and the suggestion fallback moved to `services/commandResult.ts`
+        (stores passed in, so a Node harness drives it; `verify-phase7-a8-terminal-submit.ts`).
+        "Extract the CSS" can't mean a .css file — vitePreprocess has no `<style src>` and a plain
+        file loses Svelte's scoping — so the status bar became `TerminalStatusBar.svelte` (453)
+        with its markup and all 41 of its rule groups, INCLUDING those inside the parent's four
+        @media blocks (the first attempt missed them; an audit of every selector caught it) and
+        copies of the keyframes it shares (Svelte scopes @keyframes per component). Verified in a
+        real browser: full computed style of all 18 status-bar elements identical at 1280 / 1000 /
+        760 / 470px, before vs after, within one dev-server session; a 1px padding change inside
+        the 768px query is caught at exactly that width. Tab new / switch / close / focus driven by
+        clicks. Two lessons: Vite's dev cache served a deleted-and-recreated component's OLD CSS
+        (restart the dev server), and baselines from a different server session are not
+        comparable. Found and fixed on the way: Ctrl+L, settings confirmations and error details
+        invisible in tab mode (a8afac2); concurrent session creation failing auth on every page
+        load (61675fe).
 - [x] **A8 `authService` DONE 2026-10-07.** `routes/auth.ts` 563 -> 138 (thin adapters);
       `services/authService.ts` (488) owns registration provisioning, lockout, sessions, audit.
       Verified by `verify-phase7-a8-auth.ts`: an end-to-end characterization of the HTTP API (18
