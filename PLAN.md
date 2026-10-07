@@ -3901,11 +3901,23 @@ Write them per-refactor, immediately before touching the code:
         converting them means making those call sites async — that is the DI refactor A4 owns, not a
         mechanical sweep. The budget in the harness (40) holds the line meanwhile.
 
-- [ ] **A8** Split the oversized modules — extract `serverContentService`'s 1,473 lines of
+- [~] **A8** Split the oversized modules — extract `serverContentService`'s 1,473 lines of
       module-scope data; move `missionTemplatePool`'s 1,911-line array to JSON/DB; split
       `forumService` (the proxy network is a separate domain); split `hackService` into
       session-store / scoring / countermeasures; extract `Terminal.svelte`'s CSS and break up the
       295-line `handleSubmit`.
+      - [x] `missionTemplatePool` — 143a02f. Kept as typed TS, not JSON (see that commit).
+      - [x] **`serverContentService` — 2,947 -> 1,554 lines (2026-10-07).** Not just data: the
+        region was data PLUS ~25 pure functions (role/faction generators, prompt builders, random
+        pickers). Split into `serverContentTemplates.ts` (973) and `serverContentPrompts.ts` (461);
+        no cycle (prompts import only the `NetworkContext` type). Verified by
+        `verify-phase7-a8-server-content.ts`: fingerprints data AND every moved function's output
+        over a 228-case matrix (8 roles x 6 factions incl. null/unknown), with Math.random seeded
+        per case and Date frozen. Recorded before the move (internals exported first — a
+        behaviour-neutral, diff-proven step), 228/228 identical after.
+      - [ ] `forumService` (3,102) — proxy network is a separate domain.
+      - [ ] `hackService` (2,739) — session-store / scoring / countermeasures.
+      - [ ] `Terminal.svelte` (2,867) — CSS + `handleSubmit`.
 - [ ] **A8** Introduce `authService` — move the auth domain out of `routes/auth.ts` (561 lines,
       security-critical, currently unreachable without an HTTP request).
 - [x] **A8 (index.ts) DONE — 367ec80, 894e546.** Re-verified against source 2026-10-07:
