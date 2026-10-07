@@ -1,5 +1,4 @@
 import { Command, CommandResult } from "../../../../shared/types";
-import type { Prisma } from "@prisma/client";
 import { CommandModule, CommandContext, CommandInfo } from "./interface";
 import { getSession, successResult, errorResult } from "./helpers";
 import {
@@ -421,14 +420,7 @@ export class DefenseCommandsModule implements CommandModule {
         return errorResult(`Already at firewall level ${progress.homeFirewall}.`);
       }
       const price = FIREWALL_PRICES[level]!;
-      const bought = await this.purchaseDefense(context, price, (tx) =>
-        tx.playerProgress
-          .updateMany({
-            where: { userId: context.userId, homeFirewall: { lt: level } },
-            data: { homeFirewall: level },
-          })
-          .then((r: { count: number }) => r.count),
-      );
+      const bought = await this.purchaseDefense(context, "firewall", level, price);
       if (!bought.ok) return errorResult(bought.message);
       // NOTE: We don't update GameServer.firewallLevel here — the defense layers are added
       // dynamically in hackService.initiateHackSession() based on homeFirewall level.
@@ -448,14 +440,7 @@ export class DefenseCommandsModule implements CommandModule {
         return errorResult(`Already at vault level ${progress.homeVault}.`);
       }
       const price = VAULT_PRICES[level]!;
-      const bought = await this.purchaseDefense(context, price, (tx) =>
-        tx.playerProgress
-          .updateMany({
-            where: { userId: context.userId, homeVault: { lt: level } },
-            data: { homeVault: level },
-          })
-          .then((r: { count: number }) => r.count),
-      );
+      const bought = await this.purchaseDefense(context, "vault", level, price);
       if (!bought.ok) return errorResult(bought.message);
       // Create vault directory on home server
       const session = getSession(context);
@@ -488,14 +473,7 @@ export class DefenseCommandsModule implements CommandModule {
         return errorResult(`Already at IDS level ${progress.homeIds}.`);
       }
       const price = IDS_PRICES[level]!;
-      const bought = await this.purchaseDefense(context, price, (tx) =>
-        tx.playerProgress
-          .updateMany({
-            where: { userId: context.userId, homeIds: { lt: level } },
-            data: { homeIds: level },
-          })
-          .then((r: { count: number }) => r.count),
-      );
+      const bought = await this.purchaseDefense(context, "ids", level, price);
       if (!bought.ok) return errorResult(bought.message);
       const desc = level === 1 ? "Alert when hack completes" : level === 2 ? "Alert when hack starts" : "Alert on start + attacker IP";
       if (context.services.missionIntegrationService) {
@@ -509,14 +487,7 @@ export class DefenseCommandsModule implements CommandModule {
         return errorResult("Honeypot already installed.");
       }
       // Boolean rather than a level, so the guard is `homeHoneypot: false`.
-      const bought = await this.purchaseDefense(context, HONEYPOT_PRICE, (tx) =>
-        tx.playerProgress
-          .updateMany({
-            where: { userId: context.userId, homeHoneypot: false },
-            data: { homeHoneypot: true },
-          })
-          .then((r: { count: number }) => r.count),
-      );
+      const bought = await this.purchaseDefense(context, "honeypot", 1, HONEYPOT_PRICE);
       if (!bought.ok) return errorResult(bought.message);
       // Generate initial decoy files
       const session = getSession(context);
@@ -543,43 +514,21 @@ export class DefenseCommandsModule implements CommandModule {
    * charge the player twice — or both "upgrade" to the same level and charge
    * twice for one upgrade.
    *
-   * Both checks now live in WHERE clauses inside one transaction:
-   *   - `spendCredits` matches only if the balance still covers the price;
-   *   - `applyLevel` matches only if the stored level is still BELOW the one
-   *     being bought, which makes the upgrade idempotent under a double-submit.
-   * If the level guard matches nothing we throw, and the transaction takes the
-   * charge back with it — so the player is never billed for an upgrade that did
-   * not apply.
+   * Both checks now live in WHERE clauses inside one transaction, in
+   * `playerProgressRepository.purchaseHomeDefense` (A4: it was opened here,
+   * writing player_progress through `tx` past the repository that owns it).
    */
   private async purchaseDefense(
     context: CommandContext,
+    defense: "firewall" | "vault" | "ids" | "honeypot",
+    level: number,
     price: number,
-    applyLevel: (tx: Prisma.TransactionClient) => Promise<number>,
   ): Promise<{ ok: true } | { ok: false; message: string }> {
-    const ALREADY_OWNED = "__already_owned__";
-    try {
-      return await context.db.client.$transaction(async (tx) => {
-        const spend = await context.playerProgress.spendCredits(
-          context.userId,
-          price,
-          tx,
-        );
-        if (!spend.ok) {
-          return {
-            ok: false as const,
-            message: `Not enough credits. Need ${price}c, have ${spend.balance}c.`,
-          };
-        }
-        const applied = await applyLevel(tx);
-        if (applied === 0) throw new Error(ALREADY_OWNED);
-        return { ok: true as const };
-      });
-    } catch (err) {
-      if (err instanceof Error && err.message === ALREADY_OWNED) {
-        return { ok: false, message: "That upgrade was already purchased." };
-      }
-      throw err;
-    }
+    const r = await context.playerProgress.purchaseHomeDefense(context.userId, defense, level, price);
+    if (r.ok) return { ok: true };
+    return r.reason === "INSUFFICIENT"
+      ? { ok: false, message: `Not enough credits. Need ${price}c, have ${r.balance}c.` }
+      : { ok: false, message: "That upgrade was already purchased." };
   }
 
   // ── Helper: generate decoy files ──

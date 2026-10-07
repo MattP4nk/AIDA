@@ -11,6 +11,10 @@
  *   D-4  `honeypot refresh` replaces old decoys and leaves a REAL file holding
  *        a decoy name alone (fileService.redeployDecoys).
  *   D-5  `protect` still toggles (positive control for setNodeFlags).
+ *   D-6  `upgrade` charged inside a transaction the command module opened,
+ *        writing player_progress through `tx`; `spendCredits` is silent under
+ *        a transaction and nothing announced after commit, so the client never
+ *        saw its balance drop. Now playerProgressRepository.purchaseHomeDefense.
  *
  * Over a real socket for the commands; fixtures are the fixture player's own
  * home files, deleted by id in `finally`.
@@ -131,11 +135,45 @@ async function main() {
       const off = (await prisma.fileSystemNode.findUniqueOrThrow({ where: { id: dir.id } })).isProtected;
       check("protect on, then off", on === true && off === false, `${on} → ${off}`);
     }
+
+    console.log("\nD-6 — a defense purchase reaches the client, and charges once");
+    {
+      await prisma.playerProgress.update({ where: { userId }, data: { credits: 10_000, homeIds: 0, homeFirewall: 0 } });
+      const deltas: Array<{ path: string; value: unknown }> = [];
+      s.on("state:delta", (d: any) => deltas.push({ path: d?.delta?.path, value: d?.delta?.value }));
+      const out = await run("upgrade ids 1");
+      check("PRECONDITION: the upgrade ran", /IDS upgraded to Level 1/.test(out), out.split("\n")[0]);
+      for (let i = 0; i < 20 && !deltas.some((d) => d.path === "player.credits"); i++) await new Promise((r) => setTimeout(r, 100));
+      const pushed = deltas.find((d) => d.path === "player.credits");
+      check("the new balance is PUSHED (spendCredits is silent under a transaction; nothing announced it)",
+        pushed?.value === 8_500, pushed ? `pushed ${pushed.value}` : `deltas: ${deltas.map((d) => d.path).join(", ") || "none"}`);
+
+      const { setupContainer, getService } = await import("../src/di/container");
+      const TOKENS = await import("../src/di/tokens");
+      const { Server: SocketIOServer } = await import("socket.io");
+      const loggerMod: any = await import("../src/logger");
+      setupContainer(new SocketIOServer() as any, prisma as any, (loggerMod.default ?? loggerMod) as any);
+      const repo = getService<any>(TOKENS.PLAYER_PROGRESS_REPOSITORY);
+      const [a1, a2] = await Promise.all([
+        repo.purchaseHomeDefense(userId, "firewall", 1, 2000),
+        repo.purchaseHomeDefense(userId, "firewall", 1, 2000),
+      ]);
+      const after = await prisma.playerProgress.findUniqueOrThrow({ where: { userId }, select: { credits: true, homeFirewall: true } });
+      check("two concurrent purchases: one applies, one is refused as already owned",
+        [a1, a2].filter((x: any) => x.ok).length === 1 && [a1, a2].some((x: any) => x.reason === "ALREADY_OWNED"),
+        [a1, a2].map((x: any) => x.ok ? "ok" : x.reason).join(" | "));
+      check("and the player is charged ONCE", after.credits === 6_500 && after.homeFirewall === 1, `${after.credits}c, L${after.homeFirewall}`);
+      const poor = await repo.purchaseHomeDefense(userId, "vault", 3, 20_000);
+      const unchanged = await prisma.playerProgress.findUniqueOrThrow({ where: { userId }, select: { credits: true, homeVault: true } });
+      check("an unaffordable purchase charges nothing and applies nothing",
+        poor.ok === false && poor.reason === "INSUFFICIENT" && unchanged.credits === 6_500 && unchanged.homeVault === 1,
+        `${poor.reason}; ${unchanged.credits}c, vault L${unchanged.homeVault}`);
+    }
   } finally {
     s.disconnect();
     try {
       await prisma.fileSystemNode.deleteMany({ where: { id: { in: ids } } });
-      await prisma.playerProgress.update({ where: { userId }, data: { homeVault: 0, homeHoneypot: false } });
+      await prisma.playerProgress.update({ where: { userId }, data: { homeVault: 0, homeHoneypot: false, homeIds: 0, homeFirewall: 0 } });
     } catch (err) { fail++; console.log(`  [FAIL] cleanup — ${(err as Error).message}`); }
   }
 

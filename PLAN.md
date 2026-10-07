@@ -3917,6 +3917,14 @@ Write them per-refactor, immediately before touching the code:
         `setNodeFlags`. `verify-a4-defense-writes.ts`.
       - Every fix in all four new harnesses was negative-controlled (each mutation red on its own
         check, then restored).
+      - **CORRECTION — "0" was false.** The ratchet matched `db.client.<model>.<write>` only. Four
+        more writes went through `tx.playerProgress.updateMany` callbacks inside a `$transaction`
+        that `defenseCommands.purchaseDefense` opened itself — past the repository that owns
+        player_progress. And under that transaction `spendCredits` is silent, with no post-commit
+        announce, so **no defense purchase ever pushed the new balance to the client**. Now
+        `playerProgressRepository.purchaseHomeDefense` (one transaction, announces after commit);
+        the ratchet also matches `tx.<model>.<write>`, with a positive control.
+        `verify-a4-defense-writes.ts` D-6.
       - **OPEN QUESTIONS (need the maintainer):**
         1. **Endgame lockout.** 9 fragments exist, 9 are required, nothing restores a bricked one:
            the first failed `fragment.crack` makes the endgame unreachable for everyone.

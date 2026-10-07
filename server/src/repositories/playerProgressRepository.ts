@@ -218,6 +218,52 @@ export class PlayerProgressRepository extends EventEmitter {
     return { ok: true, balance };
   }
 
+  /**
+   * Buy a home-defense level: charge and apply in ONE transaction, each guard
+   * in its WHERE. The charge matches only if the balance covers the price; the
+   * level matches only if it is still BELOW the one bought (the honeypot is a
+   * boolean, so its guard is `false`). If the level guard matches nothing the
+   * transaction throws and takes the charge back with it.
+   *
+   * A4: this was a `$transaction` opened inside defenseCommands, writing
+   * player_progress through `tx` callbacks — past this repository, and past
+   * the write ratchet, which only knew `db.client`. And because `spendCredits`
+   * stays silent under a transaction, no purchase ever pushed the new balance
+   * to the client. It is announced here, after commit.
+   */
+  public async purchaseHomeDefense(
+    userId: string,
+    defense: "firewall" | "vault" | "ids" | "honeypot",
+    level: number,
+    price: number,
+  ): Promise<{ ok: true; balance: number } | { ok: false; reason: "INSUFFICIENT"; balance: number } | { ok: false; reason: "ALREADY_OWNED" }> {
+    const ALREADY_OWNED = Symbol("already owned");
+    try {
+      const out = await this.prisma.$transaction(async (tx) => {
+        const spend = await this.spendCredits(userId, price, tx);
+        if (!spend.ok) return { ok: false as const, reason: "INSUFFICIENT" as const, balance: spend.balance };
+        const where =
+          defense === "honeypot" ? { userId, homeHoneypot: false }
+          : defense === "firewall" ? { userId, homeFirewall: { lt: level } }
+          : defense === "vault" ? { userId, homeVault: { lt: level } }
+          : { userId, homeIds: { lt: level } };
+        const data =
+          defense === "honeypot" ? { homeHoneypot: true }
+          : defense === "firewall" ? { homeFirewall: level }
+          : defense === "vault" ? { homeVault: level }
+          : { homeIds: level };
+        const applied = await tx.playerProgress.updateMany({ where, data });
+        if (applied.count === 0) throw ALREADY_OWNED;
+        return { ok: true as const, balance: spend.balance };
+      });
+      if (out.ok) this.announce({ userId, credits: out.balance });
+      return out;
+    } catch (err) {
+      if (err === ALREADY_OWNED) return { ok: false, reason: "ALREADY_OWNED" };
+      throw err;
+    }
+  }
+
   private async readCredits(userId: string, tx?: PrismaLike): Promise<number> {
     const row = await this.db(tx).playerProgress.findUnique({
       where: { userId },
