@@ -1,4 +1,3 @@
-import { EventEmitter } from "events";
 import { Server as SocketIOServer } from "socket.io";
 import { db } from "../database/client";
 import {
@@ -109,7 +108,7 @@ function toStateInventory(
 }
 
 @injectable()
-class GameStateManager extends EventEmitter {
+class GameStateManager {
   private playerSessions: Map<string, PlayerSession>;
   private activeConnections: Map<string, string>; // socketId -> userId
   private serverStates: Map<string, ServerState>;
@@ -157,7 +156,6 @@ class GameStateManager extends EventEmitter {
     @inject(PLAYER_MISSION_REPOSITORY)
     private missionRepo: PlayerMissionRepository,
   ) {
-    super();
     this.io = io;
     this.eventService = eventService;
     this.shopService = shopService;
@@ -536,8 +534,6 @@ class GameStateManager extends EventEmitter {
         await this.cleanupIdleSessions();
       }
 
-      this.emit("session:created", { userId, session });
-
       return session;
     } catch (error) {
       this.logger.error({ err: error, userId }, "Error creating session");
@@ -591,7 +587,6 @@ class GameStateManager extends EventEmitter {
         data: { isOnline: false },
       });
 
-      this.emit("session:destroyed", { userId });
     } catch (error) {
       this.logger.error({ err: error, userId }, "Error destroying session");
       throw error;
@@ -1100,7 +1095,6 @@ class GameStateManager extends EventEmitter {
           this.logger.warn({ err, userId, serverId }, "Could not register connection drain");
         }
 
-        this.emit("player:connected_to_server", { userId, serverId });
         this.logger.info({ userId, serverId }, "User connected to server");
 
         return true;
@@ -1216,7 +1210,6 @@ class GameStateManager extends EventEmitter {
           this.logger.warn({ err, userId, serverId }, "Could not release connection drain");
         }
 
-        this.emit("player:disconnected_from_server", { userId, serverId });
         this.logger.info({ userId, serverId }, "User disconnected from server");
       },
       context: "Disconnect player from server",
@@ -1725,10 +1718,6 @@ Tips:
       if (!hasActivePlayers) {
         this.serverStates.delete(serverId);
       }
-    }
-
-    if (cleanedCount > 0) {
-      this.emit("sessions:cleaned", { count: cleanedCount });
     }
 
     return cleanedCount;

@@ -3927,17 +3927,23 @@ Write them per-refactor, immediately before touching the code:
         `this.x(` -> `this.access.x(` rewrites; comparator negative-controlled). 42 call sites in
         9 files re-pointed by file:line, not regex. Two harnesses depended on layout and were
         re-pointed — one of them, a NEGATIVE source check, would have passed vacuously.
-      - [ ] **Dead in-process event paths, found during the forum split — RETURN TO THIS.**
-        `dynamicContentService` registers 17 hooks; 3 are never forwarded:
-        `honeypot:triggered` (the hook's payload — serverId/fileName/attackerId — matches FILE
-        honeypots, `fileService.alertHoneypot`, not the FORUM event of the same name, whose payload
-        matches none of it), `backdoor:discovered` (emitted, listened to in index.ts, never
-        forwarded; payload lacks the hook's `type`/`detectionRisk`; and writing `Installed by:` into
-        the victim's log reveals the attacker — a DESIGN question), `dungeon:conquered` (never
-        emitted; `conquerVault` exists; the hook's query is not filtered to darknet servers despite
-        its comment). Separately `story:post-read` is emitted "for StoryService to handle" and
-        nothing handles it. Right altitude: a bus-contract check, the in-process twin of
-        check-socket-contract.ts.
+      - [x] **Dead in-process event paths — CLOSED 2026-10-07 (bus contract).** The audit's first
+        scan reported 25 emitted-but-unheard events; 7 were heard all along through
+        gameStateManager's `subscribe()` helper and a loop over literal names, which a `.on("...")`
+        search cannot see. Of the rest: 16 dead or redundant emits DELETED (presence, session,
+        command, equipment, backdoor:installed, trace:evaded, the forum honeypot) plus the
+        zero-caller `validateEquipment`/`unequipAll`; four classes no longer extend EventEmitter.
+        Four missing consumers WIRED: `backdoor:discovered` -> the victim's security log (payload
+        enriched with type/detectionRisk; `Installed by` reveals nothing new — the owner's scan
+        already prints the username), file honeypots -> the hidden trap log (the hook's fields
+        matched FILE honeypots exactly), `conquerVault` -> `dungeon:conquered` (and the hook's
+        query fixed to DarkNet servers — the old one picked 3 non-DarkNet), `story:post-read` ->
+        the story ledger. Also removed duplicate presence updates in the socket connect/disconnect
+        handlers. `verify-bus-contract.ts` (no allowlist, positive controls for every form) and
+        `verify-phase7-bus-hooks.ts` (each hook renders what its emitter sends).
+      - [ ] **No story-relevant forum content exists** (0 of 12 posts; nothing live can mark one —
+        the only setter is the superseded first-boot populator). `story:post-read` is wired but
+        dormant until Phase 8 provides a content source.
       - [ ] Zero-caller forum content, kept intact in `forumContentService` (dead-code rule):
         `createAIReply` (untracked until now), `populateForumContent` (first-boot populator,
         superseded by seed.ts on any seeded DB; only a manual script calls it). `handleNPCReply` is

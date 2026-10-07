@@ -110,8 +110,14 @@ via `HACK_TOOL_ITEMS` (`gameBalance.ts:40-52`), calls `shopService.hasItem`, and
 `hackService.calculateToolBonus` — which uses its own hardcoded `TOOL_EFFECTIVENESS` table
 (`hackService.ts:72`), not the item's `effects`.
 
-Events `purchase:complete`, `item:used`, `item:sold`, `item:equipped`, `item:unequipped`,
-`item:auto_unequipped`, `equipment:cleared` — **zero listeners**, server or client.
+Events — **corrected 2026-10-07** (the line above this said all of these had zero listeners):
+`item:added`, `item:removed`, `purchase:complete`, `item:sold` and `item:used` ARE heard —
+`gameStateManager` subscribes to all five in one loop to push the inventory and credits slices (a
+literal `.on("...")` search cannot see a loop over a list of names, which is how they were
+miscounted). `item:equipped`, `item:unequipped`, `item:auto_unequipped` and `equipment:cleared`
+had no listener and were DELETED, with the two zero-caller methods that emitted the last two
+(`validateEquipment`, `unequipAll`). Equipping stays cosmetic: only the `equipment` display reads it.
+`scripts/verify-bus-contract.ts` now checks every bus emit against its listeners.
 
 ---
 

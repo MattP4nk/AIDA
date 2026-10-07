@@ -1,4 +1,3 @@
-import { EventEmitter } from "events";
 import { Server as SocketIOServer } from "socket.io";
 import { db } from "../database/client";
 import type {
@@ -93,7 +92,7 @@ import type { PlayerProgress } from "@prisma/client";
  * - Audit logging
  */
 @injectable()
-class CommandProcessor extends EventEmitter {
+class CommandProcessor {
   private commandHistory: Map<string, Command[]>;
   private rateLimitMap: Map<string, number[]>; // userId -> timestamps[]
   private readonly RATE_LIMIT_WINDOW = COMMAND_RATE_WINDOW_MS;
@@ -114,7 +113,6 @@ class CommandProcessor extends EventEmitter {
     @inject(PROGRESS_SERVICE) private progressService: ProgressService,
     @inject(GAME_STATE_MANAGER) private gameStateManager: GameStateManager,
   ) {
-    super();
     this.commandHistory = new Map();
     this.rateLimitMap = new Map();
 
@@ -650,9 +648,6 @@ class CommandProcessor extends EventEmitter {
       if (terminalId !== undefined) {
         result.terminalId = terminalId;
       }
-
-      // Emit event for logging/monitoring
-      this.emit("command:executed", { userId, command, result });
 
       // Increment command counter (fire-and-forget)
       this.resolveService<PlayerProgressRepository>(

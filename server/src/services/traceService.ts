@@ -16,7 +16,6 @@ import type MemoryService from "./memoryService";
  * Events emitted:
  * - "trace:initiated"  { traceId, targetId, serverId }
  * - "trace:completed"  { traceId, targetId, initiatedBy }  — hacker identity exposed
- * - "trace:evaded"     { traceId, targetId }
  */
 
 import {
@@ -410,8 +409,6 @@ class TraceService extends EventEmitter {
         // player who had been traced carried the drain for the rest of the
         // process's life.
         await this._releaseTraceDrain(userId, traceId);
-
-        this.emit("trace:evaded", { traceId, targetId: userId });
 
         return {
           success: true,

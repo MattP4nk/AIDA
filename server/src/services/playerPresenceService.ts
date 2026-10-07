@@ -1,4 +1,3 @@
-import { EventEmitter } from "events";
 import { Logger } from "pino";
 import { prisma } from "../database/client";
 import { injectable, inject } from "tsyringe";
@@ -55,17 +54,6 @@ export interface ServerOccupancy {
 }
 
 /**
- * Presence update types
- */
-export type PresenceEvent =
-  | "player_online"
-  | "player_offline"
-  | "player_joined_server"
-  | "player_left_server"
-  | "player_activity"
-  | "status_changed";
-
-/**
  * PlayerPresenceService - Track and broadcast online player status
  *
  * Features:
@@ -76,7 +64,7 @@ export type PresenceEvent =
  * - Presence broadcasting via Socket.IO
  */
 @injectable()
-export class PlayerPresenceService extends EventEmitter {
+export class PlayerPresenceService {
     private presenceTimer: NodeJS.Timeout | null = null;
   private onlinePlayers: Map<string, OnlinePlayer>;
   private playersByServer: Map<string, Set<string>>;
@@ -91,7 +79,6 @@ export class PlayerPresenceService extends EventEmitter {
    * live connect path.
    */
   constructor(@inject(LOGGER) private logger: Logger) {
-    super();
     this.onlinePlayers = new Map();
     this.playersByServer = new Map();
     this.activityTimeouts = new Map();
@@ -152,7 +139,6 @@ export class PlayerPresenceService extends EventEmitter {
       // the online list in ChatDialog. Two global broadcasts for one fact,
       // only one of which anything listened to.
 
-      this.emit("player_online", onlinePlayer);
       this.logger.info({ username: user.username }, "Player is now online");
     } catch (error) {
       const err = error instanceof Error ? error : new Error(String(error));
@@ -189,12 +175,10 @@ export class PlayerPresenceService extends EventEmitter {
         data: { isOnline: false },
       });
 
-      // Broadcast to all players
       // Removed with its twin above, for the same reason: `user:status_change`
       // is emitted on the disconnect path in `handlers.ts` and is the one the
       // client consumes.
 
-      this.emit("player_offline", { userId, username: player.username });
       this.logger.info({ username: player.username }, "Player is now offline");
     } catch (error) {
       const err = error instanceof Error ? error : new Error(String(error));
@@ -283,7 +267,6 @@ export class PlayerPresenceService extends EventEmitter {
       }
       this.playersByServer.get(serverId)!.add(userId);
 
-      // Broadcast to players on that server
       // PER-SOCKET BROADCAST REMOVED 2026-10-07.
       //
       // It looped occupants and emitted to `p.socketId`, so a player with two
@@ -297,7 +280,6 @@ export class PlayerPresenceService extends EventEmitter {
       // socket handler, so `playersByServer` was never populated for a real
       // connection and `who` always answered "No other players on this server."
 
-      this.emit("player_joined_server", { userId, serverId });
       this.logger.info({ username: player.username, serverName: server?.name || serverId }, "Player joined server");
     } catch (error) {
       const err = error instanceof Error ? error : new Error(String(error));
@@ -316,7 +298,6 @@ export class PlayerPresenceService extends EventEmitter {
       const player = this.onlinePlayers.get(userId);
       if (!player) return;
 
-      // Broadcast to players on that server
       // PER-SOCKET BROADCAST REMOVED 2026-10-07.
       //
       // It looped occupants and emitted to `p.socketId`, so a player with two
@@ -343,7 +324,6 @@ export class PlayerPresenceService extends EventEmitter {
       delete player.currentServerId;
       delete player.currentServerName;
 
-      this.emit("player_left_server", { userId, serverId });
       this.logger.info({ username: player.username, serverId }, "Player left server");
     } catch (error) {
       const err = error instanceof Error ? error : new Error(String(error));

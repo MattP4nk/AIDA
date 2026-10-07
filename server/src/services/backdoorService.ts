@@ -117,7 +117,6 @@ export class BackdoorService extends EventEmitter {
             } catch (err) {
               this.logger.warn({ err, installerId, serverId }, "Could not register backdoor drain");
             }
-            this.emit("backdoor:installed", { installerId, serverId, type });
 
             return { success: true, backdoor: upgraded, upgraded: true };
           }
@@ -176,7 +175,6 @@ export class BackdoorService extends EventEmitter {
         } catch (err) {
           this.logger.warn({ err, installerId, serverId }, "Could not register backdoor drain");
         }
-        this.emit("backdoor:installed", { installerId, serverId, type });
 
         return { success: true, backdoor };
       },
@@ -279,6 +277,8 @@ export class BackdoorService extends EventEmitter {
             serverId,
             installerId: userId,
             discoveredBy: "system",
+            type: backdoor.type,
+            detectionRisk: newDetectionRisk,
           });
 
           // Deactivated above by `isActive: !discovered`, which is why this
@@ -505,6 +505,8 @@ export class BackdoorService extends EventEmitter {
               serverId,
               installerId: backdoor.installerId,
               discoveredBy: "scan",
+              type: backdoor.type,
+              detectionRisk: backdoor.detectionRisk,
             });
           }
         }

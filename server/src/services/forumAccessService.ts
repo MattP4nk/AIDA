@@ -711,11 +711,6 @@ export class ForumAccessService extends EventEmitter {
             silent: true,
           })();
 
-          this.emit("honeypot:triggered", {
-            userId,
-            forumId,
-            factionId: forum.factionId,
-          });
         }
 
         // Emit warning to player

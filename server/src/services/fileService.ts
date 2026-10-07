@@ -25,8 +25,7 @@ import {
   FACTION_KNOWLEDGE_SERVICE,
   NETWORK_TOPOLOGY_SERVICE,
   PLAYER_PROGRESS_REPOSITORY,
-  EVENT_SERVICE,
-} from "../di/tokens";
+  EVENT_SERVICE, DYNAMIC_CONTENT_SERVICE } from "../di/tokens";
 import { EventType, EventSeverity } from "../../../shared/types";
 import type PlayerProgressRepository from "../repositories/playerProgressRepository";
 import type { CacheService } from "./cacheService";
@@ -169,6 +168,19 @@ export class FileService {
       );
     } catch (err) {
       this.logger.warn({ err, ownerId, serverId, fileName }, "Failed to raise honeypot alert");
+    }
+
+    // The hidden /var/log/honeypot.log trap entry. dynamicContentService's
+    // `honeypot:triggered` hook reads exactly { serverId, fileName, attackerId }
+    // — FILE honeypots — and was never fed; the only event of that name was
+    // the FORUM honeypot's, whose payload matched none of it. Separate try:
+    // a log failure must not read as a failed alert.
+    try {
+      const { getService } = await import("../di/container");
+      const dynamicContent = getService<import("./dynamicContentService").DynamicContentService>(DYNAMIC_CONTENT_SERVICE);
+      await dynamicContent.processEvent("honeypot:triggered", { serverId, fileName, attackerId, action });
+    } catch (err) {
+      this.logger.warn({ err, serverId, fileName }, "Failed to write honeypot trap log");
     }
   }
 

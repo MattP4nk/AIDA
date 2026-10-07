@@ -790,18 +790,18 @@ async function handleAuthentication(
 
 async function handleServerConnect(
   socket: Socket,
-  { gameStateManager, presenceService, progressService }: SocketServices,
+  { gameStateManager, progressService }: SocketServices,
   data: { serverId: string },
 ): Promise<void> {
   const userId = getUserId(socket);
   if (!userId) return;
 
-  // S1: the gate lives in `connectPlayerToServer`, but its answer only means
-  // something if this caller reads it. Ignoring the boolean let a refused
-  // player be registered by `playerJoinedServer` anyway — which sets their
-  // `currentServerId`, adds them to `playersByServer`, and broadcasts
-  // `presence:player_joined_server` to everyone already there. The connection
-  // was denied while the presence system announced it had happened.
+  // S1: the gate lives in `connectPlayerToServer`, and it now also records
+  // presence — on its success path only, so a refused player is never
+  // registered. This handler used to call `playerJoinedServer` itself after
+  // the gate, which became a SECOND registration once the call moved inside;
+  // removed 2026-10-07. Reading the boolean still matters: it decides the
+  // error the socket is told.
   const connected = await gameStateManager.connectPlayerToServer(
     userId,
     data.serverId,
@@ -815,26 +815,20 @@ async function handleServerConnect(
     return;
   }
 
-  await presenceService.playerJoinedServer(userId, data.serverId);
   progressService.saveOnEvent(userId, "server_connected");
 }
 
 async function handleServerDisconnect(
   socket: Socket,
-  { gameStateManager, presenceService }: SocketServices,
+  { gameStateManager }: SocketServices,
   _data: unknown,
 ): Promise<void> {
   const userId = getUserId(socket);
   if (!userId) return;
 
-  const session = gameStateManager.getPlayerSession(userId);
-  const currentServerId = session?.currentServerId;
-
+  // disconnectPlayerFromServer clears presence itself; a second
+  // playerLeftServer here duplicated it (removed 2026-10-07).
   await gameStateManager.disconnectPlayerFromServer(userId);
-
-  if (currentServerId) {
-    await presenceService.playerLeftServer(userId, currentServerId);
-  }
 }
 
 /**

@@ -1,5 +1,6 @@
 {
   "listeners": [
+    "access.on(story:post-read)",
     "backdoorService.on(backdoor:discovered)",
     "backdoorService.on(backdoor:expired)",
     "countermeasures.on(bounty:posted)",
@@ -33,6 +34,7 @@
     "EVENT_SERVICE",
     "FACTION_SERVICE",
     "FORUM_SERVICE",
+    "FORUM_SERVICE",
     "GAME_STATE_MANAGER",
     "HACK_SERVICE",
     "IP_SERVICE",
@@ -56,5 +58,5 @@
     "DUNGEON_EXPIRATION_INTERVAL_MS",
     "NOTIFICATION_PURGE_INTERVAL_MS"
   ],
-  "deferCount": 40
+  "deferCount": 42
 }

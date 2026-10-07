@@ -226,6 +226,17 @@ export interface BackdoorDiscoveredEvent {
   installerId: string;
   /** "system" — tripped on use; "scan" — a third party went looking. */
   discoveredBy: "system" | "scan";
+  /** Added so dynamicContent's security-log hook has what it prints. */
+  type: string;
+  detectionRisk: number;
+}
+
+/** forumAccessService.checkStoryTriggers — a player read a story-relevant post. */
+export interface StoryPostReadEvent {
+  userId: string;
+  postId: string;
+  forumId: string;
+  title: string;
 }
 
 export interface BackdoorExpiredEvent {

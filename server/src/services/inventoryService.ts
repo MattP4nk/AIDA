@@ -1,6 +1,5 @@
 import { injectable, inject } from "tsyringe";
 import { prisma } from "../database/client";
-import { EventEmitter } from "events";
 import { ShopItem, ItemCategory, ItemEffects } from "./shopService";
 import type { Logger } from "pino";
 import { LOGGER } from "../di/tokens";
@@ -57,9 +56,8 @@ export interface CombinedBonuses {
  * All operations use the InventoryItem table (isEquipped + slot fields).
  */
 @injectable()
-export class InventoryService extends EventEmitter {
+export class InventoryService {
   constructor(@inject(LOGGER) private logger: Logger) {
-    super();
   }
 
   /**
@@ -153,8 +151,6 @@ export class InventoryService extends EventEmitter {
           return { success: false, message: txResult.message };
         }
 
-        this.emit("item:equipped", { userId, itemId, slot, item });
-
         const result: EquipmentResult = {
           success: true,
           message: txResult.replaced
@@ -197,8 +193,6 @@ export class InventoryService extends EventEmitter {
           where: { id: equipped.id },
           data: { isEquipped: false, slot: null },
         });
-
-        this.emit("item:unequipped", { userId, itemId: equipped.shopItemId, slot });
 
         return {
           success: true,
@@ -325,57 +319,6 @@ export class InventoryService extends EventEmitter {
       logger: this.logger,
       fallback: null as EquipmentSlot | null,
     })() as EquipmentSlot | null;
-  }
-
-  /**
-   * Validate equipment state — auto-unequip items no longer in inventory.
-   */
-  public async validateEquipment(userId: string): Promise<void> {
-    await safeExecute({
-      fn: async () => {
-        // Items with isEquipped=true but quantity=0 should be unequipped
-        const broken = await prisma.inventoryItem.findMany({
-          where: { userId, isEquipped: true, quantity: { lte: 0 } },
-        });
-
-        for (const row of broken) {
-          await prisma.inventoryItem.update({
-            where: { id: row.id },
-            data: { isEquipped: false, slot: null },
-          });
-
-          this.emit("item:auto_unequipped", {
-            userId,
-            itemId: row.shopItemId,
-            slot: row.slot,
-            reason: "Item quantity is zero",
-          });
-        }
-      },
-      context: "Validate equipment",
-      logger: this.logger,
-    })();
-  }
-
-  /**
-   * Unequip all items.
-   */
-  public async unequipAll(userId: string): Promise<EquipmentResult> {
-    return await safeExecute({
-      fn: async () => {
-        await prisma.inventoryItem.updateMany({
-          where: { userId, isEquipped: true },
-          data: { isEquipped: false, slot: null },
-        });
-
-        this.emit("equipment:cleared", { userId });
-
-        return { success: true, message: "Unequipped all items" };
-      },
-      context: "Unequip all items",
-      logger: this.logger,
-      fallback: { success: false, message: "Failed to unequip all items" } as EquipmentResult,
-    })() as EquipmentResult;
   }
 }
 

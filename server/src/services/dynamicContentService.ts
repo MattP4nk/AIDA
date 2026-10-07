@@ -647,13 +647,15 @@ export class DynamicContentService {
     this.registerHook({
       event: "dungeon:conquered",
       generator: async (data) => {
+        // DarkNet's own servers. This read `factionId: { not: null }` — ANY
+        // faction's servers — under a comment saying darknet; invisible while
+        // the hook never fired.
         const darknetServers = await this.prisma.gameServer.findMany({
-          where: { factionId: { not: null }, isPlayerHome: false },
+          where: { faction: { shortName: "darknet" }, isPlayerHome: false },
           select: { id: true, factionId: true },
           take: 3,
         });
 
-        // Only target darknet-faction servers if available
         const targets = darknetServers.length > 0 ? darknetServers : [];
         const timestamp = new Date().toISOString();
         const notice = `[${timestamp}] ░░░ SIGNAL DISRUPTION ░░░\n` +

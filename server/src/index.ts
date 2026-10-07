@@ -52,6 +52,7 @@ import type {
   RewardsXpGrantedEvent,
   TraceCompletedEvent,
   TraceInitiatedEvent,
+  StoryPostReadEvent,
 } from "./services/serviceEvents";
 
 // Extracted modules
@@ -237,6 +238,12 @@ function wireServiceEvents(storyProgression: StoryProgressionService): void {
       priority: "high",
       data: { serverId: data.serverId },
     }), "Backdoor-discovered notification error");
+    // The victim's /var/log/security.log entry. dynamicContentService has had
+    // this hook since it was written and nothing ever forwarded the event, so
+    // a discovered backdoor left no trace on the server it was found on.
+    // `Installed by` reveals nothing new: the owner's `backdoor scan` already
+    // prints the installer's username.
+    defer(() => dynamicContent.processEvent("backdoor:discovered", data), "Dynamic content error on backdoor:discovered");
   });
 
   backdoorService.on("backdoor:expired", (data: BackdoorExpiredEvent) => {
@@ -257,6 +264,24 @@ function wireServiceEvents(storyProgression: StoryProgressionService): void {
   const dynamicContent = getService<DynamicContentService>(
     DYNAMIC_CONTENT_SERVICE,
   );
+
+  // ── A player read a story-relevant forum post ───────────────────────
+  // Emitted "for StoryService to handle" since checkStoryTriggers was written,
+  // and nothing handled it. The ledger is the general story sink. NOTE: no
+  // post is story-relevant today (0 in the dev DB) and nothing live can mark
+  // one — the only setter is the superseded first-boot populator — so this is
+  // correct but dormant until story content exists. Tracked in PLAN.
+  const forumService = getService<ForumService>(FORUM_SERVICE);
+  forumService.access.on("story:post-read", (data: StoryPostReadEvent) => {
+    defer(() => storyProgression.recordEvent({
+      type: "story_post_read",
+      category: "discovery",
+      actorId: data.userId,
+      actorType: "player",
+      summary: `Read story-relevant forum post "${data.title}"`,
+      data: { postId: data.postId, forumId: data.forumId },
+    }), "Story ledger error on story:post-read");
+  });
 
 
   // ── Reward notifications: bridge service events to the player's socket ──

@@ -14,7 +14,7 @@ import { injectable, inject } from "tsyringe";
 import type { Logger } from "pino";
 import crypto from "crypto";
 import { safeExecute } from "../utils/safeExecute";
-import { AI_SERVICE, BACKDOOR_SERVICE, EVENT_SERVICE, FORUM_SERVICE, LOGGER, PLAYER_PROGRESS_REPOSITORY, STORY_PROGRESSION_SERVICE } from "../di/tokens";
+import { AI_SERVICE, BACKDOOR_SERVICE, EVENT_SERVICE, FORUM_SERVICE, LOGGER, PLAYER_PROGRESS_REPOSITORY, STORY_PROGRESSION_SERVICE, DYNAMIC_CONTENT_SERVICE } from "../di/tokens";
 import type PlayerProgressRepository from "../repositories/playerProgressRepository";
 import { db } from "../database/client";
 import { resolveNpcOwnerId } from "../../prisma/npcOwnership";
@@ -835,6 +835,18 @@ Respond ONLY with JSON:
         });
       } catch {
         /* story ledger is non-critical */
+      }
+
+      // e2. Signal disruption on darknet servers. dynamicContentService has a
+      // `dungeon:conquered` hook that nothing ever fed — this service is not
+      // an EventEmitter and emitted nothing — so a conquest left no mark on
+      // the network it shook. Called directly, as warfareService does.
+      try {
+        const { getService } = await import("../di/container");
+        const dynamicContent = getService<import("./dynamicContentService").DynamicContentService>(DYNAMIC_CONTENT_SERVICE);
+        await dynamicContent.processEvent("dungeon:conquered", { userId, instanceId: instance.id, rewardType: instance.rewardType });
+      } catch (err) {
+        this.logger.warn({ err, instanceId: instance.id }, "Dungeon-conquered dynamic content failed (non-critical)");
       }
 
       // f. Emit global system event
