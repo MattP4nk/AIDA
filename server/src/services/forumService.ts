@@ -24,6 +24,7 @@ import { fallbackForumPost } from "../utils/aiFallbacks";
 
 import type { ReputationEngine } from "./reputationEngine";
 import { moderateBeforePublish } from "../utils/moderationGate";
+import { getSystemUserId } from "../utils/systemUser";
 /**
  * ForumService - Underground forum networks and darkweb system
  *
@@ -758,6 +759,7 @@ export class ForumService extends EventEmitter {
             reason,
           });
         },
+        (reason) => this.fileModerationEscalation({ forumId, postId: post.id }, reason),
       );
 
       // Emit event — skipped entirely for blocked content.
@@ -2065,14 +2067,19 @@ YOUR POST TITLE: "${stripPromptBoundaries(post.title, 200)}"`;
       });
 
       // S7(d): moderate BEFORE the broadcast — see createPost.
-      const moderation = await moderateBeforePublish(filteredContent, this.logger, async (reason) => {
-        await prisma.postReply.update({ where: { id: reply.id }, data: { isHidden: true } });
-        this.io?.to(`user:${userId}`).emit("moderation:flagged", {
-          type: "reply",
-          id: reply.id,
-          reason,
-        });
-      });
+      const moderation = await moderateBeforePublish(
+        filteredContent,
+        this.logger,
+        async (reason) => {
+          await prisma.postReply.update({ where: { id: reply.id }, data: { isHidden: true } });
+          this.io?.to(`user:${userId}`).emit("moderation:flagged", {
+            type: "reply",
+            id: reply.id,
+            reason,
+          });
+        },
+        (reason) => this.fileModerationEscalation({ forumId, replyId: reply.id }, reason),
+      );
 
       // Emit event — skipped entirely for blocked content.
       if (this.io && moderation.verdict !== "unsafe") {
@@ -2592,6 +2599,32 @@ YOUR POST TITLE: "${stripPromptBoundaries(post.title, 200)}"`;
       this.logger.error({ err: error }, "Error reporting content");
       throw error;
     }
+  }
+
+  /**
+   * S7: put a post or reply in the admin review queue on behalf of moderation.
+   *
+   * Used when automated moderation could not finish for content already
+   * published — the re-check was abandoned, or it judged the content unsafe
+   * and hiding it failed. Filed as SYSTEM, so it appears in `forum reports`
+   * (system-wide) and the forum's own queue beside player reports. Bypasses
+   * reportContent's membership check, which SYSTEM would fail.
+   */
+  public async fileModerationEscalation(
+    target: { forumId: string; postId?: string; replyId?: string },
+    reason: string,
+  ): Promise<void> {
+    const reporterId = await getSystemUserId();
+    const report = await prisma.postReport.create({
+      data: {
+        reporterId,
+        forumId: target.forumId,
+        ...(target.postId ? { postId: target.postId } : {}),
+        ...(target.replyId ? { replyId: target.replyId } : {}),
+        reason: `[auto-moderation] ${reason}`,
+      },
+    });
+    this.logger.warn({ ...target, reportId: report.id, reason }, "S7: forum content escalated to admin review");
   }
 
   /**

@@ -25,7 +25,6 @@ import { resolveAiPersonaUserId } from "../utils/aiUserIdentity";
 const AI_MESSAGE_FLOOD_LIMIT = 5;
 const AI_MESSAGE_FLOOD_WINDOW_MS = 60 * 60 * 1000;
 import { Server as SocketIOServer } from "socket.io";
-import crypto from "crypto";
 import { Logger } from "pino";
 import { injectable, inject } from "tsyringe";
 import { AI_SERVICE, LOGGER, MESSAGE_ENCRYPTION_SERVICE, MISSION_INTEGRATION_SERVICE, PLAYER_PROGRESS_REPOSITORY, SOCKET_IO, STORY_PROGRESSION_SERVICE } from "../di/tokens";
@@ -41,6 +40,7 @@ import {
 import { generateAvatar, getCompactAvatar } from "../utils/asciiAvatars";
 import type { AvatarInfo } from "../../../shared/types";
 import { moderateBeforePublish } from "../utils/moderationGate";
+import { getSystemUserId } from "../utils/systemUser";
 
 // ==================== TYPES ====================
 
@@ -305,6 +305,7 @@ export class MessageService {
             reason,
           });
         },
+        (reason) => this.fileModerationEscalation(message.id, reason),
       );
 
       // Blocked content is never delivered or broadcast. The row stays (hidden)
@@ -425,7 +426,7 @@ export class MessageService {
   ): Promise<MessageOperationResult> {
     try {
       // Use system user ID (or create a system account)
-      const systemUserId = await this.getSystemUserId();
+      const systemUserId = await getSystemUserId();
 
       const message = await prisma.message.create({
         data: {
@@ -1053,30 +1054,6 @@ export class MessageService {
     };
   }
 
-  /**
-   * Get or create system user ID
-   */
-  private async getSystemUserId(): Promise<string> {
-    const systemUser = await prisma.user.findFirst({
-      where: { username: "SYSTEM" },
-    });
-
-    if (systemUser) {
-      return systemUser.id;
-    }
-
-    // Create system user if doesn't exist
-    const newSystemUser = await prisma.user.create({
-      data: {
-        username: "SYSTEM",
-        email: "system@aida.internal",
-        password: crypto.randomBytes(32).toString("hex"),
-        homeIp: "0.0.0.0",
-      },
-    });
-
-    return newSystemUser.id;
-  }
 
   /**
    * Get or create AI user ID for a persona
@@ -1507,6 +1484,23 @@ export class MessageService {
     // method's own return value.
     this.logger.info({ reporterId, messageId, reportId: report.id }, "Message reported");
     return { success: true, message: "Report submitted", report };
+  }
+
+  /**
+   * S7: put a message in the admin review queue on behalf of moderation.
+   *
+   * Used when automated moderation could not finish for content that was
+   * already delivered — the re-check was abandoned, or it judged the message
+   * unsafe and hiding it failed. Filed as SYSTEM, so it appears in
+   * `admin reports mail` beside player reports. Bypasses reportMessage's
+   * recipient check, which exists to stop players reporting others' mail.
+   */
+  async fileModerationEscalation(messageId: string, reason: string): Promise<void> {
+    const reporterId = await getSystemUserId();
+    const report = await prisma.messageReport.create({
+      data: { reporterId, messageId, reason: `[auto-moderation] ${reason}` },
+    });
+    this.logger.warn({ messageId, reportId: report.id, reason }, "S7: message escalated to admin review");
   }
 
   /** Get message reports (admin/moderator). */

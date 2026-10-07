@@ -48,6 +48,12 @@ interface QueuedRequest {
    * silently breaking the promise `moderationGate` makes when it fails open.
    */
   critical?: boolean;
+  /**
+   * What to do if this entry is given up on. Set exactly when `critical` is:
+   * an entry cannot be marked critical without saying where it goes when it
+   * is dropped. For moderation, that is the admin review queue.
+   */
+  onAbandoned?: (reason: string) => void | Promise<void>;
 }
 
 /**
@@ -111,6 +117,12 @@ export class AIService {
      * message at all.
      */
     moderationRechecksAbandoned: 0,
+    /**
+     * Abandoned re-checks whose escalation to admin review ALSO failed. The
+     * only remaining way for unreviewed content to go unrecorded, so it gets
+     * its own number rather than hiding inside the one above.
+     */
+    moderationEscalationsFailed: 0,
   };
 
   /** R14c: when a fallback was last served, and for what. */
@@ -126,18 +138,68 @@ export class AIService {
    * makes that one fact countable instead of four separate log lines, one of
    * which did not exist.
    */
-  private abandon(req: QueuedRequest, reason: string): void {
+  private abandon(req: QueuedRequest, reason: string): Promise<void> {
     this.metrics.retryQueueDropped++;
     if (req.critical) {
       this.metrics.moderationRechecksAbandoned++;
       this.logger.error(
         { id: req.id, attempts: req.attempts, reason },
-        "S7: moderation re-check abandoned — that content stays published unreviewed",
+        "S7: moderation re-check abandoned — escalating to admin review",
       );
-    } else {
-      this.logger.warn({ id: req.id, attempts: req.attempts, reason }, "Retry queue: request dropped");
+      return this.escalate(req.onAbandoned, reason);
+    }
+    this.logger.warn({ id: req.id, attempts: req.attempts, reason }, "Retry queue: request dropped");
+    return Promise.resolve();
+  }
+
+  /**
+   * Hand abandoned content to its escalation path, and never let that fail
+   * quietly: if filing the review itself fails, the content is published,
+   * unreviewed AND unreported, which is the one outcome nobody would find.
+   */
+  private async escalate(
+    onAbandoned: QueuedRequest["onAbandoned"],
+    reason: string,
+  ): Promise<void> {
+    if (!onAbandoned) {
+      this.metrics.moderationEscalationsFailed++;
+      this.logger.error({ reason }, "S7: critical entry had no escalation path — content is unreviewed and unreported");
+      return;
+    }
+    try {
+      await onAbandoned(reason);
+    } catch (err) {
+      this.metrics.moderationEscalationsFailed++;
+      this.logger.error(
+        { err, reason },
+        "S7: escalation to admin review FAILED — content is published, unreviewed and unreported",
+      );
     }
   }
+
+  /**
+   * Graceful shutdown: escalate every moderation re-check that has not run.
+   *
+   * The queue is in memory, so a restart was a fifth silent exit — every
+   * pending re-check vanished, uncounted. lifecycle.ts calls this after
+   * stopping the timer and BEFORE the database disconnects, so the reports
+   * can still be written. The in-flight entry is included: if its AI call
+   * does finish before exit, the content gets a verdict and a report, and a
+   * redundant report is a far cheaper mistake than a missing one.
+   *
+   * A crash cannot run this. That gap is named, not covered.
+   */
+  public async escalatePendingModeration(): Promise<number> {
+    const pending = this.retryQueue.filter((r) => r.critical);
+    this.retryQueue = this.retryQueue.filter((r) => !r.critical);
+    if (this.inFlightRetry?.critical) pending.push(this.inFlightRetry);
+    this.metrics.retryQueueSize = this.retryQueue.length;
+    await Promise.all(pending.map((r) => this.abandon(r, "server shut down before the re-check ran")));
+    return pending.length;
+  }
+
+  /** The entry processRetryQueueOnce has taken OUT of the queue to attempt. */
+  private inFlightRetry: QueuedRequest | null = null;
 
   /** Queue of failed requests to retry later. */
   private retryQueue: QueuedRequest[] = [];
@@ -499,7 +561,7 @@ export class AIService {
     systemPrompt: string | undefined,
     onSuccess: (response: string) => void | Promise<void>,
     expectedFormat?: string,
-    critical = false,
+    onAbandoned?: (reason: string) => void | Promise<void>,
   ): void {
     // R14: dropping the oldest entry used to drop the IN-FLIGHT one.
     //
@@ -526,7 +588,7 @@ export class AIService {
       const victim = this.retryQueue.findIndex((r) => !r.critical);
       const dropped =
         victim >= 0 ? this.retryQueue.splice(victim, 1)[0] : this.retryQueue.shift();
-      if (dropped) this.abandon(dropped, "queue full");
+      if (dropped) void this.abandon(dropped, "queue full");
     }
 
     const id = `retry_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -538,7 +600,7 @@ export class AIService {
       onSuccess,
       attempts: 0,
       createdAt: Date.now(),
-      ...(critical ? { critical: true } : {}),
+      ...(onAbandoned ? { critical: true, onAbandoned } : {}),
     });
 
     this.metrics.retryQueueSize = this.retryQueue.length;
@@ -568,6 +630,7 @@ export class AIService {
       await this.processRetryQueueOnce();
     } finally {
       this.retryQueueProcessing = false;
+      this.inFlightRetry = null;
     }
   }
 
@@ -579,7 +642,7 @@ export class AIService {
     const fresh: QueuedRequest[] = [];
     for (const req of this.retryQueue) {
       if (now - req.createdAt < this.RETRY_MAX_AGE_MS) fresh.push(req);
-      else this.abandon(req, "exceeded max age");
+      else void this.abandon(req, "exceeded max age");
     }
     this.retryQueue = fresh;
 
@@ -593,6 +656,7 @@ export class AIService {
     // the head on overflow. Holding the entry itself, rather than an index
     // into a mutating array, is what makes the removal correct.
     const req = this.retryQueue.shift()!;
+    this.inFlightRetry = req; // cleared in processRetryQueue's finally
     req.attempts++;
 
     // On retry, strengthen the format instruction
@@ -617,7 +681,7 @@ export class AIService {
         }
       } else if (req.attempts >= this.RETRY_MAX_ATTEMPTS) {
         // Max attempts reached — leave it removed.
-        this.abandon(req, "max attempts");
+        void this.abandon(req, "max attempts");
         this.metrics.retryQueueSize = this.retryQueue.length;
       } else {
         // Not done — put it BACK at the front so it keeps its place in line.
@@ -626,7 +690,7 @@ export class AIService {
       }
     } catch (err) {
       if (req.attempts >= this.RETRY_MAX_ATTEMPTS) {
-        this.abandon(req, "max attempts after error");
+        void this.abandon(req, "max attempts after error");
       } else {
         this.retryQueue.unshift(req);
       }
@@ -765,10 +829,22 @@ export class AIService {
   public queueModerationRecheck(
     content: string,
     onVerdict: (result: ModerationResult) => void | Promise<void>,
+    onAbandoned: (reason: string) => void | Promise<void>,
   ): void {
     const systemPrompt = `Review the following content for safety violations.
     Flag if it contains: illegal content, hate speech, personal information, exploits, or spam.
     Respond ONLY with a JSON object: { "safe": boolean, "reason": string | null }`;
+
+    // Every way this re-check can end without a verdict goes through here.
+    // The entry has already left the queue when the callback runs, so the
+    // old `return` paths were permanent: content published, never reviewed.
+    // Counting and logging them made that visible; escalating makes it
+    // somebody's job.
+    const giveUp = (reason: string, logContext: Record<string, unknown> = {}) => {
+      this.metrics.moderationRechecksAbandoned++;
+      this.logger.warn({ ...logContext, reason }, "S7: moderation re-check gave up — escalating to admin review");
+      return this.escalate(onAbandoned, reason);
+    };
 
     void (async () => {
       const { sanitizeForPrompt } = await import("../utils/aiPromptSanitizer");
@@ -778,12 +854,7 @@ export class AIService {
         async (response) => {
           const match = response.match(/\{.*\}/s);
           if (!match) {
-            // REVIEW: log it. The entry has already been removed from the
-            // queue by processRetryQueueOnce, so returning quietly means the
-            // content stays published forever with no record that its
-            // re-check gave up — a silent permanent fail-open.
-            this.metrics.moderationRechecksAbandoned++;
-            this.logger.warn("S7: moderation re-check returned no JSON — content stays published unchecked");
+            await giveUp("re-check returned no JSON");
             return;
           }
           // PARSE AND ENFORCE ARE SEPARATE.
@@ -802,11 +873,7 @@ export class AIService {
             if (safe === null) {
               // Illegible is precisely what produced `unavailable` in the
               // first place, so this is the likely path, not the rare one.
-              this.logger.warn(
-                { raw: JSON.stringify(parsed.safe) },
-                "S7: moderation re-check verdict still illegible — content stays published unchecked",
-              );
-              this.metrics.moderationRechecksAbandoned++;
+              await giveUp("re-check verdict still illegible", { raw: JSON.stringify(parsed.safe) });
               return;
             }
             const reason =
@@ -815,11 +882,7 @@ export class AIService {
                 : "Content policy violation";
             verdict = safe ? { verdict: "safe" } : { verdict: "unsafe", reason };
           } catch (err) {
-            this.metrics.moderationRechecksAbandoned++;
-            this.logger.warn(
-              { err },
-              "S7: moderation re-check response unparseable — content stays published unchecked",
-            );
+            await giveUp("re-check response unparseable", { err });
             return;
           }
 
@@ -834,12 +897,21 @@ export class AIService {
                 ? "S7: moderation found UNSAFE content but the hide/notify action FAILED — it is still published"
                 : "S7: moderation re-check verdict handler failed",
             );
+            if (verdict.verdict === "unsafe") {
+              await this.escalate(onAbandoned, `judged unsafe (${verdict.reason}) but hiding it failed`);
+            }
           }
         },
         '{ "safe": true|false, "reason": "string|null" }',
-        true, // critical: never evict this in favour of NPC mail or ambient prose
+        // Critical: never evicted in favour of NPC mail or ambient prose, and
+        // escalated to admin review if it is ever given up on.
+        onAbandoned,
       );
-    })();
+    })().catch((err) => {
+      // The re-check was never even queued.
+      this.logger.error({ err }, "S7: could not queue a moderation re-check");
+      void this.escalate(onAbandoned, "re-check could not be queued");
+    });
   }
 
   /**

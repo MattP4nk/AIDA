@@ -93,6 +93,20 @@ export async function gracefulShutdown(
       logger.info("AI retry queue stopped");
     } catch { /* Not fatal */ }
 
+    // S7: pending moderation re-checks live only in memory. File them for
+    // admin review now, while the database is still connected (it disconnects
+    // last, below). Logged, not swallowed: a silent failure here is precisely
+    // the unreviewed-and-unrecorded outcome this exists to prevent.
+    try {
+      const aiService = getService<AIService>(AI_SERVICE);
+      const escalated = await aiService.escalatePendingModeration();
+      if (escalated > 0) {
+        logger.warn({ escalated }, "S7: pending moderation re-checks filed for admin review");
+      }
+    } catch (err) {
+      logger.error({ err }, "S7: could not escalate pending moderation re-checks on shutdown");
+    }
+
     // Stop content queue
     try {
       const contentQueueService = getService<ContentQueueService>(CONTENT_QUEUE_SERVICE);

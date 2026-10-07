@@ -37,12 +37,17 @@
  *
  *   - a queued re-check is never evicted to make room for ordinary AI work
  *     (NPC mail, ambient prose); those are dropped first;
- *   - if one is abandoned anyway, it increments
- *     `AIService` metric `moderationRechecksAbandoned` and logs at ERROR, so
- *     it is countable on the admin health endpoint rather than merely lost.
+ *   - if one is abandoned anyway — queue full, too old, out of attempts,
+ *     illegible answer, or the server shutting down — the content is filed
+ *     in the ADMIN REVIEW QUEUE (`escalate`) as a SYSTEM report, beside player
+ *     reports: `admin reports mail` for messages, `forum reports` for posts.
+ *     Content judged unsafe whose hide then fails is filed the same way.
  *
- * Content can still end up published and never reviewed. What changed is that
- * it can no longer happen *silently*.
+ * So the policy is now: every outcome that is not a clean "safe" ends with the
+ * content hidden, re-checked, or in front of a human. What is still uncovered,
+ * by name: a CRASH (graceful shutdown escalates, a kill -9 cannot), and an
+ * escalation whose own DB write fails — counted as
+ * `moderationEscalationsFailed` on the admin health endpoint.
  */
 import type { Logger } from "pino";
 import type { AIService } from "../services/aiService";
@@ -60,17 +65,37 @@ export async function moderateBeforePublish(
   content: string,
   logger: Logger,
   applyUnsafe: (reason: string) => Promise<void>,
+  /**
+   * File this content for human review. REQUIRED, so no caller can opt out:
+   * it is the backstop for every path where automated moderation could not
+   * finish on content that is already out.
+   */
+  escalate: (reason: string) => Promise<void>,
 ): Promise<{ verdict: "safe" | "unsafe" | "unavailable" }> {
+  const fileForReview = async (reason: string): Promise<void> => {
+    try {
+      await escalate(reason);
+    } catch (err) {
+      logger.error({ err, reason }, "S7: could not file content for admin review");
+    }
+  };
+
   let aiService: AIService | null = null;
   try {
     const { getService } = await import("../di/container");
     aiService = getService<AIService>(AI_SERVICE);
   } catch (err) {
-    logger.error({ err }, "S7: moderation service could not be resolved — publishing unmoderated");
+    // No service means no re-check either — this used to return here with
+    // nothing queued and nothing recorded: a silent, permanent fail-open.
+    logger.error({ err }, "S7: moderation service could not be resolved — publishing, filed for review");
+    await fileForReview("moderation service unavailable; published without any review");
     return { verdict: "unavailable" };
   }
 
-  if (!aiService) return { verdict: "unavailable" };
+  if (!aiService) {
+    await fileForReview("moderation service unavailable; published without any review");
+    return { verdict: "unavailable" };
+  }
 
   const result = await aiService.moderateForDelivery(content);
 
@@ -96,6 +121,9 @@ export async function moderateBeforePublish(
         { err, reason: result.reason },
         "S7: content judged UNSAFE but could not be hidden — delivery still suppressed",
       );
+      // Delivery is suppressed, but the ROW is unhidden: a forum post with
+      // isHidden=false is still listed to anyone who opens the forum.
+      await fileForReview(`judged unsafe (${result.reason}) but hiding it failed`);
     }
     return { verdict: "unsafe" };
   }
@@ -105,15 +133,20 @@ export async function moderateBeforePublish(
       { reason: result.reason },
       "S7: no moderation verdict — content published, re-check queued",
     );
-    aiService.queueModerationRecheck(content, async (recheck) => {
-      if (recheck.verdict !== "unsafe") return;
-      try {
-        await applyUnsafe(recheck.reason);
-        logger.warn({ reason: recheck.reason }, "S7: content hidden by background re-check");
-      } catch (err) {
-        logger.error({ err }, "S7: re-check said unsafe but hiding it failed");
-      }
-    });
+    aiService.queueModerationRecheck(
+      content,
+      async (recheck) => {
+        if (recheck.verdict !== "unsafe") return;
+        try {
+          await applyUnsafe(recheck.reason);
+          logger.warn({ reason: recheck.reason }, "S7: content hidden by background re-check");
+        } catch (err) {
+          logger.error({ err }, "S7: re-check said unsafe but hiding it failed");
+          await fileForReview(`re-check judged unsafe (${recheck.reason}) but hiding it failed`);
+        }
+      },
+      (why) => fileForReview(`moderation could not complete (${why}); published without review`),
+    );
     return { verdict: "unavailable" };
   }
 
