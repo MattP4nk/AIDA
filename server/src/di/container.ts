@@ -31,6 +31,9 @@ import MessageService from "../services/messageService";
 import { MessageEncryptionService } from "../services/messageEncryptionService";
 import { ChatService } from "../services/chatService";
 import ForumService from "../services/forumService";
+import { ForumAccessService } from "../services/forumAccessService";
+import { ForumModerationService } from "../services/forumModerationService";
+import { ForumContentService } from "../services/forumContentService";
 import PlayerPresenceService from "../services/playerPresenceService";
 import MemoryService from "../services/memoryService";
 import CommandProcessor from "../services/commandProcessor";
@@ -126,6 +129,9 @@ export function setupContainer(
   container.registerSingleton(TOKENS.MESSAGE_ENCRYPTION_SERVICE, MessageEncryptionService);
   container.registerSingleton(TOKENS.CHAT_SERVICE, ChatService);
   container.registerSingleton(TOKENS.MESSAGE_SERVICE, MessageService);
+  container.registerSingleton(TOKENS.FORUM_ACCESS_SERVICE, ForumAccessService);
+  container.registerSingleton(TOKENS.FORUM_MODERATION_SERVICE, ForumModerationService);
+  container.registerSingleton(TOKENS.FORUM_CONTENT_SERVICE, ForumContentService);
   container.registerSingleton(TOKENS.FORUM_SERVICE, ForumService);
   container.registerSingleton(
     TOKENS.PLAYER_PRESENCE_SERVICE,

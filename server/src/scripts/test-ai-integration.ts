@@ -65,9 +65,17 @@ async function testAIIntegration() {
     io,
     new PlayerProgressRepository(logger, prisma),
   );
+  // A8: the forum's sub-domains are constructor dependencies now.
+  const { ForumAccessService } = await import("../services/forumAccessService");
+  const { ForumModerationService } = await import("../services/forumModerationService");
+  const { ForumContentService } = await import("../services/forumContentService");
+  const forumAccess = new ForumAccessService(io, logger);
   const forumService = new (await import("../services/forumService")).default(
     io,
     logger,
+    forumAccess,
+    new ForumModerationService(logger, forumAccess),
+    new ForumContentService(io, logger),
   );
 
   const { FactionService } = await import("../services/factionService");

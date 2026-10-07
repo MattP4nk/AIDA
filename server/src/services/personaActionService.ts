@@ -704,7 +704,7 @@ Generate a post for underground hacking forums. Stay in character. Respond ONLY 
             }
 
             // Create AI post
-            const post = await this.forumService.createAIPost(
+            const post = await this.forumService.content.createAIPost(
               action.persona.id,
               targetForumId,
               postData.title,

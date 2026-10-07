@@ -277,14 +277,14 @@ Respond ONLY with JSON: { "title": "...", "content": "..." }`;
         retry: true,
         onRetrySuccess: async (result) => {
           const forum = await prismaRef.forum.findFirst({ where: { factionId } });
-          if (forum && result) await forumSvc.createAIPost(leaderId, forum.id, result.title, result.content);
+          if (forum && result) await forumSvc.content.createAIPost(leaderId, forum.id, result.title, result.content);
         },
       });
       if (!validated) return;
 
       const factionForum = await this.prisma.forum.findFirst({ where: { factionId } });
       if (factionForum) {
-        await this.forumService.createAIPost(leader.id, factionForum.id, validated.title, validated.content);
+        await this.forumService.content.createAIPost(leader.id, factionForum.id, validated.title, validated.content);
       }
       this.logger.info({ factionId, serverId, won, personaId: leader.id }, "Faction leader reacted to contest result");
     } catch (error) {
@@ -519,12 +519,12 @@ Respond ONLY with JSON: { "title": "...", "content": "..." }`;
             onRetrySuccess: async (result) => {
               if (!result) return;
               const forum = await prismaRef.forum.findFirst({ where: { factionId: aFactionId } });
-              if (forum) await forumSvc.createAIPost(aLeaderId, forum.id, result.title, result.content);
+              if (forum) await forumSvc.content.createAIPost(aLeaderId, forum.id, result.title, result.content);
             },
           });
           if (validated) {
             const forum = await this.prisma.forum.findFirst({ where: { factionId: attackerFactionId } });
-            if (forum) await this.forumService.createAIPost(attackerLeader.id, forum.id, validated.title, validated.content);
+            if (forum) await this.forumService.content.createAIPost(attackerLeader.id, forum.id, validated.title, validated.content);
           }
         } catch { /* AI post is best-effort */ }
       }
@@ -564,12 +564,12 @@ Respond ONLY with JSON: { "title": "...", "content": "..." }`;
             onRetrySuccess: async (result) => {
               if (!result) return;
               const forum = await prismaRef.forum.findFirst({ where: { factionId: dFactionId } });
-              if (forum) await forumSvc.createAIPost(dLeaderId, forum.id, result.title, result.content);
+              if (forum) await forumSvc.content.createAIPost(dLeaderId, forum.id, result.title, result.content);
             },
           });
           if (validated) {
             const forum = await this.prisma.forum.findFirst({ where: { factionId: defenderFactionId } });
-            if (forum) await this.forumService.createAIPost(defenderLeader.id, forum.id, validated.title, validated.content);
+            if (forum) await this.forumService.content.createAIPost(defenderLeader.id, forum.id, validated.title, validated.content);
           }
         } catch { /* best-effort */ }
       }
@@ -644,12 +644,12 @@ Respond ONLY with JSON: { "title": "...", "content": "..." }`;
             onRetrySuccess: async (result) => {
               if (!result) return;
               const forum = await prismaRef.forum.findFirst({ where: { factionId: wFactionId } });
-              if (forum) await forumSvc.createAIPost(wLeaderId, forum.id, result.title, result.content);
+              if (forum) await forumSvc.content.createAIPost(wLeaderId, forum.id, result.title, result.content);
             },
           });
           if (validated) {
             const forum = await this.prisma.forum.findFirst({ where: { factionId: winnerId } });
-            if (forum) await this.forumService.createAIPost(winnerLeader.id, forum.id, validated.title, validated.content);
+            if (forum) await this.forumService.content.createAIPost(winnerLeader.id, forum.id, validated.title, validated.content);
           }
         } catch { /* best-effort */ }
       }
@@ -688,12 +688,12 @@ Respond ONLY with JSON: { "title": "...", "content": "..." }`;
             onRetrySuccess: async (result) => {
               if (!result) return;
               const forum = await prismaRef.forum.findFirst({ where: { factionId: lFactionId } });
-              if (forum) await forumSvc.createAIPost(lLeaderId, forum.id, result.title, result.content);
+              if (forum) await forumSvc.content.createAIPost(lLeaderId, forum.id, result.title, result.content);
             },
           });
           if (validated) {
             const forum = await this.prisma.forum.findFirst({ where: { factionId: loserFactionId } });
-            if (forum) await this.forumService.createAIPost(loserLeader.id, forum.id, validated.title, validated.content);
+            if (forum) await this.forumService.content.createAIPost(loserLeader.id, forum.id, validated.title, validated.content);
           }
         } catch { /* best-effort */ }
       }

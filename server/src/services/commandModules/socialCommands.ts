@@ -543,7 +543,7 @@ export class SocialCommandsModule implements CommandModule {
     try {
       // forum (no args) - list discovered forums
       if (!subCommand) {
-        const forums = await forumService.getDiscoveredForums(userId);
+        const forums = await forumService.access.getDiscoveredForums(userId);
 
         if (forums.length === 0) {
           return successResult([
@@ -580,7 +580,7 @@ export class SocialCommandsModule implements CommandModule {
       // forum scan - discover new forums
       if (subCommand === "scan") {
         const useProxy = command.args.includes("--proxy");
-        const result = await forumService.scanForForums(userId, useProxy);
+        const result = await forumService.access.scanForForums(userId, useProxy);
 
         const rows: Array<{ label: string; value: string }> = [
           {
@@ -617,7 +617,7 @@ export class SocialCommandsModule implements CommandModule {
         }
 
         const useProxy = command.args.includes("--proxy");
-        const access = await forumService.accessForum(
+        const access = await forumService.access.accessForum(
           userId,
           forumId,
           useProxy,
@@ -699,7 +699,7 @@ export class SocialCommandsModule implements CommandModule {
           return errorResult("Usage: forum register <forumId> <handle>");
         }
 
-        await forumService.registerForumAccount(userId, forumId, handle);
+        await forumService.access.registerForumAccount(userId, forumId, handle);
 
         return {
           success: true,
@@ -984,7 +984,7 @@ export class SocialCommandsModule implements CommandModule {
           return errorResult("Usage: forum report <forumId> <postId> <reason>");
         }
 
-        const report = await forumService.reportContent(
+        const report = await forumService.moderation.reportContent(
           userId,
           forumId,
           postId,
@@ -1009,7 +1009,7 @@ export class SocialCommandsModule implements CommandModule {
 
         if (!forumId) {
           // System-wide reports (system admin/moderator only)
-          const result = await forumService.getSystemReports(userId);
+          const result = await forumService.moderation.getSystemReports(userId);
 
           if (result.reports.length === 0) {
             return successResult("No pending reports across any forum.");
@@ -1039,7 +1039,7 @@ export class SocialCommandsModule implements CommandModule {
           };
         }
 
-        const reports = await forumService.getReports(userId, forumId);
+        const reports = await forumService.moderation.getReports(userId, forumId);
 
         if (reports.length === 0) {
           return successResult("No pending reports.");
@@ -1075,7 +1075,7 @@ export class SocialCommandsModule implements CommandModule {
           return errorResult("Usage: forum resolve <forumId> <reportId> dismiss|action");
         }
 
-        const report = await forumService.resolveReport(
+        const report = await forumService.moderation.resolveReport(
           userId,
           forumId,
           reportId,
@@ -1100,7 +1100,7 @@ export class SocialCommandsModule implements CommandModule {
           return errorResult("Usage: forum pin <forumId> <postId>");
         }
 
-        const post = await forumService.pinPost(userId, forumId, postId);
+        const post = await forumService.moderation.pinPost(userId, forumId, postId);
 
         return {
           success: true,
@@ -1120,7 +1120,7 @@ export class SocialCommandsModule implements CommandModule {
           return errorResult("Usage: forum lock <forumId> <postId>");
         }
 
-        const post = await forumService.lockPost(userId, forumId, postId);
+        const post = await forumService.moderation.lockPost(userId, forumId, postId);
 
         return {
           success: true,
@@ -1140,7 +1140,7 @@ export class SocialCommandsModule implements CommandModule {
           return errorResult("Usage: forum ban <forumId> <handle>");
         }
 
-        await forumService.banMember(userId, forumId, handle);
+        await forumService.moderation.banMember(userId, forumId, handle);
 
         return {
           success: true,
@@ -1159,7 +1159,7 @@ export class SocialCommandsModule implements CommandModule {
           return errorResult("Usage: forum unban <forumId> <handle>");
         }
 
-        await forumService.unbanMember(userId, forumId, handle);
+        await forumService.moderation.unbanMember(userId, forumId, handle);
 
         return {
           success: true,
@@ -1178,7 +1178,7 @@ export class SocialCommandsModule implements CommandModule {
           return errorResult("Usage: forum delete <forumId> <postId>");
         }
 
-        await forumService.deletePost(userId, forumId, postId);
+        await forumService.moderation.deletePost(userId, forumId, postId);
 
         return {
           success: true,
@@ -1198,7 +1198,7 @@ export class SocialCommandsModule implements CommandModule {
           return errorResult("Usage: forum edit <forumId> <postId> <content>");
         }
 
-        const post = await forumService.editPost(
+        const post = await forumService.moderation.editPost(
           userId,
           forumId,
           postId,
@@ -1372,7 +1372,7 @@ export class SocialCommandsModule implements CommandModule {
     try {
       // proxy list - show available proxy servers
       if (subCommand === "list" || !subCommand) {
-        const proxies = await forumService.listProxyServers(userId);
+        const proxies = await forumService.access.listProxyServers(userId);
 
         const speedMap: Record<string, string> = {
           slow: "Slow",
@@ -1416,7 +1416,7 @@ export class SocialCommandsModule implements CommandModule {
           return errorResult("Usage: proxy connect <proxy_id>");
         }
 
-        const connection = await forumService.connectToProxy(userId, proxyId);
+        const connection = await forumService.access.connectToProxy(userId, proxyId);
 
         const lines = infoBox(
           "PROXY CONNECTED",
@@ -1444,14 +1444,14 @@ export class SocialCommandsModule implements CommandModule {
 
       // proxy disconnect - disconnect from proxy
       if (subCommand === "disconnect") {
-        await forumService.disconnectProxy(userId);
+        await forumService.access.disconnectProxy(userId);
 
         return successResult("✓ Disconnected from proxy server");
       }
 
       // proxy status - check current connection
       if (subCommand === "status") {
-        const status = await forumService.getProxyStatus(userId);
+        const status = await forumService.access.getProxyStatus(userId);
 
         if (!status.connected) {
           const lines = statusCard(

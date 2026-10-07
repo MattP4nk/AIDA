@@ -3915,7 +3915,33 @@ Write them per-refactor, immediately before touching the code:
         over a 228-case matrix (8 roles x 6 factions incl. null/unknown), with Math.random seeded
         per case and Date frozen. Recorded before the move (internals exported first — a
         behaviour-neutral, diff-proven step), 228/228 identical after.
-      - [ ] `forumService` (3,102) — proxy network is a separate domain.
+      - [x] **`forumService` 3,102 -> 930 (2026-10-07).** PLAN's "the proxy network is a separate
+        domain" was right in concept and wrong in scale: the proxy code is ~120 lines. The bulk was
+        three self-contained domains, measured by what each reaches through `this`:
+        `forumAccessService` (886: discovery, access, live-feed rooms, proxy, honeypot),
+        `forumModerationService` (626: reports, pin/lock, ban, delete, edit),
+        `forumContentService` (793: AI/NPC posts and replies). Exposed as DI-managed sub-services —
+        `forumService.moderation.banMember(...)` — rather than three more `CommandContext` fields.
+        One-way deps: core and moderation use access; access uses nothing. 48/48 methods proven
+        verbatim (moved text diffed against the original after reversing only the deliberate
+        `this.x(` -> `this.access.x(` rewrites; comparator negative-controlled). 42 call sites in
+        9 files re-pointed by file:line, not regex. Two harnesses depended on layout and were
+        re-pointed — one of them, a NEGATIVE source check, would have passed vacuously.
+      - [ ] **Dead in-process event paths, found during the forum split — RETURN TO THIS.**
+        `dynamicContentService` registers 17 hooks; 3 are never forwarded:
+        `honeypot:triggered` (the hook's payload — serverId/fileName/attackerId — matches FILE
+        honeypots, `fileService.alertHoneypot`, not the FORUM event of the same name, whose payload
+        matches none of it), `backdoor:discovered` (emitted, listened to in index.ts, never
+        forwarded; payload lacks the hook's `type`/`detectionRisk`; and writing `Installed by:` into
+        the victim's log reveals the attacker — a DESIGN question), `dungeon:conquered` (never
+        emitted; `conquerVault` exists; the hook's query is not filtered to darknet servers despite
+        its comment). Separately `story:post-read` is emitted "for StoryService to handle" and
+        nothing handles it. Right altitude: a bus-contract check, the in-process twin of
+        check-socket-contract.ts.
+      - [ ] Zero-caller forum content, kept intact in `forumContentService` (dead-code rule):
+        `createAIReply` (untracked until now), `populateForumContent` (first-boot populator,
+        superseded by seed.ts on any seeded DB; only a manual script calls it). `handleNPCReply` is
+        already tracked in Phase 8.
       - [ ] `hackService` (2,739) — session-store / scoring / countermeasures.
       - [ ] `Terminal.svelte` (2,867) — CSS + `handleSubmit`.
 - [ ] **A8** Introduce `authService` — move the auth domain out of `routes/auth.ts` (561 lines,

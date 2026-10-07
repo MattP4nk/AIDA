@@ -625,7 +625,7 @@ async function handleAuthentication(
       // `forumMember` directly and join every row — including memberships that
       // had been BANNED, since `banMember` leaves the row in place and only
       // flips a flag that the posting paths check and this one did not.
-      const forumIds = await forumService.getLiveFeedForums(userId);
+      const forumIds = await forumService.access.getLiveFeedForums(userId);
       for (const forumId of forumIds) socket.join(`forum:${forumId}`);
       if (forumIds.length > 0) {
         logger.debug({ userId, forums: forumIds.length }, "Joined forum rooms");

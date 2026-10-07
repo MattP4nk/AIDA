@@ -241,7 +241,7 @@ async function main() {
       check("reason is marked automated", mine?.reason === "[auto-moderation] test escalation", mine?.reason);
 
       await forums.fileModerationEscalation({ forumId: forum.id, postId: post.id }, "test escalation");
-      const sys = await forums.getSystemReports(mod.id);
+      const sys = await forums.moderation.getSystemReports(mod.id);
       const mineP = sys.reports.find((r: any) => r.postId === post.id);
       check("post report is in system-wide `forum reports`", !!mineP);
       check("filed by SYSTEM", mineP?.reporter?.username === "SYSTEM", mineP?.reporter?.username);

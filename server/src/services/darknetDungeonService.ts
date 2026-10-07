@@ -745,7 +745,7 @@ Respond ONLY with JSON:
       const { getService } = await import("../di/container");
       const forumService = getService<ForumService>(FORUM_SERVICE);
 
-      const post = await forumService.createAIPost(
+      const post = await forumService.content.createAIPost(
         architect.id,
         forum.id,
         title,

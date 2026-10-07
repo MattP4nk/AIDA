@@ -150,7 +150,10 @@ async function main() {
   console.log("\nS6c-5 — both replay sites use it");
   {
     const msg = read("../src/services/messageService.ts");
-    const forum = read("../src/services/forumService.ts");
+    // A8: handleNPCReply moved to forumContentService.ts. Reading the old file
+    // made three checks fail — and would have made the NEGATIVE check below
+    // pass vacuously, which is the worse outcome.
+    const forum = read("../src/services/forumContentService.ts");
 
     check(
       "generatePersonaReply builds history through sanitizeTranscript",

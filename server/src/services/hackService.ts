@@ -2316,7 +2316,7 @@ class HackService extends EventEmitter {
           });
 
           if (forum) {
-            await forumService.createAIPost(
+            await forumService.content.createAIPost(
               forum.id,
               faction.aiPersonaId,
               `WANTED: ${target.username}`,

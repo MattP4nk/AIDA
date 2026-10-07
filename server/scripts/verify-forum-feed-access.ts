@@ -93,7 +93,7 @@ async function main() {
     // ── The rule ─────────────────────────────────────────────────────
     console.log("\nFF-1 — only a valid membership grants the live feed");
     {
-      const allowed: string[] = await forums.getLiveFeedForums(user.id);
+      const allowed: string[] = await forums.access.getLiveFeedForums(user.id);
       check(
         "the function exists and returns a list",
         Array.isArray(allowed),
@@ -132,8 +132,10 @@ async function main() {
     {
       const left: Array<{ from: string; room: string }> = [];
       const joined: Array<{ from: string; room: string }> = [];
-      const realIo = (forums as any).io;
-      (forums as any).io = {
+      // A8: live-feed rooms are ForumAccessService's job, and it holds its own
+      // `io` (the same SOCKET_IO singleton in production).
+      const realIo = (forums as any).access.io;
+      (forums as any).access.io = {
         in: (from: string) => ({
           socketsLeave: (room: string) => left.push({ from, room }),
           socketsJoin: (room: string) => joined.push({ from, room }),
@@ -160,7 +162,7 @@ async function main() {
           data: { userId: victim.id, forumId: ok.id, handle: `${tag}_vh` },
         });
 
-        await forums.banMember(user.id, ok.id, `${tag}_vh`);
+        await forums.moderation.banMember(user.id, ok.id, `${tag}_vh`);
 
         check(
           "PRECONDITION: the ban was recorded",
@@ -189,7 +191,7 @@ async function main() {
 
         // ── The other direction ──────────────────────────────────────
         joined.length = 0;
-        await forums.unbanMember(user.id, ok.id, `${tag}_vh`);
+        await forums.moderation.unbanMember(user.id, ok.id, `${tag}_vh`);
         check(
           "PRECONDITION: the unban was recorded",
           (await prisma.forumMember.findUnique({
@@ -206,7 +208,7 @@ async function main() {
           "inert: they can read and post, but their live feed stays dead until they reload",
         );
       } finally {
-        (forums as any).io = realIo;
+        (forums as any).access.io = realIo;
         await prisma.forumMember.deleteMany({ where: { userId: victim.id } });
         await prisma.user.delete({ where: { id: victim.id } }).catch((e) => {
           console.error("CLEANUP FAILED (victim):", e.message);
@@ -226,7 +228,7 @@ async function main() {
         },
       });
       try {
-        const allowed: string[] = await forums.getLiveFeedForums(stranger.id);
+        const allowed: string[] = await forums.access.getLiveFeedForums(stranger.id);
         check(
           "a user with no memberships joins no rooms",
           allowed.length === 0,
@@ -246,8 +248,10 @@ async function main() {
       // authenticate-time join correctly refused. Same player, same forum, two
       // different answers, which is what one rule stated in two places buys.
       const joined: Array<{ from: string; room: string }> = [];
-      const realIo = (forums as any).io;
-      (forums as any).io = {
+      // A8: live-feed rooms are ForumAccessService's job, and it holds its own
+      // `io` (the same SOCKET_IO singleton in production).
+      const realIo = (forums as any).access.io;
+      (forums as any).access.io = {
         in: (from: string) => ({
           socketsJoin: (room: string) => joined.push({ from, room }),
           socketsLeave: () => {},
@@ -275,7 +279,7 @@ async function main() {
           ],
         });
 
-        await forums.registerForumAccount(joiner.id, ok.id, `${tag}_jh`);
+        await forums.access.registerForumAccount(joiner.id, ok.id, `${tag}_jh`);
         check(
           "POSITIVE CONTROL: registering on an ordinary forum DOES join the room",
           joined.some((j) => j.room === `forum:${ok.id}` && j.from === `user:${joiner.id}`),
@@ -289,7 +293,7 @@ async function main() {
         joined.length = 0;
         let proxyErr: any = null;
         try {
-          await forums.registerForumAccount(joiner.id, proxied.id, `${tag}_jp`);
+          await forums.access.registerForumAccount(joiner.id, proxied.id, `${tag}_jp`);
         } catch (e) { proxyErr = e; }
         check(
           "registering on a requiresProxy forum without a proxy is refused",
@@ -315,7 +319,7 @@ async function main() {
         });
         check(
           "and the live feed still excludes it even if a membership exists",
-          !(await forums.getLiveFeedForums(joiner.id)).includes(proxied.id),
+          !(await forums.access.getLiveFeedForums(joiner.id)).includes(proxied.id),
           "the registration gate and the feed predicate are independent defences",
         );
 
@@ -323,7 +327,7 @@ async function main() {
         const undiscovered = await mkForum("undiscovered", true);
         let discErr: any = null;
         try {
-          await forums.registerForumAccount(joiner.id, undiscovered.id, `${tag}_ju`);
+          await forums.access.registerForumAccount(joiner.id, undiscovered.id, `${tag}_ju`);
         } catch (e) { discErr = e; }
         check(
           "registering on a forum you have never found is refused",
@@ -337,7 +341,7 @@ async function main() {
           "reads as a bug",
         );
       } finally {
-        (forums as any).io = realIo;
+        (forums as any).access.io = realIo;
         await prisma.forumMember.deleteMany({ where: { userId: joiner.id } });
         await prisma.user.delete({ where: { id: joiner.id } }).catch((e) => {
           console.error("CLEANUP FAILED (joiner):", e.message);

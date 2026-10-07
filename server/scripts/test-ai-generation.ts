@@ -70,7 +70,7 @@ async function runTest() {
     // We call the public method that triggers the internal generateForumPosts
     // Note: populateForumContent is designed for all forums, let's call it and filter or
     // since we want a specific test, we can call it and see what happens.
-    await forumService.populateForumContent();
+    await forumService.content.populateForumContent();
 
     // 6. Verify Results
     const posts = await db.client.post.findMany({
