@@ -8,7 +8,7 @@ import { config, validateConfig, CORS_ORIGINS } from "./config/environment";
 import { db } from "./database/client";
 import { reconcileShopItems } from "../prisma/reconcileShopItems";
 import { initializeContainer, getService } from "./di/container";
-import { ACHIEVEMENT_SERVICE, AI_SCHEDULER_SERVICE, ARCHITECT_INTERVENTION_EXECUTOR, CENSORSHIP_SERVICE, CONTENT_DRAFT_SERVICE, CONTENT_QUEUE_SERVICE, DARKNET_DUNGEON_SERVICE, DYNAMIC_CONTENT_SERVICE, EPOCH_SCHEDULER_SERVICE, EVENT_SERVICE, FACTION_SERVICE, FORUM_SERVICE, GAME_STATE_MANAGER, HACK_SERVICE, IP_SERVICE, KEY_FRAGMENT_SERVICE, MESSAGE_SERVICE, MISSION_SERVICE, PERSONA_MAIL_QUEUE_SERVICE, PERSONA_SERVICE, PROGRESS_SERVICE, REFERENCE_VALIDATION_SERVICE, RESOURCE_SERVICE, SERVER_CONTENT_SERVICE, SHOP_SERVICE, STORY_MISSION_SERVICE, STORY_PROGRESSION_SERVICE, TUTORIAL_SERVICE, WARFARE_SERVICE } from "./di/tokens";
+import { ACHIEVEMENT_SERVICE, BACKDOOR_SERVICE, AI_SCHEDULER_SERVICE, ARCHITECT_INTERVENTION_EXECUTOR, CENSORSHIP_SERVICE, CONTENT_DRAFT_SERVICE, CONTENT_QUEUE_SERVICE, DARKNET_DUNGEON_SERVICE, DYNAMIC_CONTENT_SERVICE, EPOCH_SCHEDULER_SERVICE, EVENT_SERVICE, FACTION_SERVICE, FORUM_SERVICE, GAME_STATE_MANAGER, HACK_SERVICE, IP_SERVICE, KEY_FRAGMENT_SERVICE, MESSAGE_SERVICE, MISSION_SERVICE, PERSONA_MAIL_QUEUE_SERVICE, PERSONA_SERVICE, PROGRESS_SERVICE, REFERENCE_VALIDATION_SERVICE, RESOURCE_SERVICE, SERVER_CONTENT_SERVICE, SHOP_SERVICE, STORY_MISSION_SERVICE, TRACE_SERVICE, STORY_PROGRESSION_SERVICE, TUTORIAL_SERVICE, WARFARE_SERVICE } from "./di/tokens";
 
 import type GameStateManager from "./services/gameStateManager";
 import type ProgressService from "./services/progressService";
@@ -30,6 +30,8 @@ import type { FactionService } from "./services/factionService";
 import type { ForumService } from "./services/forumService";
 
 import type {
+  BackdoorDiscoveredEvent,
+  BackdoorExpiredEvent,
   BountyPostedEvent,
   EndgameCompletedEvent,
   EndgameUnlockedEvent,
@@ -48,6 +50,8 @@ import type {
   PlayerLevelUpEvent,
   RewardsCreditsGrantedEvent,
   RewardsXpGrantedEvent,
+  TraceCompletedEvent,
+  TraceInitiatedEvent,
 } from "./services/serviceEvents";
 
 // Extracted modules
@@ -59,6 +63,7 @@ import {
 import { setupSocketHandlers } from "./sockets/handlers";
 import { registerShutdownHandlers } from "./lifecycle";
 import { registerShutdownTimer } from "./utils/shutdownTimers";
+import { notifyUser } from "./utils/notify";
 import {
   ARCHITECT_EVAL_INTERVAL_MS,
   DUNGEON_EXPIRATION_INTERVAL_MS,
@@ -181,6 +186,69 @@ function wireServiceEvents(storyProgression: StoryProgressionService): void {
   const hackService = getService<HackService>(HACK_SERVICE);
   const missionService = getService<MissionService>(MISSION_SERVICE);
   const factionService = getService<FactionService>(FACTION_SERVICE);
+  const traceService = getService<import("./services/traceService").TraceService>(TRACE_SERVICE);
+  const backdoorService =
+    getService<import("./services/backdoorService").BackdoorService>(BACKDOOR_SERVICE);
+
+  // ── Things happening TO you ──────────────────────────────────────
+  //
+  // traceService and backdoorService were both 100% bus-only: no `io`, no
+  // `notifyUser`, and no listener anywhere. Every event below is a consequence
+  // of someone ELSE's action, so the player has no reason to go looking — and
+  // the only way to find out was to type `trace.status` or notice a backdoor
+  // missing from `backdoor list`.
+  //
+  // Routed through `notifyUser` rather than new socket events on purpose: it
+  // persists, so a player who was offline when they were traced still learns
+  // about it on reconnect, and it reuses the notification path the client
+  // already renders. A new socket event would have needed a new client
+  // listener to say the same thing, less durably.
+  traceService.on("trace:initiated", (data: TraceInitiatedEvent) => {
+    defer(() => notifyUser(io, data.targetId, {
+      type: "security_alert",
+      category: "security",
+      title: "Trace Detected",
+      message: "Someone is tracing your connection. Use `trace.evade` to break it.",
+      priority: "high",
+      data: { traceId: data.traceId, serverId: data.serverId },
+    }), "Trace-initiated notification error");
+  });
+
+  traceService.on("trace:completed", (data: TraceCompletedEvent) => {
+    defer(() => notifyUser(io, data.targetId, {
+      type: "security_alert",
+      category: "security",
+      title: "Identity Exposed",
+      message: "A trace against you completed. Your identity has been exposed.",
+      priority: "critical",
+      data: { traceId: data.traceId },
+    }), "Trace-completed notification error");
+  });
+
+  backdoorService.on("backdoor:discovered", (data: BackdoorDiscoveredEvent) => {
+    defer(() => notifyUser(io, data.installerId, {
+      type: "security_alert",
+      category: "security",
+      title: "Backdoor Discovered",
+      message:
+        data.discoveredBy === "scan"
+          ? "A security scan found one of your backdoors. It has been removed."
+          : "One of your backdoors was detected in use and has been disabled.",
+      priority: "high",
+      data: { serverId: data.serverId },
+    }), "Backdoor-discovered notification error");
+  });
+
+  backdoorService.on("backdoor:expired", (data: BackdoorExpiredEvent) => {
+    defer(() => notifyUser(io, data.installerId, {
+      type: "backdoor_expired",
+      category: "game",
+      title: "Backdoor Expired",
+      message: "One of your backdoors has expired and no longer grants access.",
+      priority: "normal",
+      data: { serverId: data.serverId },
+    }), "Backdoor-expired notification error");
+  });
 
   //
   // All event side-effects are deferred via queueMicrotask so the EventEmitter
@@ -449,6 +517,31 @@ function wireServiceEvents(storyProgression: StoryProgressionService): void {
       data: { factionId: data.factionId, amount: data.amount, newReputation: data.newReputation },
       impact: { factions: { [data.factionId]: data.amount > 0 ? 1 : -1 } }, weight: 2,
     }), "Story ledger error on faction:reputation_changed");
+
+    // Tell the player. This bridge was LEDGER-ONLY: the `reputation:changed`
+    // socket event exists and the client has always handled it, but the only
+    // emitter was reputationEngine — so the two paths that call
+    // `factionService.addReputation` directly (hackService's post-hack faction
+    // penalty, and the bounty claim in playerInfoCommands) changed standing
+    // silently, as did the engine's own rival-faction spillover.
+    //
+    // Emitting from the bus event means every reputation change is covered by
+    // construction, because `addReputation` is the single writer.
+    if (data.amount !== 0) {
+      defer(async () => {
+        const faction = await db.client.faction.findUnique({
+          where: { id: data.factionId },
+          select: { name: true },
+        });
+        io.to(`player:${data.userId}`).emit("reputation:changed", {
+          factionId: data.factionId,
+          factionName: faction?.name ?? "Faction",
+          amount: data.amount,
+          newReputation: data.newReputation,
+          reason: data.reason,
+        });
+      }, "Reputation socket bridge error");
+    }
   });
 
   factionService.on("faction:rank_achieved", (data: FactionRankAchievedEvent) => {
@@ -517,9 +610,38 @@ function wireServiceEvents(storyProgression: StoryProgressionService): void {
   });
 
   // Level up → dynamic content (home server log)
-  missionService.on("player:levelup", (data: PlayerLevelUpEvent) => {
+  // BOTH emitters, because they are separate EventEmitters.
+  //
+  // `missionService` and `hackService` each emit `player:levelup` with the same
+  // shape, and this was registered on missionService only — so XP earned by
+  // HACKING levelled you up in silence. missionService socket-emits and calls
+  // notifyUser inline at its own emit site; hackService does neither, and has
+  // no `io` to do it with. The asymmetry is why the hack path needs the socket
+  // emit added here while the mission path must NOT get a second one.
+  //
+  // `serviceEvents.ts` has carried a comment warning that these are separate
+  // emitters since the day the types were written. A comment is not a fix.
+  const onLevelUp = (fromHack: boolean) => (data: PlayerLevelUpEvent) => {
     defer(() => dynamicContent.processEvent("player:levelup", data), "Dynamic content error on player:levelup");
-  });
+    if (!fromHack) return;
+    defer(async () => {
+      io.to(`player:${data.userId}`).emit("player:levelup", {
+        newLevel: data.newLevel,
+        experience: data.experience,
+        userId: data.userId,
+      });
+      const { notifyUser } = await import("./utils/notify");
+      await notifyUser(io, data.userId, {
+        type: "levelup",
+        category: "game",
+        title: "Level Up!",
+        message: `You reached level ${data.newLevel}.`,
+        priority: "high",
+      });
+    }, "Level-up notification error (hack path)");
+  };
+  missionService.on("player:levelup", onLevelUp(false));
+  hackService.on("player:levelup", onLevelUp(true));
 
   // Tutorial mission completion is handled by the single `mission:completed`
   // registration above; `tutorialService` is resolved there.

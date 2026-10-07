@@ -2352,7 +2352,12 @@ class HackService extends EventEmitter {
 
         // Penalty scales with evidence: 61-80% → -5 rep, 81-100% → -15 rep
         const penalty = evidenceLevel > 80 ? -15 : -5;
-        await factionService.addReputation(attackerId, factionId, penalty);
+        await factionService.addReputation(
+          attackerId,
+          factionId,
+          penalty,
+          "Detected intrusion",
+        );
 
         this.logger.info({ attackerId, factionId, penalty, evidenceLevel }, "Detection reputation penalty applied");
       },

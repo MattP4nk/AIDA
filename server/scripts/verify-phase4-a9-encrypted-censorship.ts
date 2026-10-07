@@ -91,7 +91,28 @@ async function main() {
     content: PHRASE,
     messageType: "private",
   });
-  check("PRECONDITION: the plain message sent", plain?.success === true, plain?.message ?? "");
+  // PRECONDITIONS ASSERT PERSISTENCE, NOT THE MODERATION VERDICT.
+  //
+  // These were `success === true`, which made the whole harness depend on AI
+  // latency. The fixture is an SSN pattern — exactly what the S7 moderation
+  // gate is meant to catch — so `moderateBeforePublish` legitimately returns
+  // "unsafe" and `sendPrivateMessage` answers `{success:false, message:
+  // "Message blocked by content policy"}`. Whether that happens is a race: on
+  // the run that exposed this, the FIRST message slipped through only because
+  // moderation exceeded its 10s budget and fell through to publish-and-recheck,
+  // while the second was judged in time and blocked. Same code, opposite
+  // results, decided by how busy the AI was.
+  //
+  // Moderation is orthogonal to what this file tests. Censorship redaction runs
+  // BEFORE encryption, the row is persisted either way (blocked content is kept
+  // hidden so the decision stays auditable), and the real assertion below reads
+  // that row. So the precondition is now "the row exists", which is what the
+  // test actually needs and does not move with AI load.
+  check(
+    "PRECONDITION: the plain message was persisted",
+    !!plain?.data?.messageId,
+    plain?.message ?? "no messageId — the send path did not run at all",
+  );
 
   const plainRow = await prisma.message.findFirst({
     where: { senderId: sender.id, subject: "plain" },
@@ -110,7 +131,11 @@ async function main() {
     messageType: "private",
     encrypt: true,
   });
-  check("PRECONDITION: the encrypted message sent", enc?.success === true, enc?.message ?? "");
+  check(
+    "PRECONDITION: the encrypted message was persisted",
+    !!enc?.data?.messageId,
+    enc?.message ?? "no messageId — the send path did not run at all",
+  );
 
   const encRow = await prisma.message.findFirst({
     where: { senderId: sender.id, subject: "encrypted" },

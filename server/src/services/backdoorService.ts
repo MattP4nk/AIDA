@@ -233,7 +233,11 @@ export class BackdoorService extends EventEmitter {
             "Backdoor expired on use attempt",
           );
 
-          this.emit("backdoor:expired", { backdoorId: backdoor.id, serverId });
+          this.emit("backdoor:expired", {
+            backdoorId: backdoor.id,
+            serverId,
+            installerId: userId,
+          });
           await this.releaseBackdoorDrain(userId, serverId);
 
           return { success: false, error: "Backdoor has expired" };
@@ -273,6 +277,7 @@ export class BackdoorService extends EventEmitter {
           this.emit("backdoor:discovered", {
             backdoorId: backdoor.id,
             serverId,
+            installerId: userId,
             discoveredBy: "system",
           });
 
@@ -418,6 +423,7 @@ export class BackdoorService extends EventEmitter {
           this.emit("backdoor:expired", {
             backdoorId: expired.id,
             serverId: expired.serverId,
+            installerId: expired.installerId,
           });
           await this.releaseBackdoorDrain(expired.installerId, expired.serverId);
         }
@@ -497,6 +503,7 @@ export class BackdoorService extends EventEmitter {
             this.emit("backdoor:discovered", {
               backdoorId: backdoor.id,
               serverId,
+              installerId: backdoor.installerId,
               discoveredBy: "scan",
             });
           }

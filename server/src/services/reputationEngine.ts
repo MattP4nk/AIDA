@@ -1,7 +1,6 @@
 import { injectable, inject } from "tsyringe";
 import { PrismaClient } from "@prisma/client";
 import { Logger } from "pino";
-import { Server as SocketIOServer } from "socket.io";
 import { FactionService } from "./factionService";
 import { LOGGER, WARFARE_SERVICE } from "../di/tokens";
 
@@ -48,18 +47,15 @@ export interface ReputationChangeEvent {
 export class ReputationEngine {
   private prisma: PrismaClient;
   private logger: Logger;
-  private io: SocketIOServer;
   private factionService: FactionService;
 
   constructor(
     @inject("PrismaClient") prisma: PrismaClient,
     @inject(LOGGER) logger: Logger,
-    @inject("SocketIO") io: SocketIOServer,
     @inject("FactionService") factionService: FactionService,
   ) {
     this.prisma = prisma;
     this.logger = logger;
-    this.io = io;
     this.factionService = factionService;
   }
 
@@ -114,7 +110,7 @@ export class ReputationEngine {
       }
 
       // 1. Apply primary reputation change
-      await this.factionService.addReputation(userId, factionId, effectiveAmount);
+      await this.factionService.addReputation(userId, factionId, effectiveAmount, reason);
 
       // 2. Create FactionEvent for the change
       await this.prisma.factionEvent.create({
@@ -143,7 +139,12 @@ export class ReputationEngine {
 
           if (!rivalFaction) continue;
 
-          await this.factionService.addReputation(userId, rivalFaction.id, rivalAmount);
+          await this.factionService.addReputation(
+            userId,
+            rivalFaction.id,
+            rivalAmount,
+            `Rivalry: ${reason}`,
+          );
 
           // Create FactionEvent for the ripple effect
           await this.prisma.factionEvent.create({
@@ -160,14 +161,14 @@ export class ReputationEngine {
         }
       }
 
-      // 4. Emit socket notification to player
-      this.io.to(`player:${userId}`).emit("reputation:changed", {
-        factionId,
-        factionName: faction.name,
-        amount,
-        reason,
-        source,
-      });
+      // 4. NO SOCKET EMIT HERE any more.
+      //
+      // It moved to the `faction:reputation_changed` bridge in index.ts, fed by
+      // `factionService.addReputation` — the single writer of reputation. This
+      // emit only ever covered the PRIMARY faction on the engine path, so it
+      // missed both the rival-faction spillover below (which calls
+      // addReputation at step 3 and was never announced) and the two callers
+      // that bypass this engine entirely. Keeping it would now double-fire.
 
       this.logger.info(
         { userId, factionId: shortName, amount, reason, source },

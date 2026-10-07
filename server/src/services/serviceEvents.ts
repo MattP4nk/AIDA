@@ -147,6 +147,8 @@ export interface FactionReputationChangedEvent {
   factionId: string;
   amount: number;
   newReputation: number;
+  /** Optional: supplied by callers that have one, shown in the notification. */
+  reason?: string;
 }
 
 export interface FactionRankAchievedEvent {
@@ -190,4 +192,44 @@ export interface EndgameUnlockedEvent {
 export interface EndgameCompletedEvent {
   userId: string;
   choice: string;
+}
+
+// ── traceService ──────────────────────────────────────────────────
+//
+// This whole service was bus-only: zero `io.to(...)`, zero `notifyUser`, and
+// nothing anywhere listened. Being traced — the most consequential thing that
+// can happen to a hacker — was discoverable only by typing `trace.status`.
+
+export interface TraceInitiatedEvent {
+  traceId: string;
+  /** The player being traced. */
+  targetId: string;
+  serverId: string;
+}
+
+export interface TraceCompletedEvent {
+  traceId: string;
+  /** The player whose identity is now exposed. */
+  targetId: string;
+  initiatedBy: string;
+}
+
+// ── backdoorService ───────────────────────────────────────────────
+//
+// Also bus-only. `installerId` was added to every emit for these bridges: both
+// events are asset losses the owner cannot cause and could not be told about,
+// and the payload did not say whose asset it was.
+
+export interface BackdoorDiscoveredEvent {
+  backdoorId: string;
+  serverId: string;
+  installerId: string;
+  /** "system" — tripped on use; "scan" — a third party went looking. */
+  discoveredBy: "system" | "scan";
+}
+
+export interface BackdoorExpiredEvent {
+  backdoorId: string;
+  serverId: string;
+  installerId: string;
 }

@@ -1079,6 +1079,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
           context.userId,
           bounty.issuedByFactionId,
           bounty.rewardReputation,
+          "Bounty claimed",
         );
       } catch {
         // Rep grant failure non-fatal

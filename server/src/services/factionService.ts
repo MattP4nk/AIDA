@@ -367,10 +367,18 @@ export class FactionService extends EventEmitter {
     return standing?.reputation || 0;
   }
 
+  /**
+   * THE one place faction reputation changes.
+   *
+   * `reason` is carried through to the bus event because that is what the
+   * player's notification shows. Without it the client falls back to "Your
+   * standing has changed", which is true and useless.
+   */
   public async addReputation(
     userId: string,
     factionId: string,
     amount: number,
+    reason?: string,
   ): Promise<void> {
     await safeExecute({
       fn: async () => {
@@ -410,11 +418,19 @@ export class FactionService extends EventEmitter {
           },
         });
 
+        // Bridged to the player's socket in index.ts. Emitting from HERE
+        // rather than from reputationEngine is what closes three gaps at once:
+        // the two call sites that bypass the engine entirely
+        // (hackService's post-hack penalty and the bounty claim in
+        // playerInfoCommands), and the engine's own RIVAL-faction spillover —
+        // which calls this method but was never covered by the engine's single
+        // emit, so the cross-faction rivalry mechanic was invisible.
         this.emit("faction:reputation_changed", {
           userId,
           factionId,
           amount,
           newReputation: newRep,
+          ...(reason ? { reason } : {}),
         });
 
         // Track for mission objectives

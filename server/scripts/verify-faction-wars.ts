@@ -139,7 +139,13 @@ async function main() {
       );
       check(
         "and applies the scaled amount, not the raw one",
-        /addReputation\(userId, factionId, effectiveAmount\)/.test(rep),
+        // TOLERANT OF EXTRA ARGUMENTS. This required the exact three-arg form
+        // `addReputation(userId, factionId, effectiveAmount)` and went red when
+        // a fourth parameter (`reason`) was added — the code still passed
+        // `effectiveAmount`, so the check was testing the argument list rather
+        // than the property. Same shape as the `emit(...)` layout checks: a
+        // regex that spans a call boundary breaks on the next edit to that call.
+        /addReputation\(\s*userId,\s*factionId,\s*effectiveAmount\b/.test(rep),
         "computing a multiplier and then ignoring it is the classic half-fix",
       );
     }
