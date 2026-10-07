@@ -89,11 +89,26 @@ async function main() {
     );
     // Positive control: the server really does branch on the callback, so the
     // assertions above are about a live mechanism, not a dead one.
+    // REPLACED 2026-10-07. This asserted that the server still had BOTH
+    // branches — the ack and an `authentication:complete` fallback — on the
+    // reasoning that passing the ack is what selects the good one. The
+    // fallback is now deleted: nothing ever listened for that event, on the
+    // client or in any harness, so a caller without an ack received nothing
+    // either way and the branch only made it look handled.
+    //
+    // The property that actually matters survives the deletion: the handler
+    // still distinguishes "ack supplied" from "not", and now SAYS SO instead
+    // of emitting into a void.
     check(
-      "POSITIVE CONTROL: the server still branches on the ack",
+      "POSITIVE CONTROL: the server still distinguishes a missing ack",
       /typeof callback === "function"/.test(serverSrc) &&
-        /emit\("authentication:complete"/.test(serverSrc),
-      "both branches exist, so passing the ack is what selects the good one",
+        /acknowledgement — response dropped/.test(serverSrc),
+      "it must not silently do nothing when no ack is passed",
+    );
+    check(
+      "and the dead `authentication:complete` fallback is gone",
+      !/emit\("authentication:complete"/.test(serverSrc),
+      "an event with no listener anywhere is not a fallback, it is a no-op",
     );
   }
 

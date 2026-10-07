@@ -581,13 +581,32 @@ async function handleAuthentication(
   const userId = socket.data.user?.id;
   const username = socket.data.user?.username;
 
+  /**
+   * Answer the caller's acknowledgement.
+   *
+   * The three sites below used to fall back to
+   * `socket.emit("authentication:complete", …)` when no ack was passed — an
+   * event NOTHING has ever listened for, on either the client or in any
+   * harness. So a caller without an ack received nothing either way; the
+   * fallback only made it look handled. Every real emitter passes one (the
+   * client at `socket.ts` and `App.svelte`, plus ten harnesses), so this path
+   * is unreachable today — and if it ever is reached, a log line is strictly
+   * more useful than a message with no recipient.
+   */
+  const respond = (payload: { success: boolean; userId?: string; username?: string; error?: string }) => {
+    if (typeof callback === "function") {
+      callback(payload);
+      return;
+    }
+    logger.warn(
+      { socketId: socket.id },
+      "authenticate called without an acknowledgement — response dropped",
+    );
+  };
+
   if (!userId) {
     const error = "No user ID found";
-    if (typeof callback === "function") {
-      callback({ success: false, error });
-    } else {
-      socket.emit("authentication:complete", { success: false, error });
-    }
+    respond({ success: false, error });
     return;
   }
 
@@ -759,22 +778,13 @@ async function handleAuthentication(
     });
 
     // Respond
-    const response = { success: true, userId, username };
-    if (typeof callback === "function") {
-      callback(response);
-    } else {
-      socket.emit("authentication:complete", response);
-    }
+    respond({ success: true, userId, username });
 
     logger.info({ username }, "User authenticated and session ready");
   } catch (error) {
     const msg = error instanceof Error ? error.message : "Unknown error";
     logger.error({ err: error }, "Authentication error");
-    if (typeof callback === "function") {
-      callback({ success: false, error: msg });
-    } else {
-      socket.emit("authentication:complete", { success: false, error: msg });
-    }
+    respond({ success: false, error: msg });
   }
 }
 

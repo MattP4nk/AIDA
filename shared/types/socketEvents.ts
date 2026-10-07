@@ -50,23 +50,13 @@ export interface ServerToClientEvents {
   }) => void;
 
   // ── authentication ─────────────────────────────────────────────────────
-  /**
-   * UNREACHABLE. Emitted only in the `else` of
-   * `typeof callback === "function"` — and **every** emitter of
-   * `authenticated`/`authenticate:request` passes an ack: the client
-   * (socket.ts, App.svelte) and all 13 harnesses. Verified by counting: 15
-   * emit sites, 0 without a callback.
-   *
-   * The previous comment here claimed it was "kept because harnesses still
-   * rely on it". That was false — I wrote it while fixing the handshake and
-   * never checked. Flagged for deletion in the orphan audit.
-   */
-  "authentication:complete": (data: {
-    success: boolean;
-    userId?: string;
-    username?: string;
-    error?: string;
-  }) => void;
+  // `authentication:complete` DELETED 2026-10-07. It was the else-branch of
+  // handleAuthentication's ack check — a reply sent when no acknowledgement was
+  // passed, to an event nothing has ever listened for on the client or in any
+  // harness. So a caller without an ack got nothing either way; the branch only
+  // made it look handled. The handler now logs that case instead, which is the
+  // behaviour the fallback was pretending to have.
+
 
   // ── notifications & messaging ──────────────────────────────────────────
   notification: (data: {

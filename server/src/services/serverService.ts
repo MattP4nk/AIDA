@@ -220,14 +220,12 @@ class ServerService {
           type: server.type,
         });
 
-        // Emit Socket.IO event
-        if (this.io && data.ownerId) {
-          this.io.to(`player:${data.ownerId}`).emit("server:created", {
-            serverId: server.id,
-            name: server.name,
-            ipAddress: server.ipAddress,
-          });
-        }
+        // NO EMIT. `createServer`'s only caller is `serverContentService`, which
+        // passes the NPC owner from `resolveNpcOwnerId` — so `player:<ownerId>`
+        // is a room no socket has ever joined, and this emitted into it on
+        // every generated server. Unlike its update/delete siblings it is not
+        // worth routing to the owner either: nobody needs telling that a server
+        // they do not know about was generated.
 
         // Generate default state
         const defaultState: ServerState = {
@@ -439,13 +437,12 @@ class ServerService {
           },
         );
 
-        // Emit Socket.IO event
-        if (this.io && existingServer.ownerId) {
-          this.io.to(`player:${existingServer.ownerId}`).emit("server:updated", {
-            serverId: server.id,
-            name: server.name,
-          });
-        }
+        await this.notifyServerOwner(
+          existingServer.ownerId,
+          "Server Modified",
+          `An administrator modified your server "${server.name}".`,
+          server.id,
+        );
 
         return (await this.getServer(serverId)) as ServerDetails;
       },
@@ -501,12 +498,12 @@ class ServerService {
           serverName: server.name,
         });
 
-        // Emit Socket.IO event
-        if (this.io && server.ownerId) {
-          this.io.to(`player:${server.ownerId}`).emit("server:deleted", {
-            serverId: server.id,
-          });
-        }
+        await this.notifyServerOwner(
+          server.ownerId,
+          "Server Removed",
+          `An administrator removed your server "${server.name}".`,
+          server.id,
+        );
       },
       context: "Delete server",
       logger: this.logger,
@@ -1363,6 +1360,52 @@ class ServerService {
       logger: this.logger,
       fallback: 0,
     })()) ?? 0;
+  }
+
+  /**
+   * Tell a server's owner that an admin changed it — if the owner is a player.
+   *
+   * These were socket emits to `player:<ownerId>` with no client listener. That
+   * was harmless while `updateServer`/`deleteServer` had zero callers, and
+   * STOPPED being harmless on 2026-10-06 when the admin routes were made to
+   * delegate here: `GameServer.ownerId` can be a real player (home servers) and
+   * the admin route accepts any id, so the emit started firing at players who
+   * had nothing listening. A fix made a dead emit live.
+   *
+   * `notifyUser` rather than a socket event plus a new client listener: it
+   * persists, so an admin acting while the player is offline still reaches
+   * them, which matters more here than for ambient events — someone changed
+   * their property.
+   *
+   * NPC owners are skipped. Most servers are owned by the NPC resolved in
+   * `resolveNpcOwnerId`, and writing notification rows for accounts that never
+   * log in is pure waste.
+   */
+  private async notifyServerOwner(
+    ownerId: string | null,
+    title: string,
+    message: string,
+    serverId: string,
+  ): Promise<void> {
+    if (!ownerId) return;
+    try {
+      const owner = await this.prisma.user.findUnique({
+        where: { id: ownerId },
+        select: { role: true },
+      });
+      if (!owner || owner.role === "npc") return;
+      const { notifyUser } = await import("../utils/notify");
+      await notifyUser(this.io, ownerId, {
+        type: "admin_action",
+        category: "system",
+        title,
+        message,
+        priority: "high",
+        data: { serverId },
+      });
+    } catch (err) {
+      this.logger.warn({ err, ownerId, serverId }, "Could not notify server owner");
+    }
   }
 
   /**
