@@ -21,6 +21,7 @@
 import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
 import { readFileSync } from "node:fs";
+import { stripComments } from "./lib/strip-comments";
 
 const prisma = new PrismaClient();
 let pass = 0, fail = 0;
@@ -28,7 +29,9 @@ function check(n: string, ok: boolean, d = "") {
   if (ok) { pass++; console.log(`  [PASS] ${n}${d ? ` — ${d}` : ""}`); }
   else { fail++; console.log(`  [FAIL] ${n}${d ? ` — ${d}` : ""}`); }
 }
-const strip = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+// Parser-based: this harness reads playerInfoCommands.ts, the one file where
+// the regex idiom swallows real code (138 lines; see lib/strip-comments.ts).
+const strip = (s: string) => stripComments(s);
 
 async function main() {
   console.log("\n=== Phase 7 A9 — content plan ownership ===");

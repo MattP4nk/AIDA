@@ -177,9 +177,13 @@ A green check that would also have been green *before* the fix is worthless.
 - **Strip comments before matching source in a harness.** A substring guard kept matching
   the comment that *explained* the fix rather than the fix — it fired **four separate
   times** in Phase 5, and once certified a fix (R12-d) that had zero callers and would
-  have been a regression if wired up. Match the call, not the word:
-  `src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "")` first, or assert on
-  `this.emit("x"` rather than `x`.
+  have been a regression if wired up. Match the call, not the word: strip with
+  `stripComments` from `server/scripts/lib/strip-comments.ts`, or assert on `this.emit("x"`
+  rather than `x`. **Do not use the old regex idiom**
+  (`src.replace(/\/\*[\s\S]*?\*\//g, "")…`): it is not string-aware, and a `"/*"` inside a
+  string literal swallows code to the next `*/` — 138 real lines of `playerInfoCommands.ts`,
+  two database writes among them, vanished from a check that was counting writes
+  (2026-10-07). The helper parses the file, so it cannot make that mistake.
 - **A structural check proves structure, not behaviour.** "The file contains this
   identifier" is compatible with the code being unreachable. Before trusting one, ask
   what *else* would satisfy it.

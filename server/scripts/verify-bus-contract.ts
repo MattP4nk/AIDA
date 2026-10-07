@@ -26,6 +26,7 @@
  */
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
+import { stripComments } from "./lib/strip-comments";
 
 const SRC = new URL("../src", import.meta.url).pathname;
 let pass = 0, fail = 0;
@@ -39,8 +40,8 @@ function check(n: string, ok: boolean, d = "") {
  * still count; this harness's own positive control caught that. A `//` right
  * after `:` or a quote is left alone so "http://..." strings survive.
  */
-const strip = (s: string) =>
-  s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "").replace(/(?<![:"'`\\])\/\/.*$/gm, "");
+// Parser-based: the regex idioms are not string-aware (see lib/strip-comments.ts).
+const strip = (s: string) => stripComments(s);
 function walk(dir: string): string[] {
   return readdirSync(dir).flatMap((e) => {
     const p = join(dir, e);

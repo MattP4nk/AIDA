@@ -16,6 +16,7 @@
  */
 import { readdirSync, readFileSync, statSync } from "fs";
 import { join, relative } from "path";
+import { stripComments as parserStrip } from "../server/scripts/lib/strip-comments";
 
 const ROOT = join(__dirname, "..");
 const SERVER_SRC = join(ROOT, "server", "src");
@@ -74,13 +75,20 @@ const ON_HANDLER = /\.(?:on|once)\(\s*["'`]([a-z_]+:[a-zA-Z_-]+)["'`]/g;
  * harness `verify-phase7-a3-socket-contract.ts` already did it and this did
  * not.
  */
-const stripComments = (src: string): string =>
+// Parser-based (server/scripts/lib/strip-comments.ts). The regex this used
+// is not string-aware: a "/*" inside a string swallows code to the next "*/".
+// .svelte files are not TypeScript, so they keep the regex — their scripts
+// carry no glob-like strings today, and the audit that found the trap was
+// run over server .ts files.
+const regexStrip = (src: string): string =>
   src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+const stripComments = (src: string, file = ""): string =>
+  file.endsWith(".ts") ? parserStrip(src) : regexStrip(src);
 
 function collect(files: string[], re: RegExp): Ref[] {
   const out: Ref[] = [];
   for (const f of files) {
-    const src = stripComments(readFileSync(f, "utf8"));
+    const src = stripComments(readFileSync(f, "utf8"), f);
     for (const m of src.matchAll(new RegExp(re.source, re.flags))) {
       out.push({ event: m[1]!, where: relative(ROOT, f) });
     }
