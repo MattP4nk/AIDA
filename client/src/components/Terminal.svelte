@@ -20,6 +20,11 @@
     // Socket service for real-time notifications
     import { liveMessages, socketService, activeProcesses } from "../services/socket";
     import {
+        resolveDialogCommand,
+        applyChallengeState,
+        extractSuggestedCommand,
+    } from "../services/commandResult";
+    import {
         playerResources,
         activeHackSession,
         activeConnectionSession,
@@ -730,65 +735,10 @@
         isExecuting = true;
 
         try {
-            // Check if this is a UI command that should open a dialog
-            const cmdParts = command.trim().split(/\s+/);
-            const cmdName = cmdParts[0].toLowerCase();
-
-            if (cmdName === "shop") {
-                openDialog("shop");
-                if (activeTabId) {
-                    terminalTabsStore.updateProcessingState(activeTabId, false);
-                }
-                isExecuting = false;
-                return;
-            }
-
-            if (
-                cmdName === "inventory" ||
-                cmdName === "equipment" ||
-                cmdName === "gear" ||
-                cmdName === "scripts"
-            ) {
-                openDialog("equipment");
-                if (activeTabId) {
-                    terminalTabsStore.updateProcessingState(activeTabId, false);
-                }
-                isExecuting = false;
-                return;
-            }
-
-            // Open chat dialog for messaging commands
-            if (
-                cmdName === "msg" ||
-                cmdName === "message" ||
-                cmdName === "chat" ||
-                cmdName === "dm"
-            ) {
-                openDialog("chat", { command: cmdParts });
-                if (activeTabId) {
-                    terminalTabsStore.updateProcessingState(activeTabId, false);
-                }
-                isExecuting = false;
-                return;
-            }
-
-            // Open mail dialog for inbox/mail commands
-            if (
-                cmdName === "mail" ||
-                cmdName === "inbox" ||
-                cmdName === "messages"
-            ) {
-                openDialog("mail");
-                if (activeTabId) {
-                    terminalTabsStore.updateProcessingState(activeTabId, false);
-                }
-                isExecuting = false;
-                return;
-            }
-
-            // Open forum dialog for forum commands
-            if (cmdName === "forum" || cmdName === "forums") {
-                openDialog("forum", { command: cmdParts });
+            // UI commands open a dialog instead of going to the server.
+            const dialogRoute = resolveDialogCommand(command);
+            if (dialogRoute) {
+                openDialog(dialogRoute.dialog, dialogRoute.data);
                 if (activeTabId) {
                     terminalTabsStore.updateProcessingState(activeTabId, false);
                 }
@@ -804,78 +754,13 @@
                 openDialog(result.openDialog, result.data);
             }
 
-            // Handle challenge starts from HTTP results (connection/hack)
-            if (result.data?.connectionSessionId && result.data?.connectionChallenge) {
-                activeConnectionSession.set({
-                    active: true,
-                    targetIp: result.data.targetIp,
-                    challenge: result.data.connectionChallenge,
-                    sessionId: result.data.connectionSessionId,
-                });
-                // Register in ProcessBar for countdown
-                const connTimeLimit = result.data.connectionChallenge?.timeLimit || 45;
-                const { activeProcesses } = await import("../services/socket");
-                activeProcesses.update(procs => [
-                    ...procs.filter((p: any) => p.pid !== ReservedPID.CONNECTION_CHALLENGE),
-                    { pid: ReservedPID.CONNECTION_CHALLENGE, type: "connection_challenge", description: `Connection challenge — ${result.data.targetIp}`, progress: 0, eta: connTimeLimit },
-                ]);
-            }
-            if (result.data?.connectionResolved) {
-                activeConnectionSession.set(null);
-                const { activeProcesses } = await import("../services/socket");
-                activeProcesses.update(procs => procs.filter((p: any) => p.pid !== ReservedPID.CONNECTION_CHALLENGE));
-            }
-
-            // Handle hack session start from HTTP fallback (when memoryService unavailable)
-            if (result.data?.sessionId && result.data?.targetIp && !result.data?.connectionSessionId) {
-                const { activeProcesses } = await import("../services/socket");
-                activeHackSession.set({
-                    active: true,
-                    targetIp: result.data.targetIp,
-                    currentLayer: 0,
-                    totalLayers: result.data.totalLayers,
-                    challenge: result.data.challenge,
-                });
-                activeProcesses.update(procs => [
-                    ...procs.filter((p: any) => p.pid !== ReservedPID.HACK_CHALLENGE),
-                    { pid: ReservedPID.HACK_CHALLENGE, type: "hack", description: `Hacking ${result.data.targetIp}`, progress: 0 },
-                ]);
-            }
-            // Handle hack layer progression (nextChallenge) or resolution (hackResolved)
-            if (result.data?.nextChallenge) {
-                activeHackSession.update((session: any) => {
-                    if (!session) return session;
-                    return { ...session, currentLayer: (session.currentLayer || 0) + 1, challenge: result.data.nextChallenge };
-                });
-            }
-            if (result.data?.hackResolved) {
-                activeHackSession.set(null);
-                const { activeProcesses } = await import("../services/socket");
-                activeProcesses.update(procs => procs.filter((p: any) => p.pid !== ReservedPID.HACK_CHALLENGE));
-            }
-
-            // Handle file access challenge start from HTTP
-            if (result.data?.fileAccessSessionId && result.data?.fileAccessType) {
-                const { activeProcesses } = await import("../services/socket");
-                activeFileChallenge.set({
-                    active: true,
-                    type: result.data.fileAccessType,
-                    targetFile: result.data.targetFile,
-                    targetDir: result.data.targetDir,
-                    challenge: result.data.challenge,
-                    sessionId: result.data.fileAccessSessionId,
-                });
-                activeProcesses.update(procs => [
-                    ...procs.filter((p: any) => p.pid !== ReservedPID.FILE_CHALLENGE),
-                    { pid: ReservedPID.FILE_CHALLENGE, type: "file_challenge", description: `${result.data.fileAccessType} challenge`, progress: 0 },
-                ]);
-            }
-            // Handle file access resolution
-            if (result.data?.fileAccessResolved) {
-                activeFileChallenge.set(null);
-                const { activeProcesses } = await import("../services/socket");
-                activeProcesses.update(procs => procs.filter((p: any) => p.pid !== ReservedPID.FILE_CHALLENGE));
-            }
+            // Start, advance or clear a connection / hack / file challenge.
+            applyChallengeState(result.data, {
+                activeProcesses,
+                activeConnectionSession,
+                activeHackSession,
+                activeFileChallenge,
+            });
 
             // Display command result (with typewriter if enabled)
             const resultOutput = Array.isArray(result.output)
@@ -907,26 +792,9 @@
                 sound.error();
             }
 
-            // Suggested command — use server field if provided, else regex fallback
-            if (result.suggestedCommand) {
-                suggestedCommand = result.suggestedCommand;
-            } else {
-                // Regex fallback: only match when followed by a KNOWN command name
-                // This prevents matching random words from file content (e.g., "report to...")
-                const outputText = Array.isArray(result.output)
-                    ? result.output.join("\n")
-                    : result.output || "";
-                const suggestionMatch = outputText.match(
-                    /(?:Submit with|Submit:|Try:|Use:|Run:|Type:)\s+([a-z][a-z0-9_.]+(?:\s+\S+)*)/i,
-                );
-                if (suggestionMatch?.[1]) {
-                    const firstWord = suggestionMatch[1].split(/\s+/)[0]?.toLowerCase() || "";
-                    // Only accept if the first word is a known command
-                    if (KNOWN_COMMANDS.includes(firstWord)) {
-                        suggestedCommand = suggestionMatch[1].trim();
-                    }
-                }
-            }
+            // Suggested command — server field, else a guarded regex fallback.
+            const suggestion = extractSuggestedCommand(result, KNOWN_COMMANDS);
+            if (suggestion) suggestedCommand = suggestion;
 
             // Update context from server data if available
             if (result.data) {
