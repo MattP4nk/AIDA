@@ -3,7 +3,6 @@ import { db } from "../database/client";
 import { MISSION_SERVICE, LOGGER, FACTION_KNOWLEDGE_SERVICE } from "../di/tokens";
 import MissionService from "./missionService";
 import type { Logger } from "pino";
-import { Server as SocketIOServer } from "socket.io";
 import type { FactionKnowledgeService } from "./factionKnowledgeService";
 import { safeExecute } from "../utils/safeExecute";
 
@@ -60,16 +59,8 @@ function matchesEntity(
  * - Send notifications to players about mission progress
  */
 
-interface ObjectiveValidationResult {
-  missionId: string;
-  objectiveId: string;
-  completed: boolean;
-  progress: number | string | boolean;
-}
-
 @injectable()
 export class MissionIntegrationService {
-  private io: SocketIOServer | null = null;
   private factionKnowledge: FactionKnowledgeService | null = null;
 
   /**
@@ -171,13 +162,12 @@ export class MissionIntegrationService {
     );
   }
 
-  /**
-   * Set Socket.IO instance for real-time notifications
-   */
-  public setSocketIO(io: SocketIOServer): void {
-    this.io = io;
-    this.missionService.setSocketIO(io);
-  }
+  // REMOVED 2026-10-07: `setSocketIO`. It had ZERO callers, so `this.io` was
+  // permanently null and the one socket emit that used it — `mission:notification`
+  // in the deleted `sendNotification` — could never have fired even if that
+  // method had been reachable. Its other job, forwarding to
+  // `missionService.setSocketIO`, is redundant: missionService takes `io` by DI
+  // injection and says so at missionService.ts:131.
 
   // ==================== EVENT HANDLERS ====================
 
@@ -919,93 +909,23 @@ export class MissionIntegrationService {
 
   // ==================== UTILITY METHODS ====================
 
-  /**
-   * Validate all objectives for a mission
-   * Useful for checking mission state on reconnect or periodic validation
-   */
-  public async validateMissionObjectives(
-    userId: string,
-    missionId: string,
-  ): Promise<ObjectiveValidationResult[]> {
-    return (await safeExecute({
-      fn: async () => {
-        const missions = await this.missionService.getPlayerMissions(userId);
-        const mission = missions.find((m: any) => m.missionId === missionId);
-
-        if (!mission || !mission.objectives) {
-          return [];
-        }
-
-        const results: ObjectiveValidationResult[] = [];
-
-        for (const objective of mission.objectives) {
-          results.push({
-            missionId,
-            objectiveId: objective.id,
-            completed: objective.completed,
-            progress: objective.current,
-          });
-        }
-
-        return results;
-      },
-      context: "validateMissionObjectives",
-      logger: this.logger,
-      fallback: [] as ObjectiveValidationResult[],
-    })()) ?? [];
-  }
-
-  /**
-   * Send mission notification to player
-   */
-  private async sendNotification(
-    userId: string,
-    type:
-      | "objective_complete"
-      | "mission_complete"
-      | "mission_available"
-      | "mission_expired",
-    data: any,
-  ): Promise<void> {
-    if (!this.io) return;
-
-    this.io.to(`player:${userId}`).emit("mission:notification", {
-      type,
-      data,
-      timestamp: new Date(),
-    });
-  }
-
-  /**
-   * Check and update all active missions for a user
-   * Useful for periodic background checks
-   */
-  public async checkAllActiveMissions(userId: string): Promise<void> {
-    await safeExecute({
-      fn: async () => {
-        const missions = await this.missionService.getPlayerMissions(userId);
-        const activeMissions = missions.filter((m: any) => m.status === "active");
-
-        for (const mission of activeMissions) {
-          // Check expiration
-          if (mission.expiresAt && new Date(mission.expiresAt) < new Date()) {
-            await this.missionService.expireMission(userId, mission.missionId);
-            await this.sendNotification(userId, "mission_expired", {
-              missionId: mission.missionId,
-              status: "expired",
-              message: `Mission "${(mission as any).title}" has expired`,
-            });
-          }
-
-          // Validate objectives
-          await this.validateMissionObjectives(userId, mission.missionId);
-        }
-      },
-      context: "checkAllActiveMissions",
-      logger: this.logger,
-      silent: true,
-    })();
-  }
+  // REMOVED 2026-10-07: `checkAllActiveMissions`, and with it `sendNotification`
+  // and `validateMissionObjectives`. All three were transitively dead and —
+  // checked before deleting — none carried functionality that is now lost:
+  //
+  //  - Expiry + notify is covered by the live path. `startExpirationChecker`
+  //    runs the sweep, and `expireMission` emits `mission:expired` itself
+  //    (missionService.ts:1752, :1804), which the client handles
+  //    (client/src/services/socket.ts:751). `sendNotification`'s only type in
+  //    use was "mission_expired" — a duplicate of that.
+  //  - `validateMissionObjectives` was a PURE READ whose result was DISCARDED
+  //    at its one call site. It re-projected `{completed, progress}` out of
+  //    `getPlayerMissions`, which already returns exactly those fields. Calling
+  //    it had no effect of any kind.
+  //
+  // The other three `sendNotification` types — objective_complete,
+  // mission_complete, mission_available — were enum values no caller ever
+  // passed, so they were aspiration rather than behaviour.
 
   // ==================== FACTION KNOWLEDGE TRACKING ====================
 

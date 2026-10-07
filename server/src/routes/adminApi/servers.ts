@@ -6,7 +6,7 @@ import { resolveNpcOwnerId } from "../../../prisma/npcOwnership";
 
 import type { ReferenceValidationService } from "../../services/referenceValidationService";
 import { normalizeAccessMethod, accessMethodList, DEFAULT_ACCESS_METHOD } from "../../utils/accessMethod";
-import { BACKDOOR_SERVICE, REFERENCE_VALIDATION_SERVICE } from "../../di/tokens";
+import { REFERENCE_VALIDATION_SERVICE, SERVER_SERVICE } from "../../di/tokens";
 const router = Router();
 
 // GET / — List servers with filtering and pagination
@@ -207,10 +207,16 @@ router.put("/:id", asyncHandler(async (req: any, res: any) => {
   if (description !== undefined) data.description = description;
   if (motd !== undefined) data.motd = motd;
 
-  const server = await prisma.gameServer.update({
-    where: { id: req.params.id },
-    data,
-  });
+  // DELEGATED, not re-implemented. This was `prisma.gameServer.update(...)`
+  // inline, which skipped the cache invalidation and the audit log inside
+  // `serverService.updateServer` — so every admin edit left a stale
+  // `server:<id>` cache entry and no SERVER_UPDATED record. The service took a
+  // seven-field type that could not express what this route edits, which is
+  // why it was bypassed; that type is now wide enough.
+  const { getService } = await import("../../di/container");
+  const serverService =
+    getService<import("../../services/serverService").default>(SERVER_SERVICE);
+  const server = await serverService.updateServer(req.params.id, data);
 
   res.json({
     success: true,
@@ -226,29 +232,22 @@ router.delete("/:id", asyncHandler(async (req: any, res: any) => {
   });
   if (!existing) throw new NotFoundError("Server not found");
 
-  // Release passive drains BEFORE the transaction: Backdoor cascades off
-  // GameServer, so once the row is gone nothing can say whose resources the
-  // backdoors on this server were costing, and the drain is unreleasable.
-  // Outside the transaction deliberately — it mutates in-memory state, which a
-  // rollback would not undo, and a failure here must not block the delete.
-  try {
-    const { getService } = await import("../../di/container");
-    const backdoors =
-      getService<import("../../services/backdoorService").default>(BACKDOOR_SERVICE);
-    await backdoors.releaseDrainsForServers([req.params.id]);
-  } catch {
-    // releaseDrainsForServers already logs; never block an admin delete on it.
-  }
-
-  await prisma.$transaction(async (tx) => {
-    await tx.fileSystemNode.deleteMany({ where: { serverId: req.params.id } });
-    await tx.serverLink.deleteMany({
-      where: {
-        OR: [{ sourceId: req.params.id }, { targetId: req.params.id }],
-      },
-    });
-    await tx.gameServer.delete({ where: { id: req.params.id } });
-  });
+  // DELEGATED, not re-implemented. This route used to do its own transaction
+  // and skipped BOTH the cache invalidation and the audit log that
+  // `serverService.deleteServer` performs, so an admin delete left a stale
+  // `server:<id>` entry and no SERVER_DELETED record.
+  //
+  // The explicit child deletes are gone with it, and they were redundant
+  // anyway: FileSystemNode, ServerLink (both LinkSource and LinkTarget),
+  // ServerConnection and Backdoor are ALL `onDelete: Cascade` off GameServer.
+  // The transaction was doing by hand what the database already guarantees.
+  //
+  // The drain release also moves into the service, where it belongs — one
+  // deletion path, one place that frees the resources the row was costing.
+  const { getService } = await import("../../di/container");
+  const serverService =
+    getService<import("../../services/serverService").default>(SERVER_SERVICE);
+  await serverService.deleteServer(req.params.id);
 
   res.json({
     success: true,

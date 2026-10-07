@@ -115,6 +115,31 @@ Quote line numbers. If a comment, a plan item, or this file disagrees with the s
 
 Corollary: when you write a comment claiming an invariant, verify the invariant first.
 
+## 1b. Never hide a bug
+
+**The response to a found issue is never to ignore it.** Always look for a solution.
+
+This rule exists because the alternatives are seductive and all look like progress:
+
+- **Allowlisting.** Freezing a list of known-bad entries so the check goes green. The
+  check now passes and the bugs are still there, with a file asserting that is fine.
+- **Reclassifying.** Calling something "not fatal", "informational", or "pre-existing"
+  so it stops counting. The socket-contract check printed 28 server events with no
+  client listener under a "not fatal" header for weeks; triaging them found a report
+  being broadcast to the person reported, two zero-caller methods, and four false
+  positives caused by a bug in the checker itself.
+- **Narrowing the check** until the failure disappears, rather than until the check is
+  correct.
+- **Filing it** and moving on, when the fix was ten minutes away.
+
+What to do instead: fix it, or delete the dead thing, or — if it genuinely needs a
+decision you cannot make — write down the specific question and raise it. "Deferred"
+is only honest when the next action is named and the reason is real.
+
+Corollary: **a check that reports something as acceptable is making a claim**, and that
+claim needs the same scrutiny as any other. If you find yourself adding an entry to an
+exceptions list, that is the moment to ask whether you are fixing or hiding.
+
 ## 2. Verification discipline
 
 A green check that would also have been green *before* the fix is worthless.

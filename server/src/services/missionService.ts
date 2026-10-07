@@ -174,13 +174,12 @@ class MissionService extends EventEmitter {
     }
   }
 
-  /**
-   * Set Socket.IO instance for real-time events
-   * @param io - Socket.IO server instance
-   */
-  public setSocketIO(io: SocketIOServer): void {
-    this.io = io;
-  }
+  // REMOVED 2026-10-07: `setSocketIO`. `io` is injected (see the constructor
+  // note above); this setter's only caller was `missionIntegration.setSocketIO`,
+  // which was itself dead and has been removed. A setter that duplicates
+  // injection can only ever re-assign the same instance, and leaving one
+  // around is how `this.io` ends up null in the first place.
+
 
   /**
    * Create a new mission

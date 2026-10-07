@@ -44,7 +44,18 @@ interface Ref { event: string; where: string }
 const SOCKET_EMIT = /(?:\bio\b|\bsocket\b|\bclient\b|\bthis\.io\b)[^\n;]{0,120}?\.emit\(\s*["'`]([a-z_]+:[a-zA-Z_-]+)["'`]/g;
 /** EventEmitter emissions — collected only so the report can explain exclusions. */
 const SERVICE_EMIT = /\bthis\.emit\(\s*["'`]([a-z_]+:[a-zA-Z_-]+)["'`]/g;
-const ON_HANDLER = /\.on\(\s*["'`]([a-z_]+:[a-zA-Z_-]+)["'`]/g;
+/**
+ * Listener registrations — `.on(` AND `.once(`.
+ *
+ * `.once(` was missing, and it is not a rare form here: the whole terminal tab
+ * bar is wired with it (`terminalTabs.ts` registers `terminal:created`,
+ * `terminal:closed`, `terminal:switched` and `terminal:list` that way, the
+ * last being its boot path). The check reported all four as server events
+ * nobody listens to — live code, called dead, for as long as this file has
+ * existed. Anything request/response-shaped is a `once` by nature, so this was
+ * guaranteed to misreport exactly the events that behave most like calls.
+ */
+const ON_HANDLER = /\.(?:on|once)\(\s*["'`]([a-z_]+:[a-zA-Z_-]+)["'`]/g;
 
 // NOTE: the character class allows HYPHENS. It originally did not, which made the
 // check silently blind to 12 real events — forum:new-post, story:key-fragment,

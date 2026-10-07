@@ -325,19 +325,36 @@ async function main() {
     const read = (rel: string) =>
       readFileSync(new URL(rel, import.meta.url).pathname, "utf8")
         .replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
-    const callers = [
+    // ASSERT THE PROPERTY, NOT THE SPELLING.
+    //
+    // This used to require `releaseDrainsForServers(` in all three files. The
+    // admin route now DELEGATES to `serverService.deleteServer`, which does the
+    // release — correct, and it would have failed the old check. So the rule
+    // is: any file that deletes a GameServer must either release drains itself
+    // or hand the delete to something that does.
+    const deleters = [
       ["serverService", "../src/services/serverService.ts"],
       ["darknetDungeonService", "../src/services/darknetDungeonService.ts"],
       ["adminApi/servers", "../src/routes/adminApi/servers.ts"],
     ] as const;
-    for (const [name, rel] of callers) {
+    for (const [name, rel] of deleters) {
       const src = read(rel);
+      const deletesDirectly = /gameServer\.delete(Many)?\(/.test(src);
+      const releasesItself = /releaseDrainsForServers\(/.test(src);
+      const delegates = /serverService\.deleteServer\(/.test(src);
       check(
-        `${name} releases drains before deleting servers`,
-        /releaseDrainsForServers\(/.test(src),
-        "a deletion path that skips this orphans the drain permanently",
+        `${name} cannot delete a server without releasing its drains`,
+        !deletesDirectly || releasesItself || delegates,
+        `deletes=${deletesDirectly} releases=${releasesItself} delegates=${delegates} — ` +
+        "Backdoor cascades off GameServer, so after the delete nothing can say " +
+        "whose resources the backdoors cost",
       );
     }
+    check(
+      "POSITIVE CONTROL: at least one path still deletes servers directly",
+      [...deleters].some(([, rel]) => /gameServer\.delete(Many)?\(/.test(read(rel))),
+      "if nothing deletes, the three checks above pass vacuously",
+    );
   }
 
   progressRepo.off("progress:changed", foreign);

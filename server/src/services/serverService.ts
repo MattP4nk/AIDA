@@ -62,6 +62,35 @@ interface CreateServerData {
 }
 
 /**
+ * Every column an update may touch.
+ *
+ * Mirrors what the admin PUT route accepts. It is deliberately wider than
+ * `CreateServerData`: creation has defaults for most of these, editing does
+ * not, and the narrower type was the reason the route bypassed the service.
+ */
+interface UpdateServerData {
+  name?: string;
+  ipAddress?: string;
+  type?: string;
+  role?: string;
+  networkId?: string | null;
+  factionId?: string | null;
+  ownerId?: string | null;
+  securityLevel?: number;
+  firewallLevel?: number;
+  encryptionLevel?: number;
+  discoveryLevel?: number;
+  isPublic?: boolean;
+  accessMethod?: string;
+  accessKey?: string | null;
+  isOnline?: boolean;
+  maxConnections?: number;
+  description?: string;
+  motd?: string;
+  accessRules?: unknown[];
+}
+
+/**
  * Server details interface
  */
 interface ServerDetails extends GameServer {
@@ -155,13 +184,10 @@ class ServerService {
     this.logger.info("ServerService initialized");
   }
 
-  /**
-   * Set Socket.IO instance for real-time events
-   * @param io - Socket.IO server instance
-   */
-  public setSocketIO(io: SocketIOServer): void {
-    this.io = io;
-  }
+  // REMOVED 2026-10-07: `setSocketIO`. Zero callers — `io` is injected, as the
+  // constructor note above explains at length. Keeping it contradicted that
+  // note: "a setter that must be remembered is a setter that gets forgotten".
+
 
   /**
    * Create a new game server
@@ -337,9 +363,24 @@ class ServerService {
    * @param updates - Partial server data to update
    * @returns Updated server details
    */
+  /**
+   * Update a server. THE one path — the admin route delegates here.
+   *
+   * It used to take `Partial<CreateServerData>`, which covers seven fields,
+   * while the admin PUT route edits sixteen. So the route could not delegate
+   * without silently dropping most of what an admin had just typed, and
+   * instead re-implemented the update inline against raw Prisma — skipping the
+   * cache invalidation and the audit log below. Every admin server edit left a
+   * stale `server:<id>` cache entry and no audit record.
+   *
+   * Widening the parameter is what makes delegation possible, so the fix is
+   * here rather than a second copy of `cacheService.del` in the route. Same
+   * shape as the `rejectDraft` consolidation: two implementations of one
+   * transition, only one of which logged.
+   */
   public async updateServer(
     serverId: string,
-    updates: Partial<CreateServerData>,
+    updates: UpdateServerData,
   ): Promise<ServerDetails> {
     return (await safeExecute({
       fn: async () => {
@@ -351,16 +392,34 @@ class ServerService {
           throw new Error("Server not found");
         }
 
-        // Prepare update data
-        const updateData: any = {};
-        if (updates.name) updateData.name = updates.name;
-        if (updates.type) updateData.type = updates.type;
-        if (updates.encryptionLevel !== undefined)
-          updateData.encryptionLevel = updates.encryptionLevel;
-        if (updates.accessRules)
-          updateData.accessRules = updates.accessRules as any;
-        if (updates.maxConnections !== undefined)
-          updateData.maxConnections = updates.maxConnections;
+        // Every editable column, applied only when the caller supplied it.
+        //
+        // `!== undefined` rather than truthiness for everything that can
+        // legitimately be 0, false or "": `securityLevel: 0`, `isPublic:
+        // false` and `isOnline: false` would all be silently ignored by a
+        // truthy check, which is how a "nothing happened" admin bug hides.
+        const updateData: Record<string, unknown> = {};
+        const assign = <K extends keyof UpdateServerData>(key: K, column = key as string) => {
+          if (updates[key] !== undefined) updateData[column] = updates[key];
+        };
+        assign("name");
+        assign("ipAddress");
+        assign("type");
+        assign("role");
+        assign("networkId");
+        assign("factionId");
+        assign("securityLevel");
+        assign("firewallLevel");
+        assign("encryptionLevel");
+        assign("discoveryLevel");
+        assign("isPublic");
+        assign("accessMethod");
+        assign("accessKey");
+        assign("isOnline");
+        assign("maxConnections");
+        assign("description");
+        assign("motd");
+        if (updates.accessRules) updateData.accessRules = updates.accessRules as never;
 
         const server = await this.prisma.gameServer.update({
           where: { id: serverId },

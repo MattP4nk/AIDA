@@ -2585,16 +2585,21 @@ YOUR POST TITLE: "${stripPromptBoundaries(post.title, 200)}"`;
         },
       });
 
-      // Emit event to admins
-      if (this.io) {
-        this.io.to(`forum:${forumId}`).emit("forum:content-reported", {
-          reportId: report.id,
-          reporterId: userId,
-          postId: postId || null,
-          replyId: replyId || null,
-          reason,
-        });
-      }
+      // NO SOCKET EMIT HERE. Removed 2026-10-07 — it was a privacy leak.
+      //
+      // It said "Emit event to admins" and sent `reporterId` to
+      // `forum:<forumId>`, which `handlers.ts` populates with EVERY live-feed
+      // member of the forum — including the author being reported. Anyone who
+      // added a listener would have deanonymised every reporter to the people
+      // they reported. Latent only because nothing listens yet, which is the
+      // worst kind of latent: the next person to wire it up inherits the bug.
+      //
+      // Admins already get this, correctly: `getReports()` below is gated by
+      // `checkAdmin` and is reachable as `forum reports`
+      // (socialCommands.ts:1042). A pull behind an authorisation check is the
+      // right shape for moderation data; a broadcast to the moderated room is
+      // not. There is no `forum-admin:<id>` room to re-target to, and building
+      // one for a consumer that does not exist would be inventing machinery.
 
       this.logger.info(
         { userId, forumId, postId, replyId, reportId: report.id },
