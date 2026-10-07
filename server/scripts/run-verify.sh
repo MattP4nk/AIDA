@@ -68,7 +68,24 @@ if [ "$fail" -gt 0 ]; then
   echo "failed:"
   printf '  - %s\n' "${failed_names[@]}"
   echo
-  echo "If these are ECONNREFUSED, start the dev server and re-run before"
-  echo "reading anything into them."
+  # Name the environmental causes from the logs instead of leaving the reader
+  # to guess. Rate limiting is the subtle one: the global /api limiter
+  # (RATE_LIMIT_MAX_REQUESTS per RATE_LIMIT_WINDOW_MS, per IP, in memory) is
+  # shared by every HTTP harness, so a third run inside one window fails all
+  # of them with 429 although nothing is wrong with the code.
+  limited=$(grep -l "Too many requests from this IP" "$OUT"/*.log 2>/dev/null | wc -l)
+  refused=$(grep -l "ECONNREFUSED" "$OUT"/*.log 2>/dev/null | wc -l)
+  if [ "$limited" -gt 0 ]; then
+    echo "RATE-LIMITED: $limited log(s) hit the dev server's /api rate limit (429)."
+    echo "  Restart the dev server (the limiter's store is in memory) or wait out"
+    echo "  the window, then re-run. These failures say nothing about the code."
+  fi
+  if [ "$refused" -gt 0 ]; then
+    echo "ECONNREFUSED in $refused log(s): start the dev server and re-run before"
+    echo "reading anything into them."
+  fi
+  if [ "$limited" -eq 0 ] && [ "$refused" -eq 0 ]; then
+    echo "No environmental cause found in the logs — these are real failures."
+  fi
   exit 1
 fi

@@ -29,7 +29,10 @@ bypassed with `git add -f`, because forcing the add leaves the directory ignored
 silently untracks the next harness written.
 
 **~10 harnesses need the dev server already running** and fail with `ECONNREFUSED`
-without it — environmental, not a regression. `npm run verify` says so when it reports
+without it — environmental, not a regression. They also share the dev server's global
+`/api` rate limit (`RATE_LIMIT_MAX_REQUESTS` per 15 min per IP, in memory): about two
+full runs fit in one window, and a third fails every HTTP harness with 429. `npm run
+verify` names both causes from the logs; restart the dev server to clear the limiter. `npm run verify` says so when it reports
 failures. Editing `src/` mid-run also restarts `tsx watch` under them; that has produced
 a phantom failure before.
 

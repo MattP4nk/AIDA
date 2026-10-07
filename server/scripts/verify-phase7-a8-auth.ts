@@ -14,10 +14,14 @@
  * garbage token, PLUS the database rows registration and the session
  * lifecycle leave behind. Tokens, ids, IPs and timestamps are normalised out.
  *
- * Run with --record BEFORE the move, then plain afterwards.
- * Needs the dev server. Uses 10 failed logins per run: the per-IP lockout
- * trips at 30 and lives in the server's memory, so do not run it three times
- * against one server process without a restart.
+ * The lockout is exercised IN-PROCESS on a private AuthService (see below):
+ * over HTTP it cost ~40 requests per run against the global /api rate limiter
+ * and locked every other harness out on the second suite run in a window.
+ * Over HTTP this now makes ~18 requests and 2 failed logins.
+ *
+ * Run with --record to re-baseline (it was recorded against the pre-move
+ * routes and proved the extraction 18/18 identical, commit 0f6b3a4).
+ * Needs the dev server.
  *
  * Run: npx tsx scripts/verify-phase7-a8-auth.ts
  */
@@ -78,11 +82,13 @@ async function main() {
   rec("register-duplicate", await call("POST", "/register", { body: u1 }));
   rec("register-invalid", await call("POST", "/register", { body: { username: "x", email: "bad", password: "1" } }));
 
-  // ── wrong password until the per-account lockout ───────────────────
-  const wrong: number[] = [];
-  for (let i = 0; i < 10; i++) wrong.push((await call("POST", "/login", { body: { username: u1.username, password: "nope" } })).status);
-  out["wrong-password-x10"] = wrong;
-  rec("login-after-lockout", await call("POST", "/login", { body: { username: u1.username, password: u1.password } }));
+  // ── one wrong password, over HTTP (the 401 shape) ──────────────────
+  // The LOCKOUT is driven in-process below, on a private AuthService. Doing it
+  // over HTTP cost ~11 failed logins and ~40 requests per run against the
+  // server's global /api rate limiter (RATE_LIMIT_MAX_REQUESTS per 15 min per
+  // IP), so two suite runs inside one window locked out EVERY harness that
+  // logs in — 9 of them failed with 429 the first time it happened.
+  rec("wrong-password", await call("POST", "/login", { body: { username: u1.username, password: "nope" } }));
   rec("login-unknown-user", await call("POST", "/login", { body: { username: `${tag}_ghost`, password: "x" } }));
 
   // ── the happy path on a second account ─────────────────────────────
@@ -135,7 +141,7 @@ async function main() {
   {
     const iat = (t?: string) => (t ? JSON.parse(Buffer.from(t.split(".")[1]!, "base64url").toString()).iat : null);
     let proven: string | null = null;
-    for (let i = 0; i < 8 && !proven; i++) {
+    for (let i = 0; i < 4 && !proven; i++) {
       const [a, b] = await Promise.all([
         call("POST", "/login", { body: { username: u2.username, password: u2.password } }),
         call("POST", "/login", { body: { username: u2.username, password: u2.password } }),
@@ -150,17 +156,57 @@ async function main() {
         check("two logins in the SAME second both succeed with distinct tokens", false, `${proven} — ${JSON.stringify(a.status !== 200 ? a.body : b.body).slice(0, 120)}`);
       }
     }
-    check("PRECONDITION: a same-second pair actually occurred", !!proven, proven ?? "8 pairs, none landed in one second");
+    check("PRECONDITION: a same-second pair actually occurred", !!proven, proven ?? "4 pairs, none landed in one second");
+  }
+
+  // ── LOCKOUT, in-process, on a PRIVATE AuthService ──────────────────
+  // Its own lockout map and a documentation-range IP, so nothing here touches
+  // the running server's state. Covers what HTTP never reached: the per-IP
+  // lockout across usernames, and the window expiring.
+  {
+    await import("reflect-metadata");
+    const { AuthService } = await import("../src/services/authService");
+    const quiet: any = { info() {}, warn() {}, error() {}, debug() {} };
+    const svc: any = new AuthService(quiet);
+    const meta = { ip: null, userAgent: null, lockoutIp: "203.0.113.7" };
+    const attempt = async (username: string) => {
+      try { await svc.login({ username, password: "nope" }, meta); return "ok"; }
+      catch (e: any) { return `${e.statusCode ?? e.status ?? "?"}:${e.code}`; }
+    };
+    const ghost = `${tag}_lock`;
+    const ten: string[] = [];
+    for (let i = 0; i < 10; i++) ten.push(await attempt(ghost));
+    check("10 failures are each a 401", ten.every((r) => r === "401:AUTH_FAILED"), ten[0]);
+    const locked = await attempt(ghost);
+    check("the 11th is ACCOUNT_LOCKED (429)", locked === "429:ACCOUNT_LOCKED", locked);
+    const other = await attempt(`${tag}_other`);
+    check("the account lock does not lock a different username", other === "401:AUTH_FAILED", other);
+    // A LOCKED attempt throws before its failure is recorded, so the 11th
+    // above did not count: 10 + 1 (other) + 19 = 30 recorded failures, and
+    // the lock applies to the attempt AFTER the 30th (count >= 30).
+    for (let i = 0; i < 19; i++) await attempt(`${tag}_spray${i}`);
+    const ipLocked = await attempt(`${tag}_fresh`);
+    check("30 failures across usernames trip the per-IP lockout", ipLocked === "429:IP_LOCKED", ipLocked);
+    // Expire the windows and the locks lift.
+    for (const v of svc.loginAttempts.values()) v.firstAttempt -= 16 * 60 * 1000;
+    const after = await attempt(ghost);
+    check("after the 15-minute window both locks lift", after === "401:AUTH_FAILED", after);
+    svc.loginAttempts.clear();
   }
 
   const snapshot = unTag(out);
-  check("the run exercised every step", Object.keys(snapshot).length >= 18, `${Object.keys(snapshot).length} steps`);
-  check("PRECONDITION: the lockout actually tripped", (snapshot as any)["login-after-lockout"].status === 429);
+  check("the run exercised every step", Object.keys(snapshot).length >= 17, `${Object.keys(snapshot).length} steps`);
   check("PRECONDITION: the happy path actually succeeded", (snapshot as any)["login"].status === 200 && !!login.rawToken);
 
   if (RECORD) {
-    writeFileSync(BASELINE, JSON.stringify(snapshot, null, 1) + "\n");
-    console.log(`  recorded -> ${BASELINE}`);
+    // Never record a broken run as the truth: a rate-limited or down server
+    // produced a baseline full of 429s once, and it printed "recorded".
+    if (fail > 0) {
+      console.log("  NOT RECORDED — a check failed above; the baseline would encode that failure.");
+    } else {
+      writeFileSync(BASELINE, JSON.stringify(snapshot, null, 1) + "\n");
+      console.log(`  recorded -> ${BASELINE}`);
+    }
   } else {
     check("baseline exists", existsSync(BASELINE));
     const base = JSON.parse(readFileSync(BASELINE, "utf8"));

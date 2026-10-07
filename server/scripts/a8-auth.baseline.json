@@ -58,23 +58,11 @@
   },
   "cookies": []
  },
- "wrong-password-x10": [
-  401,
-  401,
-  401,
-  401,
-  401,
-  401,
-  401,
-  401,
-  401,
-  401
- ],
- "login-after-lockout": {
-  "status": 429,
+ "wrong-password": {
+  "status": 401,
   "body": {
-   "code": "ACCOUNT_LOCKED",
-   "error": "Too many failed attempts. Try again in 15 minutes.",
+   "code": "AUTH_FAILED",
+   "error": "Invalid username or password",
    "success": false,
    "timestamp": "<string>"
   },
