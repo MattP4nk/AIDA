@@ -1475,6 +1475,31 @@ class HackService extends EventEmitter {
   /**
    * Log hack attempt to database
    */
+  /**
+   * A hack the attacker abandoned during prep, which the target noticed:
+   * logged as a failed, detected probe. A4: this was a direct hackLog.create
+   * in hackCommands' onCancel.
+   */
+  public async recordAbortedProbe(probe: {
+    attackerId: string;
+    targetId: string;
+    targetServerId: string;
+    method: string;
+    tools: string[];
+  }): Promise<void> {
+    await db.client.hackLog.create({
+      data: {
+        ...probe,
+        stealthLevel: 0,
+        success: false,
+        detected: true,
+        evidenceLeft: 10,
+        accessLevel: 0,
+        timestamp: new Date(),
+      },
+    });
+  }
+
   private async logHackAttempt(
     attempt: HackAttempt,
     result: HackResult,

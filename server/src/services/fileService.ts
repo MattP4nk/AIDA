@@ -1760,6 +1760,19 @@ export class FileService {
 
 
   /**
+   * Set a node's protection / visibility flags as a SYSTEM action — no access
+   * check, because the callers are game mechanics that have already decided
+   * (a spent Quantum charge, a won crack.storm, a vault the owner configured).
+   * A4: these were direct fileSystemNode.update calls in the command modules.
+   */
+  public async setNodeFlags(
+    nodeId: string,
+    flags: { isProtected?: boolean; isHidden?: boolean },
+  ): Promise<void> {
+    await prisma.fileSystemNode.update({ where: { id: nodeId }, data: flags });
+  }
+
+  /**
    * Generate random encryption key
    */
   private generateEncryptionKey(): string {

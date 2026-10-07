@@ -495,22 +495,13 @@ export class HackCommandsModule implements CommandModule {
             // Partial detection: 20% chance the target logs a suspicious probe
             const detected = Math.random() < 0.2;
             if (detected && serverId) {
-              const { db } = await import("../../database/client");
-              await db.client.hackLog.create({
-                data: {
-                  attackerId: context.userId,
-                  targetId: ownerId!,
-                  targetServerId: serverId!,
-                  method: method || "bruteforce",
-                  tools: tools,
-                  stealthLevel: 0,
-                  success: false,
-                  detected: true,
-                  evidenceLeft: 10,
-                  accessLevel: 0,
-                  timestamp: new Date(),
-                },
-              }).catch(() => {});
+              await context.services.hackService.recordAbortedProbe({
+                attackerId: context.userId,
+                targetId: ownerId!,
+                targetServerId: serverId!,
+                method: method || "bruteforce",
+                tools: tools,
+              }).catch((err: unknown) => logger.warn({ err, attackerId: context.userId }, "Could not record aborted hack probe"));
             }
             // Apply half cooldown (15s instead of 30s) to prevent rapid retries
             hackService.applyCooldown(context.userId, 15);
@@ -1206,21 +1197,20 @@ export class HackCommandsModule implements CommandModule {
       );
     }
 
-    // Consume the charge
-    if (charge.quantity <= 1) {
-      await context.db.client.inventoryItem.delete({ where: { id: charge.id } });
-    } else {
-      await context.db.client.inventoryItem.update({
-        where: { id: charge.id },
-        data: { quantity: { decrement: 1 } },
-      });
+    // Consume the charge — through the shop, which removes atomically and
+    // emits item:removed, the event that pushes the inventory to the client.
+    // This deleted/decremented the row directly: a find-then-act a concurrent
+    // command could interleave with, and the client went on showing a charge
+    // the player no longer had.
+    const consumed = await context.services.shopService.removeItemFromInventory(
+      context.userId, QUANTUM_CHARGE_ITEM_ID, 1,
+    );
+    if (!consumed) {
+      return errorResult("Requires a Quantum Decryptor Charge.");
     }
 
     // Remove protection
-    await context.db.client.fileSystemNode.update({
-      where: { id: fileNode.id },
-      data: { isProtected: false },
-    });
+    await context.fileService.setNodeFlags(fileNode.id, { isProtected: false });
 
     return successResult(
       `Quantum Decryptor activated. Protection layer dissolved.\n` +
@@ -1324,10 +1314,7 @@ export class HackCommandsModule implements CommandModule {
 
     if (correct) {
       // Remove protection
-      await context.db.client.fileSystemNode.update({
-        where: { id: stormSession.fileId },
-        data: { isProtected: false },
-      });
+      await context.fileService.setNodeFlags(stormSession.fileId, { isProtected: false });
 
       // Award big XP
       try {
