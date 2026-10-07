@@ -2,6 +2,9 @@ import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
 import { successResult, errorResult, spawnBackgroundProcess } from "./helpers";
 import logger from "../../logger";
+import { getService } from "../../di/resolve";
+import { BOUNTY_SERVICE } from "../../di/tokens";
+import type BountyService from "../bountyService";
 import {
   boxTop,
   boxBottom,
@@ -22,6 +25,8 @@ import {
 import { getInlineGlyph } from "../../utils/asciiAvatars";
 import type { PlayerDetails } from "../playerPresenceService";
 
+
+const bountyService = () => getService<BountyService>(BOUNTY_SERVICE);
 export class PlayerInfoCommandsModule implements CommandModule {
   public category = "player";
   public commands: Set<string> = new Set([
@@ -852,36 +857,15 @@ export class PlayerInfoCommandsModule implements CommandModule {
       return errorResult("Usage: bounty <claim|complete> <bounty_id>\n'bounties' to see active bounties.");
     }
 
-    const bounty = await context.db.client.bounty.findUnique({
-      where: { id: bountyId },
-    });
-
-    if (!bounty) {
-      return errorResult(`Bounty not found: ${bountyId}`);
-    }
+    // The listing prints a 16-char prefix; `resolve` accepts it (findUnique
+    // on the full id could never match what the player was shown).
+    const found = await bountyService().resolve(bountyId);
+    if (!found.ok) return errorResult(found.error);
 
     if (action === "claim") {
-      // Claim a bounty — assign it to this player
-      if (bounty.status !== "active") {
-        return errorResult(`Bounty is ${bounty.status}, cannot claim.`);
-      }
-      if (bounty.claimedByUserId) {
-        return errorResult("Bounty already claimed by another player.");
-      }
-      if (bounty.targetUserId === context.userId) {
-        return errorResult("You can't claim a bounty on yourself.");
-      }
-
-      await context.db.client.bounty.update({
-        where: { id: bountyId },
-        data: { claimedByUserId: context.userId, status: "claimed" },
-      });
-
-      // Get target's home IP for the player
-      const target = await context.db.client.user.findUnique({
-        where: { id: bounty.targetUserId },
-        select: { homeIp: true, username: true },
-      });
+      const r = await bountyService().claim(found.bounty.id, context.userId);
+      if (!r.ok) return errorResult(r.error);
+      const bounty = r.bounty;
 
       const W = context.terminalWidth;
       const lines: string[] = [];
@@ -898,12 +882,11 @@ export class PlayerInfoCommandsModule implements CommandModule {
       lines.push(boxDivider(W));
       lines.push(boxRow(" OBJECTIVE:", W));
       lines.push(boxRow(` Hack ${bounty.targetUsername}'s home server`, W));
-      if (target?.homeIp) {
-        lines.push(boxRow(` Home IP: ${target.homeIp}`, W));
+      if (r.targetHomeIp) {
+        lines.push(boxRow(` Home IP: ${r.targetHomeIp}`, W));
       }
-      lines.push(boxRow(" Read /home/*/proof.log to verify access", W));
       lines.push(
-        boxRow(" Then run: bounty complete " + bountyId.substring(0, 16), W),
+        boxRow(" Then run: bounty complete " + bounty.id.substring(0, 16), W),
       );
       lines.push(boxBottom(W));
 
@@ -911,120 +894,9 @@ export class PlayerInfoCommandsModule implements CommandModule {
     }
 
     if (action === "complete") {
-      // Complete a bounty — verify the player has hacked the target's home
-      if (bounty.status !== "claimed") {
-        return errorResult("Bounty must be claimed first. Use 'bounty claim <id>'.");
-      }
-      if (bounty.claimedByUserId !== context.userId) {
-        return errorResult("This bounty was claimed by someone else.");
-      }
-
-      // Verify: player must have a ServerConnection with accessLevel > 0 on target's home server
-      const targetUser = await context.db.client.user.findUnique({
-        where: { id: bounty.targetUserId },
-        select: { homeServerId: true, homeIp: true },
-      });
-
-      if (!targetUser?.homeServerId) {
-        return errorResult("Target has no home server.");
-      }
-
-      const hasAccess = await context.db.client.serverConnection.findFirst({
-        where: {
-          userId: context.userId,
-          serverId: targetUser.homeServerId,
-          accessLevel: { gt: 0 },
-        },
-      });
-
-      if (!hasAccess) {
-        return errorResult(`You haven't hacked ${bounty.targetUsername}'s home server yet. Hack ${targetUser.homeIp} first.`);
-      }
-
-      // ── Delete stolen files from target's home server ──
-      let filesDeleted = 0;
-      let keysRevoked = 0;
-      let decoysHit = 0;
-      const stolenFileIds = (bounty as any).stolenFileIds as string[] | null;
-
-      if (
-        stolenFileIds &&
-        stolenFileIds.length > 0 &&
-        targetUser.homeServerId
-      ) {
-        // Find the stolen files and their content (for key revocation)
-        const stolenFiles = await context.db.client.fileSystemNode.findMany({
-          where: {
-            id: { in: stolenFileIds },
-            serverId: targetUser.homeServerId,
-          },
-          select: { id: true, name: true, content: true, metadata: true },
-        });
-
-        for (const file of stolenFiles) {
-          const meta = file.metadata as any;
-
-          // Track honeypot decoy hits
-          if (meta?.isDecoy === true) {
-            decoysHit++;
-            await context.db.client.fileSystemNode
-              .delete({ where: { id: file.id } })
-              .catch(() => {});
-            filesDeleted++;
-            continue; // Decoy files have no access keys to revoke
-          }
-
-          // Revoke access keys that came from this file's content
-          if (meta?.sourceServerId) {
-            const revoked = await context.db.client.serverAccessKey.deleteMany({
-              where: {
-                userId: bounty.targetUserId,
-                sourceFileId: file.id,
-              },
-            });
-            keysRevoked += revoked.count;
-          }
-
-          // Delete the stolen file
-          await context.db.client.fileSystemNode
-            .delete({ where: { id: file.id } })
-            .catch(() => {});
-          filesDeleted++;
-        }
-      }
-
-      // Complete the bounty — grant rewards
-      await context.db.client.bounty.update({
-        where: { id: bountyId },
-        data: { status: "completed", completedAt: new Date() },
-      });
-
-      // Grant credits
-      await context.playerProgress.addCredits(
-        context.userId,
-        bounty.rewardCredits,
-      );
-
-      // Grant reputation with issuing faction
-      try {
-        await context.services.factionService.addReputation(
-          context.userId,
-          bounty.issuedByFactionId,
-          bounty.rewardReputation,
-          "Bounty claimed",
-        );
-      } catch {
-        // Rep grant failure non-fatal
-      }
-
-      // Notify the target that their files were deleted
-      if (context.io && filesDeleted > 0) {
-        context.io.to(`player:${bounty.targetUserId}`).emit("command:result", {
-          success: false,
-          output: `⚠ SECURITY BREACH: ${filesDeleted} file(s) deleted from your home server by a bounty hunter.${keysRevoked > 0 ? ` ${keysRevoked} access key(s) revoked.` : ""}`,
-          timestamp: new Date(),
-        });
-      }
+      const r = await bountyService().complete(found.bounty.id, context.userId);
+      if (!r.ok) return errorResult(r.error);
+      const { bounty, filesDeleted, decoysHit, keysRevoked } = r;
 
       const W = context.terminalWidth;
       const lines: string[] = [];
@@ -1053,13 +925,6 @@ export class PlayerInfoCommandsModule implements CommandModule {
       lines.push(boxDivider(W));
       lines.push(boxRow(" Well done, hunter.", W));
       lines.push(boxBottom(W));
-
-      // Fire mission integration hook
-      if (context.services.missionIntegrationService) {
-        context.services.missionIntegrationService
-          .onBountyCompleted(context.userId, bounty.issuedByFactionId)
-          .catch(() => {});
-      }
 
       return successResult(render(lines));
     }

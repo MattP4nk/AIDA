@@ -377,12 +377,16 @@ export class HackCountermeasureService extends EventEmitter {
       });
       if (!target) return;
 
-      // Check if there's already an active bounty on this player from this faction
+      // Check if there's already a LIVE bounty on this player from this faction.
+      // `expiresAt` is part of "live": nothing ever writes status "expired",
+      // so without it the first bounty to lapse unclaimed stayed "active"
+      // forever and this faction could never post on this player again.
       const existing = await db.client.bounty.findFirst({
         where: {
           targetUserId,
           issuedByFactionId: factionId,
           status: "active",
+          expiresAt: { gt: new Date() },
         },
       });
       if (existing) {

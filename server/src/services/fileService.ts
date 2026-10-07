@@ -1773,6 +1773,19 @@ export class FileService {
   }
 
   /**
+   * Delete a node as a SYSTEM action, revoking every access key it granted —
+   * a key whose source file is gone would otherwise outlive it (the user-facing
+   * delete above does the same revocation). Used by bounty completion to purge
+   * a target's stolen files. Idempotent: an already-deleted node reports
+   * `deleted: false` instead of throwing.
+   */
+  public async purgeNode(nodeId: string): Promise<{ deleted: boolean; keysRevoked: number }> {
+    const revoked = await prisma.serverAccessKey.deleteMany({ where: { sourceFileId: nodeId } });
+    const gone = await prisma.fileSystemNode.deleteMany({ where: { id: nodeId } });
+    return { deleted: gone.count === 1, keysRevoked: revoked.count };
+  }
+
+  /**
    * Generate random encryption key
    */
   private generateEncryptionKey(): string {

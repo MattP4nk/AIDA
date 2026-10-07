@@ -3872,6 +3872,58 @@ Write them per-refactor, immediately before touching the code:
       since all 29 call sites assert non-null (`!`), it did not retry and did not warn, it
       propagated as a "definitely defined" value and crashed somewhere else entirely. A cache that
       remembers failures is worse than no cache. 29 sites now call `resolveService` directly.
+- [~] **A4 part 2, WRITES — 2026-10-07. 30 direct `db.client.<model>.<write>` in commandModules →
+      10.** Ratchet: `server/scripts/verify-a4-command-writes.ts` (MAX only ever goes down). Each
+      write was read for the invariant it bypassed; most hid a real defect:
+      - **adminCommands (9 → 0) → `AccountAdminService`.** Demotion left the role in the 60s auth
+        cache AND on every live socket; resetpw (the compromised-account response) left the
+        attacker's session working; `admin mute` was written and never read; the panel's role
+        change wrote no audit; audit failures were swallowed. `verify-account-admin.ts`.
+      - **hackCommands (5 → 0).** The spent Quantum charge never reached the client (no
+        `item:removed`). `verify-a4-hack-writes.ts`.
+      - **fragmentCommands (3 → 0).** Bricking → `keyFragmentService.brickFragment`. See OPEN Q1.
+      - **The ratchet itself lied twice.** The regex comment-stripper swallowed 322 lines of
+        playerInfoCommands at a `"/*/proof.log"` string (11 counted, 13 real) → parser-based
+        `scripts/lib/strip-comments.ts`. Then the WRITE regex could not see a chain split across
+        lines — two bounty deletes hid that way (13 counted, 15 real). Both have positive controls.
+      - **playerInfoCommands bounty (5 → 0) → `BountyService`.** The feature could never have
+        worked: `bounties` prints a 16-char id prefix, `bounty claim` did `findUnique` on the full
+        25-char cuid — the dev DB holds zero bounties, ever. Behind that: claim was check-then-act
+        (two hunters both "won"); completion was check-then-act then paid (double credits AND rep);
+        "hack the target's home" accepted ANY past access (rows are never pruned), so a returning
+        hunter completed on claim; claim ignored `expiresAt`; nothing writes status "expired", so
+        `postBounty`'s dedupe let the first lapsed bounty block that faction from ever posting on
+        that player again; the claim text sent hunters after a `proof.log` nothing checks; the
+        target's breach alert was socket-only (lost if offline) → `notifyUser`. Fixes: atomic
+        `updateMany` transitions, transition+credits in one transaction (post-commit announce via
+        `playerProgressRepository.announceCommittedCredits`), access must postdate the bounty,
+        `fileService.purgeNode` (system delete + key revocation, failures logged).
+        `verify-a4-bounty.ts` 23/23; every fix negative-controlled (8 mutations, each red on its
+        own check).
+      - **Remaining 10:** defenseCommands 6, fileCommands 2, socialCommands 2.
+      - **OPEN QUESTIONS (need the maintainer):**
+        1. **Endgame lockout.** 9 fragments exist, 9 are required, nothing restores a bricked one:
+           the first failed `fragment.crack` makes the endgame unreachable for everyone.
+        2. **Bounty decoys are dead code.** Completion counts `isDecoy` stolen files, but stolen
+           files are selected by `metadata.sourceServerId = <breached server>` and decoys carry
+           `sourceServerId: "decoy"` — `decoysHit` is always 0 and "Target used honeypot" can never
+           print. Wire honeypots into bounties, or delete the branch?
+        3. **Should a CLAIMED bounty expire?** Claim now requires a live bounty; completion does
+           not, so a hunter can sit on a claim forever.
+        4. **`protect <dir>` promises inheritance that does not exist.** It tells the player files
+           inside cannot be deleted by attackers; `fileService.delete` checks only the target
+           node. Make protection inherited, or change the text?
+        5. Session TTL vs JWT_EXPIRES_IN; logout sets `isOnline=false` despite other live
+           sessions; in-game vs panel role policy differ (in game an admin cannot create admins).
+      - **Found in passing, NOT fixed (named so it is not lost):** `prisma/npcOwnership.ts` merges a
+        duplicate NPC by moving servers, sent messages and forum memberships, then `user.delete`.
+        Five required User FKs have no `onDelete` and so default to RESTRICT — `Contact.contact`
+        (:416), `Post.author` (:510), `HackLog.attacker/target` (:870-871), `MessageReport.reporter`
+        (:394). Any such row pointing at the duplicate makes the merge throw P2003. It
+        runs only from `seed.ts:2979`, after the seed's own `deleteMany`s, so today it is latent;
+        it bites the first time the merge is run against a live DB. Next action: move those rows in
+        the merge (contacts with the forumMember clash pattern), and add a harness that merges a
+        fixture duplicate holding one row of each.
 - [~] **A5 — PARTLY DONE 2026-09-24. The cycle is now MEASURABLE, and it is 14, not 48.**
       - **The headline number was folklore.** "48-module cycle / closes 36 cycles" came from an
         analysis nothing in the repo could reproduce — no madge, no dpdm, no eslint rule.

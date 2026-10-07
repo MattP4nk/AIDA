@@ -158,6 +158,15 @@ export class PlayerProgressRepository extends EventEmitter {
   // ── CREDITS ───────────────────────────────────────────────────────────
 
   /**
+   * For a transactional caller, AFTER its commit: announce the balance that a
+   * `tx` call deliberately did not (see `announce`).
+   */
+  public async announceCommittedCredits(userId: string): Promise<void> {
+    this.announce({ userId, credits: await this.readCredits(userId) });
+  }
+
+
+  /**
    * Grant credits. Always an `increment`, never an absolute write — that is the
    * D5 half of the fix, and it is why this returns the new balance rather than
    * letting the caller compute one.

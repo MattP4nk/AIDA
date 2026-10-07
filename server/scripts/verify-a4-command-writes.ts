@@ -17,7 +17,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { stripComments } from "./lib/strip-comments";
 
-const MAX = 13;
+const MAX = 10;
 
 let pass = 0, fail = 0;
 function check(n: string, ok: boolean, d = "") {
@@ -26,7 +26,7 @@ function check(n: string, ok: boolean, d = "") {
 }
 // String-aware: the regex idiom swallowed 322 lines of this very directory.
 const strip = stripComments;
-const WRITE = /\bdb\.client\.([a-zA-Z]+)\.(create|createMany|update|updateMany|upsert|delete|deleteMany)\b/g;
+const WRITE = /\bdb\.client\.([a-zA-Z]+)\s*\.\s*(create|createMany|update|updateMany|upsert|delete|deleteMany)\b/g;
 
 const dir = new URL("../src/services/commandModules", import.meta.url).pathname;
 const hits: string[] = [];
@@ -41,6 +41,10 @@ check("POSITIVE CONTROL: the pattern counts code and skips comments", [...probe.
 // The trap that hid two writes: `/*` inside a STRING is not a comment.
 const trap = strip('const p = "x/*/proof.log";\nawait context.db.client.bounty.update({});\n/* real */');
 check("POSITIVE CONTROL: a '/*' inside a string does not swallow code", [...trap.matchAll(WRITE)].length === 1);
+// And a chain split across lines — two bounty deletes hid that way, written
+// `context.db.client.fileSystemNode` NEWLINE `.delete(...)`.
+const chained = strip("await context.db.client.fileSystemNode\n  .delete({ where: { id } })\n  .catch(() => {});");
+check("POSITIVE CONTROL: a write chained across lines is counted", [...chained.matchAll(WRITE)].length === 1);
 check(`at most ${MAX} direct writes remain (ratchet — only ever lower it)`, hits.length <= MAX, `${hits.length} found`);
 check("the ratchet is tight (lower MAX to the current count)", hits.length === MAX,
   hits.length < MAX ? `${hits.length} < ${MAX}: lower MAX` : `${hits.length}`);
