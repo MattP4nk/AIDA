@@ -41,6 +41,7 @@ import { generateAvatar, getCompactAvatar } from "../utils/asciiAvatars";
 import type { AvatarInfo } from "../../../shared/types";
 import { moderateBeforePublish } from "../utils/moderationGate";
 import { getSystemUserId } from "../utils/systemUser";
+import { activeMuteMessage } from "../utils/mute";
 
 // ==================== TYPES ====================
 
@@ -192,6 +193,12 @@ export class MessageService {
           message: "Sender not found",
           error: "SENDER_NOT_FOUND",
         };
+      }
+
+      // `admin mute` — see utils/mute.ts. The sender row is already loaded.
+      const muted = activeMuteMessage(sender.mutedUntil);
+      if (muted) {
+        return { success: false, message: muted, error: "MUTED" };
       }
 
       if (!recipient) {

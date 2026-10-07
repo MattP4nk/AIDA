@@ -1,8 +1,11 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext, CommandInfo } from "./interface";
 import { successResult, errorResult } from "./helpers";
-import type { Prisma } from "@prisma/client";
-import bcrypt from "bcryptjs";
+import { getService } from "../../di/resolve";
+import { ACCOUNT_ADMIN_SERVICE } from "../../di/tokens";
+import type { AccountAdminService } from "../accountAdminService";
+
+const accounts = () => getService<AccountAdminService>(ACCOUNT_ADMIN_SERVICE);
 
 const ROLE_HIERARCHY: Record<string, number> = {
   player: 0,
@@ -427,10 +430,7 @@ export class AdminCommandsModule implements CommandModule {
     }
 
     const mutedUntil = new Date(Date.now() + minutes * 60 * 1000);
-    await context.db.client.user.update({
-      where: { id: user.id },
-      data: { mutedUntil },
-    });
+    await accounts().mute(user.id, mutedUntil);
 
     await this.auditAction(context, "admin_mute", "user", user.id, {
       target,
@@ -458,10 +458,7 @@ export class AdminCommandsModule implements CommandModule {
       return errorResult(`User '${target}' not found.`);
     }
 
-    await context.db.client.user.update({
-      where: { id: user.id },
-      data: { mutedUntil: null },
-    });
+    await accounts().unmute(user.id);
 
     await this.auditAction(context, "admin_unmute", "user", user.id, {
       target,
@@ -500,33 +497,9 @@ export class AdminCommandsModule implements CommandModule {
 
     const reason = command.args.slice(2).join(" ") || "Banned by administrator";
 
-    // Deactivate account
-    await context.db.client.user.update({
-      where: { id: user.id },
-      data: { isActive: false, isOnline: false },
-    });
-
-    // Kill session and force disconnect
-    await context.gameStateManager.destroySession(user.id);
-    if (context.io) {
-      // S3: see the kick path — targeted emit, then a server-side close so the
-      // ban does not depend on the banned client choosing to comply.
-      context.io
-        .to(`user:${user.id}`)
-        .emit("force:disconnect", { reason: `Account banned: ${reason}` });
-      const { disconnectUserSockets } = await import("../../sockets/handlers");
-      disconnectUserSockets(context.io, user.id);
-    }
-
-    // Deactivate all sessions
-    await context.db.client.userSession.updateMany({
-      where: { userId: user.id, isActive: true },
-      data: { isActive: false },
-    });
-
-    // Immediately invalidate auth cache so banned user can't use cached sessions
-    const { invalidateAuthCacheForUser } = await import("../../middleware/auth");
-    invalidateAuthCacheForUser(user.id);
+    // Deactivate the account and end every session: game session, live
+    // sockets (closed server-side — S3), DB sessions, auth cache.
+    await accounts().ban(user.id, reason);
 
     await this.auditAction(context, "admin_ban", "user", user.id, {
       target,
@@ -558,10 +531,7 @@ export class AdminCommandsModule implements CommandModule {
       return errorResult(`'${target}' is not banned.`);
     }
 
-    await context.db.client.user.update({
-      where: { id: user.id },
-      data: { isActive: true },
-    });
+    await accounts().unban(user.id);
 
     await this.auditAction(context, "admin_unban", "user", user.id, { target });
 
@@ -607,10 +577,9 @@ export class AdminCommandsModule implements CommandModule {
       return errorResult("Cannot set a role equal to or above your own.");
     }
 
-    await context.db.client.user.update({
-      where: { id: user.id },
-      data: { role: newRole },
-    });
+    // Also refreshes the auth cache and every live socket's role — a
+    // demotion used to leave the target admin until they reconnected.
+    await accounts().setRole(user.id, newRole);
 
     await this.auditAction(context, "admin_setrole", "user", user.id, {
       target,
@@ -717,29 +686,10 @@ export class AdminCommandsModule implements CommandModule {
       return errorResult("Cannot reset password of a user with equal or higher rank.");
     }
 
-    // Generate temp password
-    const chars = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789";
-    let tempPw = "";
-    for (let i = 0; i < 12; i++) {
-      tempPw += chars[Math.floor(Math.random() * chars.length)];
-    }
-
-    // S10: use the configured cost, not a hardcoded 10. `config.BCRYPT_ROUNDS`
-    // defaults to 12 and is range-validated at boot, so this site was quietly
-    // issuing weaker hashes than registration — and would ignore any future
-    // tuning of the cost.
-    const { config } = await import("../../config/environment");
-    const hashed = await bcrypt.hash(tempPw, config.BCRYPT_ROUNDS);
-    await context.db.client.user.update({
-      where: { id: user.id },
-      data: { password: hashed },
-    });
-
-    // Invalidate all sessions
-    await context.db.client.userSession.updateMany({
-      where: { userId: user.id, isActive: true },
-      data: { isActive: false },
-    });
+    // CSPRNG temp password, configured bcrypt cost, and sign-out
+    // EVERYWHERE — this only deactivated DB sessions, so the auth cache and
+    // every live socket (an attacker's included) kept working.
+    const tempPw = await accounts().resetPassword(user.id);
 
     await this.auditAction(context, "admin_resetpw", "user", user.id, {
       target,
@@ -874,19 +824,8 @@ export class AdminCommandsModule implements CommandModule {
     resourceId: string | null,
     metadata: Record<string, unknown>,
   ): Promise<void> {
-    try {
-      await context.db.client.auditLog.create({
-        data: {
-          userId: context.userId,
-          action,
-          resource,
-          resourceId,
-          metadata: metadata as Prisma.InputJsonValue,
-        },
-      });
-    } catch {
-      // Don't fail the command if audit logging fails
-    }
+    // Never fails the command; a failure is logged (this was `catch {}`).
+    await accounts().audit(context.userId, action, resource, resourceId, metadata);
   }
 
   getCommandInfo(): CommandInfo[] {

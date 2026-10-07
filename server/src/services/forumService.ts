@@ -12,6 +12,7 @@ import type { FactionKnowledgeService } from "./factionKnowledgeService";
 import type { ReputationEngine } from "./reputationEngine";
 import { moderateBeforePublish } from "../utils/moderationGate";
 import { getSystemUserId } from "../utils/systemUser";
+import { activeMuteMessage } from "../utils/mute";
 import type { ForumAccessService } from "./forumAccessService";
 import type { ForumModerationService } from "./forumModerationService";
 import type { ForumContentService } from "./forumContentService";
@@ -188,6 +189,11 @@ export class ForumService extends EventEmitter {
       if (member.isBanned) {
         throw new Error("You are banned from this forum");
       }
+
+      // `admin mute` — see utils/mute.ts.
+      const author = await prisma.user.findUnique({ where: { id: userId }, select: { mutedUntil: true } });
+      const muted = activeMuteMessage(author?.mutedUntil);
+      if (muted) throw new Error(muted);
 
       // Apply censorship filtering
       let filteredTitle = title;
@@ -402,6 +408,11 @@ export class ForumService extends EventEmitter {
       if (member.isBanned) {
         throw new Error("You are banned from this forum");
       }
+
+      // `admin mute` — see utils/mute.ts.
+      const author = await prisma.user.findUnique({ where: { id: userId }, select: { mutedUntil: true } });
+      const muted = activeMuteMessage(author?.mutedUntil);
+      if (muted) throw new Error(muted);
 
       // Check post exists and is not locked
       const post = await prisma.post.findUnique({

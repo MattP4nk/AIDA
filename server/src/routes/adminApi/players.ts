@@ -1,4 +1,7 @@
 import { Router } from "express";
+import { getService } from "../../di/resolve";
+import { ACCOUNT_ADMIN_SERVICE } from "../../di/tokens";
+import type { AccountAdminService } from "../../services/accountAdminService";
 import { prisma } from "../../database/client";
 import { asyncHandler } from "../../middleware/setup";
 import { NotFoundError, ValidationError } from "../../../../shared/types";
@@ -166,15 +169,19 @@ router.put("/:id/role", asyncHandler(async (req: any, res: any) => {
   });
   if (!player) throw new NotFoundError("Player not found");
 
-  const updated = await prisma.user.update({
-    where: { id: req.params.id },
-    data: { role },
-    select: {
-      id: true,
-      username: true,
-      role: true,
-    },
+  // Through AccountAdminService: the role row AND the caches that hold it —
+  // the auth cache and every live socket of the target. This route wrote the
+  // row alone, so a demotion here left the target their old powers until they
+  // reconnected; and it wrote no audit record at all.
+  const accounts = getService<AccountAdminService>(ACCOUNT_ADMIN_SERVICE);
+  const { oldRole } = await accounts.setRole(req.params.id, role);
+  await accounts.audit(req.user.id, "admin_setrole", "user", req.params.id, {
+    target: player.username,
+    oldRole,
+    newRole: role,
+    via: "admin-panel",
   });
+  const updated = { id: player.id, username: player.username, role };
 
   res.json({
     success: true,

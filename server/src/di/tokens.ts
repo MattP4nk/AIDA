@@ -30,6 +30,7 @@ export const MESSAGE_ENCRYPTION_SERVICE = "MessageEncryptionService";
 export const CHAT_SERVICE = "ChatService";
 export const FORUM_SERVICE = "ForumService";
 export const AUTH_SERVICE = "AuthService";
+export const ACCOUNT_ADMIN_SERVICE = "AccountAdminService";
 export const FORUM_ACCESS_SERVICE = "ForumAccessService";
 export const FORUM_MODERATION_SERVICE = "ForumModerationService";
 export const FORUM_CONTENT_SERVICE = "ForumContentService";

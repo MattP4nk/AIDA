@@ -268,6 +268,26 @@ function clientIp(socket: Socket): string {
  * trusting the client to hang up is not enforcement, it is a suggestion. A
  * modified or simply old client keeps its socket and carries on.
  */
+/**
+ * Update the role every live socket of a user carries.
+ *
+ * Socket commands authorize with `socket.data.user.role`, set once at socket
+ * authentication and never refreshed — so a demotion left the demoted admin
+ * admin on every open socket until they reconnected, possibly hours. Unlike
+ * disconnectUserSockets this keeps them connected and just changes what they
+ * are allowed to do.
+ */
+export function setSocketUserRole(io: SocketIOServer, userId: string, role: string): number {
+  const ids = userSockets.get(userId);
+  if (!ids) return 0;
+  let n = 0;
+  for (const socketId of ids) {
+    const s = io.sockets.sockets.get(socketId);
+    if (s?.data.user) { s.data.user.role = role; n++; }
+  }
+  return n;
+}
+
 export function disconnectUserSockets(io: SocketIOServer, userId: string): number {
   const ids = userSockets.get(userId);
   if (!ids || ids.size === 0) return 0;
