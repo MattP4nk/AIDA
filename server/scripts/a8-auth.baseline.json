@@ -165,15 +165,28 @@
   "cookies": []
  },
  "refresh": {
-  "status": 403,
+  "status": 200,
   "body": {
-   "error": "CSRF token required",
+   "message": "Token refreshed",
+   "success": true,
+   "timestamp": "<string>",
+   "token": "<string>"
+  },
+  "cookies": [
+   "HttpOnly; Max-Age=86400; Path=/; SameSite=None; Secure; aida_token=<v>"
+  ]
+ },
+ "verify-stale-after-refresh": {
+  "status": 401,
+  "body": {
+   "code": "SESSION_EXPIRED",
+   "error": "Session expired or invalid",
    "success": false,
    "timestamp": "<string>"
   },
   "cookies": []
  },
- "verify-stale-after-refresh": {
+ "verify-refreshed": {
   "status": 200,
   "body": {
    "success": true,
@@ -193,30 +206,22 @@
   },
   "cookies": []
  },
- "verify-refreshed": {
-  "status": 401,
-  "body": {
-   "code": "AUTH_REQUIRED",
-   "error": "No token provided",
-   "success": false,
-   "timestamp": "<string>"
-  },
-  "cookies": []
- },
  "logout": {
-  "status": 403,
+  "status": 200,
   "body": {
-   "error": "CSRF token required",
-   "success": false,
+   "message": "Logged out successfully",
+   "success": true,
    "timestamp": "<string>"
   },
-  "cookies": []
+  "cookies": [
+   "Path=/; aida_token=<v>"
+  ]
  },
  "verify-after-logout": {
   "status": 401,
   "body": {
-   "code": "AUTH_REQUIRED",
-   "error": "No token provided",
+   "code": "SESSION_EXPIRED",
+   "error": "Session expired or invalid",
    "success": false,
    "timestamp": "<string>"
   },
@@ -245,7 +250,7 @@
  "db": {
   "user": {
    "isActive": true,
-   "isOnline": true,
+   "isOnline": false,
    "role": "player",
    "hasHomeServer": true
   },
@@ -399,13 +404,15 @@
    }
   ],
   "sessions": [
-   "true|a8-auth-characterization",
+   "false|a8-auth-characterization",
+   "false|a8-auth-characterization",
    "true|a8-auth-characterization",
    "true|a8-auth-characterization"
   ],
   "audit": [
    "user_login|user|a8-auth-characterization",
    "user_login|user|a8-auth-characterization",
+   "user_logout|user|a8-auth-characterization",
    "user_registered|user|a8-auth-characterization"
   ],
   "standings": 3

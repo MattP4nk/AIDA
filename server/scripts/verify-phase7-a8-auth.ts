@@ -40,13 +40,30 @@ function check(n: string, ok: boolean, d = "") {
 }
 
 /** Status + body shape + cookie attributes, with volatile values removed. */
+/**
+ * A CSRF token for this JWT. EVERY state-changing request needs one — Bearer
+ * included; only login/register are exempt. This harness first sent refresh
+ * and logout WITHOUT one, so both were answered 403 "CSRF token required" in
+ * the pre-move AND post-move runs: they matched because neither ran, and the
+ * extraction's refresh/logout were never exercised. Caught writing a later
+ * harness, 2026-10-07.
+ */
+async function csrfFor(token: string): Promise<string> {
+  const r = await fetch(`${BASE.replace("/api/auth", "")}/api/csrf-token`, { headers: { Authorization: `Bearer ${token}` } });
+  const j: any = await r.json().catch(() => null);
+  if (!j?.csrfToken) throw new Error(`no CSRF token: ${r.status} ${JSON.stringify(j).slice(0, 100)}`);
+  return j.csrfToken;
+}
+
 async function call(method: string, path: string, opts: { body?: unknown; token?: string } = {}) {
+  const needsCsrf = method !== "GET" && !["/login", "/register"].includes(path) && !!opts.token;
   const r = await fetch(`${BASE}${path}`, {
     method,
     headers: {
       "Content-Type": "application/json",
       "User-Agent": "a8-auth-characterization",
       ...(opts.token ? { Authorization: `Bearer ${opts.token}` } : {}),
+      ...(needsCsrf ? { "X-CSRF-Token": await csrfFor(opts.token!) } : {}),
     },
     ...(opts.body ? { body: JSON.stringify(opts.body) } : {}),
   });
@@ -197,6 +214,12 @@ async function main() {
   const snapshot = unTag(out);
   check("the run exercised every step", Object.keys(snapshot).length >= 17, `${Object.keys(snapshot).length} steps`);
   check("PRECONDITION: the happy path actually succeeded", (snapshot as any)["login"].status === 200 && !!login.rawToken);
+  // The guard that was missing: a characterization of refresh/logout that
+  // recorded a CSRF rejection is not a characterization of refresh/logout.
+  check("PRECONDITION: refresh actually ran (not a CSRF 403)", (snapshot as any)["refresh"].status === 200,
+    String((snapshot as any)["refresh"].status));
+  check("PRECONDITION: logout actually ran (not a CSRF 403)", (snapshot as any)["logout"].status === 200,
+    String((snapshot as any)["logout"].status));
 
   if (RECORD) {
     // Never record a broken run as the truth: a rate-limited or down server
