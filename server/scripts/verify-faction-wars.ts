@@ -158,7 +158,7 @@ async function main() {
       // it grepped for `updateWarScore(` and the producer calls
       // `recordHackForWar`. A check that encodes a limitation has to be
       // rewritten when the limitation goes, not merely re-run.
-      const src = strip(readFileSync(new URL("../src/services/hackService.ts", import.meta.url).pathname, "utf8"));
+      const src = strip(["hackService", "hackCountermeasureService", "hackScoring", "hackSessionStore"].map((f) => readFileSync(new URL(`../src/services/${f}.ts`, import.meta.url).pathname, "utf8")).join("\n"));
       check(
         "hackService reports successful hacks to warfareService",
         /recordHackForWar\(attackerId, targetServerId\)/.test(src),

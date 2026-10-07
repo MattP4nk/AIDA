@@ -376,7 +376,7 @@ function wireServiceEvents(storyProgression: StoryProgressionService): void {
     });
   });
 
-  hackService.on("bounty:posted", (data: BountyPostedEvent) => {
+  hackService.countermeasures.on("bounty:posted", (data: BountyPostedEvent) => {
     defer(() => dynamicContent.processEvent("bounty:posted", data), "Dynamic content error on bounty:posted");
   });
 

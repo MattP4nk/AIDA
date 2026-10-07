@@ -3942,7 +3942,15 @@ Write them per-refactor, immediately before touching the code:
         `createAIReply` (untracked until now), `populateForumContent` (first-boot populator,
         superseded by seed.ts on any seeded DB; only a manual script calls it). `handleNPCReply` is
         already tracked in Phase 8.
-      - [ ] `hackService` (2,739) — session-store / scoring / countermeasures.
+      - [x] **`hackService` 2,739 -> 1,799 (2026-10-07)**, along the seams PLAN named:
+        `hackCountermeasureService.ts` (581, DI singleton + EventEmitter, `hackService.countermeasures`),
+        `hackScoring.ts` (296, pure functions + the four constants), `hackSessionStore.ts` (136;
+        getters keep every `this.activeHacks` use verbatim; restore takes `onExpire`). 46/46
+        methods and 4/4 constants proven verbatim after reversing the deliberate rewrites.
+        `bounty:posted` is emitted only by countermeasures now, so index.ts listens there —
+        `verify-phase7-a8-bootstrap` caught the re-point exactly (one baseline line).
+        Seven harness source-reads re-pointed to read the whole hack domain; one built its path
+        from a template literal and was invisible to grep — the suite found it.
       - [ ] `Terminal.svelte` (2,867) — CSS + `handleSubmit`.
 - [ ] **A8** Introduce `authService` — move the auth domain out of `routes/auth.ts` (561 lines,
       security-critical, currently unreachable without an HTTP request).

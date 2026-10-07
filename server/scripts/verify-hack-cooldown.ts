@@ -39,7 +39,7 @@ async function main() {
     `${getHackCooldown(100000)}s — an unbounded reduction would mean no cooldown at all`,
   );
 
-  const hs = strip(readFileSync(new URL("../src/services/hackService.ts", import.meta.url).pathname, "utf8"));
+  const hs = strip(["hackService", "hackCountermeasureService", "hackScoring", "hackSessionStore"].map((f) => readFileSync(new URL(`../src/services/${f}.ts`, import.meta.url).pathname, "utf8")).join("\n"));
   check("applyCooldown consults it", /getHackCooldown\(progress\?\.hacking \?\? 0\)/.test(hs));
   check(
     "an explicit duration still overrides (hackCommands passes 15)",

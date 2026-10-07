@@ -53,7 +53,7 @@ async function main() {
     // Structural, deliberately: driving a full hack needs a live session, a
     // target server and a minigame. What regressed is that TWO methods in one
     // resolution both granted XP, and that is visible where it lives.
-    const src = readFileSync(new URL("../src/services/hackService.ts", import.meta.url).pathname, "utf8");
+    const src = ["hackService", "hackCountermeasureService", "hackScoring", "hackSessionStore"].map((f) => readFileSync(new URL(`../src/services/${f}.ts`, import.meta.url).pathname, "utf8")).join("\n");
 
     const statsFn = src.slice(
       src.indexOf("private async updateHackStatistics("),

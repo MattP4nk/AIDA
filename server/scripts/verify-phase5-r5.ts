@@ -73,7 +73,7 @@ async function main() {
 
     // Drive the private method directly. evidenceLevel > 80 is the branch that
     // reaches the trace call.
-    const measures: string[] = await (hackService as any).triggerCounterMeasures(
+    const measures: string[] = await (hackService as any).countermeasures.triggerCounterMeasures(
       server.id,
       95,
       victim.id,

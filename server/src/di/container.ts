@@ -26,6 +26,7 @@ import { InventoryService } from "../services/inventoryService";
 import MissionService from "../services/missionService";
 import ServerService from "../services/serverService";
 import HackService from "../services/hackService";
+import { HackCountermeasureService } from "../services/hackCountermeasureService";
 import FileService from "../services/fileService";
 import MessageService from "../services/messageService";
 import { MessageEncryptionService } from "../services/messageEncryptionService";
@@ -124,6 +125,7 @@ export function setupContainer(
   );
   container.registerSingleton(TOKENS.CONTENT_QUEUE_SERVICE, ContentQueueService);
   container.registerSingleton(TOKENS.SERVER_SERVICE, ServerService);
+  container.registerSingleton(TOKENS.HACK_COUNTERMEASURE_SERVICE, HackCountermeasureService);
   container.registerSingleton(TOKENS.HACK_SERVICE, HackService);
   container.registerSingleton(TOKENS.FILE_SERVICE, FileService);
   container.registerSingleton(TOKENS.MESSAGE_ENCRYPTION_SERVICE, MessageEncryptionService);

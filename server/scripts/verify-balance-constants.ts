@@ -94,7 +94,7 @@ async function main() {
 
   console.log("\nBC-3 — the twins are gone from the services");
   {
-    const hack = read("../src/services/hackService.ts");
+    const hack = ["hackService", "hackCountermeasureService", "hackScoring", "hackSessionStore"].map((f) => read(`../src/services/${f}.ts`)).join("\n");
     const dungeon = read("../src/services/darknetDungeonService.ts");
     const mission = read("../src/services/missionService.ts");
     const gen = read("../src/services/missionGenerator.ts");
@@ -114,7 +114,7 @@ async function main() {
 
   console.log("\nBC-4 — the last four: every twin now reads its constant");
   {
-    const hack = read("../src/services/hackService.ts");
+    const hack = ["hackService", "hackCountermeasureService", "hackScoring", "hackSessionStore"].map((f) => read(`../src/services/${f}.ts`)).join("\n");
     const mem = read("../src/services/memoryService.ts");
     check("no bare `evidenceLevel > 80` remains", !/evidenceLevel > 80\b/.test(hack));
     check(

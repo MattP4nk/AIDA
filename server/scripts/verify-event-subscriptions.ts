@@ -737,7 +737,7 @@ async function main() {
         "this file has no emit of any kind, so the row was the owner's ONLY signal",
       );
 
-      const hs = read("../src/services/hackService.ts");
+      const hs = ["hackService", "hackCountermeasureService", "hackScoring", "hackSessionStore"].map((f) => read(`../src/services/${f}.ts`)).join("\n");
       check(
         "KNOWN EXCEPTION: hackService keeps its direct write",
         /gameEvent\.create/.test(hs),

@@ -23,6 +23,7 @@ export const INVENTORY_SERVICE = "InventoryService";
 export const MISSION_SERVICE = "MissionService";
 export const SERVER_SERVICE = "ServerService";
 export const HACK_SERVICE = "HackService";
+export const HACK_COUNTERMEASURE_SERVICE = "HackCountermeasureService";
 export const FILE_SERVICE = "FileService";
 export const MESSAGE_SERVICE = "MessageService";
 export const MESSAGE_ENCRYPTION_SERVICE = "MessageEncryptionService";

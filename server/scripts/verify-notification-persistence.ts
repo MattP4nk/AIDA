@@ -548,8 +548,14 @@ async function main() {
     // ── Emitters go through the chokepoint ───────────────────────────
     console.log("\nNP-6 — the per-user emitters use the chokepoint");
     {
+      // A8 split hackService; a domain is every file it now spans, or the
+      // NEGATIVE check below passes vacuously on the half that moved.
+      const DOMAIN: Record<string, string[]> = {
+        missionService: ["missionService"],
+        hackService: ["hackService", "hackCountermeasureService", "hackScoring", "hackSessionStore"],
+      };
       for (const f of ["missionService", "hackService"]) {
-        const src = read(`../src/services/${f}.ts`);
+        const src = DOMAIN[f]!.map((x) => read(`../src/services/${x}.ts`)).join("\n");
         const raw = (src.match(/emit\(\s*"notification"/g) || []).length;
         check(
           `${f} has no hand-rolled notification emit left`,

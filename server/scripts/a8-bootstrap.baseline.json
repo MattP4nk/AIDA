@@ -2,11 +2,11 @@
   "listeners": [
     "backdoorService.on(backdoor:discovered)",
     "backdoorService.on(backdoor:expired)",
+    "countermeasures.on(bounty:posted)",
     "factionService.on(faction:member_joined)",
     "factionService.on(faction:member_left)",
     "factionService.on(faction:rank_achieved)",
     "factionService.on(faction:reputation_changed)",
-    "hackService.on(bounty:posted)",
     "hackService.on(hack:attempt)",
     "hackService.on(hack:detected)",
     "hackService.on(ids_alert)",
