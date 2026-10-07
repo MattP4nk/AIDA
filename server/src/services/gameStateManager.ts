@@ -134,7 +134,8 @@ class GameStateManager {
   private readonly MAX_SESSIONS = MAX_SESSIONS_LIMIT;
   private readonly SESSION_IDLE_TIMEOUT_MS = SESSION_IDLE_TIMEOUT_MIN * 60 * 1000;
   private readonly SESSION_LOCK_TTL_MS = SESSION_LOCK_TTL_MS_CFG;
-  private sessionLocks = new Map<string, number>(); // userId -> lock timestamp
+  /** userId -> the session creation currently running for them. */
+  private sessionCreations = new Map<string, { startedAt: number; promise: Promise<PlayerSession> }>();
   private connectionLocks = new Map<string, number>(); // userId -> lock timestamp (prevents concurrent connectPlayerToServer)
 
   private get commandProcessor(): CommandProcessor {
@@ -406,18 +407,21 @@ class GameStateManager {
     socketId: string,
     ipAddress: string,
   ): Promise<PlayerSession> {
-    // Per-user lock to prevent concurrent session creation (with TTL)
-    const lockTime = this.sessionLocks.get(userId);
-    if (lockTime !== undefined) {
-      const lockAge = Date.now() - lockTime;
-      if (lockAge < this.SESSION_LOCK_TTL_MS) {
-        // Lock is still valid — return existing session or reject
-        const existing = this.playerSessions.get(userId);
-        if (existing) return existing;
-        throw new Error(
-          `Session creation already in progress for user ${userId}`,
-        );
-      }
+    // Per-user lock: one session creation at a time — and a concurrent caller
+    // JOINS it instead of being refused.
+    //
+    // This threw "Session creation already in progress" at the second caller,
+    // and a page load always has two: SocketService authenticates on every
+    // `connect`, and App.svelte sends its own `authenticate:request` — 2ms
+    // apart, both landing in handleAuthentication. Whichever lost was told
+    // authentication FAILED for a user who was in fact authenticating, and
+    // App.svelte's terminal init then timed out on an empty tab list. Two tabs
+    // opened together race the same way. Joining hands every concurrent
+    // caller the one session being built, which is what all of them wanted.
+    const inflight = this.sessionCreations.get(userId);
+    if (inflight) {
+      const lockAge = Date.now() - inflight.startedAt;
+      if (lockAge < this.SESSION_LOCK_TTL_MS) return inflight.promise;
       // Lock expired — stale lock from a crashed operation, proceed
       this.logger.warn(
         { userId, lockAgeMs: lockAge },
@@ -425,7 +429,21 @@ class GameStateManager {
       );
     }
 
-    this.sessionLocks.set(userId, Date.now());
+    const entry = { startedAt: Date.now(), promise: this.createSessionUnlocked(userId, socketId, ipAddress) };
+    this.sessionCreations.set(userId, entry);
+    try {
+      return await entry.promise;
+    } finally {
+      // Only clear OUR entry: a stale lock may already have been replaced.
+      if (this.sessionCreations.get(userId) === entry) this.sessionCreations.delete(userId);
+    }
+  }
+
+  private async createSessionUnlocked(
+    userId: string,
+    socketId: string,
+    ipAddress: string,
+  ): Promise<PlayerSession> {
     try {
       // Check if session already exists
       const existingSession = this.playerSessions.get(userId);
@@ -538,8 +556,6 @@ class GameStateManager {
     } catch (error) {
       this.logger.error({ err: error, userId }, "Error creating session");
       throw error;
-    } finally {
-      this.sessionLocks.delete(userId);
     }
   }
 
@@ -897,7 +913,7 @@ class GameStateManager {
     userId: string,
     serverId: string,
   ): Promise<boolean> {
-    // Per-user lock to prevent concurrent connection changes (mirrors sessionLocks pattern)
+    // Per-user lock to prevent concurrent connection changes (mirrors the sessionCreations lock in createSession)
     const lockTime = this.connectionLocks.get(userId);
     if (lockTime !== undefined && Date.now() - lockTime < this.SESSION_LOCK_TTL_MS) {
       this.logger.warn({ userId }, "Connection change already in progress");
