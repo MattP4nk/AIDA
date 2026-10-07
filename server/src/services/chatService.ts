@@ -102,6 +102,36 @@ export class ChatService {
   // ==================== CHAT CONTACTS ====================
 
   /**
+   * Add a user to the caller's contacts. A4: was a find-then-create in
+   * socialCommands — two concurrent adds hit `@@unique([userId,
+   * contactUserId])` and the loser surfaced as "Command execution failed";
+   * and nothing stopped a player adding themselves.
+   */
+  async addContact(userId: string, username: string): Promise<{ ok: boolean; message: string }> {
+    const target = await prisma.user.findFirst({ where: { username }, select: { id: true, username: true } });
+    if (!target) return { ok: false, message: "User not found" };
+    if (target.id === userId) return { ok: false, message: "You can't add yourself as a contact." };
+    try {
+      await prisma.contact.create({
+        data: { userId, contactUserId: target.id, handle: target.username, status: "pending" },
+      });
+    } catch (err) {
+      if ((err as { code?: string }).code === "P2002") return { ok: false, message: "Contact already exists" };
+      throw err;
+    }
+    return { ok: true, message: `Added ${target.username} to contacts` };
+  }
+
+  /** Remove a contact. Says so when there was nothing to remove. */
+  async removeContact(userId: string, username: string): Promise<{ ok: boolean; message: string }> {
+    const target = await prisma.user.findFirst({ where: { username }, select: { id: true, username: true } });
+    if (!target) return { ok: false, message: "User not found" };
+    const gone = await prisma.contact.deleteMany({ where: { userId, contactUserId: target.id } });
+    if (gone.count === 0) return { ok: false, message: `${target.username} is not in your contacts.` };
+    return { ok: true, message: `Removed ${target.username} from contacts` };
+  }
+
+  /**
    * Get chat contacts for a user (from DB contacts + message history)
    */
   async getChatContacts(userId: string): Promise<MessageOperationResult> {

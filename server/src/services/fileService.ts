@@ -1773,6 +1773,71 @@ export class FileService {
   }
 
   /**
+   * Move a node to another directory as a SYSTEM action (the vault), setting
+   * its flags in the same write. A same-named node already at the destination
+   * is reported, not thrown: `@@unique([serverId, parentId, name])` made the
+   * direct update in `safevault` escape as "Command execution failed".
+   */
+  public async moveNodeSystem(
+    nodeId: string,
+    newParentId: string,
+    flags: { isProtected: boolean; isHidden: boolean },
+  ): Promise<{ ok: true } | { ok: false; reason: "NAME_TAKEN" }> {
+    try {
+      await prisma.fileSystemNode.update({ where: { id: nodeId }, data: { parentId: newParentId, ...flags } });
+      return { ok: true };
+    } catch (err) {
+      if ((err as { code?: string }).code === "P2002") return { ok: false, reason: "NAME_TAKEN" };
+      throw err;
+    }
+  }
+
+  /**
+   * Replace the honeypot decoys in a directory: remove the old ones, then
+   * create each new one unless a REAL file already holds its name (D7 —
+   * decoys are cosmetic; a player's genuine loot is not).
+   */
+  public async redeployDecoys(
+    serverId: string,
+    parentId: string,
+    createdBy: string,
+    decoys: Array<{ name: string; content: string; metadata: Prisma.InputJsonValue }>,
+  ): Promise<void> {
+    await prisma.fileSystemNode.deleteMany({
+      where: { parentId, type: "file", metadata: { path: ["isDecoy"], equals: true } },
+    });
+    for (const d of decoys) {
+      await prisma.fileSystemNode.upsert({
+        where: { serverId_parentId_name: { serverId, parentId, name: d.name } },
+        update: {},
+        create: {
+          serverId, parentId, name: d.name, type: "file",
+          content: d.content, size: d.content.length, createdBy, metadata: d.metadata,
+        },
+      });
+    }
+  }
+
+  /**
+   * Record that a node is a downloaded copy, and of what. MERGED into the
+   * node's metadata, not written over it. `postBounty` finds stolen files by
+   * `sourceServerId`; deleting the file revokes the keys it granted.
+   */
+  public async markDownloaded(
+    nodeId: string,
+    source: { sourceServerId: string; sourcePath: string },
+  ): Promise<void> {
+    const node = await prisma.fileSystemNode.findUniqueOrThrow({ where: { id: nodeId }, select: { metadata: true } });
+    const prior = node.metadata && typeof node.metadata === "object" && !Array.isArray(node.metadata) ? node.metadata : {};
+    await prisma.fileSystemNode.update({
+      where: { id: nodeId },
+      data: {
+        metadata: { ...prior, ...source, downloadedAt: new Date().toISOString(), isDownloaded: true },
+      },
+    });
+  }
+
+  /**
    * Delete a node as a SYSTEM action, revoking every access key it granted —
    * a key whose source file is gone would otherwise outlive it (the user-facing
    * delete above does the same revocation). Used by bounty completion to purge

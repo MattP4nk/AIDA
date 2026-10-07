@@ -7,9 +7,9 @@
  * password reset leaving an attacker's session working, `admin mute` never
  * enforced, a spent item never reaching the client.
  *
- * A RATCHET: the count may only go down. Lower MAX as each batch lands; the
- * goal is 0. Counted on comment-stripped source, so prose quoting an old
- * write does not count.
+ * Reached 0 on 2026-10-07. MAX stays 0: a command module that needs to
+ * write calls a service. Counted on comment-stripped source, so prose quoting
+ * an old write does not count.
  *
  * Run: npx tsx scripts/verify-a4-command-writes.ts
  */
@@ -17,7 +17,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { stripComments } from "./lib/strip-comments";
 
-const MAX = 10;
+const MAX = 0;
 
 let pass = 0, fail = 0;
 function check(n: string, ok: boolean, d = "") {

@@ -1,6 +1,9 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
 import { successResult, errorResult } from "./helpers";
+import { getService } from "../../di/resolve";
+import { CHAT_SERVICE } from "../../di/tokens";
+import type { ChatService } from "../chatService";
 import {
   sanitizeMessageContent,
   validateMessageContent,
@@ -21,6 +24,8 @@ import {
   shouldRequireToken,
 } from "../../utils/tokenConsumption";
 
+
+const chat = () => getService<ChatService>(CHAT_SERVICE);
 export class SocialCommandsModule implements CommandModule {
   public category = "social";
   public commands: Set<string> = new Set([
@@ -479,33 +484,8 @@ export class SocialCommandsModule implements CommandModule {
         return errorResult("Usage: contact add <username>");
       }
 
-      const target = await db.client.user.findFirst({
-        where: { username: targetUsername },
-      });
-
-      if (!target) {
-        return errorResult("User not found");
-      }
-
-      // Check if already exists
-      const existing = await db.client.contact.findFirst({
-        where: { userId, contactUserId: target.id },
-      });
-
-      if (existing) {
-        return errorResult("Contact already exists");
-      }
-
-      await db.client.contact.create({
-        data: {
-          userId,
-          contactUserId: target.id,
-          handle: target.username,
-          status: "pending",
-        },
-      });
-
-      return successResult(`Added ${targetUsername} to contacts`);
+      const r = await chat().addContact(userId, targetUsername);
+      return r.ok ? successResult(r.message) : errorResult(r.message);
     }
 
     if (action === "remove") {
@@ -513,19 +493,8 @@ export class SocialCommandsModule implements CommandModule {
         return errorResult("Usage: contact remove <username>");
       }
 
-      const target = await db.client.user.findFirst({
-        where: { username: targetUsername },
-      });
-
-      if (!target) {
-        return errorResult("User not found");
-      }
-
-      await db.client.contact.deleteMany({
-        where: { userId, contactUserId: target.id },
-      });
-
-      return successResult(`Removed ${targetUsername} from contacts`);
+      const r = await chat().removeContact(userId, targetUsername);
+      return r.ok ? successResult(r.message) : errorResult(r.message);
     }
 
     return errorResult("Usage: contact [list|add|remove] [username]");

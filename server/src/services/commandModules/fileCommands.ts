@@ -1,5 +1,7 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
+import type { FileOperationResult } from "../fileService";
+import logger from "../../logger";
 import { infoBox, render } from "./asciiBox";
 import { getSkillShortfall } from "./skillRequirements";
 import {
@@ -222,71 +224,11 @@ export class FileCommandsModule implements CommandModule {
         targetServerId: sourceServerId,
         onComplete: async () => {
           // ── On completion: copy file to home server ──
-          const accessKeysGranted: string[] = [];
           try {
-            // Track download for mission objectives FIRST (before file copy which can fail)
-            const missionIntegration = context.services.missionIntegrationService as
-              | import("../missionIntegration").MissionIntegrationService
-              | undefined;
-            if (missionIntegration) {
-              try {
-                await missionIntegration.onFileOperation(userId, "download", sourceFileId, sourceServerId);
-              } catch { /* non-critical */ }
-            }
-
-            // Get or create downloads directory on home server
-            const user = await context.db.client.user.findUnique({
-              where: { id: userId },
-              select: { username: true },
+            const { result, downloadDir, accessKeysGranted } = await saveDownload(context, {
+              userId, homeServerId, sourceServerId, sourcePath: path, sourceFileId,
+              filename, content: fileContent, isEncrypted: fileIsEncrypted,
             });
-            const downloadDir = `/home/${user?.username || "user"}/downloads`;
-
-            // Ensure downloads directory exists
-            await context.fileService.createDirectory(homeServerId, userId, downloadDir).catch(() => {});
-
-            // Create the downloaded copy with source metadata
-            const downloadPath = `${downloadDir}/${filename.split("/").pop() || filename}`;
-            const result = await context.fileService.createFile(
-              homeServerId,
-              userId,
-              downloadPath,
-              fileContent,
-              fileIsEncrypted,
-            );
-
-            if (result.success) {
-              // Mark the file with source metadata for tracking
-              const node = await context.db.client.fileSystemNode.findFirst({
-                where: { serverId: homeServerId, name: filename.split("/").pop()! },
-                orderBy: { createdAt: "desc" },
-              });
-              if (node) {
-                await context.db.client.fileSystemNode.update({
-                  where: { id: node.id },
-                  data: {
-                    metadata: {
-                      sourceServerId,
-                      sourcePath: path,
-                      downloadedAt: new Date().toISOString(),
-                      isDownloaded: true,
-                    } as any,
-                  },
-                });
-              }
-
-              // ── Access key detection happens HERE (on download, not on cat) ──
-              if (context.services.networkTopologyService && fileContent) {
-                const granted = await context.fileService.detectAndGrantAccessKeys(
-                  userId,
-                  fileContent,
-                  sourceServerId,
-                  path,
-                  node?.id,
-                );
-                if (granted.length > 0) accessKeysGranted.push(...granted);
-              }
-
-            }
 
             // Push result to player.
             //
@@ -352,66 +294,14 @@ export class FileCommandsModule implements CommandModule {
 
     // Fallback: no process system available — direct copy
     try {
-      // Track download for mission objectives FIRST
-      const missionIntegration = context.services.missionIntegrationService as
-              | import("../missionIntegration").MissionIntegrationService
-              | undefined;
-      if (missionIntegration) {
-        try {
-          await missionIntegration.onFileOperation(context.userId, "download", sourceFileId, serverId);
-        } catch { /* non-critical */ }
-      }
-
-      const user = await context.db.client.user.findUnique({
-        where: { id: context.userId },
-        select: { username: true },
+      const saved = await saveDownload(context, {
+        userId: context.userId, homeServerId: session.homeServerId, sourceServerId: serverId,
+        sourcePath: path, sourceFileId, filename, content: fileContent, isEncrypted: fileIsEncrypted,
       });
-      const downloadDir = `/home/${user?.username || "user"}/downloads`;
-      await context.fileService.createDirectory(session.homeServerId, context.userId, downloadDir).catch(() => {});
-
-      const downloadPath = `${downloadDir}/${filename.split("/").pop() || filename}`;
-      const result = await context.fileService.createFile(
-        session.homeServerId,
-        context.userId,
-        downloadPath,
-        fileContent,
-        fileIsEncrypted,
-      );
-
-      if (!result.success) {
-        return errorResult(`Download failed: ${result.message}`);
+      if (!saved.result.success) {
+        return errorResult(`Download failed: ${saved.result.message}`);
       }
-
-      // Mark with source metadata
-      const node = await context.db.client.fileSystemNode.findFirst({
-        where: { serverId: session.homeServerId, name: filename.split("/").pop()! },
-        orderBy: { createdAt: "desc" },
-      });
-      if (node) {
-        await context.db.client.fileSystemNode.update({
-          where: { id: node.id },
-          data: {
-            metadata: {
-              sourceServerId: serverId,
-              sourcePath: path,
-              downloadedAt: new Date().toISOString(),
-              isDownloaded: true,
-            } as any,
-          },
-        });
-      }
-
-      // Access key detection on download
-      let grantedServers: string[] = [];
-      if (context.services.networkTopologyService && fileContent) {
-        grantedServers = await context.fileService.detectAndGrantAccessKeys(
-          context.userId,
-          fileContent,
-          serverId,
-          path,
-          node?.id,
-        );
-      }
+      const grantedServers = saved.accessKeysGranted;
 
       let downloadOutput = `Downloaded ${filename} → ~/downloads/\n${fileIsEncrypted ? "[ENCRYPTED] " : ""}File saved to home server.`;
       if (grantedServers.length > 0) {
@@ -919,4 +809,61 @@ export class FileCommandsModule implements CommandModule {
       return errorResult("Analysis failed", error instanceof Error ? error.message : "Unknown error");
     }
   }
+}
+
+/**
+ * Copy a downloaded file onto the player's home server and record where it
+ * came from. Shared by the background-process path and the direct fallback,
+ * which were two copies of the same ~40 lines.
+ *
+ * A4: the provenance write used to find the new node again by bare FILENAME
+ * anywhere on the home server, then replace its whole metadata — when
+ * `createFile` had just returned the node's id. The id is what the access
+ * keys granted below are tied to (`sourceFileId`), and what a bounty purge
+ * revokes them by, so it has to be the node that was created.
+ */
+export async function saveDownload(
+  context: CommandContext,
+  d: {
+    userId: string;
+    homeServerId: string;
+    sourceServerId: string;
+    sourcePath: string;
+    sourceFileId: string;
+    filename: string;
+    content: string;
+    isEncrypted: boolean;
+  },
+): Promise<{ result: FileOperationResult; downloadDir: string; accessKeysGranted: string[] }> {
+  // Track download for mission objectives FIRST (before file copy which can fail)
+  const missionIntegration = context.services.missionIntegrationService as
+    | import("../missionIntegration").MissionIntegrationService
+    | undefined;
+  if (missionIntegration) {
+    await missionIntegration
+      .onFileOperation(d.userId, "download", d.sourceFileId, d.sourceServerId)
+      .catch((err) => logger.warn({ err, userId: d.userId }, "download: mission hook failed"));
+  }
+
+  const user = await context.db.client.user.findUnique({
+    where: { id: d.userId },
+    select: { username: true },
+  });
+  const downloadDir = `/home/${user?.username || "user"}/downloads`;
+  // Usually already exists; a real failure surfaces from createFile below.
+  await context.fileService.createDirectory(d.homeServerId, d.userId, downloadDir).catch(() => undefined);
+
+  const downloadPath = `${downloadDir}/${d.filename.split("/").pop() || d.filename}`;
+  const result = await context.fileService.createFile(d.homeServerId, d.userId, downloadPath, d.content, d.isEncrypted);
+  if (!result.success) return { result, downloadDir, accessKeysGranted: [] };
+
+  const nodeId: string = result.data.id;
+  await context.fileService.markDownloaded(nodeId, { sourceServerId: d.sourceServerId, sourcePath: d.sourcePath });
+
+  // Access key detection happens HERE (on download, not on cat).
+  const accessKeysGranted =
+    context.services.networkTopologyService && d.content
+      ? await context.fileService.detectAndGrantAccessKeys(d.userId, d.content, d.sourceServerId, d.sourcePath, nodeId)
+      : [];
+  return { result, downloadDir, accessKeysGranted };
 }

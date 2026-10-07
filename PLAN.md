@@ -3872,8 +3872,8 @@ Write them per-refactor, immediately before touching the code:
       since all 29 call sites assert non-null (`!`), it did not retry and did not warn, it
       propagated as a "definitely defined" value and crashed somewhere else entirely. A cache that
       remembers failures is worse than no cache. 29 sites now call `resolveService` directly.
-- [~] **A4 part 2, WRITES — 2026-10-07. 30 direct `db.client.<model>.<write>` in commandModules →
-      10.** Ratchet: `server/scripts/verify-a4-command-writes.ts` (MAX only ever goes down). Each
+- [x] **A4 part 2, WRITES — DONE 2026-10-07. 30 direct `db.client.<model>.<write>` in
+      commandModules → 0** (32 real: two were invisible to the first ratchet). Ratchet: `server/scripts/verify-a4-command-writes.ts` (MAX only ever goes down). Each
       write was read for the invariant it bypassed; most hid a real defect:
       - **adminCommands (9 → 0) → `AccountAdminService`.** Demotion left the role in the 60s auth
         cache AND on every live socket; resetpw (the compromised-account response) left the
@@ -3900,7 +3900,23 @@ Write them per-refactor, immediately before touching the code:
         `fileService.purgeNode` (system delete + key revocation, failures logged).
         `verify-a4-bounty.ts` 23/23; every fix negative-controlled (8 mutations, each red on its
         own check).
-      - **Remaining 10:** defenseCommands 6, fileCommands 2, socialCommands 2.
+      - **fileCommands (2 → 0).** The background and fallback download paths were two copies of
+        the same ~40 lines; now one `saveDownload`. Both re-found the new node by bare FILENAME
+        anywhere on the home and replaced its whole metadata, though `createFile` returns the id —
+        and that id is what granted keys carry as `sourceFileId`, i.e. what deleting the file or a
+        bounty purge revokes them by. `fileService.markDownloaded` merges. (The "metadata
+        overwrite" worry was otherwise moot: `createFile` refuses an existing name, so the node
+        was always fresh.) `verify-a4-download.ts` uses a same-named newer TRAP node.
+      - **socialCommands contacts (2 → 0) → `chatService.addContact/removeContact`.** Concurrent
+        adds: the loser's P2002 escaped as "Command execution failed"; a player could add
+        themselves; remove said "Removed" for a non-contact. `verify-a4-contacts.ts`.
+      - **defenseCommands (6 → 0).** `fileService.moveNodeSystem`: a vault move/retrieve onto a
+        taken name escaped as "Command execution failed" (P2002); retrieve un-hid dotfiles; the
+        move claimed the file was "now encrypted" (nothing sets isEncrypted).
+        `fileService.redeployDecoys` keeps the D7 skip-a-real-file rule. `protect` / vault flags →
+        `setNodeFlags`. `verify-a4-defense-writes.ts`.
+      - Every fix in all four new harnesses was negative-controlled (each mutation red on its own
+        check, then restored).
       - **OPEN QUESTIONS (need the maintainer):**
         1. **Endgame lockout.** 9 fragments exist, 9 are required, nothing restores a bricked one:
            the first failed `fragment.crack` makes the endgame unreachable for everyone.
@@ -3913,7 +3929,10 @@ Write them per-refactor, immediately before touching the code:
         4. **`protect <dir>` promises inheritance that does not exist.** It tells the player files
            inside cannot be deleted by attackers; `fileService.delete` checks only the target
            node. Make protection inherited, or change the text?
-        5. Session TTL vs JWT_EXPIRES_IN; logout sets `isOnline=false` despite other live
+        5. **Contacts show "(pending)" forever.** `addContact` writes status "pending"; there is no
+           accept flow and nothing else writes the field (the schema's "ContactStatus enum" exists
+           nowhere). Build an accept flow, or stop printing the status?
+        6. Session TTL vs JWT_EXPIRES_IN; logout sets `isOnline=false` despite other live
            sessions; in-game vs panel role policy differ (in game an admin cannot create admins).
       - **Found in passing, NOT fixed (named so it is not lost):** `prisma/npcOwnership.ts` merges a
         duplicate NPC by moving servers, sent messages and forum memberships, then `user.delete`.
