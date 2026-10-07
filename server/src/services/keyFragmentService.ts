@@ -530,6 +530,25 @@ export class KeyFragmentService extends EventEmitter {
    * @param serverId - The server being accessed
    * @returns Claim result if a fragment was found on this server
    */
+  /**
+   * Destroy a fragment permanently: `fragment.crack`'s failure outcome.
+   * A4: this was a direct keyFragment.update in fragmentCommands.
+   *
+   * OPEN DESIGN QUESTION — recorded, not decided here. The world holds exactly
+   * TOTAL_FRAGMENTS_REQUIRED (9) fragments and checkEndgameUnlock needs a
+   * player to HOLD that many. Nothing restores a bricked fragment, so the
+   * first brick makes the endgame unreachable for EVERY player. The command's
+   * text says "gone forever", so permanence is intended; the global lockout
+   * almost certainly is not. Also unlike claim/steal/transfer, a brick emits
+   * no event, so the story ledger never learns a fragment was destroyed.
+   */
+  async brickFragment(fragmentId: string): Promise<void> {
+    await this.prisma.keyFragment.update({
+      where: { id: fragmentId },
+      data: { status: "bricked", heldByUserId: null, heldSince: null },
+    });
+  }
+
   async checkServerFragment(
     userId: string,
     serverId: string,

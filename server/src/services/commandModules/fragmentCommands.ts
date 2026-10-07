@@ -689,10 +689,7 @@ export class FragmentCommandsModule implements CommandModule {
 
     if (success) {
       // Remove protection — fragment survives
-      await context.db.client.fileSystemNode.update({
-        where: { id: fileNode.id },
-        data: { isProtected: false },
-      });
+      await context.fileService.setNodeFlags(fileNode.id, { isProtected: false });
 
       // Award XP
       try {
@@ -718,10 +715,9 @@ export class FragmentCommandsModule implements CommandModule {
 
     // FAILURE — brick a random sword fragment (the type used for attack)
     const victimFragment = swordFragments[Math.floor(Math.random() * swordFragments.length)]!;
-    await context.db.client.keyFragment.update({
-      where: { id: victimFragment.id },
-      data: { status: "bricked", heldByUserId: null, heldSince: null },
-    });
+    // See KeyFragmentService.brickFragment — this can lock EVERY player out
+    // of the endgame; an open design question, recorded there.
+    await fragmentService.brickFragment(victimFragment.id);
 
     return {
       success: false,
@@ -767,10 +763,7 @@ export class FragmentCommandsModule implements CommandModule {
     if (node.isProtected) return errorResult(`${target} is already protected.`);
 
     // Apply protection — Collar power is reliable (no failure risk)
-    await context.db.client.fileSystemNode.update({
-      where: { id: node.id },
-      data: { isProtected: true },
-    });
+    await context.fileService.setNodeFlags(node.id, { isProtected: true });
 
     return {
       success: true,
