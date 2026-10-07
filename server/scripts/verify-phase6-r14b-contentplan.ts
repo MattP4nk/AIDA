@@ -7,7 +7,7 @@
  * isPathSafe) and commandModules/helpers.ts. It simply was not applied on the
  * AI path. Arrays were unbounded too: only per-item CONTENT was capped
  * (`slice(0, 3000)`), so a model returning 100k entries passed through whole
- * and `applyContentPlanViaPrisma`'s `ensureDir` would upsert its way through
+ * and `applyContentPlan`'s `ensureDir` would upsert its way through
  * every segment of every one.
  *
  * And a null element threw a TypeError OUT of the validator rather than

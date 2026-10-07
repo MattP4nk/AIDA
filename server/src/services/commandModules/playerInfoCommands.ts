@@ -1515,7 +1515,12 @@ export class PlayerInfoCommandsModule implements CommandModule {
             fileName: file.name,
             serverId,
             isEncrypted: file.isEncrypted,
-            contentPreview: file.content?.substring(0, 100) || "",
+            // A LOCKED file's content column holds its plaintext (R9: keyless
+            // provisioned files are opened only by the crack flow), so a
+            // preview of it would store the answer to the minigame in faction
+            // knowledge. Nothing renders this field today — which is exactly
+            // when to stop writing it, before someone does.
+            contentPreview: file.isEncrypted ? "" : file.content?.substring(0, 100) || "",
           },
           source: "player_report",
           confidence: 1.0,

@@ -2116,14 +2116,12 @@ export class ServerContentService {
     }
 
     // Standalone fallback: create root + standard directories via Prisma
-    // Resolve a valid user ID for createdBy FK
-    let createdBy = ownerId;
-    if (ownerId === "system" || !ownerId) {
-      const anyUser = await this.prisma.user.findFirst({
-        select: { id: true },
-      });
-      createdBy = anyUser?.id || ownerId;
-    }
+    // System filesystems have NO owner — see the OWNERSHIP note in
+    // applyContentPlan. This was the second copy of the same `findFirst()`
+    // pick, justified as "a valid user ID for createdBy FK"; the column is
+    // nullable (`onDelete: SetNull`), so null IS valid, and it is what every
+    // existing system node carries.
+    const createdBy = ownerId && ownerId !== "system" ? ownerId : null;
 
     // ── D7: this is the function that produced the observed duplicate ───────
     // The `hasRoot` check above is a check-then-create with an await between
@@ -2259,78 +2257,31 @@ export class ServerContentService {
   }
 
   /**
-   * Apply a content plan to a server's filesystem.
-   * Works both with FileService (full DI) and directly via Prisma (standalone scripts).
+   * Apply a content plan to a server's filesystem, Prisma-direct.
+   *
+   * A9: this was a dispatcher over two implementations, one of them a
+   * zero-caller FileService variant kept compilable with @ts-expect-error.
+   * Deleted rather than "collapsed" because it was superseded, not bypassed:
+   *  - its real encryption is not what the game uses — provisioned files are
+   *    deliberately keyless LOCKED files that only the crack flow opens (R9;
+   *    see fileService.readFile), which is the shape this path writes;
+   *  - its other side effects are wrong for provisioning: createFile credits
+   *    mission "upload" objectives and writes an access log as the owner.
    */
   private async applyContentPlan(
     serverId: string,
     ownerId: string,
     plan: ServerContentPlan,
   ): Promise<void> {
-    // Always use Prisma-direct path for system provisioning.
-    // FileService enforces user-level permissions (access level, write checks)
-    // which fail for system/AI-generated content (no hack log, no ownership).
-    await this.applyContentPlanViaPrisma(serverId, ownerId, plan);
-  }
-
-  // Unreferenced today: applyContentPlan always takes the Prisma-direct path,
-  // because FileService's permission checks reject system provisioning. Kept for
-  // when that model supports system callers. Audit A9 tracks collapsing these two
-  // implementations into one.
-  // @ts-expect-error TS6133 — intentionally unused, see above
-  private async applyContentPlanViaFileService(
-    serverId: string,
-    ownerId: string,
-    plan: ServerContentPlan,
-    fileService: any,
-  ): Promise<void> {
-    const sortedDirs = [...plan.directories].sort(
-      (a, b) => a.path.split("/").length - b.path.split("/").length,
-    );
-
-    for (const dir of sortedDirs) {
-      try {
-        await fileService.createDirectory(serverId, ownerId, dir.path);
-      } catch (err) {
-        this.logger.debug({ err, path: dir.path }, "Error creating directory");
-      }
-    }
-
-    for (const file of plan.files) {
-      try {
-        await fileService.createFile(
-          serverId,
-          ownerId,
-          file.path,
-          file.content,
-          file.isEncrypted || false,
-        );
-      } catch (err) {
-        this.logger.debug({ err, path: file.path }, "Error creating file");
-      }
-    }
-
-    // Apply hidden/protected flags
-    await this.applyFileFlags(serverId, plan);
-  }
-
-  /**
-   * Prisma-direct content plan application — works without FileService DI.
-   * Creates directories and files by resolving paths manually.
-   */
-  private async applyContentPlanViaPrisma(
-    serverId: string,
-    ownerId: string,
-    plan: ServerContentPlan,
-  ): Promise<void> {
-    // Resolve a valid owner — use "system" placeholder or first user
-    let createdBy = ownerId;
-    if (ownerId === "system") {
-      const anyUser = await this.prisma.user.findFirst({
-        select: { id: true },
-      });
-      createdBy = anyUser?.id || ownerId;
-    }
+    // OWNERSHIP. System content has NO owner: `createdBy` is what fileService
+    // grants owner-level access on (canRead returns before the hack-depth
+    // `requiredAccessLevel` gate; canWrite bypasses isProtected at root).
+    // This used to resolve "system" to `user.findFirst()` with no orderBy —
+    // whichever row Postgres returned first, which shifts as rows are
+    // updated — making that user owner of every new system file it wrote.
+    // In the dev DB it happened to be the NPC `sysadmin`; nothing guaranteed
+    // it. null is also what all existing system content already carries.
+    const createdBy = ownerId === "system" ? null : ownerId;
 
     // Get or find root
     const root = await this.prisma.fileSystemNode.findFirst({
