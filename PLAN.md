@@ -3912,8 +3912,26 @@ Write them per-refactor, immediately before touching the code:
       `initialize()` is 107 lines, ONE `mission:completed` listener, ZERO `(data: any)` handlers.
       Original item: break up `index.ts`'s 438-line `initialize()`; consolidate the two
       `mission:completed` listeners; type the 18 `(data: any)` handlers.
-- [ ] **A9** Remaining duplication: profile builder, `probeRows`, the two content-plan
-      persistence paths, `di/serviceRegistry.ts` (0 callers).
+- [x] **A9 DONE 2026-10-07.** Remaining duplication: profile builder, `probeRows`, the two
+      content-plan persistence paths, `di/serviceRegistry.ts` (0 callers — deleted earlier, d737686).
+      - **Content plan:** the zero-caller `applyContentPlanViaFileService` is DELETED — superseded,
+        not bypassed: provisioned encrypted files are deliberately keyless LOCKED files (R9) that
+        only crack opens, which is what the Prisma path writes; its other side effects (mission
+        "upload" credit, access log) are wrong for provisioning. Asking "did the survivor do
+        everything?" found the real bug: system content was attributed to `user.findFirst()` with
+        no orderBy — an ARBITRARY user, made owner (`createdBy`) of every new system file. Owner is
+        checked BEFORE the hack-depth gate in canRead and bypasses isProtected in canWrite at root.
+        TWO copies (applyContentPlan and ensureBaseFilesystem's DI-unavailable fallback, which also
+        disagreed with fileService.initializeFileSystem — that one already used null). Both now
+        write null, as all 1,770 existing system files do. Latent in the dev DB (findFirst
+        happened to return the NPC `sysadmin`); nothing guaranteed that.
+      - **`report file`** stored the first 100 chars of a LOCKED file's plaintext in faction
+        knowledge. Nothing renders `contentPreview` today; now empty for encrypted files.
+      - **`probe` and `whois`** each wrote their whole report twice (background-process path vs
+        instant fallback), verbatim. Now `buildProbeOutput` / `formatWhois`. The golden master does
+        NOT cover either command, so equivalence was proved by an old-vs-new differential:
+        12 outputs x 2 paths byte-identical.
+      - Harnesses: `verify-phase7-a9-content-plan.ts` (14), `verify-phase7-a9-two-paths.ts`.
 - [x] **A10** Delete the dead code. Corrected counts (2026-09-24): **18** genuinely dead
       `gameBalance` constants, not 29 — 28 have no external consumer but 10 of those are used by
       exported functions in-file, and the parenthetical "tuning that file does nothing" is false,

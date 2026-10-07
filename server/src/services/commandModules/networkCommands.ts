@@ -1337,10 +1337,7 @@ export class NetworkCommandsModule implements CommandModule {
         label: `probe ${target}`,
         onComplete: async () => {
           try {
-            let server = await context.services.serverService.getServer(target);
-            if (!server) {
-              server = await context.services.serverService.getServerByIp(target);
-            }
+            const server = await this.findProbeTarget(target, context);
             if (!server) {
               if (context.io) {
                 context.io.to(`player:${context.userId}`).emit("command:result", {
@@ -1353,85 +1350,7 @@ export class NetworkCommandsModule implements CommandModule {
               return;
             }
 
-            const accessCheck = await context.services.serverService.canAccessServer(
-              context.userId,
-              server.id,
-            );
-            const topoService = context.services.networkTopologyService;
-
-            const probeRows: Array<{ label: string; value: string }> = [
-              { label: "IP Address:  ", value: server.ipAddress },
-              { label: "Name:        ", value: server.name },
-              { label: "Type:        ", value: server.type },
-              { label: "Role:        ", value: (server as any).role || "general" },
-              { label: "Security:    ", value: `Level ${server.securityLevel}` },
-              { label: "Firewall:    ", value: `Level ${server.firewallLevel}` },
-              { label: "Encryption:  ", value: `Level ${server.encryptionLevel}` },
-              {
-                label: "Status:      ",
-                value: server.isOnline ? "ONLINE" : "OFFLINE",
-              },
-              {
-                label: "Connections: ",
-                value: `${server.currentConnections}/${server.maxConnections}`,
-              },
-              {
-                label: "Access:      ",
-                value: accessCheck.canAccess
-                  ? `Granted (Level ${accessCheck.accessLevel})`
-                  : "Denied",
-              },
-            ];
-
-            if (!accessCheck.canAccess && accessCheck.reason) {
-              probeRows.push({ label: "Reason:      ", value: accessCheck.reason });
-            }
-
-            // Network info
-            if (server.networkId) {
-              const network = await context.db.client.network.findUnique({
-                where: { id: server.networkId },
-                select: { name: true, zone: true },
-              });
-              if (network) {
-                probeRows.push({ label: "Network:     ", value: network.name });
-                probeRows.push({ label: "Zone:        ", value: network.zone });
-              }
-            }
-
-            // Topology info — show linked servers if adjacent and skilled
-            if (topoService) {
-              const adjacent = await topoService.getAdjacentServers(server.id);
-              probeRows.push({
-                label: "Links:       ",
-                value: `${adjacent.length} connections`,
-              });
-
-              const progress = await context.db.client.playerProgress.findUnique({
-                where: { userId: context.userId },
-                select: { networking: true },
-              });
-
-              // Show linked server names if networking >= 30
-              if ((progress?.networking ?? 0) >= 30 && adjacent.length > 0) {
-                probeRows.push({ label: "", value: "─── Linked Servers ───" });
-                for (const adj of adjacent.slice(0, 6)) {
-                  probeRows.push({
-                    label: `  ${adj.link.linkType}: `,
-                    value: `${adj.serverIp} (${adj.serverRole})`,
-                  });
-                }
-                if (adjacent.length > 6) {
-                  probeRows.push({
-                    label: "",
-                    value: `  ... +${adjacent.length - 6} more`,
-                  });
-                }
-              }
-            }
-
-            const lines = panel(`Probe: ${server.name}`, probeRows, context.terminalWidth);
-            const outputString = redactSensitiveContent(render(lines));
+            const outputString = await this.buildProbeOutput(server, context);
             if (context.io) {
               context.io.to(`player:${context.userId}`).emit("command:result", {
                 success: true,
@@ -1459,96 +1378,114 @@ export class NetworkCommandsModule implements CommandModule {
 
     // ── Fallback: no resource system — instant probe ──
     try {
-      let server = await context.services.serverService.getServer(target);
-      if (!server) {
-        server = await context.services.serverService.getServerByIp(target);
-      }
+      const server = await this.findProbeTarget(target, context);
       if (!server) {
         return errorResult(`Server not found: ${target}`);
       }
 
-      const accessCheck = await context.services.serverService.canAccessServer(
-        context.userId,
-        server.id,
-      );
-      const topoService = context.services.networkTopologyService;
-
-      const probeRows: Array<{ label: string; value: string }> = [
-        { label: "IP Address:  ", value: server.ipAddress },
-        { label: "Name:        ", value: server.name },
-        { label: "Type:        ", value: server.type },
-        { label: "Role:        ", value: (server as any).role || "general" },
-        { label: "Security:    ", value: `Level ${server.securityLevel}` },
-        { label: "Firewall:    ", value: `Level ${server.firewallLevel}` },
-        { label: "Encryption:  ", value: `Level ${server.encryptionLevel}` },
-        {
-          label: "Status:      ",
-          value: server.isOnline ? "ONLINE" : "OFFLINE",
-        },
-        {
-          label: "Connections: ",
-          value: `${server.currentConnections}/${server.maxConnections}`,
-        },
-        {
-          label: "Access:      ",
-          value: accessCheck.canAccess
-            ? `Granted (Level ${accessCheck.accessLevel})`
-            : "Denied",
-        },
-      ];
-
-      if (!accessCheck.canAccess && accessCheck.reason) {
-        probeRows.push({ label: "Reason:      ", value: accessCheck.reason });
-      }
-
-      // Network info
-      if (server.networkId) {
-        const network = await context.db.client.network.findUnique({
-          where: { id: server.networkId },
-          select: { name: true, zone: true },
-        });
-        if (network) {
-          probeRows.push({ label: "Network:     ", value: network.name });
-          probeRows.push({ label: "Zone:        ", value: network.zone });
-        }
-      }
-
-      // Topology info — show linked servers if adjacent and skilled
-      if (topoService) {
-        const adjacent = await topoService.getAdjacentServers(server.id);
-        probeRows.push({
-          label: "Links:       ",
-          value: `${adjacent.length} connections`,
-        });
-
-        const progress = await context.db.client.playerProgress.findUnique({
-          where: { userId: context.userId },
-          select: { networking: true },
-        });
-
-        // Show linked server names if networking >= 30
-        if ((progress?.networking ?? 0) >= 30 && adjacent.length > 0) {
-          probeRows.push({ label: "", value: "─── Linked Servers ───" });
-          for (const adj of adjacent.slice(0, 6)) {
-            probeRows.push({
-              label: `  ${adj.link.linkType}: `,
-              value: `${adj.serverIp} (${adj.serverRole})`,
-            });
-          }
-          if (adjacent.length > 6) {
-            probeRows.push({
-              label: "",
-              value: `  ... +${adjacent.length - 6} more`,
-            });
-          }
-        }
-      }
-
-      const lines = panel(`Probe: ${server.name}`, probeRows, context.terminalWidth);
-      return successResult(redactSensitiveContent(render(lines)));
+      return successResult(await this.buildProbeOutput(server, context));
     } catch (error) {
       return errorResult(error instanceof Error ? error.message : "Probe failed");
     }
+  }
+
+  /** `probe` accepts a server id or an IP. */
+  private async findProbeTarget(target: string, context: CommandContext) {
+    return (
+      (await context.services.serverService.getServer(target)) ??
+      (await context.services.serverService.getServerByIp(target))
+    );
+  }
+
+  /**
+   * The probe report. A9: this was written out twice, verbatim — once for the
+   * background-process path and once for the instant fallback — so any change
+   * to what `probe` shows had to be made in both, and nothing checked that it
+   * was.
+   */
+  private async buildProbeOutput(
+    server: NonNullable<Awaited<ReturnType<NetworkCommandsModule["findProbeTarget"]>>>,
+    context: CommandContext,
+  ): Promise<string> {
+    const accessCheck = await context.services.serverService.canAccessServer(
+      context.userId,
+      server.id,
+    );
+    const topoService = context.services.networkTopologyService;
+
+    const probeRows: Array<{ label: string; value: string }> = [
+      { label: "IP Address:  ", value: server.ipAddress },
+      { label: "Name:        ", value: server.name },
+      { label: "Type:        ", value: server.type },
+      { label: "Role:        ", value: (server as any).role || "general" },
+      { label: "Security:    ", value: `Level ${server.securityLevel}` },
+      { label: "Firewall:    ", value: `Level ${server.firewallLevel}` },
+      { label: "Encryption:  ", value: `Level ${server.encryptionLevel}` },
+      {
+        label: "Status:      ",
+        value: server.isOnline ? "ONLINE" : "OFFLINE",
+      },
+      {
+        label: "Connections: ",
+        value: `${server.currentConnections}/${server.maxConnections}`,
+      },
+      {
+        label: "Access:      ",
+        value: accessCheck.canAccess
+          ? `Granted (Level ${accessCheck.accessLevel})`
+          : "Denied",
+      },
+    ];
+
+    if (!accessCheck.canAccess && accessCheck.reason) {
+      probeRows.push({ label: "Reason:      ", value: accessCheck.reason });
+    }
+
+    // Network info
+    if (server.networkId) {
+      const network = await context.db.client.network.findUnique({
+        where: { id: server.networkId },
+        select: { name: true, zone: true },
+      });
+      if (network) {
+        probeRows.push({ label: "Network:     ", value: network.name });
+        probeRows.push({ label: "Zone:        ", value: network.zone });
+      }
+    }
+
+    // Topology info — show linked servers if adjacent and skilled
+    if (topoService) {
+      const adjacent = await topoService.getAdjacentServers(server.id);
+      probeRows.push({
+        label: "Links:       ",
+        value: `${adjacent.length} connections`,
+      });
+
+      const progress = await context.db.client.playerProgress.findUnique({
+        where: { userId: context.userId },
+        select: { networking: true },
+      });
+
+      // Show linked server names if networking >= 30
+      if ((progress?.networking ?? 0) >= 30 && adjacent.length > 0) {
+        probeRows.push({ label: "", value: "─── Linked Servers ───" });
+        for (const adj of adjacent.slice(0, 6)) {
+          probeRows.push({
+            label: `  ${adj.link.linkType}: `,
+            value: `${adj.serverIp} (${adj.serverRole})`,
+          });
+        }
+        if (adjacent.length > 6) {
+          probeRows.push({
+            label: "",
+            value: `  ... +${adjacent.length - 6} more`,
+          });
+        }
+      }
+    }
+
+    const lines = panel(`Probe: ${server.name}`, probeRows, context.terminalWidth);
+    return redactSensitiveContent(render(lines));
   }
 
   // ==================== TRACEROUTE ====================

@@ -20,6 +20,7 @@ import {
   render,
 } from "./asciiBox";
 import { getInlineGlyph } from "../../utils/asciiAvatars";
+import type { PlayerDetails } from "../playerPresenceService";
 
 export class PlayerInfoCommandsModule implements CommandModule {
   public category = "player";
@@ -444,169 +445,14 @@ export class PlayerInfoCommandsModule implements CommandModule {
     };
   }
 
-  private async handleWhois(
-    command: Command,
-    context: CommandContext,
-  ): Promise<CommandResult> {
-    const targetUsername = command.args?.[0];
-
-    if (!targetUsername) {
-      return errorResult("Usage: whois <username>");
-    }
-
-    const presenceService = context.services.playerPresenceService;
-    if (!presenceService) {
-      return errorResult("Presence service unavailable.");
-    }
-
-    // Find player by username (cheap lookup — keep before spawn)
-    const player = presenceService.findPlayerByUsername(targetUsername);
-
-    if (!player) {
-      return errorResult(`Player '${targetUsername}' not found or is offline.`);
-    }
-
-    // ── Resource check: spawn whois as a background process ──
-    const memoryService = context.services.memoryService;
-    if (memoryService) {
-      const spawn = await spawnBackgroundProcess({
-        context,
-        processType: "whois",
-        skillKey: "networking",
-        label: `whois ${targetUsername}`,
-        onComplete: async () => {
-          try {
-            // Get detailed info
-            const details = await presenceService.getPlayerDetails(player.userId);
-
-            const playerGlyph = getInlineGlyph("player");
-
-            if (!details) {
-              if (context.io) {
-                context.io.to(`player:${context.userId}`).emit("command:result", {
-                  success: false,
-                  output: "Failed to retrieve player information.",
-                  terminalId: command.terminalId,
-                  timestamp: new Date(),
-                });
-              }
-              return;
-            }
-
-            // Format output
-            const successRate =
-              details.totalHacks > 0
-                ? Math.round((details.successfulHacks / details.totalHacks) * 100)
-                : 0;
-
-            const sections: Array<{
-              heading?: string;
-              rows: Array<{ label: string; value: string }>;
-            }> = [
-              {
-                rows: [
-                  { label: pad("Level:", 20), value: `${details.level}` },
-                  { label: pad("Reputation:", 20), value: `${details.reputation}` },
-                  { label: pad("Credits:", 20), value: `${details.credits}` },
-                  {
-                    label: pad("Member Since:", 20),
-                    value: details.joinedAt.toLocaleDateString(),
-                  },
-                  {
-                    label: pad("Location:", 20),
-                    value: details.currentServerName || "Not connected",
-                  },
-                ],
-              },
-              {
-                heading: "SKILLS",
-                rows: [
-                  { label: pad("Hacking:", 20), value: `${details.skills.hacking}` },
-                  { label: pad("Stealth:", 20), value: `${details.skills.stealth}` },
-                  {
-                    label: pad("Networking:", 20),
-                    value: `${details.skills.networking}`,
-                  },
-                  {
-                    label: pad("Cryptography:", 20),
-                    value: `${details.skills.cryptography}`,
-                  },
-                  {
-                    label: pad("Social Eng:", 20),
-                    value: `${details.skills.socialEng}`,
-                  },
-                  {
-                    label: pad("Forensics:", 20),
-                    value: `${details.skills.forensics}`,
-                  },
-                ],
-              },
-              {
-                heading: "STATS",
-                rows: [
-                  { label: pad("Total Hacks:", 20), value: `${details.totalHacks}` },
-                  {
-                    label: pad("Successful:", 20),
-                    value: `${details.successfulHacks}`,
-                  },
-                  { label: pad("Success Rate:", 20), value: `${successRate}%` },
-                ],
-              },
-            ];
-
-            if (details.achievements.length > 0) {
-              sections.push({
-                heading: "ACHIEVEMENTS",
-                rows: details.achievements.map((ach: string) => ({
-                  label: "",
-                  value: `• ${ach}`,
-                })),
-              });
-            }
-
-            const resultOutput = render(
-              multiPanel(
-                `${playerGlyph} PLAYER INFO: ${details.username}`,
-                sections,
-                44,
-              ),
-            );
-
-            if (context.io) {
-              context.io.to(`player:${context.userId}`).emit("command:result", {
-                success: true,
-                output: resultOutput,
-                terminalId: command.terminalId,
-                timestamp: new Date(),
-              });
-            }
-          } catch (err) {
-            logger.error({ err }, "Whois background process error");
-            if (context.io) {
-              context.io.to(`player:${context.userId}`).emit("command:result", {
-                success: false,
-                output: "Query failed",
-                terminalId: command.terminalId,
-                timestamp: new Date(),
-              });
-            }
-          }
-        },
-      });
-
-      if (spawn) return spawn.result;
-    }
-
-    // ── Fallback: instant (no resource system) ──
-
-    // Get detailed info
-    const details = await presenceService.getPlayerDetails(player.userId);
-
+  /**
+   * The `whois` profile panel. A9: written out twice, verbatim — once for the
+   * background-process path and once for the instant fallback — so the two
+   * could drift with nothing to notice (AUDIT_2026-08-30, ~115 lines each).
+   * Pure: details in, rendered panel out.
+   */
+  private formatWhois(details: PlayerDetails): string {
     const playerGlyph = getInlineGlyph("player");
-
-    if (!details) {
-      return errorResult("Failed to retrieve player information.");
-    }
 
     // Format output
     const successRate =
@@ -679,13 +525,99 @@ export class PlayerInfoCommandsModule implements CommandModule {
       });
     }
 
-    const output = render(
+    return render(
       multiPanel(
         `${playerGlyph} PLAYER INFO: ${details.username}`,
         sections,
         44,
       ),
     );
+  }
+
+  private async handleWhois(
+    command: Command,
+    context: CommandContext,
+  ): Promise<CommandResult> {
+    const targetUsername = command.args?.[0];
+
+    if (!targetUsername) {
+      return errorResult("Usage: whois <username>");
+    }
+
+    const presenceService = context.services.playerPresenceService;
+    if (!presenceService) {
+      return errorResult("Presence service unavailable.");
+    }
+
+    // Find player by username (cheap lookup — keep before spawn)
+    const player = presenceService.findPlayerByUsername(targetUsername);
+
+    if (!player) {
+      return errorResult(`Player '${targetUsername}' not found or is offline.`);
+    }
+
+    // ── Resource check: spawn whois as a background process ──
+    const memoryService = context.services.memoryService;
+    if (memoryService) {
+      const spawn = await spawnBackgroundProcess({
+        context,
+        processType: "whois",
+        skillKey: "networking",
+        label: `whois ${targetUsername}`,
+        onComplete: async () => {
+          try {
+            // Get detailed info
+            const details = await presenceService.getPlayerDetails(player.userId);
+
+            if (!details) {
+              if (context.io) {
+                context.io.to(`player:${context.userId}`).emit("command:result", {
+                  success: false,
+                  output: "Failed to retrieve player information.",
+                  terminalId: command.terminalId,
+                  timestamp: new Date(),
+                });
+              }
+              return;
+            }
+
+            const resultOutput = this.formatWhois(details);
+
+            if (context.io) {
+              context.io.to(`player:${context.userId}`).emit("command:result", {
+                success: true,
+                output: resultOutput,
+                terminalId: command.terminalId,
+                timestamp: new Date(),
+              });
+            }
+          } catch (err) {
+            logger.error({ err }, "Whois background process error");
+            if (context.io) {
+              context.io.to(`player:${context.userId}`).emit("command:result", {
+                success: false,
+                output: "Query failed",
+                terminalId: command.terminalId,
+                timestamp: new Date(),
+              });
+            }
+          }
+        },
+      });
+
+      if (spawn) return spawn.result;
+    }
+
+    // ── Fallback: instant (no resource system) ──
+
+    // Get detailed info
+    const details = await presenceService.getPlayerDetails(player.userId);
+
+    if (!details) {
+      return errorResult("Failed to retrieve player information.");
+    }
+
+    const output = this.formatWhois(details);
 
     return {
       success: true,
