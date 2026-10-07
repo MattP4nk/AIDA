@@ -571,6 +571,19 @@
     let typewriterCancel = false; // set by keypress to skip animation
 
     function addOutputLine(text: string, type: OutputLine["type"] = "output") {
+        // TAB-AWARE. When a tab is active the output area renders THAT tab's
+        // lines (currentTabOutputLines), so writing only the local array made
+        // the line invisible — and a tab is active from the moment tabs load.
+        // Lost that way: every `settings` confirmation, logout's messages, an
+        // error's Details line, and Ctrl+C's ^C echo. Callers that already
+        // branch on activeTabId are unaffected; the rest now just work.
+        if (activeTabId) {
+            terminalTabsStore.addOutputLine(activeTabId, text, type);
+            tick().then(() => {
+                scrollToBottom();
+            });
+            return;
+        }
         outputLines = [
             ...outputLines,
             {
@@ -674,6 +687,13 @@
     }
 
     function clearScreen() {
+        // In tab mode this is what `clear` already did. Ctrl+L called this
+        // too, and in tab mode reset only the invisible local buffer — so the
+        // shortcut did nothing while the command worked.
+        if (activeTabId) {
+            terminalTabsStore.clearOutput(activeTabId);
+            return;
+        }
         outputLines = [];
         welcomeLines.forEach((line) => {
             addOutputLine(line, "system");
@@ -845,11 +865,7 @@
 
         // Clear command
         if (cmd === "clear" || cmd === "cls") {
-            if (activeTabId) {
-                terminalTabsStore.clearOutput(activeTabId);
-            } else {
-                clearScreen();
-            }
+            clearScreen(); // tab-aware; shared with Ctrl+L so they cannot drift
             return true;
         }
 
