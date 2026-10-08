@@ -25,6 +25,7 @@ import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
 import { readFileSync } from "node:fs";
 import { stripComments } from "./lib/strip-comments";
+import { freeIp } from "./lib/free-ip";
 
 const prisma = new PrismaClient();
 
@@ -176,7 +177,7 @@ async function main() {
       const probeServer = await prisma.gameServer.create({
         data: {
           name: `${tag}_target`,
-          ipAddress: `10.66.0.${process.pid % 250}`,
+          ipAddress: await freeIp(prisma),
           type: "corporate",
           factionId: b.id,
         },
@@ -199,7 +200,7 @@ async function main() {
         const neutralServer = await prisma.gameServer.create({
           data: {
             name: `${tag}_neutral`,
-            ipAddress: `10.66.1.${process.pid % 250}`,
+            ipAddress: await freeIp(prisma),
             type: "corporate",
           },
         });

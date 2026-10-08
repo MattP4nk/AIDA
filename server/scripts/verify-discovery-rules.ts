@@ -29,6 +29,7 @@
 import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
 import { stripComments } from "./lib/strip-comments";
+import { freeIp } from "./lib/free-ip";
 
 const prisma = new PrismaClient();
 
@@ -65,7 +66,7 @@ async function main() {
     const target = await prisma.gameServer.create({
       data: {
         name: `${tag}_${label}`,
-        ipAddress: `10.90.${madeServers.length}.${process.pid % 250}`,
+        ipAddress: await freeIp(prisma),
         type: "corporate",
         isPublic: targetIsPublic,
       },
@@ -87,7 +88,7 @@ async function main() {
         username: tag,
         email: `${tag}@probe.local`,
         password: "p",
-        homeIp: `10.91.0.${process.pid % 250}`,
+        homeIp: await freeIp(prisma),
         progress: { create: { networking: 10 } },
       },
     });
@@ -96,7 +97,7 @@ async function main() {
     const origin = await prisma.gameServer.create({
       data: {
         name: `${tag}_origin`,
-        ipAddress: `10.92.0.${process.pid % 250}`,
+        ipAddress: await freeIp(prisma),
         type: "corporate",
         isPublic: true,
       },

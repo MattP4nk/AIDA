@@ -503,19 +503,17 @@ export class HelpCommandsModule implements CommandModule {
       underSkilled?: boolean;
     }> = [];
 
-    // Check discovery level — hide fragment/endgame commands until player discovers them
-    const discoveryLevel = await fragments().getDiscoveryLevel(context.userId);
-
-    const HIDDEN_UNTIL_DISCOVERY = new Set(["fragment", "fragments", "endgame"]);
+    // ONE rule reveals the fragment commands, the one the commands themselves
+    // enforce (maintainer decision 2026-10-08): AIDA intel or a fragment
+    // discovery. This listing used `discoveryLevel >= 3` instead, and hid
+    // only three of the module's six commands by name.
+    const knowsAboutAida = await fragments().hasFragmentAccess(context.userId);
 
     for (const mod of context.modules) {
       if (mod.getCommandInfo) {
         const infos = mod.getCommandInfo();
         for (const info of infos) {
-          // Hide fragment/endgame from help until discoveryLevel >= 3
-          if (discoveryLevel < 3 && HIDDEN_UNTIL_DISCOVERY.has(info.command)) {
-            continue;
-          }
+          if (mod.category === "fragment" && !knowsAboutAida) continue;
 
           let locked = false;
           let underSkilled = false;

@@ -22,6 +22,7 @@ import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
 import { readFileSync } from "node:fs";
 import { stripComments } from "./lib/strip-comments";
+import { freeIp } from "./lib/free-ip";
 
 const prisma = new PrismaClient();
 
@@ -54,7 +55,7 @@ async function main() {
         username: tag,
         email: `${tag}@probe.local`,
         password: "probe",
-        homeIp: "10.0.0." + (process.pid % 250),
+        homeIp: await freeIp(prisma),
         isOnline: true,
         progress: { create: { credits: 12345, experience: 999, hacking: 42 } },
       },

@@ -23,6 +23,7 @@
  */
 import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
+import { freeIp } from "./lib/free-ip";
 
 const prisma = new PrismaClient();
 
@@ -96,7 +97,7 @@ async function main() {
         username: tag,
         email: `${tag}@probe.local`,
         password: "p",
-        homeIp: `10.71.0.${process.pid % 250}`,
+        homeIp: await freeIp(prisma),
         progress: { create: { credits: 1000 } },
       },
     });
@@ -104,7 +105,7 @@ async function main() {
     const home = await prisma.gameServer.create({
       data: {
         name: `${tag}_home`,
-        ipAddress: `10.72.0.${process.pid % 250}`,
+        ipAddress: await freeIp(prisma),
         type: "player_home",
         ownerId: user.id,
         isPlayerHome: true,

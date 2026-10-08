@@ -874,7 +874,11 @@ export class HackCommandsModule implements CommandModule {
     if (!fileNode.isEncrypted) {
       return successResult(`${fileName} is not encrypted.`);
     }
-    if (fileNode.isProtected) {
+    const guard = await context.fileService.protectingNode(fileNode.id);
+    if (guard) {
+      if (guard.id !== fileNode.id) {
+        return errorResult(`${fileName} is PROTECTED by its directory '${guard.name}'. Break that first: 'crack.storm', 'crack.protected' (requires Quantum Charge) or 'fragment.crack' on the directory.`);
+      }
       return errorResult(`${fileName} is PROTECTED. Use 'crack.storm ${fileName}', 'crack.protected ${fileName}' (requires Quantum Charge), or 'fragment.crack ${fileName}'.`);
     }
 
@@ -1107,7 +1111,14 @@ export class HackCommandsModule implements CommandModule {
     if (!resolution.exists || !resolution.node) return errorResult(`File not found: ${fileName}`);
 
     const fileNode = resolution.node as any;
-    if (!fileNode.isProtected) return errorResult(`${fileName} is not protected.`);
+    if (!fileNode.isProtected) {
+      // Inherited protection lives on the directory; removing a flag the file
+      // does not carry would spend the charge for nothing.
+      const guard = await context.fileService.protectingNode(fileNode.id);
+      return errorResult(guard
+        ? `${fileName} is protected by its directory '${guard.name}' — target that directory.`
+        : `${fileName} is not protected.`);
+    }
 
     // Check for the charge in inventory, BY CATALOG ID.
     //
@@ -1169,7 +1180,12 @@ export class HackCommandsModule implements CommandModule {
     if (!resolution.exists || !resolution.node) return errorResult(`File not found: ${fileName}`);
 
     const fileNode = resolution.node as any;
-    if (!fileNode.isProtected) return errorResult(`${fileName} is not protected. Use 'crack' instead.`);
+    if (!fileNode.isProtected) {
+      const guard = await context.fileService.protectingNode(fileNode.id);
+      return errorResult(guard
+        ? `${fileName} is protected by its directory '${guard.name}' — target that directory.`
+        : `${fileName} is not protected. Use 'crack' instead.`);
+    }
 
     const progress = await context.playerProgress.get(context.userId);
     const skills = { cryptography: progress?.cryptography ?? 0, hacking: progress?.hacking ?? 0 };

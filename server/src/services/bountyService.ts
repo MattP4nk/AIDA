@@ -122,6 +122,10 @@ export class BountyService {
         : "Bounty must be claimed first. Use 'bounty claim <id>'." };
     }
     if (bounty.claimedByUserId !== userId) return { ok: false, error: "This bounty was claimed by someone else." };
+    // A claim does not stop the clock (maintainer decision 2026-10-08): it
+    // ends at the bounty's deadline, the one the listing shows. Before, a
+    // hunter could claim and sit on a bounty forever.
+    if (bounty.expiresAt <= new Date()) return { ok: false, error: "Bounty has expired." };
 
     const target = await prisma.user.findUnique({
       where: { id: bounty.targetUserId },
@@ -152,14 +156,21 @@ export class BountyService {
     // row out of "claimed" pays, and the pay commits with it or not at all.
     const paid = await prisma.$transaction(async (tx) => {
       const moved = await tx.bounty.updateMany({
-        where: { id: bountyId, status: "claimed", claimedByUserId: userId },
+        where: { id: bountyId, status: "claimed", claimedByUserId: userId, expiresAt: { gt: new Date() } },
         data: { status: "completed", completedAt: new Date() },
       });
       if (moved.count !== 1) return false;
       await this.progress.addCredits(userId, bounty.rewardCredits, tx);
       return true;
     });
-    if (!paid) return { ok: false, error: "Bounty already completed." };
+    if (!paid) {
+      // Lost the transition: explain from the row as it is NOW (the deadline
+      // can pass between the check above and the transaction).
+      const now = await prisma.bounty.findUnique({ where: { id: bountyId }, select: { status: true, expiresAt: true } });
+      return { ok: false, error: now?.status === "claimed" && now.expiresAt <= new Date()
+        ? "Bounty has expired."
+        : "Bounty already completed." };
+    }
     // `addCredits` stays silent under a transaction (it would announce
     // uncommitted state); announce the committed balance now.
     await this.progress.announceCommittedCredits(userId);

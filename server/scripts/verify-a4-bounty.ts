@@ -206,6 +206,21 @@ async function main() {
       check("self-claim refused", own.ok === false && /yourself/.test(own.error), own.error ?? "CLAIMED");
     }
 
+    console.log("\nB-5b — a CLAIMED bounty still expires at its deadline");
+    {
+      const b = await mk();
+      const c = await bounties.claim(b.id, hunterB.id);
+      check("PRECONDITION: claimed", c.ok === true, c.error ?? "");
+      await prisma.bounty.update({ where: { id: b.id }, data: { expiresAt: new Date(Date.now() - 1000) } });
+      await access(hunterB.id, new Date(), true);
+      const before = await credits(hunterB.id);
+      const r = await bounties.complete(b.id, hunterB.id);
+      const row = await prisma.bounty.findUniqueOrThrow({ where: { id: b.id } });
+      check("completing after the deadline is refused (was: a claim never expired)",
+        r.ok === false && /expired/i.test(r.error ?? "") && row.status === "claimed", r.error ?? "COMPLETED");
+      check("and nothing is paid", (await credits(hunterB.id)) === before);
+    }
+
     console.log("\nB-6 — a lapsed bounty does not block the faction from posting again");
     {
       // Clear the board for this (target, faction) pair, then leave ONE lapsed

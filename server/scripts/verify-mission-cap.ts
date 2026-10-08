@@ -13,6 +13,7 @@
 import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
 import { MAX_ACTIVE_MISSIONS } from "../src/config/gameBalance";
+import { freeIp } from "./lib/free-ip";
 
 const prisma = new PrismaClient();
 let pass = 0, fail = 0;
@@ -40,7 +41,7 @@ async function main() {
     const user = await prisma.user.create({
       data: {
         username: tag, email: `${tag}@probe.local`, password: "probe",
-        homeIp: `10.1.0.${process.pid % 250}`,
+        homeIp: await freeIp(prisma),
         progress: { create: { level: 50 } },
       },
     });

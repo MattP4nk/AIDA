@@ -102,34 +102,54 @@ async function main() {
     // touched an authenticated route, so no cache holds a stale role yet.
     await prisma.user.updateMany({ where: { id: { in: [actor.id, httpTarget.id, sockTarget.id] } }, data: { role: "admin" } });
 
-    console.log("\nAA-1 — demotion over HTTP is immediate (auth cache)");
+    // Maintainer decision (2026-10-08): neither the panel nor the terminal
+    // may create or unmake an ADMIN — that is `npm run admin:grant|revoke`
+    // on the host, a separate process that cannot touch this server's caches.
+    // So privileged checks re-read the role from the database; these prove a
+    // host-side revoke still takes effect at once, over HTTP and on a socket.
+    const { execFileSync } = await import("node:child_process");
+    const hostRevoke = (username: string) =>
+      execFileSync("npx", ["tsx", "src/scripts/adminRole.ts", "revoke", username], { cwd: new URL("..", import.meta.url).pathname, encoding: "utf8" });
+
+    console.log("\nAA-1 — a host-side revoke is immediate over HTTP (was: 60s auth cache)");
     {
       const warm = await api("GET", "/api/admin/players", httpTarget.token);
       check("PRECONDITION: the target is admin over HTTP (and is now cached)", warm.status === 200, `${warm.status}`);
-      const demote = await api("PUT", `/api/admin/players/${httpTarget.id}/role`, actor.token, { role: "player" });
-      check("the admin panel demotes them", demote.status === 200, `${demote.status}`);
+      const out = hostRevoke(httpTarget.username);
+      check("the host revokes it", /admin -> player/.test(out), out.trim());
       const after = await api("GET", "/api/admin/players", httpTarget.token);
-      check("their very next admin request is refused (was: admin for up to 60s)", after.status === 403, `${after.status}`);
+      check("their very next admin request is refused", after.status === 403, `${after.status}`);
       const audit = await prisma.auditLog.findFirst({
-        where: { userId: actor.id, action: "admin_setrole", resourceId: httpTarget.id }, select: { metadata: true },
+        where: { action: "admin_revoke", resourceId: httpTarget.id }, select: { metadata: true },
       });
-      check("the panel's role change is audited (it wrote none)", (audit?.metadata as any)?.via === "admin-panel",
-        JSON.stringify(audit?.metadata ?? null));
+      check("the revoke is audited", (audit?.metadata as any)?.via === "host-cli", JSON.stringify(audit?.metadata ?? null));
     }
 
-    console.log("\nAA-2 — demotion reaches a LIVE socket (socket.data.user.role)");
+    console.log("\nAA-2 — a host-side revoke reaches a LIVE socket (socket.data.user.role)");
     {
       const s = await connect(sockTarget.token); sockets.push(s);
       const before = await runSocketCommand(s, "admin status");
       // POSITIVE: the real status panel, not merely "no ACCESS DENIED" — that
       // weaker form passed on "No active session".
       check("PRECONDITION: on the socket they are admin", /AIDA SYSTEM STATUS/.test(text(before)), text(before).split("\n")[0]);
-      const demote = await api("PUT", `/api/admin/players/${sockTarget.id}/role`, actor.token, { role: "player" });
-      check("demoted", demote.status === 200);
+      hostRevoke(sockTarget.username);
       const after = await runSocketCommand(s, "admin status");
       check("the SAME open socket is refused at once (was: admin until reconnect)", /ACCESS DENIED/.test(text(after)),
         text(after).split("\n")[0]);
       check("and stays connected — a demotion is not a kick", s.connected);
+    }
+
+    console.log("\nAA-5 — the panel can no longer make or unmake an admin");
+    {
+      const grant = await api("PUT", `/api/admin/players/${resetTarget.id}/role`, actor.token, { role: "admin" });
+      check("granting admin is refused (was: allowed)", grant.status === 403, `${grant.status} ${grant.json?.error ?? ""}`);
+      await prisma.user.update({ where: { id: resetTarget.id }, data: { role: "admin" } });
+      const demote = await api("PUT", `/api/admin/players/${resetTarget.id}/role`, actor.token, { role: "player" });
+      check("demoting another admin is refused (was: allowed)", demote.status === 403, `${demote.status}`);
+      await prisma.user.update({ where: { id: resetTarget.id }, data: { role: "moderator" } });
+      const mod = await api("PUT", `/api/admin/players/${resetTarget.id}/role`, actor.token, { role: "player" });
+      const row = await prisma.user.findUniqueOrThrow({ where: { id: resetTarget.id }, select: { role: true } });
+      check("POSITIVE: an admin can still demote a moderator", mod.status === 200 && row.role === "player", `${mod.status} ${row.role}`);
     }
 
     console.log("\nAA-3 — `admin resetpw` signs the account out everywhere");

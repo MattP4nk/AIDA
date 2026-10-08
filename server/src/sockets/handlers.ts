@@ -261,6 +261,11 @@ function clientIp(socket: Socket): string {
   return chain[index] ?? direct;
 }
 
+/** How many sockets this user has open right now, across all tabs. */
+export function liveSocketCount(userId: string): number {
+  return userSockets.get(userId)?.size ?? 0;
+}
+
 /**
  * Update the role every live socket of a user carries.
  *

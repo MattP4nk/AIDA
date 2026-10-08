@@ -136,7 +136,10 @@ export class DefenseCommandsModule implements CommandModule {
     }
 
     if (command.args.length === 0) {
-      return errorResult("Usage: protect <directory>\nToggles protection on a directory. Protected dirs require memory_trace minigame to access.");
+      // The usage text promised "Protected dirs require memory_trace minigame
+      // to access" — nothing implements that gate (raised with the maintainer,
+      // 2026-10-08). It now states what protection does.
+      return errorResult("Usage: protect <directory>\nToggles protection on a directory. Everything inside it cannot be deleted, moved or modified by intruders, and is hidden from low-access ones.");
     }
 
     const dirName = command.args[0]!;

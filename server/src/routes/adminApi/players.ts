@@ -4,7 +4,8 @@ import { ACCOUNT_ADMIN_SERVICE } from "../../di/tokens";
 import type { AccountAdminService } from "../../services/accountAdminService";
 import { prisma } from "../../database/client";
 import { asyncHandler } from "../../middleware/setup";
-import { NotFoundError, ValidationError } from "../../../../shared/types";
+import { AuthorizationError, NotFoundError, ValidationError } from "../../../../shared/types";
+import { roleChangeRefusal } from "../../utils/roles";
 
 const router = Router();
 
@@ -168,6 +169,12 @@ router.put("/:id/role", asyncHandler(async (req: any, res: any) => {
     where: { id: req.params.id },
   });
   if (!player) throw new NotFoundError("Player not found");
+
+  // The same rule as the terminal (utils/roles.ts). The panel let any admin
+  // grant `admin` and demote other admins; maintainer decision 2026-10-08:
+  // admins are made and unmade only on the host (npm run admin:grant|revoke).
+  const refusal = roleChangeRefusal({ id: req.user.id, role: req.user.role }, player, role);
+  if (refusal) throw new AuthorizationError(refusal);
 
   // Through AccountAdminService: the role row AND the caches that hold it —
   // the auth cache and every live socket of the target. This route wrote the

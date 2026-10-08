@@ -4,6 +4,7 @@ import jwt from "jsonwebtoken";
 import logger from "../logger";
 import { prisma } from "../database/client";
 import { config, isProduction } from "../config/environment";
+import { ROLE_HIERARCHY, roleLevel } from "../utils/roles";
 
 /** Hash token before using as cache key — prevents raw JWT exposure in memory. */
 const hashToken = (token: string): string =>
@@ -333,41 +334,45 @@ export const verifySocketToken = async (token: string) => {
   }
 };
 
-// Role hierarchy: admin > moderator > player
-const ROLE_HIERARCHY: Record<string, number> = {
-  player: 0,
-  moderator: 1,
-  admin: 2,
-};
-
-// Role-based access control middleware
+// Role-based access control middleware.
+//
+// The role is RE-READ from the database here, not taken from the 60s auth
+// cache: admins are granted and revoked on the host (npm run
+// admin:grant|admin:revoke), a separate process that cannot invalidate this
+// server's caches — a revoked admin would otherwise keep the admin panel for
+// up to a minute. One indexed lookup, on privileged routes only.
 export const requireRole = (minimumRole: string) => {
   if (!(minimumRole in ROLE_HIERARCHY)) {
     throw new Error(`requireRole: unknown role "${minimumRole}"`);
   }
-  return (req: Request, res: Response, next: NextFunction): void => {
-    if (!req.user) {
-      res.status(401).json({
-        success: false,
-        error: "Authentication required",
-        timestamp: new Date(),
-      });
-      return;
+  return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      if (!req.user) {
+        res.status(401).json({
+          success: false,
+          error: "Authentication required",
+          timestamp: new Date(),
+        });
+        return;
+      }
+
+      const current = await prisma.user.findUnique({ where: { id: req.user.id }, select: { role: true } });
+      const role = current?.role ?? "player";
+      req.user.role = role;
+
+      if (roleLevel(role) < roleLevel(minimumRole)) {
+        res.status(403).json({
+          success: false,
+          error: "Insufficient permissions",
+          timestamp: new Date(),
+        });
+        return;
+      }
+
+      next();
+    } catch (err) {
+      next(err);
     }
-
-    const userLevel = ROLE_HIERARCHY[req.user.role] ?? 0;
-    const requiredLevel = ROLE_HIERARCHY[minimumRole] ?? 0;
-
-    if (userLevel < requiredLevel) {
-      res.status(403).json({
-        success: false,
-        error: "Insufficient permissions",
-        timestamp: new Date(),
-      });
-      return;
-    }
-
-    next();
   };
 };
 

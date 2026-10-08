@@ -5,7 +5,8 @@ import { HackMethod } from "../types/game";
 import { injectable, inject } from "tsyringe";
 import { safeExecute } from "../utils/safeExecute";
 import { Logger } from "pino";
-import { BACKDOOR_SERVICE, LOGGER, MISSION_INTEGRATION_SERVICE, PERSONA_SERVICE, PLAYER_PROGRESS_REPOSITORY, PROGRESS_SERVICE, REPUTATION_ENGINE, SERVER_SERVICE, TRACE_SERVICE, WARFARE_SERVICE, HACK_COUNTERMEASURE_SERVICE } from "../di/tokens";
+import { BACKDOOR_SERVICE, LOGGER, MISSION_INTEGRATION_SERVICE, PERSONA_SERVICE, PLAYER_PROGRESS_REPOSITORY, PROGRESS_SERVICE, REPUTATION_ENGINE, SERVER_SERVICE, TRACE_SERVICE, WARFARE_SERVICE, HACK_COUNTERMEASURE_SERVICE, FILE_SERVICE } from "../di/tokens";
+import { getService } from "../di/resolve";
 import type MissionIntegrationService from "./missionIntegration";
 import type ProgressService from "./progressService";
 import type PlayerProgressRepository from "../repositories/playerProgressRepository";
@@ -1453,10 +1454,13 @@ class HackService extends EventEmitter {
           take: Math.min(accessLevel * 3, MAX_FILE_DISCOVERY),
         });
 
-        // Filter by protection level vs access level
+        // Filter by protection level vs access level. Protection is inherited
+        // (a file inside a protected directory is protected).
+        const protectedIds = await getService<import("./fileService").FileService>(FILE_SERVICE)
+          .effectivelyProtectedIds(serverId);
         const discoveredFiles = files
           .filter((file: any) => {
-            if (file.isProtected && accessLevel < 7) return false;
+            if (protectedIds.has(file.id) && accessLevel < 7) return false;
             if (file.isHidden && accessLevel < 5) return false;
             return true;
           })

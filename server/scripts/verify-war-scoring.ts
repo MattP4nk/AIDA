@@ -26,6 +26,7 @@
  */
 import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
+import { freeIp } from "./lib/free-ip";
 
 const prisma = new PrismaClient();
 
@@ -81,7 +82,7 @@ async function main() {
     const user = await prisma.user.create({
       data: {
         username: tag, email: `${tag}@probe.local`, password: "p",
-        homeIp: `10.44.0.${process.pid % 250}`,
+        homeIp: await freeIp(prisma),
         progress: { create: {} },
       },
     });
@@ -92,7 +93,7 @@ async function main() {
       const s = await prisma.gameServer.create({
         data: {
           name: `${tag}_t${n}`,
-          ipAddress: `10.45.${n}.${process.pid % 250}`,
+          ipAddress: await freeIp(prisma),
           type: "corporate",
           factionId: b.id,
         },
@@ -151,7 +152,7 @@ async function main() {
       const other = await prisma.user.create({
         data: {
           username: `${tag}_2`, email: `${tag}_2@probe.local`, password: "p",
-          homeIp: `10.46.0.${process.pid % 250}`, progress: { create: {} },
+          homeIp: await freeIp(prisma), progress: { create: {} },
         },
       });
       await prisma.factionMember.create({ data: { userId: other.id, factionId: a.id } });
@@ -171,7 +172,7 @@ async function main() {
       const neutral = await prisma.gameServer.create({
         data: {
           name: `${tag}_neutral`,
-          ipAddress: `10.47.0.${process.pid % 250}`,
+          ipAddress: await freeIp(prisma),
           type: "corporate",
         },
       });
@@ -196,7 +197,7 @@ async function main() {
       const racer = await prisma.user.create({
         data: {
           username: `${tag}_r`, email: `${tag}_r@probe.local`, password: "p",
-          homeIp: `10.48.0.${process.pid % 250}`, progress: { create: {} },
+          homeIp: await freeIp(prisma), progress: { create: {} },
         },
       });
       await prisma.factionMember.create({ data: { userId: racer.id, factionId: a.id } });

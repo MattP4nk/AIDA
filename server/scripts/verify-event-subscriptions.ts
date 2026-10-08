@@ -34,6 +34,7 @@ import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
 import { readFileSync } from "node:fs";
 import { stripComments } from "./lib/strip-comments";
+import { freeIp } from "./lib/free-ip";
 
 const prisma = new PrismaClient();
 
@@ -94,20 +95,20 @@ async function main() {
 
   try {
     const watcher = await prisma.user.create({
-      data: { username: tag, email: `${tag}@probe.local`, password: "p", homeIp: `10.7.0.${process.pid % 250}` },
+      data: { username: tag, email: `${tag}@probe.local`, password: "p", homeIp: await freeIp(prisma) },
     });
     const victim = await prisma.user.create({
-      data: { username: `${tag}_v`, email: `${tag}_v@probe.local`, password: "p", homeIp: `10.8.0.${process.pid % 250}` },
+      data: { username: `${tag}_v`, email: `${tag}_v@probe.local`, password: "p", homeIp: await freeIp(prisma) },
     });
     const bystander = await prisma.user.create({
-      data: { username: `${tag}_b`, email: `${tag}_b@probe.local`, password: "p", homeIp: `10.9.0.${process.pid % 250}` },
+      data: { username: `${tag}_b`, email: `${tag}_b@probe.local`, password: "p", homeIp: await freeIp(prisma) },
     });
     created.users.push(watcher.id, victim.id, bystander.id);
 
     const server = await prisma.gameServer.create({
       data: {
         name: `${tag}_srv`,
-        ipAddress: `10.77.0.${process.pid % 250}`,
+        ipAddress: await freeIp(prisma),
         type: "corporate",
         ownerId: victim.id,
       },
@@ -481,7 +482,7 @@ async function main() {
         "a bare findFirst on ipAddress let anyone tap any home server they had never scanned",
       );
       const other = await prisma.gameServer.create({
-        data: { name: `${tag}_srv2`, ipAddress: `10.79.0.${process.pid % 250}`, type: "corporate" },
+        data: { name: `${tag}_srv2`, ipAddress: await freeIp(prisma), type: "corporate" },
       });
       created.servers.push(other.id); // links and discoveries cascade from it
       const link = await prisma.serverLink.create({ data: { sourceId: other.id, targetId: server.id } });
@@ -651,7 +652,7 @@ async function main() {
       const home = await prisma.gameServer.create({
         data: {
           name: `${tag}_home`,
-          ipAddress: `10.78.0.${process.pid % 250}`,
+          ipAddress: await freeIp(prisma),
           type: "player_home",
           ownerId: victim.id,
           isPlayerHome: true,

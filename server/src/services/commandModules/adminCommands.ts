@@ -3,16 +3,7 @@ import { CommandModule, CommandContext, CommandInfo } from "./interface";
 import { successResult, errorResult } from "./helpers";
 import { accounts, factions, messages, servers as serversSvc, users } from "./deps";
 
-
-const ROLE_HIERARCHY: Record<string, number> = {
-  player: 0,
-  moderator: 1,
-  admin: 2,
-};
-
-function roleLevel(role: string): number {
-  return ROLE_HIERARCHY[role] ?? 0;
-}
+import { roleLevel, roleChangeRefusal } from "../../utils/roles";
 
 function formatDuration(ms: number): string {
   const s = Math.floor(ms / 1000);
@@ -44,7 +35,11 @@ export class AdminCommandsModule implements CommandModule {
     command: Command,
     context: CommandContext,
   ): Promise<CommandResult> {
-    const userRole = context.role;
+    // The role as it is NOW, not as the socket cached it at login: admins are
+    // granted and revoked on the host (npm run admin:grant|admin:revoke), a
+    // separate process that cannot reach this server's in-memory caches.
+    const userRole = (await users().findById(context.userId))?.role ?? "player";
+    context = { ...context, role: userRole };
 
     if (roleLevel(userRole) < roleLevel("moderator")) {
       return errorResult("ACCESS DENIED: Insufficient privileges.\nThis incident has been logged.");
@@ -486,20 +481,9 @@ export class AdminCommandsModule implements CommandModule {
       return errorResult(`User '${target}' not found.`);
     }
 
-    // Prevent self-demotion
-    if (user.id === context.userId) {
-      return errorResult("Cannot change your own role.");
-    }
-
-    // Can't modify someone of equal or higher role
-    if (roleLevel(user.role) >= roleLevel(context.role)) {
-      return errorResult("Cannot change role of a user with equal or higher rank.");
-    }
-
-    // Can't promote above own level
-    if (roleLevel(newRole) >= roleLevel(context.role)) {
-      return errorResult("Cannot set a role equal to or above your own.");
-    }
+    // The one rule, shared with the admin panel (utils/roles.ts).
+    const refusal = roleChangeRefusal({ id: context.userId, role: context.role }, user, newRole);
+    if (refusal) return errorResult(refusal);
 
     // Also refreshes the auth cache and every live socket's role — a
     // demotion used to leave the target admin until they reconnected.

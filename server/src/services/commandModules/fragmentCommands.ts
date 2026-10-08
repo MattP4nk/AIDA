@@ -602,7 +602,12 @@ export class FragmentCommandsModule implements CommandModule {
     if (!resolution.exists || !resolution.node) return errorResult(`File not found: ${fileName}`);
 
     const fileNode = resolution.node as any;
-    if (!fileNode.isProtected) return errorResult(`${fileName} is not protected.`);
+    if (!fileNode.isProtected) {
+      const guard = await context.fileService.protectingNode(fileNode.id);
+      return errorResult(guard
+        ? `${fileName} is protected by its directory '${guard.name}' — target that directory.`
+        : `${fileName} is not protected.`);
+    }
 
     // Check player has fragments
     const fragmentService = fragments();
@@ -725,7 +730,12 @@ export class FragmentCommandsModule implements CommandModule {
     if (!resolution.exists || !resolution.node) return errorResult(`Not found: ${target}`);
 
     const node = resolution.node as any;
-    if (node.isProtected) return errorResult(`${target} is already protected.`);
+    const guard = await context.fileService.protectingNode(node.id);
+    if (guard) {
+      return errorResult(guard.id === node.id
+        ? `${target} is already protected.`
+        : `${target} is already protected by its directory '${guard.name}'.`);
+    }
 
     // Apply protection — Collar power is reliable (no failure risk)
     await context.fileService.setNodeFlags(node.id, { isProtected: true });

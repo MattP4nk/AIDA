@@ -24,6 +24,7 @@ import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
 import { readFileSync } from "node:fs";
 import { stripComments } from "./lib/strip-comments";
+import { freeIp } from "./lib/free-ip";
 
 const prisma = new PrismaClient();
 
@@ -100,7 +101,7 @@ async function main() {
         username: tag,
         email: `${tag}@probe.local`,
         password: "probe",
-        homeIp: `10.1.0.${process.pid % 250}`,
+        homeIp: await freeIp(prisma),
       },
     });
     userId = user.id;
@@ -109,7 +110,7 @@ async function main() {
         username: `${tag}_other`,
         email: `${tag}_other@probe.local`,
         password: "probe",
-        homeIp: `10.2.0.${process.pid % 250}`,
+        homeIp: await freeIp(prisma),
       },
     });
     otherId = other.id;
@@ -506,7 +507,7 @@ async function main() {
           username: `${tag}_purge`,
           email: `${tag}_purge@probe.local`,
           password: "p",
-          homeIp: `10.3.0.${process.pid % 250}`,
+          homeIp: await freeIp(prisma),
         },
       });
       try {

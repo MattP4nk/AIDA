@@ -53,15 +53,6 @@ async function resolve<T>(token: string): Promise<T> {
 
 @injectable()
 export class AuthService {
-  /**
-   * Server-side session lifetime. Was the literal `24 * 60 * 60 * 1000` in
-   * three places (register, login, refresh). It is NOT derived from
-   * `config.JWT_EXPIRES_IN` ("24h" by default), so changing that config
-   * leaves sessions and tokens disagreeing — whether to derive it is an open
-   * question, since a deployed .env that differs would change behaviour.
-   */
-  private static readonly SESSION_TTL_MS = 24 * 60 * 60 * 1000;
-
   // Per-account lockout after repeated failed login attempts
   private static readonly LOGIN_ATTEMPT_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
   private static readonly MAX_LOGIN_ATTEMPTS = 10;
@@ -97,12 +88,20 @@ export class AuthService {
     } as jwt.SignOptions);
   }
 
+  /**
+   * The DB session expires exactly when its token does. It was a hardcoded
+   * 24h beside a token lifetime read from `config.JWT_EXPIRES_IN`, so changing
+   * that config made the two disagree (maintainer decision 2026-10-08: derive
+   * it). Read from the token's own `exp`, so any JWT_EXPIRES_IN format works.
+   */
   private async createSession(userId: string, token: string, meta: AuthRequestMeta): Promise<void> {
+    const exp = (jwt.decode(token) as { exp?: number } | null)?.exp;
+    if (typeof exp !== "number") throw new Error("createSession: token carries no exp");
     await prisma.userSession.create({
       data: {
         userId,
         token,
-        expiresAt: new Date(Date.now() + AuthService.SESSION_TTL_MS),
+        expiresAt: new Date(exp * 1000),
         ipAddress: meta.ip,
         userAgent: meta.userAgent,
       },
@@ -447,11 +446,17 @@ export class AuthService {
       data: { isActive: false },
     });
 
-    // Update user offline status
-    await prisma.user.update({
-      where: { id: userId },
-      data: { isOnline: false },
-    });
+    // Offline only if nothing else of theirs is connected. This was
+    // unconditional: logging out of one tab told everyone a player with other
+    // live tabs was offline. The socket layer already marks a player offline
+    // when their LAST socket closes (S9); this covers a logout with none.
+    const { liveSocketCount } = await import("../sockets/handlers");
+    if (liveSocketCount(userId) === 0) {
+      await prisma.user.update({
+        where: { id: userId },
+        data: { isOnline: false },
+      });
+    }
 
     // Log logout
     await prisma.auditLog.create({

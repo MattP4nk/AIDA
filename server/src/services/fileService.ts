@@ -990,11 +990,16 @@ export class FileService {
       const node = resolution.node;
       const accessLevel = await this.getUserAccessLevel(userId, serverId);
 
-      // Check if protected
-      if (node.isProtected) {
+      // Protected — itself, or by a protected ancestor (inherited: maintainer
+      // decision 2026-10-08; `protect <dir>` promised it and only the
+      // directory node was ever checked).
+      const deleteGuard = await this.protectingNode(node.id);
+      if (deleteGuard) {
         return {
           success: false,
-          message: `Cannot delete protected item: ${path}`,
+          message: deleteGuard.id === node.id
+            ? `Cannot delete protected item: ${path}`
+            : `Cannot delete ${path}: protected by '${deleteGuard.name}'`,
           error: "PROTECTED",
         };
       }
@@ -1272,11 +1277,14 @@ export class FileService {
       const sourceNode = sourceResolution.node;
       const accessLevel = await this.getUserAccessLevel(userId, serverId);
 
-      // Check if protected
-      if (sourceNode.isProtected) {
+      // Protected — itself or by an ancestor (inherited).
+      const moveGuard = await this.protectingNode(sourceNode.id);
+      if (moveGuard) {
         return {
           success: false,
-          message: `Cannot move protected item: ${sourcePath}`,
+          message: moveGuard.id === sourceNode.id
+            ? `Cannot move protected item: ${sourcePath}`
+            : `Cannot move ${sourcePath}: protected by '${moveGuard.name}'`,
           error: "PROTECTED",
         };
       }
@@ -1502,8 +1510,9 @@ export class FileService {
       return true;
     }
 
-    // Protected files cannot be modified by non-owners
-    if (node.isProtected) return false;
+    // Protected files cannot be modified by non-owners — including a node
+    // under a protected directory (inherited protection).
+    if (await this.protectingNode(node.id)) return false;
 
     // Game mechanic: file requires a minimum hack access level
     if (
@@ -1770,6 +1779,55 @@ export class FileService {
     flags: { isProtected?: boolean; isHidden?: boolean },
   ): Promise<void> {
     await prisma.fileSystemNode.update({ where: { id: nodeId }, data: flags });
+  }
+
+  /**
+   * What protects this node: itself if flagged, else its nearest protected
+   * ANCESTOR, else null. Protection is inherited (maintainer decision
+   * 2026-10-08): `protect <dir>` told the player that files inside could not
+   * be deleted, moved or modified, while every check read the target's own
+   * flag only.
+   */
+  public async protectingNode(nodeId: string): Promise<{ id: string; name: string } | null> {
+    let currentId: string | null = nodeId;
+    const seen = new Set<string>();
+    while (currentId && !seen.has(currentId)) {
+      seen.add(currentId);
+      const n: { id: string; name: string; isProtected: boolean; parentId: string | null } | null =
+        await prisma.fileSystemNode.findUnique({
+          where: { id: currentId },
+          select: { id: true, name: true, isProtected: true, parentId: true },
+        });
+      if (!n) return null;
+      if (n.isProtected) return { id: n.id, name: n.name };
+      currentId = n.parentId;
+    }
+    return null;
+  }
+
+  /**
+   * Every node on a server that is protected, directly or by inheritance —
+   * one query, for callers that filter many nodes at once.
+   */
+  public async effectivelyProtectedIds(serverId: string): Promise<Set<string>> {
+    const nodes = await prisma.fileSystemNode.findMany({
+      where: { serverId },
+      select: { id: true, parentId: true, isProtected: true },
+    });
+    const children = new Map<string, string[]>();
+    for (const n of nodes) {
+      if (!n.parentId) continue;
+      (children.get(n.parentId) ?? children.set(n.parentId, []).get(n.parentId)!).push(n.id);
+    }
+    const out = new Set<string>();
+    const stack = nodes.filter((n) => n.isProtected).map((n) => n.id);
+    while (stack.length) {
+      const id = stack.pop()!;
+      if (out.has(id)) continue;
+      out.add(id);
+      stack.push(...(children.get(id) ?? []));
+    }
+    return out;
   }
 
   /** A node by id. System read: no access check — gate with canUserReadFile. */

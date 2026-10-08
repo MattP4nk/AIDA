@@ -3927,6 +3927,45 @@ Write them per-refactor, immediately before touching the code:
         `playerProgressRepository.purchaseHomeDefense` (one transaction, announces after commit);
         the ratchet also matches `tx.<model>.<write>`, with a positive control.
         `verify-a4-defense-writes.ts` D-6.
+      - **DECIDED 2026-10-08 (maintainer), replacing the open questions below — to implement:**
+        - Q1 a bricked fragment RESPAWNS after a cooldown (72h unless changed) at ANOTHER location,
+          unheld; the cracker still loses it. Brick also emits a story event (it emits none today).
+        - Q2 WIRE UP honeypot decoys in bounty completion (mechanic to be proposed and confirmed first).
+        - Q3 a claimed bounty expires at its original deadline; completion requires it unexpired.
+        - Q4 protection is INHERITED: a protected ancestor protects everything beneath it.
+        - Q5 contacts get an ACCEPT FLOW (request → accept/decline); "pending" becomes meaningful.
+        - Q6 role policy: NEITHER the terminal nor the admin panel may create admins (DB/deploy only).
+          Session TTL follows JWT_EXPIRES_IN; logout marks offline only on the last live session.
+        - Q7 fragment commands are revealed by ONE rule everywhere: AIDA intel or a fragment discovery.
+        - Q8 `mission accept` on a faction mission CLAIMS it (wire assignMission); listing shows the
+          prefix id form.
+        - DESIGNS CONFIRMED: Q1 respawn = random non-home server, security 7+, holding no other
+          fragment, never the one it was lost from; `brickedAt` column; checked on boot + hourly.
+          Q2 = with a honeypot, each decoy in the target's downloads absorbs one real stolen file
+          from the purge (that file survives; the decoy is consumed); report counts decoys; reward
+          unchanged. Q5 = request → accept/decline, mutual on accept, chat lists ACCEPTED only,
+          messaging stays open. Q6 = `npm run admin:grant|admin:revoke <username>` (host-side,
+          audited); the panel adopts the full in-game rule (no granting >= own role, no changing
+          an equal-or-higher role).
+      - **BATCH 1 DONE (2026-10-08): Q3, Q4, Q6, Q7.** Q3 completion refuses past the deadline
+          (early check AND in the transition's WHERE; a lost transition now says "expired" vs
+          "completed" from the row). Q4 `fileService.protectingNode` / `effectivelyProtectedIds`:
+          delete, move, write and the intruder file listing honour a protected ancestor; crack /
+          storm / fragment.crack / collar.shield name the protecting directory. Q6 roles: one rule
+          (`utils/roles.ts`) for terminal and panel; `npm run admin:grant|admin:revoke`;
+          `requireRole` and the `admin` command re-read the role from the DB so a host-side change
+          applies at once; session expiry = the token's `exp`; logout marks offline only with no
+          live socket. Q7: `help` gates the whole fragment module on `hasFragmentAccess`.
+          Harnesses: verify-session-policy, verify-fragment-reveal, verify-inherited-protection,
+          account-admin AA-1/2/5 reworked, bounty B-5b. All negative-controlled.
+        - **NEW — Q9 (raise): `protect`'s usage text also promised "Protected dirs require
+          memory_trace minigame to access".** Nothing implements that gate. The text now states what
+          protection does; whether to BUILD an entry minigame for protected directories is open.
+        - **NEW — Q10 (raise): the player-home allocator gives each player an isolated /16 — only
+          254 exist** (`ipService.generatePlayerHomeIP`). Past 254 players every home falls back to a
+          random address in a shared range (the dev DB, full of harness accounts, is long past it).
+          That broke 11 harnesses' pid-derived fixture IPs (war-scoring hit P2002); they now use
+          `scripts/lib/free-ip.ts`. The design limit itself is open.
       - **OPEN QUESTIONS (need the maintainer):**
         1. **Endgame lockout.** 9 fragments exist, 9 are required, nothing restores a bricked one:
            the first failed `fragment.crack` makes the endgame unreachable for everyone.
