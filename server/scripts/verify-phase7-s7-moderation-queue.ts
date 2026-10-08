@@ -209,6 +209,62 @@ async function main() {
     }
   }
 
+  // ── 6b. THROUGH THE GATE, a failed filing is counted ────────────────
+  // S7-7 proves the counter with a callback handed straight to the queue. The
+  // gate wrapped its escalation in a try/catch that only logged, so on every
+  // real path (messages, posts, replies) the counter could never move.
+  console.log("\nS7-11 — through the gate, a failed filing is counted");
+  {
+    const { moderateBeforePublish } = await import("../src/utils/moderationGate");
+    const quiet: any = { warn: () => {}, error: () => {}, info: () => {}, debug: () => {} };
+    const realModerate = ai.moderateForDelivery;
+    const realLogger = ai.logger;
+    ai.logger = { ...realLogger, error: () => {}, warn: () => {} };
+    const failing = async () => { throw new Error("db down"); };
+    try {
+      // (a) abandoned re-check: the REAL queue, aged out, gate's filing fails.
+      reset();
+      ai.moderateForDelivery = async () => ({ verdict: "unavailable", reason: "timeout" });
+      const before = ai.getMetrics().moderationEscalationsFailed;
+      await moderateBeforePublish("hello", quiet, async () => {}, failing);
+      // queueModerationRecheck enqueues after an `await import(...)`.
+      for (let i = 0; i < 50 && q().length === 0; i++) await tick();
+      check("PRECONDITION: the gate queued a re-check", q().length === 1, `${q().length}`);
+      q()[0].createdAt = Date.now() - (ai.RETRY_MAX_AGE_MS + 1000);
+      await ai.processRetryQueue();
+      await tick();
+      check("abandoned re-check whose filing fails is COUNTED (was: 0)",
+        ai.getMetrics().moderationEscalationsFailed === before + 1,
+        `${before} -> ${ai.getMetrics().moderationEscalationsFailed}`);
+
+      // (b) unsafe verdict, hide fails, filing fails.
+      ai.moderateForDelivery = async () => ({ verdict: "unsafe", reason: "spam" });
+      const b2 = ai.getMetrics().moderationEscalationsFailed;
+      const r = await moderateBeforePublish("buy now", quiet, failing, failing);
+      check("unsafe still suppresses delivery", r.verdict === "unsafe");
+      check("unsafe + failed hide + failed filing is COUNTED",
+        ai.getMetrics().moderationEscalationsFailed === b2 + 1,
+        `${b2} -> ${ai.getMetrics().moderationEscalationsFailed}`);
+
+      // (c) re-check says unsafe, hide fails: filed ONCE, by the queue.
+      reset();
+      ai.moderateForDelivery = async () => ({ verdict: "unavailable", reason: "timeout" });
+      const esc = spy();
+      await moderateBeforePublish("later bad", quiet, failing, esc.fn);
+      for (let i = 0; i < 50 && q().length === 0; i++) await tick();
+      const entry = q()[0];
+      check("PRECONDITION: re-check queued", !!entry);
+      // Deliver the re-check's answer the way S7-5 does: the entry's onSuccess.
+      await entry.onSuccess('{"safe": false, "reason": "hate speech"}');
+      check("a re-check's failed hide is filed exactly once, naming the verdict",
+        esc.calls.length === 1 && esc.calls[0]!.includes("judged unsafe (hate speech)"), JSON.stringify(esc.calls));
+    } finally {
+      ai.moderateForDelivery = realModerate;
+      ai.logger = realLogger;
+      reset();
+    }
+  }
+
   // ── 7. Round trip: the report is visible where admins actually look ──
   console.log("\nS7-9 — filed reports appear in the real admin queues, from SYSTEM");
   {

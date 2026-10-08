@@ -1388,9 +1388,6 @@ export class FileService {
   // ==================== PERMISSION HELPERS ====================
 
   /**
-   * Check if user can read a file/directory
-   */
-  /**
    * S10 — may this user read this file, by id?
    *
    * Public because command modules need the question answered without being
@@ -1423,6 +1420,9 @@ export class FileService {
     return this.canRead(userId, node as unknown as FileNode, accessLevel);
   }
 
+  /**
+   * Check if user can read a file/directory
+   */
   private async canRead(
     userId: string,
     nodeOrId: string | FileNode,
@@ -1931,9 +1931,6 @@ export class FileService {
   }
 
   /**
-   * Duplicate a node (for copy operation)
-   */
-  /**
    * R11 — may this user read every directory on the way to `nodeId`?
    *
    * Permissions were checked on the TARGET only, so a file could be read
@@ -2044,6 +2041,9 @@ export class FileService {
     return false;
   }
 
+  /**
+   * Duplicate a node (for copy operation)
+   */
   private async duplicateNode(
     sourceNode: FileNode,
     newParentId: string,
@@ -2287,15 +2287,6 @@ export class FileService {
     return servers.filter((s) => s.id !== excludeServerId);
   }
 
-  /**
-   * Scan file content for access keys that match other servers' accessKey fields.
-   * When found, automatically grants the player access to those servers.
-   *
-   * Detects patterns like:
-   * - ACCESS_KEY=XYZ or accessKey: XYZ
-   * - PASS=XYZ or password: XYZ in context of a server IP
-   * - Explicit key tokens like GRN-*, FW-*, CL-* (Garrison), or vault keys
-   */
   /**
    * Scan file content for access keys without granting them.
    * Returns server names whose keys appear in the content.

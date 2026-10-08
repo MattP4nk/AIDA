@@ -20,14 +20,14 @@ import * as tokens from "./di/tokens";
 let isShuttingDown = false;
 
 /**
- * Perform a graceful shutdown: save state, close connections, exit.
- */
-/**
  * Shutdown triggers that represent a crash rather than an orderly stop.
  * These must exit non-zero so process supervisors restart the server.
  */
 const FAULT_SIGNALS = new Set(["uncaughtException", "unhandledRejection"]);
 
+/**
+ * Perform a graceful shutdown: save state, close connections, exit.
+ */
 export async function gracefulShutdown(
   signal: string,
   server: HttpServer,

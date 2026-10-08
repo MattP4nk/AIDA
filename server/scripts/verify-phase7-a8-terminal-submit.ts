@@ -56,6 +56,9 @@ async function main() {
       ["mail", "mail", false], ["inbox", "mail", false], ["messages", "mail", false],
       ["forum list", "forum", true], ["forums", "forum", true],
       ["scan", null, false], ["connect 10.0.0.1", null, false], ["shopping", null, false], ["  mail  ", "mail", false],
+      // Object's own members are not dialog routes (they resolved to
+      // `{ dialog: undefined }` and froze the terminal).
+      ["constructor", null, false], ["__proto__", null, false], ["toString", null, false], ["hasOwnProperty x", null, false],
     ];
     const bad = cases.filter(([cmd, dialog, passes]) => {
       const r = M.resolveDialogCommand(cmd);
@@ -80,7 +83,11 @@ async function main() {
 
     s = mk();
     M.applyChallengeState({ sessionId: "h1", targetIp: "10.0.0.6", totalLayers: 3, challenge: { q: 1 } }, s as any);
-    check("hack start: layer 0 of 3", s.activeHackSession.get()?.currentLayer === 0 && s.activeHackSession.get()?.totalLayers === 3);
+    check("an HTTP result does NOT start a hack session (that branch served a deleted server path)",
+      s.activeHackSession.get() === null && s.activeProcesses.get().length === 0);
+    // Hack sessions start over the socket (socket.ts); layer submissions come back over HTTP.
+    s.activeHackSession.set({ active: true, targetIp: "10.0.0.6", currentLayer: 0, totalLayers: 3, challenge: { q: 1 } });
+    s.activeProcesses.set([{ pid: ReservedPID.HACK_CHALLENGE, type: "hack" }]);
     M.applyChallengeState({ nextChallenge: { q: 2 } }, s as any);
     check("next layer advances and swaps the challenge",
       s.activeHackSession.get()?.currentLayer === 1 && s.activeHackSession.get()?.challenge?.q === 2);
@@ -110,7 +117,7 @@ async function main() {
     check("no match leaves the suggestion alone (null)", M.extractSuggestedCommand({ output: "nothing here" }, known) === null);
   }
 
-  console.log("\nTS-4 — applyChallengeState is the original block, moved verbatim");
+  console.log("\nTS-4 — applyChallengeState is the original block, moved verbatim (minus one deleted branch)");
   {
     const root = new URL("../..", import.meta.url).pathname;
     let orig = "";
@@ -123,8 +130,17 @@ async function main() {
     const norm = (t: string) => t
       .replace(/^\s*const \{ activeProcesses \} = await import\("\.\.\/services\/socket"\);\n/gm, "")
       .replace(/result\.data/g, "data")
-      .split("\n").map((l) => l.trim()).filter(Boolean).join("\n");
-    const before = norm(orig.slice(a, b));
+      .split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("//")).join("\n");
+    // One deliberate change since the move (A4 review, 2026-10-08): the
+    // HTTP hack-START branch is gone — it served the server's deleted
+    // synchronous hack path. Compare against the original minus exactly
+    // that branch, and pin that what was removed IS that branch.
+    const origBlock = orig.slice(a, b);
+    const h0 = origBlock.indexOf("// Handle hack session start from HTTP fallback");
+    const h1 = origBlock.indexOf("// Handle hack layer progression");
+    check("PRECONDITION: the removed branch is the HTTP hack-start one",
+      h0 > 0 && h1 > h0 && /activeHackSession\.set\(\{\s*active: true,\s*targetIp: result\.data\.targetIp,\s*currentLayer: 0/.test(origBlock.slice(h0, h1)));
+    const before = norm(origBlock.slice(0, h0) + origBlock.slice(h1));
     const src = readFileSync(new URL("../../client/src/services/commandResult.ts", import.meta.url).pathname, "utf8");
     const s0 = src.indexOf("// Handle challenge starts from HTTP results (connection/hack)");
     const s1 = src.indexOf("\n}\n", s0);

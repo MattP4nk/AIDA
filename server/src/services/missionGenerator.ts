@@ -848,10 +848,7 @@ Format as JSON:
 
   // ==================== UTILITY METHODS ====================
 
-  /**
-   * Calculate player level from XP
-   */
-  /** Delegates to the canonical curve — see `levelForExperience`. */
+  /** Player level from XP. Delegates to the canonical curve — see `levelForExperience`. */
   private calculateLevel(xp: number): number {
     return levelForExperience(xp);
   }

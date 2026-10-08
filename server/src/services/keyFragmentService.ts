@@ -517,19 +517,6 @@ export class KeyFragmentService extends EventEmitter {
     };
   }
 
-  // ── SERVER CHECK — Auto-claim fragments from server files ────────
-
-  /**
-   * Check if a server contains a key fragment and attempt to claim it
-   * for the player. Returns current holder info if already claimed.
-   *
-   * Called when a player reads files on a server; checks whether the server
-   * is the source of any key fragment.
-   *
-   * @param userId   - The player's user ID
-   * @param serverId - The server being accessed
-   * @returns Claim result if a fragment was found on this server
-   */
   /**
    * Destroy a fragment permanently: `fragment.crack`'s failure outcome.
    * A4: this was a direct keyFragment.update in fragmentCommands.
@@ -542,13 +529,33 @@ export class KeyFragmentService extends EventEmitter {
    * almost certainly is not. Also unlike claim/steal/transfer, a brick emits
    * no event, so the story ledger never learns a fragment was destroyed.
    */
-  async brickFragment(fragmentId: string): Promise<void> {
-    await this.prisma.keyFragment.update({
-      where: { id: fragmentId },
+  async brickFragment(fragmentId: string, holderId: string): Promise<boolean> {
+    // Review: `fragment.crack` reads the held fragments, rolls, THEN bricks
+    // its pick — a check-then-act. Updating by id alone bricked the fragment
+    // even if it had been stolen or traded in between: someone ELSE's
+    // fragment destroyed by your failed roll. The holder and status are now
+    // in the WHERE; false means it was no longer yours to lose.
+    const r = await this.prisma.keyFragment.updateMany({
+      where: { id: fragmentId, heldByUserId: holderId, status: "active" },
       data: { status: "bricked", heldByUserId: null, heldSince: null },
     });
+    return r.count === 1;
   }
 
+  // ── SERVER CHECK — Auto-claim fragments from server files ────────
+
+
+  /**
+   * Check if a server contains a key fragment and attempt to claim it
+   * for the player. Returns current holder info if already claimed.
+   *
+   * Called when a player reads files on a server; checks whether the server
+   * is the source of any key fragment.
+   *
+   * @param userId   - The player's user ID
+   * @param serverId - The server being accessed
+   * @returns Claim result if a fragment was found on this server
+   */
   async checkServerFragment(
     userId: string,
     serverId: string,

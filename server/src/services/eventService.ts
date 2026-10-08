@@ -594,9 +594,8 @@ export class EventService {
   }
 
   /**
-   * Faction war event
-   */
-  /**
+   * Faction war event.
+   *
    * @param faction1 attacker faction ID (a `Faction.id`, used for TAP MATCHING)
    * @param faction2 defender faction ID (likewise)
    * @param attackerName human-readable name for the broadcast title

@@ -9,9 +9,6 @@ import type { AIService } from "../services/aiService";
 const router = Router();
 
 /**
- * GET /health — public health check (no auth required)
- */
-/**
  * Cached AI health, so /health cannot be used to hammer the AI backend.
  *
  * Review finding: this route is PUBLIC (no auth — the rest of this router is
@@ -42,6 +39,9 @@ async function getAiHealthCached(): Promise<Record<string, unknown>> {
   return value;
 }
 
+/**
+ * GET /health — public health check (no auth required)
+ */
 router.get("/health", async (_req, res) => {
   const dbHealth = await db.healthCheck();
 

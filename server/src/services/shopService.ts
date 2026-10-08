@@ -943,14 +943,14 @@ class ShopService extends EventEmitter {
     };
   }
 
-  /**
-   * Check if player has item in InventoryItem table.
-   */
   /** The inventory rows, among `itemIds`, the player actually holds. */
   public async heldItems(userId: string, itemIds: string[]) {
     return prisma.inventoryItem.findMany({ where: { userId, shopItemId: { in: itemIds }, quantity: { gt: 0 } } });
   }
 
+  /**
+   * Check if player has item in InventoryItem table.
+   */
   public async hasItem(userId: string, itemId: string): Promise<boolean> {
     const row = await prisma.inventoryItem.findFirst({
       where: { userId, shopItemId: itemId, quantity: { gt: 0 } },

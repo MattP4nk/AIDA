@@ -686,15 +686,15 @@ const MAX_AGENT_PROMPT_CHARS = 32_000;
 // Tool-Use Prompt Block
 // ═══════════════════════════════════════════════════════════════
 
-/**
- * Generate the tool-use instruction block for AI system prompts.
- */
 /** Tools a given caller may use: non-sensitive by default, plus opt-ins. */
 function resolveAvailableTools(allowSensitive: readonly string[] = []): ToolDefinition[] {
   const allowed = new Set(allowSensitive);
   return TOOLS.filter((t) => !t.sensitive || allowed.has(t.name));
 }
 
+/**
+ * Generate the tool-use instruction block for AI system prompts.
+ */
 export function buildToolUsePrompt(allowSensitive: readonly string[] = []): string {
   // Only advertise what this caller may actually use — listing a tool the
   // loop will refuse just invites a wasted round.
@@ -728,17 +728,6 @@ RULES:
 // ═══════════════════════════════════════════════════════════════
 
 /**
- * Run an AI agent loop with tool-use capabilities.
- *
- * @param aiService - The AI service for generating responses
- * @param prisma - Prisma client for executing tool queries
- * @param systemPrompt - Base system prompt (tool instructions are appended)
- * @param userPrompt - The task for the AI to perform
- * @param logger - Logger for debugging
- * @param maxRounds - Maximum tool-call rounds (default 6)
- * @returns The AI's final response string, or null on failure
- */
-/**
  * R14: bound an append-only agent transcript.
  *
  * Keeps the ORIGINAL task at the head — dropping that is how an agent forgets
@@ -766,6 +755,17 @@ export function budgetConversation(
   return head + marker + tail;
 }
 
+/**
+ * Run an AI agent loop with tool-use capabilities.
+ *
+ * @param aiService - The AI service for generating responses
+ * @param prisma - Prisma client for executing tool queries
+ * @param systemPrompt - Base system prompt (tool instructions are appended)
+ * @param userPrompt - The task for the AI to perform
+ * @param logger - Logger for debugging
+ * @param maxRounds - Maximum tool-call rounds (default 6)
+ * @returns The AI's final response string, or null on failure
+ */
 export async function runAgentLoop(
   aiService: AIService,
   prisma: PrismaClient,

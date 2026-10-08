@@ -129,6 +129,14 @@ async function main() {
     check("PRECONDITION: the first spelling registers", a.status === 201, `${a.status}`);
     const b = await register(`${tag}case`, `${tag}other@fixture.invalid`);
     check("a username differing only by case is refused", b.status === 409, `${b.status}`);
+    // The check is a read, then bcrypt (~100ms), then the create: two
+    // signups differing only by case, AT ONCE, both passed it.
+    const racy = await Promise.all([register(`${tag}Race`), register(`${tag}race`, `${tag}race2@fixture.invalid`)]);
+    const codes = racy.map((x) => x.status).sort();
+    check("two concurrent signups differing only by case: exactly one succeeds", codes[0] === 201 && codes[1] === 409,
+      codes.join(" + "));
+    const rows = await prisma.user.count({ where: { username: { equals: `${tag}race`, mode: "insensitive" } } });
+    check("and exactly one row exists", rows === 1, `${rows}`);
     // CHARACTERIZATION, not a fix check: email case was never a gap — the
     // route's validator normalizeEmail()s it before AuthService sees it. This
     // would pass with or without A4; it pins the boundary that makes it so.

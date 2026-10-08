@@ -998,15 +998,6 @@ export class PlayerInfoCommandsModule implements CommandModule {
   // ==================== REPORT COMMAND ====================
 
   /**
-   * Report intel to faction, complete recon objectives, or submit findings.
-   *
-   * Usage:
-   *   report                    — Show current server intel summary
-   *   report server             — Report current server to faction knowledge
-   *   report file <filename>    — Report a specific file as intel
-   *   report mission            — Report findings for active mission objectives
-   */
-  /**
    * Parse `to <faction>` from args. Returns remaining args + target faction info.
    */
   private async resolveReportTarget(
@@ -1043,6 +1034,15 @@ export class PlayerInfoCommandsModule implements CommandModule {
     return { targetFactionId: membership.factionId, targetFactionName: membership.faction.name, cleanArgs };
   }
 
+  /**
+   * Report intel to faction, complete recon objectives, or submit findings.
+   *
+   * Usage:
+   *   report                    — Show current server intel summary
+   *   report server             — Report current server to faction knowledge
+   *   report file <filename>    — Report a specific file as intel
+   *   report mission            — Report findings for active mission objectives
+   */
   private async handleReport(
     command: Command,
     context: CommandContext,

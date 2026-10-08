@@ -358,8 +358,9 @@ class GameStateManager {
    * first version did — replaced `{id, name, …}` with `{itemId, item, …}`
    * mid-session, and `applyStateDelta` reports a top-level `set` as applied
    * either way, so nothing detected it and no resync corrected it.
+   *
+   * @returns false if the refresh failed, so the caller can re-queue it.
    */
-  /** @returns false if the refresh failed, so the caller can re-queue it. */
   public async refreshStateSlices(userId: string, slices: Set<StateSlice>): Promise<boolean> {
     return await safeExecute({
       fallback: false as const,

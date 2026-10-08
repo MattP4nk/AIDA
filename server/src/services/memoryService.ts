@@ -333,9 +333,6 @@ class MemoryService extends EventEmitter {
   }
 
   /**
-   * Convenience: register an active backdoor as passive consumer.
-   */
-  /**
    * Release the passive consumers that belong to a *session* — terminals and
    * server connections — when that session ends.
    *
@@ -355,6 +352,9 @@ class MemoryService extends EventEmitter {
     if (consumers.size === 0) this.passiveConsumers.delete(userId);
   }
 
+  /**
+   * Convenience: register an active backdoor as passive consumer.
+   */
   registerBackdoor(userId: string, serverId: string, serverName: string): void {
     this.addPassiveConsumer(userId, "backdoor", `bdoor:${serverId}`, serverName);
   }

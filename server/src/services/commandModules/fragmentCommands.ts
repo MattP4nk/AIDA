@@ -670,7 +670,21 @@ export class FragmentCommandsModule implements CommandModule {
     const victimFragment = swordFragments[Math.floor(Math.random() * swordFragments.length)]!;
     // See KeyFragmentService.brickFragment — this can lock EVERY player out
     // of the endgame; an open design question, recorded there.
-    await fragmentService.brickFragment(victimFragment.id);
+    const bricked = await fragmentService.brickFragment(victimFragment.id, context.userId);
+    if (!bricked) {
+      // It left your hands between the check and the backlash (stolen or
+      // traded): nothing of yours to destroy — and nobody else's.
+      return {
+        success: false,
+        output:
+          "The fragment surges... and the link snaps.\n" +
+          `[${victimFragment.name}] is no longer in your possession — the backlash found nothing to burn.\n` +
+          "The protection holds.",
+        renderMode: "cinematic" as const,
+        soundEvent: "alert" as const,
+        timestamp: new Date(),
+      };
+    }
 
     return {
       success: false,

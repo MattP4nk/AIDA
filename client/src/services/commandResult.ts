@@ -47,8 +47,12 @@ export function resolveDialogCommand(
   command: string,
 ): { dialog: DialogName; data?: { command: string[] } } | null {
   const cmdParts = command.trim().split(/\s+/);
-  const route = DIALOG_COMMANDS[cmdParts[0]!.toLowerCase()];
-  if (!route) return null;
+  // Own keys only: a plain object answers `constructor` / `__proto__` with
+  // Object's own members, which routed to `{ dialog: undefined }` and left the
+  // terminal blurred behind a dialog that never opened.
+  const name = cmdParts[0]!.toLowerCase();
+  if (!Object.prototype.hasOwnProperty.call(DIALOG_COMMANDS, name)) return null;
+  const route = DIALOG_COMMANDS[name]!;
   return route.passCommand ? { dialog: route.dialog, data: { command: cmdParts } } : { dialog: route.dialog };
 }
 
@@ -92,20 +96,11 @@ export function applyChallengeState(data: any, stores: ChallengeStores): void {
     activeProcesses.update(procs => procs.filter((p: any) => p.pid !== ReservedPID.CONNECTION_CHALLENGE));
   }
 
-  // Handle hack session start from HTTP fallback (when memoryService unavailable)
-  if (data?.sessionId && data?.targetIp && !data?.connectionSessionId) {
-    activeHackSession.set({
-      active: true,
-      targetIp: data.targetIp,
-      currentLayer: 0,
-      totalLayers: data.totalLayers,
-      challenge: data.challenge,
-    });
-    activeProcesses.update(procs => [
-      ...procs.filter((p: any) => p.pid !== ReservedPID.HACK_CHALLENGE),
-      { pid: ReservedPID.HACK_CHALLENGE, type: "hack", description: `Hacking ${data.targetIp}`, progress: 0 },
-    ]);
-  }
+  // A hack session STARTS over the socket (socket.ts, `command:result` from
+  // the hack process). There was a branch here for an HTTP start — the
+  // server's synchronous "no memoryService" hack path — which A4 deleted as
+  // unreachable; left in, it would open a hack panel for any HTTP result that
+  // happened to carry `sessionId` and `targetIp`.
   // Handle hack layer progression (nextChallenge) or resolution (hackResolved)
   if (data?.nextChallenge) {
     activeHackSession.update((session: any) => {

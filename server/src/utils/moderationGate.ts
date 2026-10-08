@@ -72,11 +72,14 @@ export async function moderateBeforePublish(
    */
   escalate: (reason: string) => Promise<void>,
 ): Promise<{ verdict: "safe" | "unsafe" | "unavailable" }> {
-  const fileForReview = async (reason: string): Promise<void> => {
+  // Filing for review must not throw into the publish path — but a FAILED
+  // filing must be counted. With no aiService (only reachable when it cannot
+  // be resolved) there is nothing to count it on, so that path logs.
+  const fileWithoutService = async (reason: string): Promise<void> => {
     try {
       await escalate(reason);
     } catch (err) {
-      logger.error({ err, reason }, "S7: could not file content for admin review");
+      logger.error({ err, reason }, "S7: could not file content for admin review (and no AI service to count it on)");
     }
   };
 
@@ -88,14 +91,17 @@ export async function moderateBeforePublish(
     // No service means no re-check either — this used to return here with
     // nothing queued and nothing recorded: a silent, permanent fail-open.
     logger.error({ err }, "S7: moderation service could not be resolved — publishing, filed for review");
-    await fileForReview("moderation service unavailable; published without any review");
+    await fileWithoutService("moderation service unavailable; published without any review");
     return { verdict: "unavailable" };
   }
 
   if (!aiService) {
-    await fileForReview("moderation service unavailable; published without any review");
+    await fileWithoutService("moderation service unavailable; published without any review");
     return { verdict: "unavailable" };
   }
+  const ai = aiService;
+  // Through aiService.escalate: it never throws, and it COUNTS a failure.
+  const fileForReview = (reason: string): Promise<void> => ai.escalate(escalate, reason);
 
   const result = await aiService.moderateForDelivery(content);
 
@@ -137,15 +143,15 @@ export async function moderateBeforePublish(
       content,
       async (recheck) => {
         if (recheck.verdict !== "unsafe") return;
-        try {
-          await applyUnsafe(recheck.reason);
-          logger.warn({ reason: recheck.reason }, "S7: content hidden by background re-check");
-        } catch (err) {
-          logger.error({ err }, "S7: re-check said unsafe but hiding it failed");
-          await fileForReview(`re-check judged unsafe (${recheck.reason}) but hiding it failed`);
-        }
+        // A failed hide THROWS: the queue catches it, logs it loudly, files it
+        // through `onAbandoned` below ("judged unsafe … but hiding it
+        // failed") and counts the filing if that fails too. Catching it here
+        // filed it a second way and kept it from the counter.
+        await applyUnsafe(recheck.reason);
+        logger.warn({ reason: recheck.reason }, "S7: content hidden by background re-check");
       },
-      (why) => fileForReview(`moderation could not complete (${why}); published without review`),
+      // The queue wraps this in aiService.escalate — let it throw.
+      (why) => escalate(why.startsWith("judged unsafe") ? why : `moderation could not complete (${why}); published without review`),
     );
     return { verdict: "unavailable" };
   }

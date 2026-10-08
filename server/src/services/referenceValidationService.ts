@@ -408,9 +408,6 @@ Use IPs in ranges: 172.16.x.x (corporate), 192.168.x.x (government), 169.254.x.x
 
   /**
    * Generate a ContentDraft for a server at a missing IP address.
-   */
-  /**
-   * Generate a ContentDraft for a server at a missing IP address.
    * Resolves network, type, faction, security, and gateway from the IP range.
    */
   private async generateServerDraft(

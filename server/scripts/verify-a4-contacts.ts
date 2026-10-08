@@ -57,6 +57,13 @@ async function main() {
       vals.map((v) => v.message).join(" | "));
     check("one row", (await prisma.contact.count({ where: { userId: me.id } })) === 1);
 
+    // By-name lookups are case-insensitive everywhere (UserRepository); this
+    // one stayed exact, so `contact add BOB` missed user "bob".
+    const shouty = await chat.addContact(me.id, them.username.toUpperCase());
+    check("add by a differently-cased name finds the user", shouty.ok === false && /already exists/.test(shouty.message), shouty.message);
+    const removedCase = await chat.removeContact(me.id, them.username.toUpperCase());
+    check("remove by a differently-cased name works", removedCase.ok === true, removedCase.message);
+    await chat.addContact(me.id, them.username);
     const removed = await chat.removeContact(me.id, them.username);
     check("POSITIVE: remove a real contact", removed.ok === true && (await prisma.contact.count({ where: { userId: me.id } })) === 0, removed.message);
     const again = await chat.removeContact(me.id, them.username);

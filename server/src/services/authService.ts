@@ -149,6 +149,22 @@ export class AuthService {
 
     // Create user with transaction
     const result = await prisma.$transaction(async (tx: any) => {
+      // The check above is a read, then `bcrypt.hash` (~100ms), then this
+      // create — and the column's @unique is case-SENSITIVE, so "Bob" and
+      // "bob" registering together both passed it (review, 2026-10-08).
+      // Serialise registrations per lowercased name with a transaction-scoped
+      // advisory lock, and re-check under it: the second one waits for the
+      // first to commit, then sees its row. ($executeRaw: Prisma cannot
+      // deserialize the `void` the lock function returns.)
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(lower(${username})))`;
+      const taken = await tx.user.findFirst({
+        where: { username: { equals: username, mode: "insensitive" } },
+        select: { id: true },
+      });
+      if (taken) {
+        throw new GameError("Username or email already in use", "CONFLICT", 409);
+      }
+
       // Create user
       const user = await tx.user.create({
         data: {

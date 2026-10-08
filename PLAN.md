@@ -3982,6 +3982,38 @@ Write them per-refactor, immediately before touching the code:
       - **OPEN Q7: which rule reveals the fragment commands?** The commands and `help <category>`
         use "has AIDA intel or a fragment discovery"; the full command listing in `help` hides them
         until `discoveryLevel >= 3`. Two rules for one question — pick one.
+- [x] **END-OF-PHASE /code-review — 2026-10-08, range `e62ef89..HEAD`** (everything since the last
+      confirmed review: the rest of Phase 7). 10 findings, all verified against source, all fixed,
+      each negative-controlled:
+      1. `contact add/remove` matched usernames exactly — missed when A4 unified the by-name rule.
+      2. Registration's case-insensitive check was check-then-create with `bcrypt` (~100ms) between;
+         two signups differing only by case both succeeded (proven: 201 + 201). Now a transaction-
+         scoped advisory lock on `lower(username)` and a re-check under it. Cleanup found TWO
+         case-duplicate fixture pairs in the dev DB — one from my own negative control of the I-4
+         check on 2026-10-07, never cleaned up. Both renamed; 0 case-duplicate usernames remain.
+      3. Bounty proof refused a hunter already inside when the bounty went up (reconnect does not
+         refresh `connectedAt`; `hack` writes no connection). Now: a LIVE connection with access,
+         or one opened since posting.
+      4. Inserting methods between a JSDoc and its function re-attached docs to the wrong symbols.
+         29 such cases across src (6 mine), fixed from git history (each orphan returned to the
+         declaration it sat on before the insertion); two were stale AND inverted (shape #8) and
+         were deleted. New harness `verify-doc-attachment.ts` guards the shape.
+      5. `brickFragment` updated by id alone — a failed `fragment.crack` could brick a fragment
+         stolen in the meantime (someone else's). Holder + status now in the WHERE.
+      6. Client: `DIALOG_COMMANDS[input]` on a plain object — `constructor` / `__proto__` froze the
+         terminal behind a dialog that never opened. Own-key check.
+      7. `moderationGate` wrapped every escalation in a log-only catch, so
+         `moderationEscalationsFailed` could never move on any real path. Filings now go through
+         `aiService.escalate` (public), which counts.
+      8. Read receipts: the store grew all session with MailDialog closed, and a receipt for a
+         message not in the open folder was cleared (lost). Logic moved to
+         `client/src/services/readReceipts.ts`; ids are held once and consumed only when applied.
+      9. `/var/log/security.log` (readable by any visitor to the server) printed the backdoor
+         installer's raw user id; risk 0 printed "unknown%". No attacker identity in the log now —
+         the owner still learns it from `backdoor scan`.
+      10. Client branch for the HTTP hack start served the server path A4 deleted — removed.
+      - Also: `verify-phase7-bus-hooks.ts` used the banned regex comment-strip idiom; switched to
+        `stripComments`. **24 more harnesses still use it** — converting them is the next commit.
 - [x] **A4 part 3, SERVICES — DONE 2026-10-08. `context.services` is gone.** It was 26 services
       behind an `[key: string]: any` index signature. Now `commandModules/deps.ts` holds one lazy,
       typed accessor per service (33, after folding in the 7 that modules resolved ad hoc through

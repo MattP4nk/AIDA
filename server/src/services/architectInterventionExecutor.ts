@@ -756,11 +756,6 @@ export class ArchitectInterventionExecutor {
   }
 
   /**
-   * reveal_faction — Make a hidden faction visible to all players.
-   *
-   * targetId: factionId
-   */
-  /**
    * Declare war between two factions.
    *
    * ORPHAN AUDIT 2026-09-24: `warfareService.declareWar` had **zero callers**,
@@ -856,6 +851,11 @@ export class ArchitectInterventionExecutor {
     } as InterventionResult;
   }
 
+  /**
+   * reveal_faction — Make a hidden faction visible to all players.
+   *
+   * targetId: factionId
+   */
   private async handleRevealFaction(
     intervention: ArchitectIntervention,
   ): Promise<InterventionResult> {

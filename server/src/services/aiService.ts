@@ -156,8 +156,13 @@ export class AIService {
    * Hand abandoned content to its escalation path, and never let that fail
    * quietly: if filing the review itself fails, the content is published,
    * unreviewed AND unreported, which is the one outcome nobody would find.
+   *
+   * PUBLIC so the moderation gate files through it too. The gate used to wrap
+   * `escalate` in its own try/catch that only logged — so an escalation
+   * failure never reached this catch, and `moderationEscalationsFailed`, the
+   * counter that exists to expose exactly that, stayed 0 on every real path.
    */
-  private async escalate(
+  public async escalate(
     onAbandoned: QueuedRequest["onAbandoned"],
     reason: string,
   ): Promise<void> {

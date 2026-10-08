@@ -133,20 +133,6 @@ export class ServerContentService {
   // Public API
   // ========================================================================
 
-  /**
-   * Provision a game server with thematic filesystem content.
-   *
-   * Call this after creating a GameServer row.  It will:
-   *   1. Initialize the base filesystem (root + common dirs) via FileService
-   *   2. Generate a content plan (AI if available, otherwise static)
-   *   3. Create all planned directories and files
-   *
-   * Safe to call multiple times — skips if the server already has content
-   * beyond the base filesystem scaffold.
-   *
-   * @param serverId  - The GameServer ID
-   * @param options   - Optional overrides
-   */
   /** Track which servers have had AI enrichment to avoid duplicate AI calls. */
   private aiEnrichedServers = new Set<string>();
 

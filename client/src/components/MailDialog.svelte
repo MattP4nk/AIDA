@@ -4,6 +4,8 @@
     import AsciiDialog from "./AsciiDialog.svelte";
     import { terminalService } from "../services/terminal";
     import { newMailNotifications, readReceipts } from "../services/socketStores";
+    import { applyReceipts } from "../services/readReceipts";
+    import { get } from "svelte/store";
     import { currentUser } from "../stores/gameState";
     import { notificationService } from "../services/notifications";
 
@@ -121,21 +123,9 @@
 
         // A recipient opened something we sent — patch it in place so the Sent
         // list's read marker updates live instead of only on the next refetch.
-        // Ids are consumed as they are applied, so the store cannot grow for
-        // the life of the session.
-        unsubscribeReceipts = readReceipts.subscribe((ids: string[]) => {
-            if (ids.length === 0) return;
-            let changed = false;
-            for (const id of ids) {
-                const msg = messages.find((m) => m.id === id);
-                if (msg && !msg.isRead) {
-                    msg.isRead = true;
-                    changed = true;
-                }
-            }
-            if (changed) messages = messages; // trigger reactivity
-            readReceipts.set([]);
-        });
+        // Only APPLIED ids are consumed (see services/readReceipts.ts): a
+        // receipt for a message not loaded right now waits for the next load.
+        unsubscribeReceipts = readReceipts.subscribe(() => applyPendingReceipts());
     });
 
     onDestroy(() => {
@@ -144,6 +134,14 @@
     });
 
     // ==================== API CALLS ====================
+
+    function applyPendingReceipts() {
+        const ids = get(readReceipts);
+        if (ids.length === 0) return;
+        const { changed, remaining } = applyReceipts(messages, ids);
+        if (changed) messages = messages; // trigger reactivity
+        if (remaining.length !== ids.length) readReceipts.set(remaining);
+    }
 
     async function loadMessages() {
         loading = true;
@@ -162,6 +160,7 @@
                         new Date(b.timestamp).getTime() -
                         new Date(a.timestamp).getTime(),
                 );
+                applyPendingReceipts();
             }
         } catch (err) {
             error = "Failed to load messages";

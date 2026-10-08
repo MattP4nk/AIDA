@@ -240,9 +240,9 @@ function wireServiceEvents(storyProgression: StoryProgressionService): void {
     }), "Backdoor-discovered notification error");
     // The victim's /var/log/security.log entry. dynamicContentService has had
     // this hook since it was written and nothing ever forwarded the event, so
-    // a discovered backdoor left no trace on the server it was found on.
-    // `Installed by` reveals nothing new: the owner's `backdoor scan` already
-    // prints the installer's username.
+    // a discovered backdoor left no trace on the server it was found on. The
+    // entry names NO installer: the log is readable by any visitor to that
+    // server (see the hook).
     defer(() => dynamicContent.processEvent("backdoor:discovered", data), "Dynamic content error on backdoor:discovered");
   });
 

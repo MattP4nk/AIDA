@@ -322,11 +322,6 @@ export class TutorialService {
   }
 
   /**
-   * Start the tutorial for a new player.
-   * Creates the first tutorial mission and sends the first Architect mail.
-   * No-ops if the tutorial has already been started.
-   */
-  /**
    * R12 — per-user in-flight guard.
    *
    * The `count()` below is a check-then-act: two concurrent calls (a
@@ -341,6 +336,11 @@ export class TutorialService {
    */
   private readonly startingTutorial = new Set<string>();
 
+  /**
+   * Start the tutorial for a new player.
+   * Creates the first tutorial mission and sends the first Architect mail.
+   * No-ops if the tutorial has already been started.
+   */
   public async startTutorial(userId: string): Promise<void> {
     if (this.startingTutorial.has(userId)) {
       this.logger.debug({ userId }, "Tutorial start already in flight, skipping");

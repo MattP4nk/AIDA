@@ -128,12 +128,19 @@ export class BountyService {
       select: { homeServerId: true, homeIp: true },
     });
     if (!target?.homeServerId) return { ok: false, error: "Target has no home server." };
+    // Proof of access: a LIVE connection with access (the hunter is inside
+    // right now), or one opened since the bounty was posted. Only old,
+    // closed access is refused — connection rows are never pruned, so
+    // "ever had access" let a hunter complete on claim. (Review: requiring
+    // `connectedAt >= createdAt` alone also refused a hunter already inside
+    // when the bounty went up — reconnecting does not refresh `connectedAt`
+    // on an active row, and `hack` writes no connection at all.)
     const access = await prisma.serverConnection.findFirst({
       where: {
         userId,
         serverId: target.homeServerId,
         accessLevel: { gt: 0 },
-        connectedAt: { gte: bounty.createdAt },
+        OR: [{ isActive: true }, { connectedAt: { gte: bounty.createdAt } }],
       },
       select: { id: true },
     });

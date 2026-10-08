@@ -400,17 +400,6 @@ export function helpPanelSections(
 // ═══════════════════════════════════════════════════════════════
 
 /**
- * Build a bordered list with a title.
- *
- * Example:
- *   ┌──────────────────────────────┐
- *   │  CONTACTS                    │
- *   ├──────────────────────────────┤
- *   │  • alice (online)            │
- *   │  • bob (offline)             │
- *   └──────────────────────────────┘
- */
-/**
  * Pack items into width-aware columns, filled column-major like a real `ls`.
  *
  * Boxes are right for output you read once (reports); they are wrong for output
@@ -452,6 +441,17 @@ export function columns(
   return lines;
 }
 
+/**
+ * Build a bordered list with a title.
+ *
+ * Example:
+ *   ┌──────────────────────────────┐
+ *   │  CONTACTS                    │
+ *   ├──────────────────────────────┤
+ *   │  • alice (online)            │
+ *   │  • bob (offline)             │
+ *   └──────────────────────────────┘
+ */
 export function list(
   title: string,
   items: string[],

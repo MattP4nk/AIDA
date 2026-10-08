@@ -128,11 +128,6 @@ interface UserLimiters {
 }
 
 /**
- * The longest limiter window (10s). An entry untouched for longer than this
- * has an empty sliding window by definition, so discarding it is a no-op —
- * which is what makes the sweep safe.
- */
-/**
  * How long a replayed notification may go unacknowledged before it is left
  * pending. Generous on purpose: the client's notification service is a dynamic
  * import, so a cold tab legitimately takes a moment, and the cost of waiting is
@@ -141,6 +136,11 @@ interface UserLimiters {
  */
 const NOTIFICATION_ACK_TIMEOUT_MS = 10_000;
 
+/**
+ * The longest limiter window (10s). An entry untouched for longer than this
+ * has an empty sliding window by definition, so discarding it is a no-op —
+ * which is what makes the sweep safe.
+ */
 const LIMITER_WINDOW_MS = 10_000;
 /** Ample margin over the window; the sweep is about memory, not precision. */
 const LIMITER_IDLE_MS = 60_000;
@@ -262,13 +262,6 @@ function clientIp(socket: Socket): string {
 }
 
 /**
- * S3 — force every live socket for a user to close, server-side.
- *
- * Exported because the ban/kick path needs it: emitting `force:disconnect` and
- * trusting the client to hang up is not enforcement, it is a suggestion. A
- * modified or simply old client keeps its socket and carries on.
- */
-/**
  * Update the role every live socket of a user carries.
  *
  * Socket commands authorize with `socket.data.user.role`, set once at socket
@@ -288,6 +281,13 @@ export function setSocketUserRole(io: SocketIOServer, userId: string, role: stri
   return n;
 }
 
+/**
+ * S3 — force every live socket for a user to close, server-side.
+ *
+ * Exported because the ban/kick path needs it: emitting `force:disconnect` and
+ * trusting the client to hang up is not enforcement, it is a suggestion. A
+ * modified or simply old client keeps its socket and carries on.
+ */
 export function disconnectUserSockets(io: SocketIOServer, userId: string): number {
   const ids = userSockets.get(userId);
   if (!ids || ids.size === 0) return 0;

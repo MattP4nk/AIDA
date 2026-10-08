@@ -836,9 +836,6 @@ export class NetworkTopologyService {
   }
 
   /**
-   * Check if a player has a stored access key for a server.
-   */
-  /**
    * Has this player discovered that server?
    *
    * REVIEW 2026-09-25: `tap` applied NO access check at all. A bare
@@ -894,6 +891,9 @@ export class NetworkTopologyService {
     return this.prisma.network.findUnique({ where: { id: networkId }, select: { name: true, zone: true } });
   }
 
+  /**
+   * Check if a player has a stored access key for a server.
+   */
   async playerHasAccessKey(userId: string, serverId: string): Promise<boolean> {
     const key = await this.prisma.serverAccessKey.findUnique({
       where: { userId_serverId: { userId, serverId } },

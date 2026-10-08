@@ -80,9 +80,9 @@ async function main() {
     bountyIds.push(b.id);
     return b;
   };
-  const access = async (userId: string, connectedAt: Date) => {
+  const access = async (userId: string, connectedAt: Date, isActive = false) => {
     const c = await prisma.serverConnection.create({
-      data: { userId, serverId: home!, isActive: false, accessLevel: 3, connectedAt },
+      data: { userId, serverId: home!, isActive, accessLevel: 3, connectedAt },
     });
     connIds.push(c.id);
   };
@@ -174,6 +174,26 @@ async function main() {
       await access(hunterB.id, new Date());
       const fresh = await bounties.complete(b.id, hunterB.id);
       check("POSITIVE: fresh access completes it", fresh.ok === true, fresh.error ?? "");
+    }
+
+    console.log("\nB-4b — a hunter ALREADY INSIDE when the bounty went up can complete");
+    {
+      // Review: reconnecting does not refresh `connectedAt` on an active row
+      // and `hack` writes no connection, so the hunter could never satisfy
+      // "connected since posting" without a full disconnect.
+      // ISOLATE: hunterA's earlier fixture connections (B-3) are timestamped
+      // after this bounty's posting time and would satisfy the proof on their
+      // own — the check would pass without the live-connection rule.
+      await prisma.serverConnection.deleteMany({ where: { id: { in: connIds } } });
+      connIds.length = 0;
+      const posted = new Date(Date.now() - 60_000);
+      const b = await mk({ createdAt: posted });
+      await bounties.claim(b.id, hunterA.id);
+      await access(hunterA.id, new Date(posted.getTime() - 3_600_000), true); // inside since before posting, still live
+      const proofRows = await prisma.serverConnection.count({ where: { userId: hunterA.id, serverId: home!, accessLevel: { gt: 0 } } });
+      check("PRECONDITION: the only access row is the live, pre-bounty one", proofRows === 1, `${proofRows}`);
+      const live = await bounties.complete(b.id, hunterA.id);
+      check("a live connection with access completes it", live.ok === true, live.error ?? "");
     }
 
     console.log("\nB-5 — an expired bounty cannot be claimed; nor your own");

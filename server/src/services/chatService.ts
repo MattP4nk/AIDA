@@ -14,11 +14,13 @@ import { prisma } from "../database/client";
 import { Server as SocketIOServer } from "socket.io";
 import { Logger } from "pino";
 import { injectable, inject } from "tsyringe";
-import { LOGGER, SOCKET_IO } from "../di/tokens";
+import { LOGGER, SOCKET_IO, USER_REPOSITORY } from "../di/tokens";
 import { generateAvatar, getCompactAvatar } from "../utils/asciiAvatars";
 import type { AvatarInfo } from "../../../shared/types";
 
 import type { MessageOperationResult, ChatContact } from "./messageService";
+import { getService } from "../di/resolve";
+import type { UserRepository } from "../repositories/userRepository";
 
 // ==================== CHAT SERVICE CLASS ====================
 
@@ -120,7 +122,9 @@ export class ChatService {
    * and nothing stopped a player adding themselves.
    */
   async addContact(userId: string, username: string): Promise<{ ok: boolean; message: string }> {
-    const target = await prisma.user.findFirst({ where: { username }, select: { id: true, username: true } });
+    // The one by-name rule (case-insensitive) — this stayed exact when msg,
+    // mail and admin moved to it, so `contact add bob` missed user "Bob".
+    const target = await getService<UserRepository>(USER_REPOSITORY).findByUsername(username);
     if (!target) return { ok: false, message: "User not found" };
     if (target.id === userId) return { ok: false, message: "You can't add yourself as a contact." };
     try {
@@ -136,7 +140,9 @@ export class ChatService {
 
   /** Remove a contact. Says so when there was nothing to remove. */
   async removeContact(userId: string, username: string): Promise<{ ok: boolean; message: string }> {
-    const target = await prisma.user.findFirst({ where: { username }, select: { id: true, username: true } });
+    // The one by-name rule (case-insensitive) — this stayed exact when msg,
+    // mail and admin moved to it, so `contact add bob` missed user "Bob".
+    const target = await getService<UserRepository>(USER_REPOSITORY).findByUsername(username);
     if (!target) return { ok: false, message: "User not found" };
     const gone = await prisma.contact.deleteMany({ where: { userId, contactUserId: target.id } });
     if (gone.count === 0) return { ok: false, message: `${target.username} is not in your contacts.` };

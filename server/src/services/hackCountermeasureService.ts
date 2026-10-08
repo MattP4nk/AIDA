@@ -275,10 +275,6 @@ export class HackCountermeasureService extends EventEmitter {
   }
 
   /**
-   * Alert the faction AI leader about a detected intrusion on their server.
-   * The AI can then generate counter-missions or post warnings.
-   */
-  /**
    * Let an NPC server owner respond to being breached, in character.
    *
    * Resolved lazily through the container so hackService keeps no hard
@@ -309,6 +305,10 @@ export class HackCountermeasureService extends EventEmitter {
     }
   }
 
+  /**
+   * Alert the faction AI leader about a detected intrusion on their server.
+   * The AI can then generate counter-missions or post warnings.
+   */
   private async alertFactionAI(
     factionId: string,
     serverId: string,

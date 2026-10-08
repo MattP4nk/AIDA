@@ -18,6 +18,7 @@
 import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
 import { readFileSync } from "node:fs";
+import { stripComments } from "./lib/strip-comments";
 
 const prisma = new PrismaClient();
 let pass = 0, fail = 0;
@@ -25,8 +26,8 @@ function check(n: string, ok: boolean, d = "") {
   if (ok) { pass++; console.log(`  [PASS] ${n}${d ? ` — ${d}` : ""}`); }
   else { fail++; console.log(`  [FAIL] ${n}${d ? ` — ${d}` : ""}`); }
 }
-const src = (rel: string) => readFileSync(new URL(rel, import.meta.url).pathname, "utf8")
-  .replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+// Parser-based: the regex idiom this used is not string-aware (CLAUDE.md §2).
+const src = (rel: string) => stripComments(readFileSync(new URL(rel, import.meta.url).pathname, "utf8"));
 
 async function main() {
   console.log("\n=== Dynamic-content hooks render what their emitters send ===");
@@ -58,6 +59,15 @@ async function main() {
     check("it prints the real type and risk, not its fallbacks",
       c.includes("Type: rootkit") && c.includes("Detection risk was: 42%") && !c.includes("standard") && !c.includes("unknown%"),
       c.split("\n").slice(1, 4).join(" | "));
+    // The log is readable by any visitor to that server (NPC and faction
+    // servers included): it must not name the attacker. It printed the raw
+    // installer user id.
+    check("it names no installer — neither the raw id nor a username",
+      !c.includes("u-1") && !/Installed by/i.test(c), c.split("\n").find((l) => /install|origin/i.test(l)) ?? "");
+    const zero = await run("backdoor:discovered",
+      { backdoorId: "b", serverId: "srv-x", installerId: "u-1", discoveredBy: "system", type: "rootkit", detectionRisk: 0 });
+    check("a detection risk of 0 prints as 0% (was: unknown%)",
+      String(zero.out[0]?.content ?? "").includes("Detection risk was: 0%"));
   }
 
   console.log("\nH-2 — honeypot:triggered -> the owner's hidden trap log (FILE honeypots)");

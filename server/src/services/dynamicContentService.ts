@@ -627,10 +627,18 @@ export class DynamicContentService {
       generator: (data) => {
         if (!data.serverId) return [];
         const timestamp = new Date().toISOString();
+        // No installer identity. This file lands on whatever server held the
+        // backdoor — NPC and faction servers included — and any visitor who
+        // can read /var/log can `cat` it. It printed `installerId`, a raw user
+        // id (the tap gate treats a raw attacker id as sensitive); a username
+        // would still name the attacker to everyone. The OWNER learns the
+        // installer from `backdoor scan`. `??`, not `||`: a risk of 0 printed
+        // as "unknown%".
+        const risk = typeof data.detectionRisk === "number" ? `${data.detectionRisk}%` : "unknown";
         const alert = `[${timestamp}] CRITICAL: Unauthorized backdoor detected and neutralized.\n` +
           `Type: ${data.type || "standard"}\n` +
-          `Installed by: ${data.installerId || "unknown"}\n` +
-          `Detection risk was: ${data.detectionRisk || "unknown"}%\n` +
+          `Origin: untraced\n` +
+          `Detection risk was: ${risk}\n` +
           `Status: REMOVED. Full security audit recommended.`;
 
         return [{

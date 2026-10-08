@@ -215,7 +215,7 @@ export function getHackCooldown(hackingSkill: number): number {
   );
 }
 
-/**
+/*
  * Detection bounds, as FRACTIONS (0.05 = 5%) — the unit every consumer uses.
  *
  * These were `*_PCT` integers (5, 30, 8) with zero consumers, while the code
@@ -385,7 +385,7 @@ export const ARCHITECT_EVAL_INTERVAL_MS = 2 * 60 * 60 * 1000; // 2 hours
 /** Minimum unprocessed events before Architect evaluates. */
 export const ARCHITECT_MIN_EVENTS = 5;
 
-/** AI persona action limits. */
+// AI persona action limits.
 /**
  * Persona scheduler cadence — DEFAULTS. The env vars AI_MAX_ACTIONS_PER_DAY,
  * AI_FACTION_LEADER_INTERVAL_HOURS and AI_INTERVAL_HOURS override them (see

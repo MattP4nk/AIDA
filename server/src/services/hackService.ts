@@ -1473,9 +1473,6 @@ class HackService extends EventEmitter {
   // ==================== COUNTERMEASURES ====================
 
   /**
-   * Log hack attempt to database
-   */
-  /**
    * A hack the attacker abandoned during prep, which the target noticed:
    * logged as a failed, detected probe. A4: this was a direct hackLog.create
    * in hackCommands' onCancel.
@@ -1500,6 +1497,9 @@ class HackService extends EventEmitter {
     });
   }
 
+  /**
+   * Log hack attempt to database
+   */
   private async logHackAttempt(
     attempt: HackAttempt,
     result: HackResult,

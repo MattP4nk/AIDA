@@ -255,11 +255,6 @@ class ServerService {
     })()) as ServerDetails;
   }
 
-  /**
-   * Get server by ID
-   * @param serverId - Server ID
-   * @returns Server details
-   */
   /** Id, name, owner and IP of the server at an address — no state, no cache. */
   public async findBasicByIp(ipAddress: string) {
     return this.prisma.gameServer.findUnique({
@@ -334,6 +329,11 @@ class ServerService {
     });
   }
 
+  /**
+   * Get server by ID
+   * @param serverId - Server ID
+   * @returns Server details
+   */
   public async getServer(serverId: string): Promise<ServerDetails | null> {
     return (await safeExecute({
       fn: async () => {
@@ -429,12 +429,6 @@ class ServerService {
     })()) ?? null;
   }
 
-  /**
-   * Update server properties
-   * @param serverId - Server ID
-   * @param updates - Partial server data to update
-   * @returns Updated server details
-   */
   /**
    * Update a server. THE one path — the admin route delegates here.
    *
@@ -1381,11 +1375,6 @@ class ServerService {
   // ==================== PRIVATE HELPER METHODS ====================
 
   /**
-   * Get count of active connections to a server
-   * @param serverId - Server ID
-   * @returns Connection count
-   */
-  /**
    * D10 — make `GameServer.currentConnections` derived state with ONE writer.
    *
    * It previously had two writers running on the same `connect`, with
@@ -1420,6 +1409,11 @@ class ServerService {
     })();
   }
 
+  /**
+   * Get count of active connections to a server
+   * @param serverId - Server ID
+   * @returns Connection count
+   */
   private async getActiveConnectionCount(serverId: string): Promise<number> {
     return (await safeExecute({
       fn: () => this.prisma.serverConnection.count({

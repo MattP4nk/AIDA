@@ -5,6 +5,7 @@ import { apiClient } from "./api";
 import { terminalTabsStore } from "./terminalTabs";
 import { sound } from "./sound";
 import { ReservedPID } from "../../../shared/types";
+import { addReceipt } from "./readReceipts";
 
 // Socket connection configuration — override via VITE_SOCKET_URL env var
 const SOCKET_URL =
@@ -455,7 +456,7 @@ class SocketService {
     // refreshed it by refetching, so a sender watching the folder saw nothing.
     this.on("message:read_receipt", (data: any) => {
       if (data?.messageId) {
-        readReceipts.update((ids) => [...ids, data.messageId]);
+        readReceipts.update((ids) => addReceipt(ids, data.messageId));
       }
     });
 
