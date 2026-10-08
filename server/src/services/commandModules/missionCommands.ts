@@ -788,7 +788,14 @@ export class MissionCommandsModule implements CommandModule {
       if (!arcId) {
         return errorResult("Usage: story abandon <arc_id>");
       }
-      const result = await storyService.abandonStoryArc(context.userId, arcId);
+      // The listing prints a 16-char prefix; resolve it among YOUR arcs.
+      const found = await storyService.findPlayerArc(context.userId, arcId);
+      if (!found.ok) {
+        return errorResult(found.reason === "ambiguous"
+          ? `Ambiguous story arc id: ${arcId}. Use more characters.`
+          : `Story arc not found: ${arcId}`);
+      }
+      const result = await storyService.abandonStoryArc(context.userId, found.row.id);
       if (!result.success) {
         return errorResult(result.error || "Failed to abandon story arc.");
       }
@@ -797,11 +804,14 @@ export class MissionCommandsModule implements CommandModule {
 
     // View story arc details
     const arcId = action;
-    const arc = await storyService.getStoryArc(arcId);
-
-    if (!arc) {
-      return errorResult(`Story arc not found: ${arcId}`);
+    // Only your own arcs, by full id or the prefix the listing shows.
+    const found = await storyService.findPlayerArc(context.userId, arcId);
+    if (!found.ok) {
+      return errorResult(found.reason === "ambiguous"
+        ? `Ambiguous story arc id: ${arcId}. Use more characters.`
+        : `Story arc not found: ${arcId}`);
     }
+    const arc = found.row;
 
     const steps = arc.steps as any[];
     const W = 58;

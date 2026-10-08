@@ -28,6 +28,8 @@ import type { AIService } from "./aiService";
 import type { ServerContentService } from "./serverContentService";
 import { validateStoryArcPlan, validateMissionOutput } from "../utils/aiOutputValidator";
 import { fallbackStoryStep } from "../utils/aiFallbacks";
+import type { Prisma } from "@prisma/client";
+import { resolveIdOrPrefix, type IdResolution } from "../utils/idPrefix";
 
 // ═══════════════════════════════════════════════════════════════════
 // Types
@@ -779,9 +781,27 @@ Create an adapted follow-up step that accounts for the failure. Respond with JSO
     });
   }
 
-  async getStoryArc(arcId: string): Promise<any> {
-    return db.client.storyArc.findUnique({
-      where: { id: arcId },
+  /**
+   * One of the PLAYER'S arcs, by full id or the 16-char prefix `story` lists.
+   *
+   * A4: this was `getStoryArc(arcId)` — any arc, anyone's, by full id only.
+   * The listing prints a prefix, so no arc could be opened from what the
+   * player was shown; and with a full id, `story <id>` showed another
+   * player's arc (only abandon checked `assignedTo`). Scoping the lookup to
+   * the caller's own arcs fixes both.
+   */
+  async findPlayerArc(userId: string, idOrPrefix: string): Promise<IdResolution<any>> {
+    return resolveIdOrPrefix(
+      idOrPrefix,
+      (id) => this.getPlayerArcWhere({ id, assignedTo: userId }).then((r) => r[0] ?? null),
+      (prefix) => this.getPlayerArcWhere({ id: { startsWith: prefix }, assignedTo: userId }, 2),
+    );
+  }
+
+  private async getPlayerArcWhere(where: Prisma.StoryArcWhereInput, take = 1): Promise<any[]> {
+    return db.client.storyArc.findMany({
+      where,
+      take,
       include: {
         faction: { select: { name: true } },
         persona: { select: { name: true } },

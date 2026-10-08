@@ -4010,10 +4010,26 @@ Write them per-refactor, immediately before touching the code:
       - Harness: `verify-phase7-a9-two-paths.ts` compared "background === fallback"; with one path
         it now pins "the path that runs emits exactly the builder's report" (negative-controlled),
         stubbing through the DI container instead of `ctx.services`.
-      - **The truncated-ID class (next commit):** listings print an id form the consuming command
-        cannot read — story arcs (16-char prefix vs `findUnique`), admin mail reports (8 chars vs
-        `findUnique`), faction missions (LAST 4 chars vs a PREFIX resolver). Same shape as bounties.
-        Also `story <id>` shows any player's arc (only abandon checks ownership).
+      - **The truncated-ID class — FIXED 2026-10-08.** Listings print an id form the consuming
+        command could not read: story arcs (16-char prefix vs `findUnique`), admin mail reports
+        (8 chars vs `findUnique`) — same shape as bounties. One rule now, `utils/idPrefix.ts`
+        (`resolveIdOrPrefix`: exact id, else a unique prefix of 8+), used by bounties, story arcs
+        and reports. `story <id>` showed ANY player's arc by full id (only abandon checked
+        ownership); `storyMissionService.findPlayerArc` resolves among the caller's own arcs only.
+        `admin resolve mail` audits the resolved full id, not what was typed.
+        `verify-a4-display-ids.ts` (end to end over a socket; ambiguity tested on the helper with
+        stubs — through the DB it needs two cuids sharing 8+ chars, which consecutive fixtures
+        often do not, so it mostly skipped). Each fix negative-controlled.
+      - **OPEN Q8: `faction missions` lists missions nobody can accept.** It shows global `Mission`
+        rows (`factionId`, `status: available`) and says "Use 'mission accept <id>'" — with the LAST
+        4 chars of the id, while the accept resolver matches PREFIXES. But the id format is the
+        smaller problem: `acceptMission` requires a `PlayerMission` offer, and the only code that
+        offers an existing available mission to a player, `missionService.assignMission`, has ZERO
+        callers. And per-player generated offers are themselves `status: available, assignedTo:
+        null` rows — so any that carried a `factionId` would be listed to the whole faction. The dev
+        DB has 0 such rows today, so it is latent. Decide: wire `assignMission` up as the claim for
+        faction missions (it marks the row assigned, so two players cannot hold one — consistent
+        with "offers are per-player"), or drop the listing. Not half-fixed meanwhile.
       - **Found in passing, NOT fixed (named so it is not lost):** `prisma/npcOwnership.ts` merges a
         duplicate NPC by moving servers, sent messages and forum memberships, then `user.delete`.
         Five required User FKs have no `onDelete` and so default to RESTRICT — `Contact.contact`

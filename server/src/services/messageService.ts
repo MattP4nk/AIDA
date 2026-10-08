@@ -42,6 +42,7 @@ import type { AvatarInfo } from "../../../shared/types";
 import { moderateBeforePublish } from "../utils/moderationGate";
 import { getSystemUserId } from "../utils/systemUser";
 import { activeMuteMessage } from "../utils/mute";
+import { resolveIdOrPrefix } from "../utils/idPrefix";
 
 // ==================== TYPES ====================
 
@@ -1539,10 +1540,16 @@ export class MessageService {
     reportId: string,
     action: "dismiss" | "action",
   ): Promise<{ success: boolean; message: string; report?: any }> {
-    const report = await prisma.messageReport.findUnique({ where: { id: reportId } });
-    if (!report) {
-      return { success: false, message: "Report not found" };
+    // `admin reports` prints 8 chars of the id; accept what it shows.
+    const found = await resolveIdOrPrefix(
+      reportId,
+      (id) => prisma.messageReport.findUnique({ where: { id } }),
+      (prefix) => prisma.messageReport.findMany({ where: { id: { startsWith: prefix } }, take: 2 }),
+    );
+    if (!found.ok) {
+      return { success: false, message: found.reason === "ambiguous" ? "Ambiguous report id — use more characters" : "Report not found" };
     }
+    const report = found.row;
     if (action === "action" && report.messageId) {
       await prisma.message.update({
         where: { id: report.messageId },
@@ -1550,7 +1557,7 @@ export class MessageService {
       });
     }
     const updated = await prisma.messageReport.update({
-      where: { id: reportId },
+      where: { id: report.id },
       data: {
         status: action === "action" ? "actioned" : "dismissed",
         resolvedAt: new Date(),

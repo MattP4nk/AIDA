@@ -37,13 +37,12 @@ import {
 } from "../di/tokens";
 import { getService } from "../di/resolve";
 import { notifyUser } from "../utils/notify";
+import { resolveIdOrPrefix } from "../utils/idPrefix";
 import type PlayerProgressRepository from "../repositories/playerProgressRepository";
 import type { FactionService } from "./factionService";
 import type FileService from "./fileService";
 import type { MissionIntegrationService } from "./missionIntegration";
 
-/** The shortest id prefix accepted — the listing prints 16. */
-const MIN_PREFIX = 8;
 
 export type Resolved = { ok: true; bounty: Bounty } | { ok: false; error: string };
 export type ClaimResult = { ok: true; bounty: Bounty; targetHomeIp: string | null } | { ok: false; error: string };
@@ -75,14 +74,15 @@ export class BountyService {
 
   /** Full id, or the unambiguous prefix `bounties` displays. */
   async resolve(idOrPrefix: string): Promise<Resolved> {
-    const exact = await prisma.bounty.findUnique({ where: { id: idOrPrefix } });
-    if (exact) return { ok: true, bounty: exact };
-    if (idOrPrefix.length >= MIN_PREFIX) {
-      const matches = await prisma.bounty.findMany({ where: { id: { startsWith: idOrPrefix } }, take: 2 });
-      if (matches.length === 1 && matches[0]) return { ok: true, bounty: matches[0] };
-      if (matches.length > 1) return { ok: false, error: `Ambiguous bounty id: ${idOrPrefix}. Use more characters.` };
-    }
-    return { ok: false, error: `Bounty not found: ${idOrPrefix}` };
+    const r = await resolveIdOrPrefix(
+      idOrPrefix,
+      (id) => prisma.bounty.findUnique({ where: { id } }),
+      (prefix) => prisma.bounty.findMany({ where: { id: { startsWith: prefix } }, take: 2 }),
+    );
+    if (r.ok) return { ok: true, bounty: r.row };
+    return { ok: false, error: r.reason === "ambiguous"
+      ? `Ambiguous bounty id: ${idOrPrefix}. Use more characters.`
+      : `Bounty not found: ${idOrPrefix}` };
   }
 
   async claim(bountyId: string, userId: string): Promise<ClaimResult> {

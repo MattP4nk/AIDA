@@ -676,7 +676,8 @@ export class AdminCommandsModule implements CommandModule {
       return errorResult(result.message);
     }
 
-    await this.auditAction(context, "admin_resolve_report", "message_report", reportId, {
+    // The FULL id: the admin may have typed the 8-char prefix the listing shows.
+    await this.auditAction(context, "admin_resolve_report", "message_report", result.report?.id ?? reportId, {
       action,
     });
 
