@@ -38,6 +38,7 @@ import {
   multiPanel,
   render,
 } from "./asciiBox";
+import { inventory, shop } from "./deps";
 
 export class ShopCommandsModule implements CommandModule {
   public category = "shop";
@@ -166,7 +167,7 @@ export class ShopCommandsModule implements CommandModule {
     _command: Command,
     context: CommandContext,
   ): Promise<CommandResult> {
-    const shopService = context.services.shopService;
+    const shopService = shop();
     const inventory = await shopService.getPlayerInventory(context.userId);
     const bonuses = await shopService.getPlayerBonuses(context.userId);
 
@@ -247,7 +248,7 @@ export class ShopCommandsModule implements CommandModule {
     command: Command,
     context: CommandContext,
   ): Promise<CommandResult> {
-    const shopService = context.services.shopService;
+    const shopService = shop();
     const progress = await context.playerProgress.get(context.userId);
 
     if (!progress) {
@@ -357,7 +358,7 @@ export class ShopCommandsModule implements CommandModule {
       );
     }
 
-    const shopService = context.services.shopService;
+    const shopService = shop();
     const result = await shopService.purchaseItem(
       context.userId,
       itemId,
@@ -389,7 +390,7 @@ export class ShopCommandsModule implements CommandModule {
       );
     }
 
-    const shopService = context.services.shopService;
+    const shopService = shop();
     const result = await shopService.sellItem(context.userId, itemId, quantity);
 
     return {
@@ -410,7 +411,7 @@ export class ShopCommandsModule implements CommandModule {
       return errorResult("Usage: use <item_id>");
     }
 
-    const shopService = context.services.shopService;
+    const shopService = shop();
     const result = await shopService.useItem(context.userId, itemId);
 
     return {
@@ -431,8 +432,8 @@ export class ShopCommandsModule implements CommandModule {
       return errorResult("Usage: equip <item_id>\nExample: equip port_scanner");
     }
 
-    const shopService = context.services.shopService;
-    const inventoryService = context.services.inventoryService;
+    const shopService = shop();
+    const inventoryService = inventory();
 
     // Get the item from catalog
     const item = shopService.getItem(itemId);
@@ -465,7 +466,7 @@ export class ShopCommandsModule implements CommandModule {
       return errorResult("Usage: unequip <slot|item_id>\nSlots: TOOL, SOFTWARE, EXPLOIT, DEFENSE, UPGRADE");
     }
 
-    const inventoryService = context.services.inventoryService;
+    const inventoryService = inventory();
 
     // Check if arg is a valid slot name
     const validSlots = ["TOOL", "SOFTWARE", "EXPLOIT", "DEFENSE", "UPGRADE"];
@@ -486,8 +487,8 @@ export class ShopCommandsModule implements CommandModule {
     _command: Command,
     context: CommandContext,
   ): Promise<CommandResult> {
-    const shopService = context.services.shopService;
-    const inventoryService = context.services.inventoryService;
+    const shopService = shop();
+    const inventoryService = inventory();
 
     // Get equipped items
     const equipment = await inventoryService.getEquipment(context.userId);

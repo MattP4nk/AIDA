@@ -2,6 +2,8 @@ import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
 import { successResult, errorResult } from "./helpers";
 import { ExpressionEngine } from "../../utils/expressionEngine";
+import { missionIntegration } from "./deps";
+import logger from "../../logger";
 
 export class MathCommandsModule implements CommandModule {
   public category = "math";
@@ -542,8 +544,8 @@ export class MathCommandsModule implements CommandModule {
     }
 
     // Fire mission integration hook on successful decode
-    if (decoded !== null && context.services.missionIntegrationService) {
-      context.services.missionIntegrationService.onDecodeSuccess(context.userId, method, decoded).catch(() => {});
+    if (decoded !== null && missionIntegration()) {
+      missionIntegration().onDecodeSuccess(context.userId, method, decoded).catch((err) => logger.warn({ err }, "mathCommands.handleDecode: onDecodeSuccess failed"));
     }
 
     return successResult(`Decoded: ${decoded}`);
@@ -622,9 +624,7 @@ export class MathCommandsModule implements CommandModule {
     ];
 
     // Fire mission integration hook
-    if (context.services.missionIntegrationService) {
-      context.services.missionIntegrationService.onSubnetUsed(context.userId).catch(() => {});
-    }
+    missionIntegration().onSubnetUsed(context.userId).catch((err) => logger.warn({ err }, "mathCommands.handleSubnet: onSubnetUsed failed"));
 
     return successResult(lines.join("\n"));
   }

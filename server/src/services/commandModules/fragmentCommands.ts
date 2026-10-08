@@ -1,12 +1,6 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
 import { successResult, errorResult } from "./helpers";
-import type { AIService } from "../aiService";
-import { AI_SERVICE, KEY_FRAGMENT_SERVICE, SERVER_SERVICE, USER_REPOSITORY } from "../../di/tokens";
-import { getService as resolveService } from "../../di/resolve";
-import type { KeyFragmentService } from "../keyFragmentService";
-import type ServerService from "../serverService";
-import type { UserRepository } from "../../repositories/userRepository";
 import {
   boxTop,
   boxBottom,
@@ -15,11 +9,10 @@ import {
   boxCenter,
   render,
 } from "./asciiBox";
+import { ai, fragments, servers, users } from "./deps";
+import logger from "../../logger";
 
 
-const fragments = () => resolveService<KeyFragmentService>(KEY_FRAGMENT_SERVICE);
-const servers = () => resolveService<ServerService>(SERVER_SERVICE);
-const users = () => resolveService<UserRepository>(USER_REPOSITORY);
 export class FragmentCommandsModule implements CommandModule {
   public category = "fragment";
   public commands: Set<string> = new Set([
@@ -123,11 +116,6 @@ export class FragmentCommandsModule implements CommandModule {
     command: Command,
     context: CommandContext,
   ): Promise<CommandResult> {
-    const keyFragmentService = context.services.keyFragmentService;
-    if (!keyFragmentService) {
-      return errorResult("Key fragment service unavailable.");
-    }
-
     const subcommand = command.args?.[0]?.toLowerCase();
 
     if (subcommand === "give") {
@@ -145,10 +133,7 @@ export class FragmentCommandsModule implements CommandModule {
     _command: Command,
     context: CommandContext,
   ): Promise<CommandResult> {
-    const keyFragmentService = context.services.keyFragmentService;
-    if (!keyFragmentService) {
-      return errorResult("Key fragment service unavailable.");
-    }
+    const keyFragmentService = fragments();
 
     const progress = await keyFragmentService.getPlayerFragments(
       context.userId,
@@ -249,10 +234,7 @@ export class FragmentCommandsModule implements CommandModule {
     command: Command,
     context: CommandContext,
   ): Promise<CommandResult> {
-    const keyFragmentService = context.services.keyFragmentService;
-    if (!keyFragmentService) {
-      return errorResult("Key fragment service unavailable.");
-    }
+    const keyFragmentService = fragments();
 
     const type = command.args?.[1]?.toLowerCase();
     const num = command.args?.[2];
@@ -313,10 +295,7 @@ export class FragmentCommandsModule implements CommandModule {
     command: Command,
     context: CommandContext,
   ): Promise<CommandResult> {
-    const keyFragmentService = context.services.keyFragmentService;
-    if (!keyFragmentService) {
-      return errorResult("Key fragment service unavailable.");
-    }
+    const keyFragmentService = fragments();
 
     // ── D10: bind to the server the player is ACTUALLY standing on ──────────
     // This used to be `findFirst({ userId, isActive: true })` with no
@@ -459,10 +438,7 @@ export class FragmentCommandsModule implements CommandModule {
     command: Command,
     context: CommandContext,
   ): Promise<CommandResult> {
-    const keyFragmentService = context.services.keyFragmentService;
-    if (!keyFragmentService) {
-      return errorResult("Key fragment service unavailable.");
-    }
+    const keyFragmentService = fragments();
 
     const progress = await keyFragmentService.getPlayerFragments(
       context.userId,
@@ -629,8 +605,7 @@ export class FragmentCommandsModule implements CommandModule {
     if (!fileNode.isProtected) return errorResult(`${fileName} is not protected.`);
 
     // Check player has fragments
-    const fragmentService = context.services.keyFragmentService;
-    if (!fragmentService) return errorResult("Fragment system unavailable.");
+    const fragmentService = fragments();
 
     const heldFragments = await fragments().heldActiveFragments(context.userId);
 
@@ -677,7 +652,7 @@ export class FragmentCommandsModule implements CommandModule {
         // success was an unbounded skill-farming loop. The repository clamps to
         // 0..100 inside the UPDATE.
         await context.playerProgress.addSkill(context.userId, "hacking", 20);
-      } catch { /* non-critical */ }
+      } catch (err) { logger.warn({ err }, "fragmentCommands.handleFragmentCrack: non-critical step failed"); }
 
       return {
         success: true,
@@ -778,8 +753,7 @@ export class FragmentCommandsModule implements CommandModule {
 
     // Use AI to generate AIDA's response if available
     try {
-      const { getService } = await import("../../di/container");
-      const aiService = getService<AIService>(AI_SERVICE);
+      const aiService = ai();
 
       const systemPrompt =
         "You are AIDA, a fragmented AI consciousness in a cyberpunk world. " +
@@ -805,7 +779,10 @@ export class FragmentCommandsModule implements CommandModule {
           timestamp: new Date(),
         };
       }
-    } catch { /* AI unavailable — use fallback */ }
+    } catch (err) {
+      // AI unavailable — the static response below is served instead.
+      logger.warn({ err }, "key.contact: AI reply failed; serving a static response");
+    }
 
     // Fallback: static response
     const fallbacks = [

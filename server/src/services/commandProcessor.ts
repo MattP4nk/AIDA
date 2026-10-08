@@ -59,25 +59,6 @@ import type ProgressService from "./progressService";
 import type GameStateManager from "./gameStateManager";
 import type PlayerProgressRepository from "../repositories/playerProgressRepository";
 import type FileService from "./fileService";
-import type ShopService from "./shopService";
-import type MissionService from "./missionService";
-import type MissionGeneratorService from "./missionGenerator";
-import type ServerService from "./serverService";
-import type MemoryService from "./memoryService";
-import type HackService from "./hackService";
-import type MessageService from "./messageService";
-import type { ChatService } from "./chatService";
-import type { MessageEncryptionService } from "./messageEncryptionService";
-import type ForumService from "./forumService";
-import type { FactionService } from "./factionService";
-import type InventoryService from "./inventoryService";
-import type PlayerPresenceService from "./playerPresenceService";
-import type BackdoorService from "./backdoorService";
-import type TraceService from "./traceService";
-import type { FactionKnowledgeService } from "./factionKnowledgeService";
-import type { NetworkTopologyService } from "./networkTopologyService";
-import type MissionIntegrationService from "./missionIntegration";
-import type { StoryMissionService } from "./storyMissionService";
 import type { PlayerProgress } from "@prisma/client";
 
 /**
@@ -152,16 +133,6 @@ class CommandProcessor {
     );
   }
 
-  /** Resolve a service from DI, returning undefined on failure instead of throwing. */
-  private resolveService<T>(token: string): T | undefined {
-    try {
-      return getService<T>(token);
-    } catch {
-      this.logger.warn({ token }, "Service not available");
-      return undefined;
-    }
-  }
-
   /*
    * A4: the 60-second service cache is GONE. It bought nothing and cost
    * correctness.
@@ -179,84 +150,12 @@ class CommandProcessor {
    */
 
   private async buildCommandContext(userId: string, terminalCols?: number, userRole?: string): Promise<CommandContext> {
-    const fileService = this.resolveService<FileService>(TOKENS.FILE_SERVICE)!;
-    const playerProgress = this.resolveService<PlayerProgressRepository>(
-      TOKENS.PLAYER_PROGRESS_REPOSITORY,
-    )!;
-    const shopService = this.resolveService<ShopService>(TOKENS.SHOP_SERVICE)!;
-    const missionService = this.resolveService<MissionService>(
-      TOKENS.MISSION_SERVICE,
-    )!;
-    const missionGenerator = this.resolveService<MissionGeneratorService>(
-      TOKENS.MISSION_GENERATOR_SERVICE,
-    )!;
-    const serverService = this.resolveService<ServerService>(
-      TOKENS.SERVER_SERVICE,
-    )!;
-    const memoryService = this.resolveService<MemoryService>(
-      TOKENS.MEMORY_SERVICE,
-    )!;
-    const hackService = this.resolveService<HackService>(TOKENS.HACK_SERVICE)!;
-    const messageService = this.resolveService<MessageService>(
-      TOKENS.MESSAGE_SERVICE,
-    )!;
-    const forumService = this.resolveService<ForumService>(
-      TOKENS.FORUM_SERVICE,
-    )!;
-    const factionService = this.resolveService<FactionService>(
-      TOKENS.FACTION_SERVICE,
-    )!;
-    const inventoryService = this.resolveService<InventoryService>(
-      TOKENS.INVENTORY_SERVICE,
-    )!;
-    const playerPresenceService = this.resolveService<PlayerPresenceService>(
-      TOKENS.PLAYER_PRESENCE_SERVICE,
-    );
-    const backdoorService = this.resolveService<BackdoorService>(
-      TOKENS.BACKDOOR_SERVICE,
-    )!;
-    const traceService = this.resolveService<TraceService>(
-      TOKENS.TRACE_SERVICE,
-    )!;
-    const factionKnowledgeService =
-      this.resolveService<FactionKnowledgeService>(
-        TOKENS.FACTION_KNOWLEDGE_SERVICE,
-      );
-    const networkTopologyService = this.resolveService<NetworkTopologyService>(
-      TOKENS.NETWORK_TOPOLOGY_SERVICE,
-    );
-    const missionIntegrationService =
-      this.resolveService<MissionIntegrationService>(
-        TOKENS.MISSION_INTEGRATION_SERVICE,
-      );
-    const storyMissionService = this.resolveService<StoryMissionService>(
-      TOKENS.STORY_MISSION_SERVICE,
-    );
-    const leaderboardService = this.resolveService<
-      import("./leaderboardService").LeaderboardService
-    >(TOKENS.LEADERBOARD_SERVICE);
-    const achievementService = this.resolveService<
-      import("./achievementService").AchievementService
-    >(TOKENS.ACHIEVEMENT_SERVICE);
-    const keyFragmentService = this.resolveService<
-      import("./keyFragmentService").KeyFragmentService
-    >(TOKENS.KEY_FRAGMENT_SERVICE);
-    const darknetDungeonService = this.resolveService<
-      import("./darknetDungeonService").DarkNetDungeonService
-    >(TOKENS.DARKNET_DUNGEON_SERVICE);
-    const darknetDiscoveryService = this.resolveService<
-      import("./darknetDiscoveryService").default
-    >("DarkNetDiscoveryService");
-    const connectionChallengeService = this.resolveService<
-      import("./connectionChallengeService").ConnectionChallengeService
-    >(TOKENS.CONNECTION_CHALLENGE_SERVICE);
-    const chatService = this.resolveService<ChatService>(
-      TOKENS.CHAT_SERVICE,
-    );
-    const messageEncryptionService = this.resolveService<MessageEncryptionService>(
-      TOKENS.MESSAGE_ENCRYPTION_SERVICE,
-    );
-
+    // A4: getService, not a swallow-to-undefined helper and a `!`. The
+    // command's services are no longer resolved here at all — each module
+    // resolves what it uses, lazily, from ./commandModules/deps — and a
+    // failure throws at the command that needed the service.
+    const fileService = getService<FileService>(TOKENS.FILE_SERVICE);
+    const playerProgress = getService<PlayerProgressRepository>(TOKENS.PLAYER_PROGRESS_REPOSITORY);
     return {
       userId,
       role: userRole ?? "player",
@@ -267,33 +166,6 @@ class CommandProcessor {
       gameStateManager: this.gameStateManager,
       modules: this.modules,
       playerProgress,
-      services: {
-        shopService,
-        missionService,
-        missionGenerator,
-        ...(playerPresenceService ? { playerPresenceService } : {}),
-        serverService,
-        memoryService,
-        hackService,
-        messageService,
-        forumService,
-        factionService,
-        inventoryService,
-        backdoorService,
-        traceService,
-        ...(factionKnowledgeService ? { factionKnowledgeService } : {}),
-        ...(networkTopologyService ? { networkTopologyService } : {}),
-        ...(missionIntegrationService ? { missionIntegrationService } : {}),
-        ...(storyMissionService ? { storyMissionService } : {}),
-        ...(leaderboardService ? { leaderboardService } : {}),
-        ...(achievementService ? { achievementService } : {}),
-        ...(keyFragmentService ? { keyFragmentService } : {}),
-        ...(darknetDungeonService ? { darknetDungeonService } : {}),
-        ...(darknetDiscoveryService ? { darknetDiscoveryService } : {}),
-        ...(connectionChallengeService ? { connectionChallengeService } : {}),
-        ...(chatService ? { chatService } : {}),
-        ...(messageEncryptionService ? { messageEncryptionService } : {}),
-      },
     };
   }
 
@@ -649,10 +521,11 @@ class CommandProcessor {
       }
 
       // Increment command counter (fire-and-forget)
-      this.resolveService<PlayerProgressRepository>(
-        TOKENS.PLAYER_PROGRESS_REPOSITORY,
-      )
-        ?.incrementCounter(userId, "commandsExecuted")
+      Promise.resolve()
+        .then(() =>
+          getService<PlayerProgressRepository>(TOKENS.PLAYER_PROGRESS_REPOSITORY)
+            .incrementCounter(userId, "commandsExecuted"),
+        )
         .catch((err) => {
           this.logger.debug({ err, userId }, "Failed to increment commandsExecuted");
         });

@@ -14,12 +14,9 @@ import {
   fullyMeetsSkillRequirement,
 } from "./skillRequirements";
 import { successResult, errorResult } from "./helpers";
-import { getService as resolveService } from "../../di/resolve";
-import { KEY_FRAGMENT_SERVICE } from "../../di/tokens";
-import type { KeyFragmentService } from "../keyFragmentService";
+import { fragments } from "./deps";
 
 
-const fragments = () => resolveService<KeyFragmentService>(KEY_FRAGMENT_SERVICE);
 export class HelpCommandsModule implements CommandModule {
   public category = "help";
   public commands: Set<string> = new Set(["help", "man", "history", "stats"]);

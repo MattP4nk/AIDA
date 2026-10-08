@@ -16,6 +16,7 @@ import {
   render,
 } from "./asciiBox";
 import { getObjectiveHint } from "../missionObjectiveTypes";
+import { missionGenerator as missionGeneratorSvc, missions as missionsSvc, storyMissions } from "./deps";
 
 export class MissionCommandsModule implements CommandModule {
   // Per-player mission index: maps numeric shortcut (1-based) to full mission ID
@@ -158,8 +159,8 @@ export class MissionCommandsModule implements CommandModule {
     command: Command,
     context: CommandContext,
   ): Promise<CommandResult> {
-    const missionService = context.services.missionService;
-    const missionGenerator = context.services.missionGenerator;
+    const missionService = missionsSvc();
+    const missionGenerator = missionGeneratorSvc();
     const filter = command.args?.[0] as string | undefined;
 
     let missions = await missionService.getPlayerMissions(context.userId);
@@ -364,7 +365,7 @@ export class MissionCommandsModule implements CommandModule {
       return errorResult("Usage: mission <mission_id>");
     }
 
-    const missionService = context.services.missionService;
+    const missionService = missionsSvc();
     const missions = await missionService.getPlayerMissions(context.userId);
     const mission = this.resolveMissionId(
       missions,
@@ -505,7 +506,7 @@ export class MissionCommandsModule implements CommandModule {
       return errorResult("Usage: accept <mission_id>");
     }
 
-    const missionService = context.services.missionService;
+    const missionService = missionsSvc();
 
     try {
       // Resolve numeric/partial ID to full ID before calling service
@@ -596,7 +597,7 @@ export class MissionCommandsModule implements CommandModule {
       return errorResult("Usage: abandon <mission_id>");
     }
 
-    const missionService = context.services.missionService;
+    const missionService = missionsSvc();
 
     try {
       const missions = await missionService.getPlayerMissions(context.userId);
@@ -637,7 +638,7 @@ export class MissionCommandsModule implements CommandModule {
     _command: Command,
     context: CommandContext,
   ): Promise<CommandResult> {
-    const missionService = context.services.missionService;
+    const missionService = missionsSvc();
     const missions = await missionService.getPlayerMissions(
       context.userId,
       "active",
@@ -728,10 +729,7 @@ export class MissionCommandsModule implements CommandModule {
     _command: Command,
     context: CommandContext,
   ): Promise<CommandResult> {
-    const storyService = context.services.storyMissionService;
-    if (!storyService) {
-      return errorResult("Story system unavailable.");
-    }
+    const storyService = storyMissions();
 
     const arcs = await storyService.getPlayerStoryArcs(context.userId);
 
@@ -777,10 +775,7 @@ export class MissionCommandsModule implements CommandModule {
     command: Command,
     context: CommandContext,
   ): Promise<CommandResult> {
-    const storyService = context.services.storyMissionService;
-    if (!storyService) {
-      return errorResult("Story system unavailable.");
-    }
+    const storyService = storyMissions();
 
     const action = command.args?.[0];
     if (!action) {

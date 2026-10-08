@@ -1,7 +1,6 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
 import { successResult, errorResult } from "./helpers";
-import * as TOKENS from "../../di/tokens";
 import {
   helpPanel,
   table,
@@ -12,6 +11,8 @@ import {
   Column,
   HelpEntry,
 } from "./asciiBox";
+import { contests as contestsSvc, factions as factionsSvc, missionIntegration as missionIntegrationSvc, resources as resourcesSvc, servers as serversSvc, warfare } from "./deps";
+import logger from "../../logger";
 
 export class FactionCommandsModule implements CommandModule {
   public category = "faction";
@@ -147,7 +148,7 @@ export class FactionCommandsModule implements CommandModule {
   }
 
   private async handleList(context: CommandContext): Promise<CommandResult> {
-    const factionService = context.services.factionService;
+    const factionService = factionsSvc();
     const factions = await factionService.getAllFactions(false, context.userId);
 
     if (factions.length === 0) {
@@ -186,13 +187,13 @@ export class FactionCommandsModule implements CommandModule {
 
     const factionName = args.join(" ");
     const faction =
-      await context.services.factionService.getFactionByName(factionName);
+      await factionsSvc().getFactionByName(factionName);
 
     if (!faction) {
       return errorResult(`Faction not found: ${factionName}`);
     }
 
-    const result = await context.services.factionService.joinFaction(
+    const result = await factionsSvc().joinFaction(
       context.userId,
       faction.id,
     );
@@ -202,19 +203,17 @@ export class FactionCommandsModule implements CommandModule {
 
   private async handleNeutral(context: CommandContext): Promise<CommandResult> {
     // Check if player is already in a faction
-    const membership = await context.services.factionService.getUserFaction(context.userId);
+    const membership = await factionsSvc().getUserFaction(context.userId);
 
     if (membership) {
       return errorResult("You are already in a faction. Use 'faction leave' first if you want to go neutral.");
     }
 
     // Fire faction event for tutorial tracking (faction_choice objective)
-    const missionIntegration = context.services.missionIntegrationService;
-    if (missionIntegration) {
-      try {
-        await (missionIntegration as any).onFactionEvent(context.userId, "neutral", null);
-      } catch { /* non-critical */ }
-    }
+    const missionIntegration = missionIntegrationSvc();
+    try {
+      await (missionIntegration as any).onFactionEvent(context.userId, "neutral", null);
+    } catch (err) { logger.warn({ err }, "factionCommands.handleNeutral: non-critical step failed"); }
 
     return successResult([
       "You have chosen to remain neutral — a lone wolf in the digital underground.",
@@ -225,7 +224,7 @@ export class FactionCommandsModule implements CommandModule {
   }
 
   private async handleLeave(context: CommandContext): Promise<CommandResult> {
-    const result = await context.services.factionService.leaveFaction(
+    const result = await factionsSvc().leaveFaction(
       context.userId,
     );
 
@@ -233,7 +232,7 @@ export class FactionCommandsModule implements CommandModule {
   }
 
   private async handleStatus(context: CommandContext): Promise<CommandResult> {
-    const membership = await context.services.factionService.getUserFaction(
+    const membership = await factionsSvc().getUserFaction(
       context.userId,
     );
 
@@ -243,7 +242,7 @@ export class FactionCommandsModule implements CommandModule {
 
     const faction = membership.faction;
     const reputation =
-      await context.services.factionService.getFactionReputation(
+      await factionsSvc().getFactionReputation(
         context.userId,
         faction.id,
       );
@@ -275,7 +274,7 @@ export class FactionCommandsModule implements CommandModule {
   private async handleMissions(
     context: CommandContext,
   ): Promise<CommandResult> {
-    const membership = await context.services.factionService.getUserFaction(
+    const membership = await factionsSvc().getUserFaction(
       context.userId,
     );
 
@@ -283,7 +282,7 @@ export class FactionCommandsModule implements CommandModule {
       return errorResult("You must be in a faction to view faction missions.");
     }
 
-    const missions = await context.services.factionService.getFactionMissions(
+    const missions = await factionsSvc().getFactionMissions(
       membership.factionId,
     );
 
@@ -321,7 +320,7 @@ export class FactionCommandsModule implements CommandModule {
   }
 
   private async handleRank(context: CommandContext): Promise<CommandResult> {
-    const membership = await context.services.factionService.getUserFaction(
+    const membership = await factionsSvc().getUserFaction(
       context.userId,
     );
 
@@ -329,7 +328,7 @@ export class FactionCommandsModule implements CommandModule {
       return errorResult("You must be in a faction to view rank information.");
     }
 
-    const check = await context.services.factionService.checkRankRequirements(
+    const check = await factionsSvc().checkRankRequirements(
       context.userId,
       membership.factionId,
     );
@@ -386,7 +385,7 @@ export class FactionCommandsModule implements CommandModule {
   }
 
   private async handlePromote(context: CommandContext): Promise<CommandResult> {
-    const membership = await context.services.factionService.getUserFaction(
+    const membership = await factionsSvc().getUserFaction(
       context.userId,
     );
 
@@ -394,7 +393,7 @@ export class FactionCommandsModule implements CommandModule {
       return errorResult("You must be in a faction to request promotion.");
     }
 
-    const result = await context.services.factionService.promoteUser(
+    const result = await factionsSvc().promoteUser(
       context.userId,
       membership.factionId,
     );
@@ -405,7 +404,7 @@ export class FactionCommandsModule implements CommandModule {
   private async handleStandings(
     context: CommandContext,
   ): Promise<CommandResult> {
-    const standings = await context.services.factionService.getAllStandings(
+    const standings = await factionsSvc().getAllStandings(
       context.userId,
     );
 
@@ -443,7 +442,7 @@ export class FactionCommandsModule implements CommandModule {
   private async handleResources(
     context: CommandContext,
   ): Promise<CommandResult> {
-    const membership = await context.services.factionService.getUserFaction(
+    const membership = await factionsSvc().getUserFaction(
       context.userId,
     );
 
@@ -451,9 +450,7 @@ export class FactionCommandsModule implements CommandModule {
       return errorResult("You must be in a faction to view resources.");
     }
 
-    const { getService } = await import("../../di/container");
-    const resourceService =
-      getService<import("../resourceService").default>(TOKENS.RESOURCE_SERVICE);
+    const resourceService = resourcesSvc();
     const resources = await resourceService.getFactionResources(
       membership.factionId,
     );
@@ -489,7 +486,7 @@ export class FactionCommandsModule implements CommandModule {
   }
 
   private async handleServers(context: CommandContext): Promise<CommandResult> {
-    const membership = await context.services.factionService.getUserFaction(
+    const membership = await factionsSvc().getUserFaction(
       context.userId,
     );
 
@@ -497,7 +494,7 @@ export class FactionCommandsModule implements CommandModule {
       return errorResult("You must be in a faction to view servers.");
     }
 
-    const servers = await context.services.factionService.getFactionServers(
+    const servers = await factionsSvc().getFactionServers(
       membership.factionId,
     );
 
@@ -559,11 +556,9 @@ export class FactionCommandsModule implements CommandModule {
   private async handleContestStatus(
     context: CommandContext,
   ): Promise<CommandResult> {
-    const { getService } = await import("../../di/container");
-    const contestService =
-      getService<import("../contestService").default>(TOKENS.CONTEST_SERVICE);
+    const contestService = contestsSvc();
 
-    const membership = await context.services.factionService.getUserFaction(
+    const membership = await factionsSvc().getUserFaction(
       context.userId,
     );
     const contests = await contestService.getActiveContests(
@@ -611,9 +606,7 @@ export class FactionCommandsModule implements CommandModule {
       return errorResult("Usage: faction contest join <contest_id> [attack|defend|neutral]");
     }
 
-    const { getService } = await import("../../di/container");
-    const contestService =
-      getService<import("../contestService").default>(TOKENS.CONTEST_SERVICE);
+    const contestService = contestsSvc();
 
     const shortId = args[0]!;
     const side = (args[1]?.toLowerCase() || "neutral") as
@@ -646,9 +639,7 @@ export class FactionCommandsModule implements CommandModule {
       return errorResult("Usage: faction contest contribute <contest_id>");
     }
 
-    const { getService } = await import("../../di/container");
-    const contestService =
-      getService<import("../contestService").default>(TOKENS.CONTEST_SERVICE);
+    const contestService = contestsSvc();
 
     const shortId = args[0]!;
     const contestId = await contestService.findContestByShortId(shortId);
@@ -679,7 +670,7 @@ export class FactionCommandsModule implements CommandModule {
     context: CommandContext,
     serverIp: string,
   ): Promise<CommandResult> {
-    const membership = await context.services.factionService.getUserFaction(
+    const membership = await factionsSvc().getUserFaction(
       context.userId,
     );
 
@@ -688,15 +679,13 @@ export class FactionCommandsModule implements CommandModule {
     }
 
     // Find server by IP
-    const server = await context.services.serverService.findBasicByIp(serverIp);
+    const server = await serversSvc().findBasicByIp(serverIp);
 
     if (!server) {
       return errorResult(`No server found at ${serverIp}.`);
     }
 
-    const { getService } = await import("../../di/container");
-    const contestService =
-      getService<import("../contestService").default>(TOKENS.CONTEST_SERVICE);
+    const contestService = contestsSvc();
 
     const result = await contestService.declareContest(
       context.userId,
@@ -711,15 +700,13 @@ export class FactionCommandsModule implements CommandModule {
     context: CommandContext,
     args: string[],
   ): Promise<CommandResult> {
-    const { getService } = await import("../../di/container");
-    const warfareService =
-      getService<import("../warfareService").default>(TOKENS.WARFARE_SERVICE);
+    const warfareService = warfare();
 
     const sub = args[0]?.toLowerCase();
 
     if (sub === "status") {
       // Show current war for user's faction
-      const membership = await context.services.factionService.getUserFaction(
+      const membership = await factionsSvc().getUserFaction(
         context.userId,
       );
       if (!membership) {

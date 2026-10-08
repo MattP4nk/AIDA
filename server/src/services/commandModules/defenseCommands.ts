@@ -1,9 +1,6 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext, CommandInfo } from "./interface";
 import { getSession, successResult, errorResult } from "./helpers";
-import { getService } from "../../di/resolve";
-import { USER_REPOSITORY } from "../../di/tokens";
-import type { UserRepository } from "../../repositories/userRepository";
 import {
   boxTop,
   boxBottom,
@@ -12,6 +9,8 @@ import {
   boxCenter,
   render,
 } from "./asciiBox";
+import { missionIntegration, users } from "./deps";
+import logger from "../../logger";
 
 /**
  * DefenseCommandsModule — Player home server defense management.
@@ -24,7 +23,6 @@ import {
  *   upgrade       — Purchase defense upgrades
  */
 
-const users = () => getService<UserRepository>(USER_REPOSITORY);
 export class DefenseCommandsModule implements CommandModule {
   public category = "defense";
   public commands: Set<string> = new Set([
@@ -387,9 +385,7 @@ export class DefenseCommandsModule implements CommandModule {
       // NOTE: We don't update GameServer.firewallLevel here — the defense layers are added
       // dynamically in hackService.initiateHackSession() based on homeFirewall level.
       // Changing the server's base firewallLevel would double-apply the defense.
-      if (context.services.missionIntegrationService) {
-        context.services.missionIntegrationService.onDefenseEvent(context.userId, "firewall", level).catch(() => {});
-      }
+      missionIntegration().onDefenseEvent(context.userId, "firewall", level).catch((err) => logger.warn({ err }, "defenseCommands.handleUpgrade: onDefenseEvent failed"));
       return successResult(`Firewall upgraded to Level ${level}! (-${price}c)\nAttackers now face additional port_sequence challenges.`);
     }
 
@@ -409,7 +405,7 @@ export class DefenseCommandsModule implements CommandModule {
       if (session?.homeServerId) {
         const home = await users().homeDirectory(context.userId);
         const vaultPath = `${home}/.vault`;
-        await context.fileService.createDirectory(session.homeServerId, context.userId, vaultPath).catch(() => {});
+        await context.fileService.createDirectory(session.homeServerId, context.userId, vaultPath).catch((err) => logger.warn({ err }, "defenseCommands.handleUpgrade: createDirectory failed"));
         // Mark vault dir as hidden + protected
         const vaultDir = await this.findNode(context, session.homeServerId, vaultPath, "directory");
         if (vaultDir) {
@@ -417,9 +413,7 @@ export class DefenseCommandsModule implements CommandModule {
         }
       }
       const layerDesc = level === 1 ? "cipher" : level === 2 ? "cipher + memory_trace" : "cipher + port_sequence + memory_trace";
-      if (context.services.missionIntegrationService) {
-        context.services.missionIntegrationService.onDefenseEvent(context.userId, "vault", level).catch(() => {});
-      }
+      missionIntegration().onDefenseEvent(context.userId, "vault", level).catch((err) => logger.warn({ err }, "defenseCommands.handleUpgrade: onDefenseEvent failed"));
       return successResult(`Vault upgraded to Level ${level}! (-${price}c)\nVault directory created at ~/.vault/\nAttackers must solve: ${layerDesc}`);
     }
 
@@ -435,9 +429,7 @@ export class DefenseCommandsModule implements CommandModule {
       const bought = await this.purchaseDefense(context, "ids", level, price);
       if (!bought.ok) return errorResult(bought.message);
       const desc = level === 1 ? "Alert when hack completes" : level === 2 ? "Alert when hack starts" : "Alert on start + attacker IP";
-      if (context.services.missionIntegrationService) {
-        context.services.missionIntegrationService.onDefenseEvent(context.userId, "ids", level).catch(() => {});
-      }
+      missionIntegration().onDefenseEvent(context.userId, "ids", level).catch((err) => logger.warn({ err }, "defenseCommands.handleUpgrade: onDefenseEvent failed"));
       return successResult(`IDS upgraded to Level ${level}! (-${price}c)\n${desc}`);
     }
 
@@ -453,9 +445,7 @@ export class DefenseCommandsModule implements CommandModule {
       if (session?.homeServerId) {
         await this.generateDecoyFiles(context, session.homeServerId);
       }
-      if (context.services.missionIntegrationService) {
-        context.services.missionIntegrationService.onDefenseEvent(context.userId, "honeypot", 1).catch(() => {});
-      }
+      missionIntegration().onDefenseEvent(context.userId, "honeypot", 1).catch((err) => logger.warn({ err }, "defenseCommands.handleUpgrade: onDefenseEvent failed"));
       return successResult(`Honeypot installed! (-${HONEYPOT_PRICE}c)\nDecoy files deployed in ~/downloads/.\nAttackers who target decoys waste time and trigger alerts.`);
     }
 
@@ -496,7 +486,7 @@ export class DefenseCommandsModule implements CommandModule {
     const downloadsPath = `${home}/downloads`;
 
     // Ensure downloads dir exists
-    await context.fileService.createDirectory(homeServerId, context.userId, downloadsPath).catch(() => {});
+    await context.fileService.createDirectory(homeServerId, context.userId, downloadsPath).catch((err) => logger.warn({ err }, "defenseCommands.generateDecoyFiles: createDirectory failed"));
 
     const dlDir = await this.findNode(context, homeServerId, downloadsPath, "directory");
     if (!dlDir) return;

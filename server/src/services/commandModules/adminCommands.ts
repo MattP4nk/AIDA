@@ -1,14 +1,8 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext, CommandInfo } from "./interface";
 import { successResult, errorResult } from "./helpers";
-import { getService } from "../../di/resolve";
-import { ACCOUNT_ADMIN_SERVICE, SERVER_SERVICE, USER_REPOSITORY } from "../../di/tokens";
-import type { UserRepository } from "../../repositories/userRepository";
-import type ServerService from "../serverService";
-import type { AccountAdminService } from "../accountAdminService";
+import { accounts, factions, messages, servers as serversSvc, users } from "./deps";
 
-const accounts = () => getService<AccountAdminService>(ACCOUNT_ADMIN_SERVICE);
-const users = () => getService<UserRepository>(USER_REPOSITORY);
 
 const ROLE_HIERARCHY: Record<string, number> = {
   player: 0,
@@ -105,7 +99,7 @@ export class AdminCommandsModule implements CommandModule {
       case "resetpw":
         return this.handleResetPassword(command, context);
       case "reports":
-        return this.handleReports(command, context);
+        return this.handleReports(command);
       case "resolve":
         return this.handleResolve(command, context);
       case "help":
@@ -214,7 +208,7 @@ export class AdminCommandsModule implements CommandModule {
 
     const progress = await context.playerProgress.get(user.id);
 
-    const faction = await context.services.factionService.getUserFaction(user.id);
+    const faction = await factions().getUserFaction(user.id);
 
     const w = 44;
     const lines = [
@@ -553,7 +547,7 @@ export class AdminCommandsModule implements CommandModule {
   }
 
   private async handleServers(): Promise<CommandResult> {
-    const servers = await getService<ServerService>(SERVER_SERVICE).listForAdmin(50);
+    const servers = await serversSvc().listForAdmin(50);
 
     if (servers.length === 0) {
       return successResult("No game servers found.");
@@ -615,9 +609,7 @@ export class AdminCommandsModule implements CommandModule {
   // ==================== REPORTS ====================
 
   private async handleReports(
-    command: Command,
-    context: CommandContext,
-  ): Promise<CommandResult> {
+    command: Command): Promise<CommandResult> {
     const reportType = command.args[1]?.toLowerCase();
     if (reportType !== "mail") {
       return errorResult("Usage: admin reports mail [pending|actioned|dismissed]");
@@ -628,7 +620,7 @@ export class AdminCommandsModule implements CommandModule {
       return errorResult("Status must be: pending, actioned, or dismissed");
     }
 
-    const messageService = context.services.messageService;
+    const messageService = messages();
     const result = await messageService.getMessageReports(status);
 
     if (result.reports.length === 0) {
@@ -677,7 +669,7 @@ export class AdminCommandsModule implements CommandModule {
       return errorResult("Usage: admin resolve mail <reportId> <dismiss|action>");
     }
 
-    const messageService = context.services.messageService;
+    const messageService = messages();
     const result = await messageService.resolveMessageReport(context.userId, reportId, action);
 
     if (!result.success) {

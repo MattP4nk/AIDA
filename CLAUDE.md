@@ -226,7 +226,9 @@ Each was re-verified against source on 2026-09-24; the verdict is marked.
 - **Command modules hold no database handle.** ✅ Holds as of 2026-10-07 (A4): `db` is gone
   from `CommandContext`, so `context.db` does not compile, and
   `scripts/verify-a4-command-writes.ts` fails on any `db.client` or direct client import in
-  `commandModules/`. A command that needs data calls a service or repository — the
+  `commandModules/`. Since A4's services half (2026-10-08) there is no `context.services`
+  either: a module imports the accessors it uses from `commandModules/deps.ts`, and the same
+  harness fails on any other way of resolving a service there. A command that needs data calls a service or repository — the
   service is where the invariant lives (atomic guards, cache invalidation, events). Look up
   players by name with `UserRepository.findByUsername` (case-insensitive; registration keeps
   that unambiguous), and resolve relative paths against `session.currentDirectory`, never a

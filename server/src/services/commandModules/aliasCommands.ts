@@ -1,13 +1,9 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
 import { successResult, errorResult } from "./helpers";
-import * as TOKENS from "../../di/tokens";
-import { getService as resolveService } from "../../di/resolve";
-import { USER_REPOSITORY } from "../../di/tokens";
-import type { UserRepository } from "../../repositories/userRepository";
+import { aliases, users } from "./deps";
 
 
-const users = () => resolveService<UserRepository>(USER_REPOSITORY);
 export class AliasCommandsModule implements CommandModule {
   public category = "alias";
   public commands: Set<string> = new Set(["alias"]);
@@ -84,9 +80,7 @@ export class AliasCommandsModule implements CommandModule {
       return errorResult("Usage: alias create <name> (2-30 characters)");
     }
 
-    const { getService } = await import("../../di/container");
-    const aliasService =
-      getService<import("../aliasService").default>(TOKENS.ALIAS_SERVICE);
+    const aliasService = aliases();
     const result = await aliasService.createAlias(context.userId, aliasName);
 
     return result.success
@@ -95,9 +89,7 @@ export class AliasCommandsModule implements CommandModule {
   }
 
   private async handleDestroy(context: CommandContext): Promise<CommandResult> {
-    const { getService } = await import("../../di/container");
-    const aliasService =
-      getService<import("../aliasService").default>(TOKENS.ALIAS_SERVICE);
+    const aliasService = aliases();
     const result = await aliasService.destroyAlias(context.userId);
 
     return result.success
@@ -106,9 +98,7 @@ export class AliasCommandsModule implements CommandModule {
   }
 
   private async handleInfo(context: CommandContext): Promise<CommandResult> {
-    const { getService } = await import("../../di/container");
-    const aliasService =
-      getService<import("../aliasService").default>(TOKENS.ALIAS_SERVICE);
+    const aliasService = aliases();
     const alias = await aliasService.getAlias(context.userId);
 
     if (!alias) {
@@ -141,9 +131,7 @@ export class AliasCommandsModule implements CommandModule {
       return errorResult(`Player "${targetName}" not found.`);
     }
 
-    const { getService } = await import("../../di/container");
-    const aliasService =
-      getService<import("../aliasService").default>(TOKENS.ALIAS_SERVICE);
+    const aliasService = aliases();
     const result = await aliasService.attemptReveal(
       context.userId,
       targetUser.id,

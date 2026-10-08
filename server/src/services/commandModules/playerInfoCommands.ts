@@ -2,14 +2,7 @@ import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
 import { successResult, errorResult, spawnBackgroundProcess } from "./helpers";
 import logger from "../../logger";
-import { getService } from "../../di/resolve";
-import { BOUNTY_SERVICE, KEY_FRAGMENT_SERVICE, NETWORK_TOPOLOGY_SERVICE, SERVER_SERVICE, USER_REPOSITORY } from "../../di/tokens";
-import type ServerService from "../serverService";
-import type NetworkTopologyService from "../networkTopologyService";
-import type { KeyFragmentService } from "../keyFragmentService";
 import type { FactionService } from "../factionService";
-import type { UserRepository } from "../../repositories/userRepository";
-import type BountyService from "../bountyService";
 import {
   boxTop,
   boxBottom,
@@ -29,13 +22,9 @@ import {
 } from "./asciiBox";
 import { getInlineGlyph } from "../../utils/asciiAvatars";
 import type { PlayerDetails } from "../playerPresenceService";
+import { achievements, bounties as bountiesSvc, factionKnowledge, factions as factionsSvc, fragments, leaderboard, missionIntegration as missionIntegrationSvc, missions as missionsSvc, presence, servers, topology, users } from "./deps";
 
 
-const bountyService = () => getService<BountyService>(BOUNTY_SERVICE);
-const servers = () => getService<ServerService>(SERVER_SERVICE);
-const users = () => getService<UserRepository>(USER_REPOSITORY);
-const topology = () => getService<NetworkTopologyService>(NETWORK_TOPOLOGY_SERVICE);
-const fragments = () => getService<KeyFragmentService>(KEY_FRAGMENT_SERVICE);
 export class PlayerInfoCommandsModule implements CommandModule {
   public category = "player";
   public commands: Set<string> = new Set([
@@ -202,10 +191,10 @@ export class PlayerInfoCommandsModule implements CommandModule {
     const user = { ...userRow, progress: progressRow };
 
     // Build dynamic faction standings
-    const standings = await context.services.factionService.getAllStandings(
+    const standings = await factionsSvc().getAllStandings(
       context.userId,
     );
-    const membership = await context.services.factionService.getUserFaction(
+    const membership = await factionsSvc().getUserFaction(
       context.userId,
     );
 
@@ -227,7 +216,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
     let storyRows: { label: string; value: string }[];
     if (discoveryLevel >= 3) {
       // Player has discovered AIDA fragments — show full progress
-      const fragSvc = context.services.keyFragmentService;
+      const fragSvc = fragments();
       const fragmentProgress = fragSvc
         ? await fragSvc.getPlayerFragments(context.userId)
         : null;
@@ -374,10 +363,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
     _command: Command,
     context: CommandContext,
   ): Promise<CommandResult> {
-    const presenceService = context.services.playerPresenceService;
-    if (!presenceService) {
-      return errorResult("Presence service unavailable.");
-    }
+    const presenceService = presence();
 
     const players = presenceService.getOnlinePlayers();
 
@@ -431,10 +417,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
       return errorResult("You are not connected to any server.");
     }
 
-    const presenceService = context.services.playerPresenceService;
-    if (!presenceService) {
-      return errorResult("Presence service unavailable.");
-    }
+    const presenceService = presence();
     const output = presenceService.formatServerOccupancy(connection.serverId);
 
     return {
@@ -547,10 +530,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
       return errorResult("Usage: whois <username>");
     }
 
-    const presenceService = context.services.playerPresenceService;
-    if (!presenceService) {
-      return errorResult("Presence service unavailable.");
-    }
+    const presenceService = presence();
 
     // Find player by username (cheap lookup — keep before spawn)
     const player = presenceService.findPlayerByUsername(targetUsername);
@@ -560,74 +540,53 @@ export class PlayerInfoCommandsModule implements CommandModule {
     }
 
     // ── Resource check: spawn whois as a background process ──
-    const memoryService = context.services.memoryService;
-    if (memoryService) {
-      const spawn = await spawnBackgroundProcess({
-        context,
-        processType: "whois",
-        skillKey: "networking",
-        label: `whois ${targetUsername}`,
-        onComplete: async () => {
-          try {
-            // Get detailed info
-            const details = await presenceService.getPlayerDetails(player.userId);
+    const spawn = await spawnBackgroundProcess({
+      context,
+      processType: "whois",
+      skillKey: "networking",
+      label: `whois ${targetUsername}`,
+      onComplete: async () => {
+        try {
+          // Get detailed info
+          const details = await presenceService.getPlayerDetails(player.userId);
 
-            if (!details) {
-              if (context.io) {
-                context.io.to(`player:${context.userId}`).emit("command:result", {
-                  success: false,
-                  output: "Failed to retrieve player information.",
-                  terminalId: command.terminalId,
-                  timestamp: new Date(),
-                });
-              }
-              return;
-            }
-
-            const resultOutput = this.formatWhois(details);
-
-            if (context.io) {
-              context.io.to(`player:${context.userId}`).emit("command:result", {
-                success: true,
-                output: resultOutput,
-                terminalId: command.terminalId,
-                timestamp: new Date(),
-              });
-            }
-          } catch (err) {
-            logger.error({ err }, "Whois background process error");
+          if (!details) {
             if (context.io) {
               context.io.to(`player:${context.userId}`).emit("command:result", {
                 success: false,
-                output: "Query failed",
+                output: "Failed to retrieve player information.",
                 terminalId: command.terminalId,
                 timestamp: new Date(),
               });
             }
+            return;
           }
-        },
-      });
 
-      if (spawn) return spawn.result;
-    }
+          const resultOutput = this.formatWhois(details);
 
-    // ── Fallback: instant (no resource system) ──
+          if (context.io) {
+            context.io.to(`player:${context.userId}`).emit("command:result", {
+              success: true,
+              output: resultOutput,
+              terminalId: command.terminalId,
+              timestamp: new Date(),
+            });
+          }
+        } catch (err) {
+          logger.error({ err }, "Whois background process error");
+          if (context.io) {
+            context.io.to(`player:${context.userId}`).emit("command:result", {
+              success: false,
+              output: "Query failed",
+              terminalId: command.terminalId,
+              timestamp: new Date(),
+            });
+          }
+        }
+      },
+    });
 
-    // Get detailed info
-    const details = await presenceService.getPlayerDetails(player.userId);
-
-    if (!details) {
-      return errorResult("Failed to retrieve player information.");
-    }
-
-    const output = this.formatWhois(details);
-
-    return {
-      success: true,
-      output,
-      data: details,
-      timestamp: new Date(),
-    };
+    return spawn.result;
   }
 
   // ==================== SHARE INTEL ====================
@@ -636,10 +595,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
     command: Command,
     context: CommandContext,
   ): Promise<CommandResult> {
-    const fkService = context.services.factionKnowledgeService;
-    if (!fkService) {
-      return errorResult("Intel sharing system unavailable.");
-    }
+    const fkService = factionKnowledge();
 
     const assetType = command.args?.[0] as "server" | "file" | "player";
     const assetId = command.args?.[1];
@@ -673,7 +629,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
     }
 
     // Check faction rank — must be at least operative
-    const membership = await context.services.factionService.getUserFaction(context.userId);
+    const membership = await factionsSvc().getUserFaction(context.userId);
     const member = membership?.factionId === factionId ? membership : null;
     const allowedRanks = ["operative", "elite", "council_member"];
     if (!member || !allowedRanks.includes(member.rank)) {
@@ -765,18 +721,18 @@ export class PlayerInfoCommandsModule implements CommandModule {
     context: CommandContext,
   ): Promise<CommandResult> {
     // Show active bounties — all public, plus highlight ones from player's faction
-    const bounties = await bountyService().listLive(20);
+    const bounties = await bountiesSvc().listLive(20);
 
     if (bounties.length === 0) {
       return successResult("No active bounties. The network is quiet... for now.");
     }
 
     // Get player's faction for highlighting
-    const membership = await context.services.factionService.getUserFaction(context.userId);
+    const membership = await factionsSvc().getUserFaction(context.userId);
 
     // Get faction names
     const factionIds = [...new Set(bounties.map((b) => b.issuedByFactionId))];
-    const factions = await context.services.factionService.getFactionsByIds(factionIds);
+    const factions = await factionsSvc().getFactionsByIds(factionIds);
     const factionMap = new Map(
       factions.map((f) => [f.id, f.shortName || f.name]),
     );
@@ -827,11 +783,11 @@ export class PlayerInfoCommandsModule implements CommandModule {
 
     // The listing prints a 16-char prefix; `resolve` accepts it (findUnique
     // on the full id could never match what the player was shown).
-    const found = await bountyService().resolve(bountyId);
+    const found = await bountiesSvc().resolve(bountyId);
     if (!found.ok) return errorResult(found.error);
 
     if (action === "claim") {
-      const r = await bountyService().claim(found.bounty.id, context.userId);
+      const r = await bountiesSvc().claim(found.bounty.id, context.userId);
       if (!r.ok) return errorResult(r.error);
       const bounty = r.bounty;
 
@@ -862,7 +818,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
     }
 
     if (action === "complete") {
-      const r = await bountyService().complete(found.bounty.id, context.userId);
+      const r = await bountiesSvc().complete(found.bounty.id, context.userId);
       if (!r.ok) return errorResult(r.error);
       const { bounty, filesDeleted, decoysHit, keysRevoked } = r;
 
@@ -906,10 +862,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
     command: Command,
     context: CommandContext,
   ): Promise<CommandResult> {
-    const service = context.services.leaderboardService;
-    if (!service) {
-      return errorResult("Leaderboard service unavailable.");
-    }
+    const service = leaderboard();
 
     const category = (command.args[0]?.toLowerCase() || "level") as any;
     const validCategories = [
@@ -985,10 +938,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
     _command: Command,
     context: CommandContext,
   ): Promise<CommandResult> {
-    const service = context.services.achievementService;
-    if (!service) {
-      return errorResult("Achievement service unavailable.");
-    }
+    const service = achievements();
 
     // Check for new achievements first
     const newlyAwarded = await service.checkAndAward(context.userId);
@@ -1140,7 +1090,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
 
     // ── report server [to <faction>] — add current server to faction knowledge ──
     if (subCommand === "server") {
-      const targetResult = await this.resolveReportTarget(command.args?.slice(1) || [], userId, context.services.factionService);
+      const targetResult = await this.resolveReportTarget(command.args?.slice(1) || [], userId, factionsSvc());
       if ("error" in targetResult) {
         return errorResult(targetResult.error);
       }
@@ -1152,32 +1102,28 @@ export class PlayerInfoCommandsModule implements CommandModule {
       }
 
       // Add to faction knowledge
-      const fkService = context.services.factionKnowledgeService;
-      if (fkService) {
-        await fkService.addEntry(targetResult.targetFactionId, {
-          assetType: "server",
-          assetId: server.id,
-          assetMeta: {
-            name: server.name,
-            ip: server.ipAddress,
-            serverType: server.type,
-            role: server.role,
-            securityLevel: server.securityLevel,
-          },
-          source: "player_report",
-          confidence: 1.0,
-          discoveredBy: userId,
-        });
-      }
+      const fkService = factionKnowledge();
+      await fkService.addEntry(targetResult.targetFactionId, {
+        assetType: "server",
+        assetId: server.id,
+        assetMeta: {
+          name: server.name,
+          ip: server.ipAddress,
+          serverType: server.type,
+          role: server.role,
+          securityLevel: server.securityLevel,
+        },
+        source: "player_report",
+        confidence: 1.0,
+        discoveredBy: userId,
+      });
 
       // Trigger mission integration
-      const missionIntegration = context.services.missionIntegrationService;
-      if (missionIntegration) {
-        try {
-          await (missionIntegration as any).onServerConnect(userId, server.id);
-          await (missionIntegration as any).onReportSubmitted(userId, "server");
-        } catch { /* non-critical */ }
-      }
+      const missionIntegration = missionIntegrationSvc();
+      try {
+        await (missionIntegration as any).onServerConnect(userId, server.id);
+        await (missionIntegration as any).onReportSubmitted(userId, "server");
+      } catch (err) { logger.warn({ err }, "playerInfoCommands.handleReport: non-critical step failed"); }
 
       return {
         success: true,
@@ -1190,7 +1136,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
     // ── report file <filename> [to <faction>] — report a specific file as intel ──
     if (subCommand === "file") {
       const restArgs = command.args?.slice(1) || [];
-      const targetResult = await this.resolveReportTarget(restArgs, userId, context.services.factionService);
+      const targetResult = await this.resolveReportTarget(restArgs, userId, factionsSvc());
       if ("error" in targetResult) {
         return errorResult(targetResult.error);
       }
@@ -1239,37 +1185,33 @@ export class PlayerInfoCommandsModule implements CommandModule {
       }
 
       // Add file to faction knowledge
-      const fkService = context.services.factionKnowledgeService;
-      if (fkService) {
-        await fkService.addEntry(targetResult.targetFactionId, {
-          assetType: "file",
-          assetId: file.id,
-          assetMeta: {
-            name: file.name,
-            fileName: file.name,
-            serverId,
-            isEncrypted: file.isEncrypted,
-            // A LOCKED file's content column holds its plaintext (R9: keyless
-            // provisioned files are opened only by the crack flow), so a
-            // preview of it would store the answer to the minigame in faction
-            // knowledge. Nothing renders this field today — which is exactly
-            // when to stop writing it, before someone does.
-            contentPreview: file.isEncrypted ? "" : file.content?.substring(0, 100) || "",
-          },
-          source: "player_report",
-          confidence: 1.0,
-          discoveredBy: userId,
-        });
-      }
+      const fkService = factionKnowledge();
+      await fkService.addEntry(targetResult.targetFactionId, {
+        assetType: "file",
+        assetId: file.id,
+        assetMeta: {
+          name: file.name,
+          fileName: file.name,
+          serverId,
+          isEncrypted: file.isEncrypted,
+          // A LOCKED file's content column holds its plaintext (R9: keyless
+          // provisioned files are opened only by the crack flow), so a
+          // preview of it would store the answer to the minigame in faction
+          // knowledge. Nothing renders this field today — which is exactly
+          // when to stop writing it, before someone does.
+          contentPreview: file.isEncrypted ? "" : file.content?.substring(0, 100) || "",
+        },
+        source: "player_report",
+        confidence: 1.0,
+        discoveredBy: userId,
+      });
 
       // Trigger mission integration
-      const missionIntegration = context.services.missionIntegrationService;
-      if (missionIntegration) {
-        try {
-          await (missionIntegration as any).onFileOperation(userId, "read", file.id, serverId);
-          await (missionIntegration as any).onReportSubmitted(userId, "file");
-        } catch { /* non-critical */ }
-      }
+      const missionIntegration = missionIntegrationSvc();
+      try {
+        await (missionIntegration as any).onFileOperation(userId, "read", file.id, serverId);
+        await (missionIntegration as any).onReportSubmitted(userId, "file");
+      } catch (err) { logger.warn({ err }, "playerInfoCommands.handleReport: non-critical step failed"); }
 
       return {
         success: true,
@@ -1281,10 +1223,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
 
     // ── report mission — check active missions and submit relevant intel ──
     if (subCommand === "mission") {
-      const missionService = context.services.missionService;
-      if (!missionService) {
-        return errorResult("Mission system unavailable.");
-      }
+      const missionService = missionsSvc();
 
       const missions = await missionService.getPlayerMissions(userId);
       const active = missions.filter((m: any) => m.status === "active");
@@ -1294,13 +1233,11 @@ export class PlayerInfoCommandsModule implements CommandModule {
       }
 
       // Trigger mission checks for current server context
-      const missionIntegration = context.services.missionIntegrationService;
-      if (missionIntegration) {
-        try {
-          await (missionIntegration as any).onServerConnect(userId, serverId);
-          await (missionIntegration as any).onReportSubmitted(userId, "mission");
-        } catch { /* non-critical */ }
-      }
+      const missionIntegration = missionIntegrationSvc();
+      try {
+        await (missionIntegration as any).onServerConnect(userId, serverId);
+        await (missionIntegration as any).onReportSubmitted(userId, "mission");
+      } catch (err) { logger.warn({ err }, "playerInfoCommands.handleReport: non-critical step failed"); }
 
       const lines: string[] = [];
       lines.push(boxTop(W));

@@ -75,5 +75,20 @@ check("POSITIVE CONTROL: a direct client import counts (static, type, dynamic)",
 check(`command modules hold no database handle and import no client (max ${READS_MAX})`, total <= READS_MAX, `${total} found`);
 for (const [f, n] of Object.entries(any).sort((a, b) => b[1] - a[1])) console.log(`        ${f}: ${n}`);
 
+// A4, SERVICES — done 2026-10-08: `context.services` (26 services behind an
+// `any` index signature) is gone. A module's dependencies are its import from
+// ./deps; resolving a service any other way hides it from that interface.
+const RESOLVE = /\bgetService\s*<|\bresolveService\s*<|["'][./]*di\/(?:container|resolve)["']/g;
+const adhoc: string[] = [];
+for (const f of readdirSync(dir).filter((x) => x.endsWith(".ts") && x !== "deps.ts")) {
+  if ([...strip(readFileSync(join(dir, f), "utf8")).matchAll(RESOLVE)].length) adhoc.push(f);
+}
+const resolveProbe = strip('const { getService } = await import("../../di/container");\nconst a = getService<X>(T);\n// getService<Y>(T)');
+check("POSITIVE CONTROL: ad-hoc resolution is detected, a comment is not", [...resolveProbe.matchAll(RESOLVE)].length === 2);
+check("command modules resolve services only through ./deps", adhoc.length === 0, adhoc.join(", ") || "none");
+const iface = strip(readFileSync(join(dir, "interface.ts"), "utf8"));
+check("CommandContext has no `services` bag and no `any` index signature",
+  !/\bservices\s*[?:]/.test(iface) && !/\[\s*key\s*:\s*string\s*\]\s*:\s*any/.test(iface));
+
 console.log(`\n=== ${pass} PASS / ${fail} FAIL ===`);
 process.exitCode = fail ? 1 : 0;

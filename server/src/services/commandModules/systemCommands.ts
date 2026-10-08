@@ -11,12 +11,10 @@ import {
 } from "./helpers";
 import { VAULT_PAYLOAD_FILENAME, AIDA_FILE_PREFIX } from "../../config/gameBalance";
 import { redactSensitiveContent } from "../../utils/contentRedaction";
-import { getService as resolveService } from "../../di/resolve";
-import { USER_REPOSITORY } from "../../di/tokens";
-import type { UserRepository } from "../../repositories/userRepository";
+import { darknetDiscovery, darknetDungeons, fragments, users } from "./deps";
+import logger from "../../logger";
 
 
-const users = () => resolveService<UserRepository>(USER_REPOSITORY);
 export class SystemCommandsModule implements CommandModule {
   public category = "system";
   public commands: Set<string> = new Set([
@@ -416,7 +414,7 @@ export class SystemCommandsModule implements CommandModule {
         try {
           const progress = await context.playerProgress.get(context.userId);
           cryptoSkill = progress?.cryptography ?? 0;
-        } catch { /* non-critical */ }
+        } catch (err) { logger.warn({ err }, "systemCommands.handleReadFile: non-critical step failed"); }
 
         output = redactSensitiveContent(output, {
           skipRedaction: false,
@@ -428,8 +426,7 @@ export class SystemCommandsModule implements CommandModule {
       // DarkNet vault conquest: reading vault payload triggers reward
       if (filename === VAULT_PAYLOAD_FILENAME) {
         try {
-          const dungeonService = context.services.darknetDungeonService;
-          if (!dungeonService) throw new Error("not available");
+          const dungeonService = darknetDungeons();
           const conquest = await dungeonService.conquerVault(
             context.userId,
             serverId,
@@ -450,16 +447,16 @@ export class SystemCommandsModule implements CommandModule {
             ];
             output += "\n" + rewardLines.join("\n");
           }
-        } catch {
-          /* DarkNet dungeon service not available */
+        } catch (err) {
+          // Never fails the read — but a failure is logged, not hidden.
+          logger.warn({ err, userId: context.userId }, "cat: dungeon reward check failed");
         }
       }
 
       // DarkNet discovery: reading AIDA-related files triggers discovery check
       if (filename.startsWith(AIDA_FILE_PREFIX) || filename.endsWith(AIDA_FILE_PREFIX)) {
         try {
-          const darknetService = context.services.darknetDiscoveryService;
-          if (!darknetService) throw new Error("not available");
+          const darknetService = darknetDiscovery();
           const discovered = await darknetService.checkDiscoveryTrigger(
             context.userId,
             {
@@ -471,15 +468,15 @@ export class SystemCommandsModule implements CommandModule {
             output +=
               "\n\n[SYSTEM] Something shifted in the network. A new faction has appeared in your faction list...";
           }
-        } catch {
-          /* DarkNet service not available */
+        } catch (err) {
+          // Never fails the read — but a failure is logged, not hidden.
+          logger.warn({ err, userId: context.userId }, "cat: darknet discovery check failed");
         }
       }
 
       // Key fragment discovery: check if this server contains a fragment
       try {
-        const keyFragmentService = context.services.keyFragmentService;
-        if (!keyFragmentService) throw new Error("not available");
+        const keyFragmentService = fragments();
         const fragmentResult = await keyFragmentService.checkServerFragment(
           context.userId,
           serverId,
@@ -503,8 +500,9 @@ export class SystemCommandsModule implements CommandModule {
             fragmentResult.currentHolder +
             ". Hack their home server to steal it, or negotiate a trade.";
         }
-      } catch {
-        /* Key fragment service not available */
+      } catch (err) {
+        // Never fails the read — but a failure is logged, not hidden.
+        logger.warn({ err, userId: context.userId }, "cat: fragment discovery check failed");
       }
 
       // Access key hint: tell the player this file contains credentials
@@ -527,8 +525,9 @@ export class SystemCommandsModule implements CommandModule {
             "│  to save and unlock access.              │\n" +
             "└──────────────────────────────────────────┘";
         }
-      } catch {
-        /* Access key scan not available */
+      } catch (err) {
+        // Never fails the read — but a failure is logged, not hidden.
+        logger.warn({ err, userId: context.userId }, "cat: access key scan failed");
       }
 
       // Apply censorship filtering to file content on faction-owned servers

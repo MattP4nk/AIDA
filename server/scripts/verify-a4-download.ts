@@ -53,7 +53,6 @@ async function main() {
     const fileService = getService<any>(TOKENS.FILE_SERVICE);
     const context: any = {
       fileService,
-      services: { networkTopologyService: getService<any>(TOKENS.NETWORK_TOPOLOGY_SERVICE) },
     };
 
     // THE TRAP: same name, not in downloads, created "later".

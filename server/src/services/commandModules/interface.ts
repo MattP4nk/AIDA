@@ -9,31 +9,7 @@ import type { Server as SocketIOServer } from "socket.io";
 // Use type-only imports to avoid circular dependency issues
 import type PlayerProgressRepository from "../../repositories/playerProgressRepository";
 import type FileService from "../fileService";
-import type ShopService from "../shopService";
-import type MissionService from "../missionService";
-import type MissionGeneratorService from "../missionGenerator";
-import type ServerService from "../serverService";
-import type MemoryService from "../memoryService";
-import type PlayerPresenceService from "../playerPresenceService";
-import type HackService from "../hackService";
-import type MessageService from "../messageService";
-import type { ChatService } from "../chatService";
-import type { MessageEncryptionService } from "../messageEncryptionService";
-import type ForumService from "../forumService";
-import type { FactionService } from "../factionService";
-import type { InventoryService } from "../inventoryService";
 import type GameStateManager from "../gameStateManager";
-import type BackdoorService from "../backdoorService";
-import type TraceService from "../traceService";
-import type { FactionKnowledgeService } from "../factionKnowledgeService";
-import type { NetworkTopologyService } from "../networkTopologyService";
-import type MissionIntegrationService from "../missionIntegration";
-import type { LeaderboardService } from "../leaderboardService";
-import type { AchievementService } from "../achievementService";
-import type { KeyFragmentService } from "../keyFragmentService";
-import type { DarkNetDungeonService } from "../darknetDungeonService";
-import type DarkNetDiscoveryService from "../darknetDiscoveryService";
-import type { ConnectionChallengeService } from "../connectionChallengeService";
 
 export interface CommandContext {
   userId: string;
@@ -51,33 +27,8 @@ export interface CommandContext {
    * only through a service or repository.
    */
   playerProgress: PlayerProgressRepository;
-  services: {
-    shopService: ShopService;
-    missionService: MissionService;
-    missionGenerator: MissionGeneratorService;
-    serverService: ServerService;
-    memoryService: MemoryService;
-    playerPresenceService?: PlayerPresenceService;
-    hackService: HackService;
-    messageService: MessageService;
-    forumService: ForumService;
-    factionService: FactionService;
-    inventoryService: InventoryService;
-    backdoorService: BackdoorService;
-    traceService: TraceService;
-    factionKnowledgeService?: FactionKnowledgeService;
-    networkTopologyService?: NetworkTopologyService;
-    missionIntegrationService?: MissionIntegrationService;
-    leaderboardService?: LeaderboardService;
-    achievementService?: AchievementService;
-    keyFragmentService?: KeyFragmentService;
-    darknetDungeonService?: DarkNetDungeonService;
-    darknetDiscoveryService?: DarkNetDiscoveryService;
-    connectionChallengeService?: ConnectionChallengeService;
-    chatService?: ChatService;
-    messageEncryptionService?: MessageEncryptionService;
-    [key: string]: any;
-  };
+  // A4: no `services` bag. A module imports the services it uses from
+  // ./deps — that import line is its dependency interface.
 }
 
 export interface CommandInfo {

@@ -8,6 +8,7 @@ import type { CommandContext } from "./interface";
 import type { GameProcessType } from "../memoryService";
 import { sanitizePath } from "../../utils/pathSanitizer";
 import { HARDWARE_SPECS } from "../../config/gameBalance";
+import { memory, shop } from "./deps";
 
 /** Catalog ids of every rig part, computed once — used to scope the inventory read. */
 const HARDWARE_ITEM_IDS = Object.keys(HARDWARE_SPECS);
@@ -188,12 +189,9 @@ export async function refreshComputerSpec(
   context: CommandContext,
   playerLevel: number,
 ): Promise<void> {
-  const memoryService = context.services.memoryService;
-  if (!memoryService) return;
+  const owned = await shop().heldItems(context.userId, HARDWARE_ITEM_IDS);
 
-  const owned = await context.services.shopService.heldItems(context.userId, HARDWARE_ITEM_IDS);
-
-  memoryService.initComputerSpec(
+  memory().initComputerSpec(
     context.userId,
     playerLevel,
     owned.map((r) => r.shopItemId),
@@ -203,14 +201,18 @@ export async function refreshComputerSpec(
 /**
  * Spawn a background game process with resource checking.
  * Returns a CommandResult + optional process object.
- * Returns null if memoryService is unavailable (caller should handle fallback).
+ *
+ * A4: this returned null "if memoryService is unavailable (caller should
+ * handle fallback)", and eleven callers carried a second, synchronous
+ * implementation of their command for that case. memoryService is a
+ * registered singleton; the only way to get null was a construction failure,
+ * which the fallbacks then hid. Never null now; the fallbacks are gone.
  */
 export async function spawnBackgroundProcess(
   opts: SpawnProcessOptions,
-): Promise<SpawnProcessResult | null> {
+): Promise<SpawnProcessResult> {
   const { context, processType, skillKey, label, targetServerId, onComplete, effectiveSkillOverride, metadata, priority, outputMessage } = opts;
-  const memoryService = context.services.memoryService;
-  if (!memoryService) return null; // Caller should handle fallback
+  const memoryService = memory();
 
   const progress = await context.playerProgress.get(context.userId);
 

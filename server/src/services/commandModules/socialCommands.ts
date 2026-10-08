@@ -1,9 +1,6 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
 import { successResult, errorResult } from "./helpers";
-import { getService } from "../../di/resolve";
-import { CHAT_SERVICE } from "../../di/tokens";
-import type { ChatService } from "../chatService";
 import {
   sanitizeMessageContent,
   validateMessageContent,
@@ -23,12 +20,9 @@ import {
   resolvePersonaName,
   shouldRequireToken,
 } from "../../utils/tokenConsumption";
-import { USER_REPOSITORY } from "../../di/tokens";
-import type { UserRepository } from "../../repositories/userRepository";
+import { chat, forums as forumsSvc, messages as messagesSvc, users } from "./deps";
 
 
-const chat = () => getService<ChatService>(CHAT_SERVICE);
-const users = () => getService<UserRepository>(USER_REPOSITORY);
 export class SocialCommandsModule implements CommandModule {
   public category = "social";
   public commands: Set<string> = new Set([
@@ -170,7 +164,7 @@ export class SocialCommandsModule implements CommandModule {
       return errorResult(`User '${recipientUsername}' not found`);
     }
 
-    const messageService = context.services.messageService;
+    const messageService = messagesSvc();
 
     // ── AI Persona token-gated routing ──────────────────────────
     // If the recipient is a known AI persona and the player is NOT
@@ -235,7 +229,7 @@ export class SocialCommandsModule implements CommandModule {
 
     // Handle subcommands
     if (subCommand === "sent") {
-      const messageService = context.services.messageService;
+      const messageService = messagesSvc();
       const result = await messageService.getSentMessages(userId, {
         limit: 20,
       });
@@ -273,7 +267,7 @@ export class SocialCommandsModule implements CommandModule {
         return errorResult("Usage: mail read <messageId>");
       }
 
-      const messageService = context.services.messageService;
+      const messageService = messagesSvc();
       const result = await messageService.markAsRead(messageId, userId);
 
       return result.success ? successResult(result.message) : errorResult(result.message);
@@ -285,7 +279,7 @@ export class SocialCommandsModule implements CommandModule {
         return errorResult("Usage: mail delete <messageId>");
       }
 
-      const messageService = context.services.messageService;
+      const messageService = messagesSvc();
       const result = await messageService.deleteMessage(messageId, userId);
 
       return result.success ? successResult(result.message) : errorResult(result.message);
@@ -297,7 +291,7 @@ export class SocialCommandsModule implements CommandModule {
       if (!messageId || !reason) {
         return errorResult("Usage: mail report <messageId> <reason>");
       }
-      const messageService = context.services.messageService;
+      const messageService = messagesSvc();
       const result = await messageService.reportMessage(userId, messageId, reason);
       if (!result.success) {
         return errorResult(result.message);
@@ -362,7 +356,7 @@ export class SocialCommandsModule implements CommandModule {
       return errorResult(`User '${recipientUsername}' not found`);
     }
 
-    const messageService = context.services.messageService;
+    const messageService = messagesSvc();
 
     // ── AI Persona token-gated routing ──────────────────────────
     if (isAIPersonaUsername(recipientUsername)) {
@@ -421,7 +415,7 @@ export class SocialCommandsModule implements CommandModule {
     context: CommandContext,
   ): Promise<CommandResult> {
     const { userId } = context;
-    const messageService = context.services.messageService;
+    const messageService = messagesSvc();
     const result = await messageService.getInbox(userId, { limit: 10 });
 
     if (!result.success || !result.data) {
@@ -501,7 +495,7 @@ export class SocialCommandsModule implements CommandModule {
     const { userId } = context;
     const subCommand = command.args[0]?.toLowerCase();
 
-    const forumService = context.services.forumService;
+    const forumService = forumsSvc();
 
     try {
       // forum (no args) - list discovered forums
@@ -1330,7 +1324,7 @@ export class SocialCommandsModule implements CommandModule {
     const { userId } = context;
     const subCommand = command.args[0]?.toLowerCase();
 
-    const forumService = context.services.forumService;
+    const forumService = forumsSvc();
 
     try {
       // proxy list - show available proxy servers
@@ -1487,7 +1481,7 @@ export class SocialCommandsModule implements CommandModule {
       }
 
       try {
-        const chatService = context.services.chatService!;
+        const chatService = chat();
         const historyResult = await chatService.getChatHistory(
           userId,
           contactId,
@@ -1516,7 +1510,7 @@ export class SocialCommandsModule implements CommandModule {
 
     if (!subCommand) {
       try {
-        const chatService = context.services.chatService!;
+        const chatService = chat();
         const contactsResult = await chatService.getChatContacts(userId);
 
         if (!contactsResult.success) {

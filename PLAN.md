@@ -3865,9 +3865,7 @@ Write them per-refactor, immediately before touching the code:
       Prisma handed to every command. Remove `db.client` from `CommandContext` and migrate the
       **170 direct Prisma calls** in command modules onto services.
       **2026-10-07: the Prisma half is DONE** — writes (below) and reads (below); `db` is gone from
-      `CommandContext`. Still open: the "26 services" half (per-module interfaces). Modules now
-      resolve what they need through `di/resolve` accessors, which is the direction, but
-      `context.services` still exists.
+      `CommandContext`. **2026-10-08: the services half is DONE** (below).
 - [x] **A4 (partial) DONE 2026-09-24 — the 60s DI cache is deleted.** Both halves of the claim
       held. It bought **nothing**: every token it cached resolves to a tsyringe singleton, so it
       replaced one registry lookup with a Map lookup plus a timestamp compare. And it cost
@@ -3984,6 +3982,38 @@ Write them per-refactor, immediately before touching the code:
       - **OPEN Q7: which rule reveals the fragment commands?** The commands and `help <category>`
         use "has AIDA intel or a fragment discovery"; the full command listing in `help` hides them
         until `discoveryLevel >= 3`. Two rules for one question — pick one.
+- [x] **A4 part 3, SERVICES — DONE 2026-10-08. `context.services` is gone.** It was 26 services
+      behind an `[key: string]: any` index signature. Now `commandModules/deps.ts` holds one lazy,
+      typed accessor per service (33, after folding in the 7 that modules resolved ad hoc through
+      `await import("di/container")`); each module imports exactly what it uses, so that import
+      line IS its dependency interface. `CommandContext` keeps request data plus `gameStateManager`,
+      `fileService` and `playerProgress`, all non-optional. Guarded by the A4 harness (no ad-hoc
+      resolution in commandModules, no `services`/index signature back on the interface), the
+      compiler for the rest. What the bag was hiding:
+      - **`storyMissionService` was declared nowhere** — reached only through the `any` index
+        signature, so its calls were unchecked. (They happened to be right.)
+      - **Eleven services typed OPTIONAL, all registered singletons.** The builder turned a failed
+        resolution into a logged warning and `undefined`, so ~55 `if (service)` guards and
+        "service unavailable" branches could only ever fire on a real construction failure — which
+        they then hid as a silent skip (CLAUDE.md shape #5). All removed; resolution is lazy and
+        LOUD (it throws at the command that needs the service).
+      - **A second implementation of eleven commands** — the synchronous "no resource system"
+        fallbacks after `spawnBackgroundProcess`, which returned null ONLY when memoryService was
+        missing. Deleted (~300 lines): upload, download, decrypt, analyze, sweep, scan, subnet
+        sweep, probe, whois, hack (the 37-line "legacy" path), exploit, backdoor, rootkit,
+        trace.evade, crack (message), traceroute (+ its `simulatedTraceroute`, which fabricated
+        random hops), and `legacyScan`. Each deleted region was printed and read before removal;
+        `tsc --allowUnreachableCode false` confirms none is left. This shape had already cost one
+        real bug (P5-NEW: scan's legacy rescue sat in the dead branch).
+      - **~30 silent swallows** (`.catch(() => {})`, `catch { /* non-critical */ }`, and four
+        `catch { /* service not available */ }` in `cat` whose comments became false) now log.
+      - Harness: `verify-phase7-a9-two-paths.ts` compared "background === fallback"; with one path
+        it now pins "the path that runs emits exactly the builder's report" (negative-controlled),
+        stubbing through the DI container instead of `ctx.services`.
+      - **The truncated-ID class (next commit):** listings print an id form the consuming command
+        cannot read — story arcs (16-char prefix vs `findUnique`), admin mail reports (8 chars vs
+        `findUnique`), faction missions (LAST 4 chars vs a PREFIX resolver). Same shape as bounties.
+        Also `story <id>` shows any player's arc (only abandon checks ownership).
       - **Found in passing, NOT fixed (named so it is not lost):** `prisma/npcOwnership.ts` merges a
         duplicate NPC by moving servers, sent messages and forum memberships, then `user.delete`.
         Five required User FKs have no `onDelete` and so default to RESTRICT — `Contact.contact`

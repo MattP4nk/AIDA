@@ -491,11 +491,11 @@ async function main() {
       );
       check(
         "(structural) tap gates server targets through it",
-        /topology\(\)\.playerKnowsServer\(context\.userId, server\.id, server\.ownerId\)/.test(net),
+        /\w+\(\)\.playerKnowsServer\(context\.userId, server\.id, server\.ownerId\)/.test(net),
       );
       check(
         "(structural) and player targets on their home server",
-        /topology\(\)\.playerKnowsServer\(context\.userId, user\.homeServerId, user\.id\)/.test(net),
+        /\w+\(\)\.playerKnowsServer\(context\.userId, user\.homeServerId, user\.id\)/.test(net),
         "a username from the leaderboard was otherwise enough to surveil anyone",
       );
       check(

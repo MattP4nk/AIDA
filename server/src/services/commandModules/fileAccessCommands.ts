@@ -8,7 +8,7 @@
 
 import type { Command, CommandResult, MinigameChallenge } from "../../../../shared/types";
 import type { CommandContext, CommandInfo, CommandModule } from "./interface";
-import { successResult, errorResult, spawnBackgroundProcess } from "./helpers";
+import { errorResult, spawnBackgroundProcess } from "./helpers";
 import {
   generateAnomalyScanChallenge,
   generateDiskSectorChallenge,
@@ -16,6 +16,7 @@ import {
 } from "../fileAccessMinigameGenerator";
 
 import logger from "../../logger";
+import { servers } from "./deps";
 
 // ═══════════════════════════════════════════════════════════════════
 // Session Management
@@ -94,38 +95,28 @@ export class FileAccessCommandsModule implements CommandModule {
     const forensics = progress?.forensics ?? 0;
 
     // Spawn background process
-    const memoryService = context.services.memoryService;
-    if (memoryService) {
-      const spawn = await spawnBackgroundProcess({
-        context,
-        processType: "sweep",
-        skillKey: "forensics",
-        label: "filesystem sweep",
-        targetServerId: serverId,
-        onComplete: async () => {
-          try {
-            await this.executeSweep(context, serverId, currentDir, forensics);
-          } catch (err) {
-            logger.error({ err }, "Sweep onComplete error");
-            if (context.io) {
-              context.io.to(`player:${context.userId}`).emit("command:result", {
-                success: false,
-                output: "Sweep failed unexpectedly.",
-                timestamp: new Date(),
-              });
-            }
+    const spawn = await spawnBackgroundProcess({
+      context,
+      processType: "sweep",
+      skillKey: "forensics",
+      label: "filesystem sweep",
+      targetServerId: serverId,
+      onComplete: async () => {
+        try {
+          await this.executeSweep(context, serverId, currentDir, forensics);
+        } catch (err) {
+          logger.error({ err }, "Sweep onComplete error");
+          if (context.io) {
+            context.io.to(`player:${context.userId}`).emit("command:result", {
+              success: false,
+              output: "Sweep failed unexpectedly.",
+              timestamp: new Date(),
+            });
           }
-        },
-      });
-      if (spawn) return spawn.result;
-    }
-
-    // Fallback: instant sweep (no resource system)
-    await this.executeSweep(context, serverId, currentDir, forensics);
-    if (activeSweepSessions.has(context.userId)) {
-      return successResult("Sweep initiated. Analyze the panel above.");
-    }
-    return successResult("Sweep complete. No hidden anomalies detected in this directory.");
+        }
+      },
+    });
+    return spawn.result;
   }
 
   private async executeSweep(
@@ -152,7 +143,7 @@ export class FileAccessCommandsModule implements CommandModule {
 
 
     // Get server security level
-    const server = await context.services.serverService.findById(serverId);
+    const server = await servers().findById(serverId);
     const securityLevel = server?.securityLevel ?? 3;
 
     // Generate challenge based on security level
@@ -257,7 +248,7 @@ export class FileAccessCommandsModule implements CommandModule {
           "forensics",
           5 + sweepSession.challenge.difficulty,
         );
-      } catch { /* non-critical */ }
+      } catch (err) { logger.warn({ err }, "fileAccessCommands.handleSweepReveal: non-critical step failed"); }
 
       activeSweepSessions.delete(context.userId);
       return {

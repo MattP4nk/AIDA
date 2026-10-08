@@ -12,12 +12,9 @@ import {
   successResult,
   errorResult,
 } from "./helpers";
-import { getService as resolveService } from "../../di/resolve";
-import { USER_REPOSITORY } from "../../di/tokens";
-import type { UserRepository } from "../../repositories/userRepository";
+import { missionIntegration as missionIntegrationSvc, users } from "./deps";
 
 
-const users = () => resolveService<UserRepository>(USER_REPOSITORY);
 export class FileCommandsModule implements CommandModule {
   public category = "file";
   public commands: Set<string> = new Set([
@@ -114,65 +111,43 @@ export class FileCommandsModule implements CommandModule {
     const path = resolvePath(filename, getSession(context)?.currentDirectory || "/");
 
     // ── Spawn upload as a background process ──
-    const memoryService = context.services.memoryService;
-    if (memoryService) {
-      const spawn = await spawnBackgroundProcess({
-        context,
-        processType: "upload",
-        skillKey: "networking",
-        label: filename,
-        targetServerId: serverId,
-        onComplete: async () => {
-          try {
-            const result = await context.fileService.createFile(
-              serverId,
-              context.userId,
-              path,
-              content,
-              false,
-            );
+    const spawn = await spawnBackgroundProcess({
+      context,
+      processType: "upload",
+      skillKey: "networking",
+      label: filename,
+      targetServerId: serverId,
+      onComplete: async () => {
+        try {
+          const result = await context.fileService.createFile(
+            serverId,
+            context.userId,
+            path,
+            content,
+            false,
+          );
 
-            if (context.io) {
-              context.io.to(`player:${context.userId}`).emit("command:result", {
-                success: result.success,
-                output: result.success
-                  ? `File uploaded: ${filename}`
-                  : `Upload failed: ${result.message}`,
-                timestamp: new Date(),
-              });
-            }
-          } catch (err) {
-            if (context.io) {
-              context.io.to(`player:${context.userId}`).emit("command:result", {
-                success: false,
-                output: "Upload failed",
-                timestamp: new Date(),
-              });
-            }
+          if (context.io) {
+            context.io.to(`player:${context.userId}`).emit("command:result", {
+              success: result.success,
+              output: result.success
+                ? `File uploaded: ${filename}`
+                : `Upload failed: ${result.message}`,
+              timestamp: new Date(),
+            });
           }
-        },
-      });
-      if (spawn) return spawn.result;
-    }
-
-    // Fallback: instant operation (no resource system)
-    try {
-      const result = await context.fileService.createFile(
-        serverId,
-        context.userId,
-        path,
-        content,
-        false,
-      );
-
-      if (!result.success) {
-        return errorResult(`Upload failed: ${result.message}`);
-      }
-
-      return successResult(`File uploaded: ${filename}`);
-    } catch (error) {
-      return errorResult("Upload failed", error instanceof Error ? error.message : "Unknown error");
-    }
+        } catch (err) {
+          if (context.io) {
+            context.io.to(`player:${context.userId}`).emit("command:result", {
+              success: false,
+              output: "Upload failed",
+              timestamp: new Date(),
+            });
+          }
+        }
+      },
+    });
+    return spawn.result;
   }
 
   private async handleDownload(
@@ -213,120 +188,86 @@ export class FileCommandsModule implements CommandModule {
     // objectives are bound to `metadata.fileId`; both download paths used to
     // pass "" here, so they could never be credited (M12).
     const sourceFileId: string = readCheck.data.nodeId ?? "";
-    const memoryService = context.services.memoryService;
 
     // ── Spawn download as a background process ──
-    if (memoryService) {
-      const sourceServerId = serverId;
-      const homeServerId = session.homeServerId;
-      const userId = context.userId;
+    const sourceServerId = serverId;
+    const homeServerId = session.homeServerId;
+    const userId = context.userId;
 
-      const spawn = await spawnBackgroundProcess({
-        context,
-        processType: "download",
-        skillKey: "networking",
-        label: filename,
-        targetServerId: sourceServerId,
-        onComplete: async () => {
-          // ── On completion: copy file to home server ──
-          try {
-            const { result, downloadDir, accessKeysGranted } = await saveDownload(context, {
-              userId, homeServerId, sourceServerId, sourcePath: path, sourceFileId,
-              filename, content: fileContent, isEncrypted: fileIsEncrypted,
-            });
+    const spawn = await spawnBackgroundProcess({
+      context,
+      processType: "download",
+      skillKey: "networking",
+      label: filename,
+      targetServerId: sourceServerId,
+      onComplete: async () => {
+        // ── On completion: copy file to home server ──
+        try {
+          const { result, downloadDir, accessKeysGranted } = await saveDownload(context, {
+            userId, homeServerId, sourceServerId, sourcePath: path, sourceFileId,
+            filename, content: fileContent, isEncrypted: fileIsEncrypted,
+          });
 
-            // Push result to player.
-            //
-            // R12 REVIEW: gated on `result.success`. This block sat OUTSIDE the
-            // `if (result.success)` above, so it announced "Downloaded ... File
-            // saved to home server." on every attempt including the failed
-            // ones — and once the failure branch below was added, a failed
-            // download emitted BOTH: a success message and then a
-            // contradictory failure message.
-            if (result.success && context.io) {
-              let downloadOutput = `Downloaded ${filename} → ${downloadDir}/\n${fileIsEncrypted ? "[ENCRYPTED] " : ""}File saved to home server.`;
+          // Push result to player.
+          //
+          // R12 REVIEW: gated on `result.success`. This block sat OUTSIDE the
+          // `if (result.success)` above, so it announced "Downloaded ... File
+          // saved to home server." on every attempt including the failed
+          // ones — and once the failure branch below was added, a failed
+          // download emitted BOTH: a success message and then a
+          // contradictory failure message.
+          if (result.success && context.io) {
+            let downloadOutput = `Downloaded ${filename} → ${downloadDir}/\n${fileIsEncrypted ? "[ENCRYPTED] " : ""}File saved to home server.`;
 
-              if (accessKeysGranted.length > 0) {
-                downloadOutput += "\n\n" +
-                  "╔══════════════════════════════════════════╗\n" +
-                  "║     [!] ACCESS KEY DISCOVERED            ║\n" +
-                  "╠══════════════════════════════════════════╣\n";
-                for (const name of accessKeysGranted) {
-                  downloadOutput += `║  ► ${name.padEnd(37)}║\n`;
-                }
-                downloadOutput +=
-                  "║                                          ║\n" +
-                  "║  Access granted. Use 'connect' to enter. ║\n" +
-                  "╚══════════════════════════════════════════╝";
+            if (accessKeysGranted.length > 0) {
+              downloadOutput += "\n\n" +
+                "╔══════════════════════════════════════════╗\n" +
+                "║     [!] ACCESS KEY DISCOVERED            ║\n" +
+                "╠══════════════════════════════════════════╣\n";
+              for (const name of accessKeysGranted) {
+                downloadOutput += `║  ► ${name.padEnd(37)}║\n`;
               }
+              downloadOutput +=
+                "║                                          ║\n" +
+                "║  Access granted. Use 'connect' to enter. ║\n" +
+                "╚══════════════════════════════════════════╝";
+            }
 
-              context.io.to(`player:${userId}`).emit("command:result", {
-                success: true,
-                output: downloadOutput,
-                soundEvent: accessKeysGranted.length > 0 ? "success" : undefined,
-                timestamp: new Date(),
-              });
-            }
-            // R12: report the failure. There was no else at all, and
-            // `createFile` RETURNS `{ success: false }` for cases like
-            // FILE_EXISTS rather than throwing — so the `catch` below never
-            // fired and the player got NO response. Downloading the same file
-            // twice left the terminal waiting on a command that had finished.
-            //
-            // Mutually exclusive with the success emit above — exactly one
-            // `command:result` per download attempt.
-            if (!result.success && context.io) {
-              context.io.to(`player:${userId}`).emit("command:result", {
-                success: false,
-                output: `Download failed: ${result.message ?? "could not save to home server."}`,
-                timestamp: new Date(),
-              });
-            }
-          } catch (err) {
-            if (context.io) {
-              context.io.to(`player:${userId}`).emit("command:result", {
-                success: false,
-                output: `Download failed: could not save to home server.`,
-                timestamp: new Date(),
-              });
-            }
+            context.io.to(`player:${userId}`).emit("command:result", {
+              success: true,
+              output: downloadOutput,
+              soundEvent: accessKeysGranted.length > 0 ? "success" : undefined,
+              timestamp: new Date(),
+            });
           }
-        },
-      });
-
-      if (spawn) return spawn.result;
-    }
-
-    // Fallback: no process system available — direct copy
-    try {
-      const saved = await saveDownload(context, {
-        userId: context.userId, homeServerId: session.homeServerId, sourceServerId: serverId,
-        sourcePath: path, sourceFileId, filename, content: fileContent, isEncrypted: fileIsEncrypted,
-      });
-      if (!saved.result.success) {
-        return errorResult(`Download failed: ${saved.result.message}`);
-      }
-      const grantedServers = saved.accessKeysGranted;
-
-      let downloadOutput = `Downloaded ${filename} → ~/downloads/\n${fileIsEncrypted ? "[ENCRYPTED] " : ""}File saved to home server.`;
-      if (grantedServers.length > 0) {
-        downloadOutput += "\n\n" +
-          "╔══════════════════════════════════════════╗\n" +
-          "║     [!] ACCESS KEY DISCOVERED            ║\n" +
-          "╠══════════════════════════════════════════╣\n";
-        for (const name of grantedServers) {
-          downloadOutput += `║  ► ${name.padEnd(37)}║\n`;
+          // R12: report the failure. There was no else at all, and
+          // `createFile` RETURNS `{ success: false }` for cases like
+          // FILE_EXISTS rather than throwing — so the `catch` below never
+          // fired and the player got NO response. Downloading the same file
+          // twice left the terminal waiting on a command that had finished.
+          //
+          // Mutually exclusive with the success emit above — exactly one
+          // `command:result` per download attempt.
+          if (!result.success && context.io) {
+            context.io.to(`player:${userId}`).emit("command:result", {
+              success: false,
+              output: `Download failed: ${result.message ?? "could not save to home server."}`,
+              timestamp: new Date(),
+            });
+          }
+        } catch (err) {
+          if (context.io) {
+            context.io.to(`player:${userId}`).emit("command:result", {
+              success: false,
+              output: `Download failed: could not save to home server.`,
+              timestamp: new Date(),
+            });
+          }
         }
-        downloadOutput +=
-          "║                                          ║\n" +
-          "║  Access granted. Use 'connect' to enter. ║\n" +
-          "╚══════════════════════════════════════════╝";
-      }
+      },
+    });
 
-      return successResult(downloadOutput);
-    } catch (error) {
-      return errorResult("Download failed", error instanceof Error ? error.message : "Unknown error");
-    }
+    return spawn.result;
   }
 
   private async handleEncrypt(
@@ -385,8 +326,8 @@ export class FileCommandsModule implements CommandModule {
             context.userId,
             tempPath,
           );
-        } catch {
-          // Ignore cleanup errors
+        } catch (err) {
+          logger.warn({ err, tempPath }, "encrypt: temp file cleanup failed");
         }
         return errorResult(`Encryption failed: ${createResult.message}`);
       }
@@ -418,7 +359,7 @@ export class FileCommandsModule implements CommandModule {
         // was never shown to anyone.
         try {
           await context.fileService.deleteNode(serverId, context.userId, tempPath);
-        } catch { /* best effort */ }
+        } catch (err) { logger.warn({ err, tempPath }, "encrypt: temp file cleanup failed"); }
         return errorResult(
           `Cannot encrypt ${path}: ${removed.message ?? "the original could not be replaced"}`,
         );
@@ -448,8 +389,9 @@ export class FileCommandsModule implements CommandModule {
           context.userId,
           tempPath,
         );
-      } catch {
-        // Best-effort: a leftover temp file is untidy, not harmful.
+      } catch (err) {
+        // Best-effort: a leftover temp file is untidy, not harmful — but logged.
+        logger.warn({ err, tempPath }, "encrypt: temp file cleanup failed");
       }
 
       // R9: SURFACE THE KEY.
@@ -498,123 +440,75 @@ export class FileCommandsModule implements CommandModule {
     }
 
     const path = resolvePath(filename, getSession(context)?.currentDirectory || "/");
-    const memoryService = context.services.memoryService;
 
     // ── Resource check: spawn decrypt as background process ──
-    if (memoryService) {
-      // With key → faster (use skill override). Without → brute force at actual skill.
-      const cryptoProgress = await context.playerProgress.get(context.userId);
-      const cryptoSkill = cryptoProgress?.cryptography ?? 1;
-      const effectiveSkill = password ? Math.max(cryptoSkill, 30) : undefined;
+    // With key → faster (use skill override). Without → brute force at actual skill.
+    const cryptoProgress = await context.playerProgress.get(context.userId);
+    const cryptoSkill = cryptoProgress?.cryptography ?? 1;
+    const effectiveSkill = password ? Math.max(cryptoSkill, 30) : undefined;
 
-      const spawn = await spawnBackgroundProcess({
-        context,
-        processType: "decrypt",
-        skillKey: "cryptography",
-        label: filename,
-        effectiveSkillOverride: effectiveSkill,
-        onComplete: async () => {
-          try {
-            const readResult = await context.fileService.readFile(serverId, context.userId, path, password);
-            if (!readResult.success || !readResult.data) {
-              context.io?.to(`player:${context.userId}`).emit("command:result", {
-                success: false, output: `Decryption failed: ${readResult.message}`, timestamp: new Date(),
-              });
-              return;
-            }
-            if (!readResult.data.isEncrypted) {
-              context.io?.to(`player:${context.userId}`).emit("command:result", {
-                success: true, output: "File is not encrypted.", timestamp: new Date(),
-              });
-              return;
-            }
-
-            // REVIEW FIX: same unchecked delete-then-recreate as the
-            // fallback below. This path was worse — it emitted
-            // `success: true` to the client after destroying the file.
-            const content = readResult.data.content;
-            const removed = await context.fileService.deleteNode(serverId, context.userId, path);
-            if (!removed.success) {
-              context.io?.to(`player:${context.userId}`).emit("command:result", {
-                success: false,
-                output: `Cannot decrypt: ${removed.message ?? "the original could not be replaced"}`,
-                timestamp: new Date(),
-              });
-              return;
-            }
-
-            const rewritten = await context.fileService.createFile(serverId, context.userId, path, content, false);
-            if (!rewritten.success) {
-              context.io?.to(`player:${context.userId}`).emit("command:result", {
-                success: false,
-                output:
-                  `Decryption failed while rewriting ${path}: ${rewritten.message}. ` +
-                  `The file has been removed — its decrypted contents were:\n\n${content}`,
-                timestamp: new Date(),
-              });
-              return;
-            }
-
+    const spawn = await spawnBackgroundProcess({
+      context,
+      processType: "decrypt",
+      skillKey: "cryptography",
+      label: filename,
+      effectiveSkillOverride: effectiveSkill,
+      onComplete: async () => {
+        try {
+          const readResult = await context.fileService.readFile(serverId, context.userId, path, password);
+          if (!readResult.success || !readResult.data) {
             context.io?.to(`player:${context.userId}`).emit("command:result", {
-              success: true, output: `File decrypted: ${filename}`, timestamp: new Date(),
+              success: false, output: `Decryption failed: ${readResult.message}`, timestamp: new Date(),
             });
-          } catch {
-            context.io?.to(`player:${context.userId}`).emit("command:result", {
-              success: false, output: "Decryption process failed.", timestamp: new Date(),
-            });
+            return;
           }
-        },
-      });
+          if (!readResult.data.isEncrypted) {
+            context.io?.to(`player:${context.userId}`).emit("command:result", {
+              success: true, output: "File is not encrypted.", timestamp: new Date(),
+            });
+            return;
+          }
 
-      if (spawn) return spawn.result;
-    }
+          // REVIEW FIX: an unchecked delete-then-recreate. This path
+          // emitted `success: true` to the client after destroying the
+          // file. (A synchronous fallback had the same bug; A4 deleted it —
+          // it ran only when memoryService was missing, which cannot happen.)
+          const content = readResult.data.content;
+          const removed = await context.fileService.deleteNode(serverId, context.userId, path);
+          if (!removed.success) {
+            context.io?.to(`player:${context.userId}`).emit("command:result", {
+              success: false,
+              output: `Cannot decrypt: ${removed.message ?? "the original could not be replaced"}`,
+              timestamp: new Date(),
+            });
+            return;
+          }
 
-    // ── Fallback: instant decrypt (no resource system) ──
-    try {
-      const readResult = await context.fileService.readFile(serverId, context.userId, path, password);
-      if (!readResult.success || !readResult.data) {
-        return errorResult(`Cannot decrypt: ${readResult.message}`);
-      }
-      if (!readResult.data.isEncrypted) {
-        return successResult("File is not encrypted");
-      }
-      // REVIEW FIX: this is the same delete-then-recreate hazard R9 fixed in
-      // `handleEncrypt` — left intact in the function directly below it.
-      // Neither result was checked, and the two calls use DIFFERENT permission
-      // rules: `deleteNode` checks write on the NODE, `createFile` checks write
-      // on the PARENT DIRECTORY. A player with write on the file but not on
-      // its directory therefore deleted it, failed to recreate it, and was
-      // told "File decrypted".
-      const removed = await context.fileService.deleteNode(
-        serverId,
-        context.userId,
-        path,
-      );
-      if (!removed.success) {
-        return errorResult(
-          `Cannot decrypt: ${removed.message ?? "the original could not be replaced"}`,
-        );
-      }
+          const rewritten = await context.fileService.createFile(serverId, context.userId, path, content, false);
+          if (!rewritten.success) {
+            context.io?.to(`player:${context.userId}`).emit("command:result", {
+              success: false,
+              output:
+                `Decryption failed while rewriting ${path}: ${rewritten.message}. ` +
+                `The file has been removed — its decrypted contents were:\n\n${content}`,
+              timestamp: new Date(),
+            });
+            return;
+          }
 
-      const rewritten = await context.fileService.createFile(
-        serverId,
-        context.userId,
-        path,
-        readResult.data.content,
-        false,
-      );
-      if (!rewritten.success) {
-        return errorResult(
-          `Decryption failed while rewriting ${path}: ${rewritten.message}. ` +
-            `The file has been removed — its decrypted contents were:\n\n` +
-            `${readResult.data.content}`,
-        );
-      }
+          context.io?.to(`player:${context.userId}`).emit("command:result", {
+            success: true, output: `File decrypted: ${filename}`, timestamp: new Date(),
+          });
+        } catch (err) {
+          logger.warn({ err, userId: context.userId, path }, "decrypt: process failed");
+          context.io?.to(`player:${context.userId}`).emit("command:result", {
+            success: false, output: "Decryption process failed.", timestamp: new Date(),
+          });
+        }
+      },
+    });
 
-      return successResult(`File decrypted: ${filename}`);
-    } catch (error) {
-      return errorResult("Decryption failed", error instanceof Error ? error.message : "Unknown error");
-    }
+    return spawn.result;
   }
 
   /**
@@ -706,107 +600,74 @@ export class FileCommandsModule implements CommandModule {
     const severity = shortfall?.severity ?? 0;
 
     // ── Spawn analyze as a background process ──
-    const memoryService = context.services.memoryService;
-    if (memoryService) {
-      const spawn = await spawnBackgroundProcess({
-        context,
-        processType: "analyze",
-        skillKey: "forensics",
-        label: filename,
-        targetServerId: serverId,
-        onComplete: async () => {
-          try {
-            // Use listDirectory to find the node without reading content
-            const dir = path.substring(0, path.lastIndexOf("/")) || "/";
-            const name = path.substring(path.lastIndexOf("/") + 1);
+    const spawn = await spawnBackgroundProcess({
+      context,
+      processType: "analyze",
+      skillKey: "forensics",
+      label: filename,
+      targetServerId: serverId,
+      onComplete: async () => {
+        try {
+          // Use listDirectory to find the node without reading content
+          const dir = path.substring(0, path.lastIndexOf("/")) || "/";
+          const name = path.substring(path.lastIndexOf("/") + 1);
 
-            const listResult = await context.fileService.listDirectory(
-              serverId,
-              context.userId,
-              dir,
-              true, // show hidden
-            );
+          const listResult = await context.fileService.listDirectory(
+            serverId,
+            context.userId,
+            dir,
+            true, // show hidden
+          );
 
-            if (!listResult.success || !listResult.data) {
-              if (context.io) {
-                context.io.to(`player:${context.userId}`).emit("command:result", {
-                  success: false,
-                  output: `Analyze failed: ${listResult.message}`,
-                  timestamp: new Date(),
-                });
-              }
-              return;
-            }
-
-            const entry = listResult.data.entries.find((e: any) => e.name === name);
-
-            if (!entry) {
-              if (context.io) {
-                context.io.to(`player:${context.userId}`).emit("command:result", {
-                  success: false,
-                  output: `File not found: ${filename}`,
-                  timestamp: new Date(),
-                });
-              }
-              return;
-            }
-
-            const resultOutput = this.buildAnalysisReport(
-              filename,
-              entry,
-              severity,
-            );
-
-            if (context.io) {
-              context.io.to(`player:${context.userId}`).emit("command:result", {
-                success: true,
-                output: resultOutput,
-                timestamp: new Date(),
-              });
-            }
-          } catch (err) {
+          if (!listResult.success || !listResult.data) {
             if (context.io) {
               context.io.to(`player:${context.userId}`).emit("command:result", {
                 success: false,
-                output: "Analysis failed",
+                output: `Analyze failed: ${listResult.message}`,
                 timestamp: new Date(),
               });
             }
+            return;
           }
-        },
-      });
-      if (spawn) return spawn.result;
-    }
 
-    // Fallback: instant operation (no resource system)
-    try {
-      // Use listDirectory to find the node without reading content
-      const dir = path.substring(0, path.lastIndexOf("/")) || "/";
-      const name = path.substring(path.lastIndexOf("/") + 1);
+          const entry = listResult.data.entries.find((e: any) => e.name === name);
 
-      const listResult = await context.fileService.listDirectory(
-        serverId,
-        context.userId,
-        dir,
-        true, // show hidden
-      );
+          if (!entry) {
+            if (context.io) {
+              context.io.to(`player:${context.userId}`).emit("command:result", {
+                success: false,
+                output: `File not found: ${filename}`,
+                timestamp: new Date(),
+              });
+            }
+            return;
+          }
 
-      if (!listResult.success || !listResult.data) {
-        return errorResult(`Analyze failed: ${listResult.message}`);
-      }
+          const resultOutput = this.buildAnalysisReport(
+            filename,
+            entry,
+            severity,
+          );
 
-      const entry = listResult.data.entries.find((e: any) => e.name === name);
-
-      if (!entry) {
-        return errorResult(`File not found: ${filename}`);
-      }
-
-      const output = this.buildAnalysisReport(filename, entry, severity);
-
-      return successResult(output, { entry });
-    } catch (error) {
-      return errorResult("Analysis failed", error instanceof Error ? error.message : "Unknown error");
-    }
+          if (context.io) {
+            context.io.to(`player:${context.userId}`).emit("command:result", {
+              success: true,
+              output: resultOutput,
+              timestamp: new Date(),
+            });
+          }
+        } catch (err) {
+          if (context.io) {
+            context.io.to(`player:${context.userId}`).emit("command:result", {
+              success: false,
+              output: "Analysis failed",
+              timestamp: new Date(),
+            });
+          }
+        }
+      },
+    });
+    return spawn.result;
   }
 }
 
@@ -835,14 +696,9 @@ export async function saveDownload(
   },
 ): Promise<{ result: FileOperationResult; downloadDir: string; accessKeysGranted: string[] }> {
   // Track download for mission objectives FIRST (before file copy which can fail)
-  const missionIntegration = context.services.missionIntegrationService as
-    | import("../missionIntegration").MissionIntegrationService
-    | undefined;
-  if (missionIntegration) {
-    await missionIntegration
-      .onFileOperation(d.userId, "download", d.sourceFileId, d.sourceServerId)
-      .catch((err) => logger.warn({ err, userId: d.userId }, "download: mission hook failed"));
-  }
+  await missionIntegrationSvc()
+    .onFileOperation(d.userId, "download", d.sourceFileId, d.sourceServerId)
+    .catch((err) => logger.warn({ err, userId: d.userId }, "download: mission hook failed"));
 
   const downloadDir = `${await users().homeDirectory(d.userId)}/downloads`;
   // Usually already exists; a real failure surfaces from createFile below.
@@ -857,7 +713,7 @@ export async function saveDownload(
 
   // Access key detection happens HERE (on download, not on cat).
   const accessKeysGranted =
-    context.services.networkTopologyService && d.content
+    d.content
       ? await context.fileService.detectAndGrantAccessKeys(d.userId, d.content, d.sourceServerId, d.sourcePath, nodeId)
       : [];
   return { result, downloadDir, accessKeysGranted };

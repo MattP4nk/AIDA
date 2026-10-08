@@ -15,6 +15,7 @@ import {
   formatDuration,
   render,
 } from "./asciiBox";
+import { memory, shop } from "./deps";
 
 export class ProcessCommandsModule implements CommandModule {
   public category = "process";
@@ -102,18 +103,15 @@ export class ProcessCommandsModule implements CommandModule {
   // ==================== SPECS ====================
 
   private async handleSpecs(context: CommandContext): Promise<CommandResult> {
-    const memoryService = context.services.memoryService;
-    if (!memoryService) {
-      return errorResult("Resource system unavailable.");
-    }
+    const memoryService = memory();
 
-    const owned = await context.services.shopService.heldItems(context.userId, Object.keys(HARDWARE_SPECS));
+    const owned = await shop().heldItems(context.userId, Object.keys(HARDWARE_SPECS));
     const { installed } = resolveInstalledHardware(
       owned.map((r) => r.shopItemId),
     );
 
     const spec = memoryService.getComputerSpec(context.userId);
-    const shopService = context.services.shopService;
+    const shopService = shop();
 
     const W = 48;
     const lines: string[] = [];
@@ -155,10 +153,7 @@ export class ProcessCommandsModule implements CommandModule {
   // ==================== PS ====================
 
   private handlePs(context: CommandContext): CommandResult {
-    const memoryService = context.services.memoryService;
-    if (!memoryService) {
-      return errorResult("Resource system unavailable.");
-    }
+    const memoryService = memory();
 
     const breakdown = memoryService.getResourceBreakdown(context.userId);
     const processes = breakdown.processes;
@@ -224,10 +219,7 @@ export class ProcessCommandsModule implements CommandModule {
   // ==================== TOP ====================
 
   private handleTop(context: CommandContext): CommandResult {
-    const memoryService = context.services.memoryService;
-    if (!memoryService) {
-      return errorResult("Resource system unavailable.");
-    }
+    const memoryService = memory();
 
     const breakdown = memoryService.getResourceBreakdown(context.userId);
     const { spec } = breakdown;
@@ -271,10 +263,7 @@ export class ProcessCommandsModule implements CommandModule {
   // ==================== KILL ====================
 
   private handleKill(command: Command, context: CommandContext): CommandResult {
-    const memoryService = context.services.memoryService;
-    if (!memoryService) {
-      return errorResult("Resource system unavailable.");
-    }
+    const memoryService = memory();
 
     const pidStr = command.args?.[0];
     if (!pidStr) {
@@ -309,10 +298,7 @@ export class ProcessCommandsModule implements CommandModule {
   // ==================== FREE ====================
 
   private handleFree(context: CommandContext): CommandResult {
-    const memoryService = context.services.memoryService;
-    if (!memoryService) {
-      return errorResult("Resource system unavailable.");
-    }
+    const memoryService = memory();
 
     const spec = memoryService.getComputerSpec(context.userId);
     const ramFree = spec.ramTotal - spec.ramUsed;
@@ -335,10 +321,7 @@ export class ProcessCommandsModule implements CommandModule {
   // ==================== UPTIME ====================
 
   private handleUptime(context: CommandContext): CommandResult {
-    const memoryService = context.services.memoryService;
-    if (!memoryService) {
-      return errorResult("Resource system unavailable.");
-    }
+    const memoryService = memory();
 
     const spec = memoryService.getComputerSpec(context.userId);
     const processes = memoryService.getGameProcesses(context.userId);
@@ -360,10 +343,7 @@ export class ProcessCommandsModule implements CommandModule {
   // ==================== PKILL ====================
 
   private handlePkill(command: Command, context: CommandContext): CommandResult {
-    const memoryService = context.services.memoryService;
-    if (!memoryService) {
-      return errorResult("Resource system unavailable.");
-    }
+    const memoryService = memory();
 
     const typeName = command.args?.[0];
     if (!typeName) {
@@ -435,10 +415,7 @@ export class ProcessCommandsModule implements CommandModule {
   // ==================== RENICE ====================
 
   private handleRenice(command: Command, context: CommandContext): CommandResult {
-    const memoryService = context.services.memoryService;
-    if (!memoryService) {
-      return errorResult("Resource system unavailable.");
-    }
+    const memoryService = memory();
 
     const args = command.args || [];
     if (args.length < 2) {
