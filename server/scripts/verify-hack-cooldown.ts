@@ -19,13 +19,14 @@ import {
   HACK_COOLDOWN_MIN_S,
 } from "../src/config/gameBalance";
 import { readFileSync } from "node:fs";
+import { stripComments } from "./lib/strip-comments";
 
 let pass = 0, fail = 0;
 function check(n: string, ok: boolean, d = "") {
   if (ok) { pass++; console.log(`  [PASS] ${n}${d ? ` — ${d}` : ""}`); }
   else { fail++; console.log(`  [FAIL] ${n}${d ? ` — ${d}` : ""}`); }
 }
-const strip = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+const strip = (s: string) => stripComments(s);
 
 async function main() {
   console.log("\n=== Hack cooldown scales with skill ===");

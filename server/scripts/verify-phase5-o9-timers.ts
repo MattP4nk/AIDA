@@ -20,6 +20,7 @@
 import "reflect-metadata";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { stripComments } from "./lib/strip-comments";
 
 let pass = 0;
 let fail = 0;
@@ -48,7 +49,7 @@ function walk(dir: string, out: string[] = []): string[] {
  * demanded a shutdown hook for a module that has no timer at all. CLAUDE.md §2.
  */
 const code = (f: string) =>
-  readFileSync(f, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  stripComments(readFileSync(f, "utf8"));
 
 async function main() {
   console.log("\n=== Phase 5 O9 — timer shutdown ===\n");

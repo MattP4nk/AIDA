@@ -18,6 +18,7 @@
 import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
 import { readFileSync } from "node:fs";
+import { stripComments } from "./lib/strip-comments";
 
 const prisma = new PrismaClient();
 
@@ -28,7 +29,7 @@ function check(name: string, ok: boolean, detail = "") {
   else { fail++; console.log(`  [FAIL] ${name}${detail ? ` — ${detail}` : ""}`); }
 }
 const strip = (s: string) =>
-  s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  stripComments(s);
 const read = (rel: string) =>
   strip(readFileSync(new URL(rel, import.meta.url).pathname, "utf8"));
 

@@ -21,6 +21,7 @@
  * Run: npx tsx scripts/verify-phase5-review3.ts
  */
 import { readFileSync } from "node:fs";
+import { stripComments } from "./lib/strip-comments";
 
 let pass = 0;
 let fail = 0;
@@ -30,11 +31,11 @@ function check(name: string, ok: boolean, detail = "") {
 }
 
 /** Match code, not the comments that describe the code. */
-const strip = (src: string) =>
-  src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+const strip = (src: string, fileName?: string) =>
+  stripComments(src, fileName);
 
 const read = (rel: string) =>
-  strip(readFileSync(new URL(rel, import.meta.url).pathname, "utf8"));
+  strip(readFileSync(new URL(rel, import.meta.url).pathname, "utf8"), rel);
 
 async function main() {
   // ── RV-1: exactly one command:result per download ──────────────────────

@@ -24,6 +24,7 @@
  */
 import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
+import { stripComments } from "./lib/strip-comments";
 
 let pass = 0;
 let fail = 0;
@@ -56,9 +57,7 @@ function resolveSpec(fromFile: string, spec: string): string | null {
 
 /** Static, VALUE-level imports only. */
 function valueImports(file: string): string[] {
-  const src = readFileSync(file, "utf8")
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/^\s*\/\/.*$/gm, "");
+  const src = stripComments(readFileSync(file, "utf8"));
   const out: string[] = [];
   // `import ... from "x"` but NOT `import type ... from "x"`.
   for (const m of src.matchAll(/^\s*import\s+(?!type\b)([\s\S]*?)\s+from\s+["']([^"']+)["']/gm)) {

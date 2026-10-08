@@ -4013,7 +4013,13 @@ Write them per-refactor, immediately before touching the code:
          the owner still learns it from `backdoor scan`.
       10. Client branch for the HTTP hack start served the server path A4 deleted — removed.
       - Also: `verify-phase7-bus-hooks.ts` used the banned regex comment-strip idiom; switched to
-        `stripComments`. **24 more harnesses still use it** — converting them is the next commit.
+        `stripComments`. **DONE (next commit): every remaining harness converted** — 27 sites in 25
+        harnesses plus the root `check-socket-contract.ts`, whose `.svelte` exemption existed only
+        because the helper parsed everything as TypeScript; it now has a Svelte mode. Proven by
+        diffing every check line of all 25 harnesses before/after (identical; the diff also caught
+        one conversion that made a local wrapper call itself). `verify-strip-comments.ts` pins the
+        helper, including a control that first FAILED on a wrong premise (a quoted URL is a string,
+        not a comment — the real hazard is a bare URL in markup text).
 - [x] **A4 part 3, SERVICES — DONE 2026-10-08. `context.services` is gone.** It was 26 services
       behind an `[key: string]: any` index signature. Now `commandModules/deps.ts` holds one lazy,
       typed accessor per service (33, after folding in the 7 that modules resolved ad hoc through

@@ -10,13 +10,14 @@
  */
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { stripComments } from "./lib/strip-comments";
 
 let pass = 0, fail = 0;
 function check(n: string, ok: boolean, d = "") {
   if (ok) { pass++; console.log(`  [PASS] ${n}${d ? ` — ${d}` : ""}`); }
   else { fail++; console.log(`  [FAIL] ${n}${d ? ` — ${d}` : ""}`); }
 }
-const strip = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+const strip = (s: string, fileName?: string) => stripComments(s, fileName);
 const ROOT = new URL("../..", import.meta.url).pathname;
 function walk(d: string, exts: string[]): string[] {
   const o: string[] = [];
@@ -29,7 +30,7 @@ function walk(d: string, exts: string[]): string[] {
   return o;
 }
 const read = (rel: string, exts: string[]) =>
-  walk(join(ROOT, rel), exts).map(f => strip(readFileSync(f, "utf8"))).join("\n");
+  walk(join(ROOT, rel), exts).map(f => strip(readFileSync(f, "utf8"), f)).join("\n");
 
 const WIRED = [
   ["security:warning", "honeypot tripped — the register path said only 'Successfully registered'"],

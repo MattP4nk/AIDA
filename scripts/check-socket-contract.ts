@@ -77,13 +77,10 @@ const ON_HANDLER = /\.(?:on|once)\(\s*["'`]([a-z_]+:[a-zA-Z_-]+)["'`]/g;
  */
 // Parser-based (server/scripts/lib/strip-comments.ts). The regex this used
 // is not string-aware: a "/*" inside a string swallows code to the next "*/".
-// .svelte files are not TypeScript, so they keep the regex — their scripts
-// carry no glob-like strings today, and the audit that found the trap was
-// run over server .ts files.
-const regexStrip = (src: string): string =>
-  src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
-const stripComments = (src: string, file = ""): string =>
-  file.endsWith(".ts") ? parserStrip(src) : regexStrip(src);
+// .svelte files used to keep the regex because the helper parsed everything
+// as TypeScript; it now handles .svelte itself (parses the <script> blocks,
+// strips HTML comments in the markup), so there is one stripper.
+const stripComments = (src: string, file = ""): string => parserStrip(src, file || "x.ts");
 
 function collect(files: string[], re: RegExp): Ref[] {
   const out: Ref[] = [];

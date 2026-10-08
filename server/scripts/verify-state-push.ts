@@ -24,6 +24,7 @@
 import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
 import { readFileSync } from "node:fs";
+import { stripComments } from "./lib/strip-comments";
 
 const prisma = new PrismaClient();
 
@@ -33,10 +34,9 @@ function check(name: string, ok: boolean, detail = "") {
   if (ok) { pass++; console.log(`  [PASS] ${name}${detail ? ` — ${detail}` : ""}`); }
   else { fail++; console.log(`  [FAIL] ${name}${detail ? ` — ${detail}` : ""}`); }
 }
-const strip = (s: string) =>
-  s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+const strip = (s: string, fileName?: string) => stripComments(s, fileName);
 const read = (rel: string) =>
-  strip(readFileSync(new URL(rel, import.meta.url).pathname, "utf8"));
+  strip(readFileSync(new URL(rel, import.meta.url).pathname, "utf8"), rel);
 
 function fakeIo() {
   const sent: Array<{ room: string; event: string; payload: any }> = [];

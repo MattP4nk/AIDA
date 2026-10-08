@@ -183,7 +183,10 @@ A green check that would also have been green *before* the fix is worthless.
   (`src.replace(/\/\*[\s\S]*?\*\//g, "")…`): it is not string-aware, and a `"/*"` inside a
   string literal swallows code to the next `*/` — 138 real lines of `playerInfoCommands.ts`,
   two database writes among them, vanished from a check that was counting writes
-  (2026-10-07). The helper parses the file, so it cannot make that mistake.
+  (2026-10-07). The helper parses the file, so it cannot make that mistake. Every harness
+  uses it as of 2026-10-08 (27 regex sites converted, results check-for-check identical). For a
+  `.svelte` file pass the filename — `stripComments(src, file)` — so it parses only the
+  `<script>` blocks; parsed whole as TypeScript, a bare URL in markup reads as a comment.
 - **A structural check proves structure, not behaviour.** "The file contains this
   identifier" is compatible with the code being unreachable. Before trusting one, ask
   what *else* would satisfy it.

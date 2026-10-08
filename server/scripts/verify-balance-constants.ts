@@ -26,13 +26,14 @@ import {
 } from "../src/config/gameBalance";
 import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { stripComments } from "./lib/strip-comments";
 
 let pass = 0, fail = 0;
 function check(n: string, ok: boolean, d = "") {
   if (ok) { pass++; console.log(`  [PASS] ${n}${d ? ` — ${d}` : ""}`); }
   else { fail++; console.log(`  [FAIL] ${n}${d ? ` — ${d}` : ""}`); }
 }
-const strip = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+const strip = (s: string) => stripComments(s);
 const read = (rel: string) => strip(readFileSync(new URL(rel, import.meta.url).pathname, "utf8"));
 
 async function main() {

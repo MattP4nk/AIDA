@@ -22,6 +22,7 @@
  */
 import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
+import { stripComments } from "./lib/strip-comments";
 
 const prisma = new PrismaClient();
 
@@ -152,10 +153,10 @@ async function main() {
     console.log("\nDE-5 — the route stays a thin caller");
     {
       const { readFileSync } = await import("node:fs");
-      const r = readFileSync(
+      const r = stripComments(readFileSync(
         new URL("../src/routes/adminApi/drafts.ts", import.meta.url).pathname,
         "utf8",
-      ).replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+      ));
       check(
         "the reject route delegates to the service",
         /draftService\.rejectDraft\(/.test(r),

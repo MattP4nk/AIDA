@@ -28,6 +28,7 @@ import { join } from "node:path";
 import {
   KNOWN_ORPHANED_EVENTS,
 } from "../../shared/types/socketEvents";
+import { stripComments } from "./lib/strip-comments";
 
 let pass = 0;
 let fail = 0;
@@ -35,8 +36,7 @@ function check(name: string, ok: boolean, detail = "") {
   if (ok) { pass++; console.log(`  [PASS] ${name}${detail ? ` — ${detail}` : ""}`); }
   else { fail++; console.log(`  [FAIL] ${name}${detail ? ` — ${detail}` : ""}`); }
 }
-const strip = (s: string) =>
-  s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+const strip = (s: string, fileName?: string) => stripComments(s, fileName);
 
 function walk(dir: string, exts: string[]): string[] {
   const out: string[] = [];
@@ -52,7 +52,7 @@ function walk(dir: string, exts: string[]): string[] {
 const ROOT = new URL("../..", import.meta.url).pathname;
 
 function readAll(rel: string, exts: string[]): string {
-  return walk(join(ROOT, rel), exts).map((f) => strip(readFileSync(f, "utf8"))).join("\n");
+  return walk(join(ROOT, rel), exts).map((f) => strip(readFileSync(f, "utf8"), f)).join("\n");
 }
 
 async function main() {

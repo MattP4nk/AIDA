@@ -21,6 +21,7 @@
  */
 import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
+import { stripComments } from "./lib/strip-comments";
 
 const prisma = new PrismaClient();
 
@@ -322,8 +323,7 @@ async function main() {
   console.log("\nS7-10 — lifecycle escalates pending re-checks BEFORE the DB disconnects");
   {
     const { readFileSync } = await import("node:fs");
-    const life = readFileSync(new URL("../src/lifecycle.ts", import.meta.url).pathname, "utf8")
-      .replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    const life = stripComments(readFileSync(new URL("../src/lifecycle.ts", import.meta.url).pathname, "utf8"));
     const call = life.indexOf("await aiService.escalatePendingModeration()");
     const disconnect = life.indexOf("await db.disconnect()");
     check("PRECONDITION: the disconnect was found", disconnect > 0);

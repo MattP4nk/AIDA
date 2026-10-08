@@ -26,6 +26,7 @@
 import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
 import { readFileSync } from "node:fs";
+import { stripComments } from "./lib/strip-comments";
 
 const prisma = new PrismaClient();
 
@@ -181,9 +182,8 @@ async function main() {
   {
     // Match CODE, not prose. A bare substring test against the file kept
     // matching the very comments explaining the fix — this is the fourth time
-    // that trap has fired in this phase, so the guard strips comments first.
-    const stripComments = (src: string) =>
-      src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    // that trap has fired in this phase, so the guard strips comments first
+    // (scripts/lib/strip-comments — parser-based).
 
     const helpers = stripComments(
       readFileSync(new URL("../src/services/commandModules/helpers.ts", import.meta.url).pathname, "utf8"),

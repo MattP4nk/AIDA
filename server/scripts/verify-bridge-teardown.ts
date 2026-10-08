@@ -19,6 +19,7 @@
  */
 import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
+import { stripComments } from "./lib/strip-comments";
 
 const prisma = new PrismaClient();
 
@@ -113,10 +114,10 @@ async function main() {
   console.log("\nBT-3 — the teardown is scoped, not blanket");
   {
     const { readFileSync } = await import("node:fs");
-    const src = readFileSync(
+    const src = stripComments(readFileSync(
       new URL("../src/services/gameStateManager.ts", import.meta.url).pathname,
       "utf8",
-    ).replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    ));
     check(
       "stop() does not call removeAllListeners",
       !/removeAllListeners/.test(src),
@@ -195,10 +196,10 @@ async function main() {
     // COUNTED, not matched: a single `.test()` would have passed on the one
     // path that was already correct, which is exactly how this was missed.
     const { readFileSync } = await import("node:fs");
-    const src = readFileSync(
+    const src = stripComments(readFileSync(
       new URL("../src/services/backdoorService.ts", import.meta.url).pathname,
       "utf8",
-    ).replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    ));
 
     // MATCH ANY WRITE TO `isActive`, not the literal `isActive: false`.
     //
@@ -323,8 +324,7 @@ async function main() {
     // And every deletion path must actually call it.
     const { readFileSync } = await import("node:fs");
     const read = (rel: string) =>
-      readFileSync(new URL(rel, import.meta.url).pathname, "utf8")
-        .replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+      stripComments(readFileSync(new URL(rel, import.meta.url).pathname, "utf8"));
     // ASSERT THE PROPERTY, NOT THE SPELLING.
     //
     // This used to require `releaseDrainsForServers(` in all three files. The

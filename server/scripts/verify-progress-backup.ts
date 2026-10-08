@@ -21,6 +21,7 @@
 import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
 import { readFileSync } from "node:fs";
+import { stripComments } from "./lib/strip-comments";
 
 const prisma = new PrismaClient();
 
@@ -31,7 +32,7 @@ function check(name: string, ok: boolean, detail = "") {
   else { fail++; console.log(`  [FAIL] ${name}${detail ? ` — ${detail}` : ""}`); }
 }
 const strip = (s: string) =>
-  s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  stripComments(s);
 
 async function main() {
   console.log("\n=== Progress backup ===");

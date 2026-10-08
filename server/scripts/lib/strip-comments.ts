@@ -18,6 +18,21 @@
 import ts from "typescript";
 
 export function stripComments(source: string, fileName = "x.ts"): string {
+  // A .svelte file is not TypeScript: parse only its <script> blocks, and in
+  // the MARKUP strip HTML comments (never inside a script, where "<!--" can
+  // be string content). Parsing the whole file as TS would read the `//` in a
+  // markup URL as a comment and blank the rest of the line.
+  if (fileName.endsWith(".svelte")) {
+    const blank = (t: string) => t.replace(/[^\n]/g, "");
+    let out = "";
+    let at = 0;
+    for (const m of source.matchAll(/(<script\b[^>]*>)([\s\S]*?)(<\/script>)/g)) {
+      out += source.slice(at, m.index).replace(/<!--[\s\S]*?-->/g, blank);
+      out += m[1] + stripComments(m[2]!, "script.ts") + m[3];
+      at = m.index! + m[0].length;
+    }
+    return out + source.slice(at).replace(/<!--[\s\S]*?-->/g, blank);
+  }
   const sf = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, /*setParentNodes*/ false, ts.ScriptKind.TS);
   const ranges = new Map<number, number>(); // pos -> end
   const collect = (pos: number) => {

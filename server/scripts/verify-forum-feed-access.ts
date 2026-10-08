@@ -24,6 +24,7 @@
  */
 import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
+import { stripComments } from "./lib/strip-comments";
 
 const prisma = new PrismaClient();
 
@@ -353,10 +354,10 @@ async function main() {
     console.log("\nFF-3 — the socket handler routes through the function");
     {
       const { readFileSync } = await import("node:fs");
-      const h = readFileSync(
+      const h = stripComments(readFileSync(
         new URL("../src/sockets/handlers.ts", import.meta.url).pathname,
         "utf8",
-      ).replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+      ));
       check(
         "handlers.ts calls getLiveFeedForums",
         /getLiveFeedForums\(/.test(h),

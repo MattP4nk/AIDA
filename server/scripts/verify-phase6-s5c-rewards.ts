@@ -23,6 +23,7 @@ import {
   MAX_MISSION_CREDITS,
   MAX_MISSION_XP,
 } from "../src/utils/missionRewards";
+import { stripComments } from "./lib/strip-comments";
 
 let pass = 0;
 let fail = 0;
@@ -170,7 +171,7 @@ async function main() {
   {
     const { readFileSync } = await import("node:fs");
     const strip = (s: string) =>
-      s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+      stripComments(s);
     const exec = strip(readFileSync(new URL("../src/services/architectInterventionExecutor.ts", import.meta.url).pathname, "utf8"));
     const ms = strip(readFileSync(new URL("../src/services/missionService.ts", import.meta.url).pathname, "utf8"));
 

@@ -23,6 +23,7 @@
  * Run: npx tsx scripts/verify-phase7-a8-bootstrap.ts
  */
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { stripComments } from "./lib/strip-comments";
 
 const RECORD = process.argv.includes("--record");
 const SRC = new URL("../src/index.ts", import.meta.url).pathname;
@@ -37,7 +38,7 @@ function check(name: string, ok: boolean, detail = "") {
 
 /** Comments can contain anything; match code only. */
 const strip = (s: string) =>
-  s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  stripComments(s);
 
 interface Fingerprint {
   /** `emitter.on("event"` pairs, sorted. The thing most likely to be dropped. */
