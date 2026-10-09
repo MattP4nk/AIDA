@@ -1866,6 +1866,15 @@ export class FileService {
     return prisma.fileSystemNode.count({ where: { serverId, type: "directory", isProtected: true } });
   }
 
+  /** The honeypot decoys in a directory, oldest first. */
+  public async listDecoys(parentId: string): Promise<Array<{ id: string; name: string }>> {
+    return prisma.fileSystemNode.findMany({
+      where: { parentId, type: "file", metadata: { path: ["isDecoy"], equals: true } },
+      select: { id: true, name: true },
+      orderBy: { createdAt: "asc" },
+    });
+  }
+
   public async countDecoys(parentId: string): Promise<number> {
     return prisma.fileSystemNode.count({
       where: { parentId, type: "file", metadata: { path: ["isDecoy"], equals: true } },

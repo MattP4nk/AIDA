@@ -32,6 +32,10 @@ function check(name: string, ok: boolean, detail = "") {
   else { fail++; console.log(`  [FAIL] ${name}${detail ? ` — ${detail}` : ""}`); }
 }
 const tick = () => new Promise((r) => setImmediate(r));
+/** Up to 5s for an async enqueue to land — time-bounded, not tick-counted. */
+async function waitForQueueOf(q: () => unknown[]): Promise<void> {
+  for (let t = Date.now(); q().length === 0 && Date.now() - t < 5000; ) await new Promise((r) => setTimeout(r, 10));
+}
 
 async function main() {
   console.log("\n=== Phase 7 S7 — abandoned moderation re-checks reach admin review ===");
@@ -48,6 +52,7 @@ async function main() {
   ai.stopRetryQueue();
 
   const q = (): any[] => ai.retryQueue;
+  const waitForQueue = () => waitForQueueOf(q);
   const reset = () => { ai.retryQueue = []; ai.inFlightRetry = null; };
   const MAX: number = ai.RETRY_QUEUE_MAX;
   const spy = () => {
@@ -228,9 +233,12 @@ async function main() {
       ai.moderateForDelivery = async () => ({ verdict: "unavailable", reason: "timeout" });
       const before = ai.getMetrics().moderationEscalationsFailed;
       await moderateBeforePublish("hello", quiet, async () => {}, failing);
-      // queueModerationRecheck enqueues after an `await import(...)`.
-      for (let i = 0; i < 50 && q().length === 0; i++) await tick();
+      // queueModerationRecheck enqueues after an `await import(...)`. Wait on
+      // TIME, not a tick count: under a full suite's load the import outlasted
+      // 50 ticks and this run crashed on the line below.
+      await waitForQueue();
       check("PRECONDITION: the gate queued a re-check", q().length === 1, `${q().length}`);
+      if (q().length !== 1) throw new Error("S7-11 precondition failed — stopping this section (see the FAIL above)");
       q()[0].createdAt = Date.now() - (ai.RETRY_MAX_AGE_MS + 1000);
       await ai.processRetryQueue();
       await tick();
@@ -252,13 +260,18 @@ async function main() {
       ai.moderateForDelivery = async () => ({ verdict: "unavailable", reason: "timeout" });
       const esc = spy();
       await moderateBeforePublish("later bad", quiet, failing, esc.fn);
-      for (let i = 0; i < 50 && q().length === 0; i++) await tick();
+      await waitForQueue();
       const entry = q()[0];
       check("PRECONDITION: re-check queued", !!entry);
+      if (!entry) throw new Error("S7-11 precondition failed — stopping this section (see the FAIL above)");
       // Deliver the re-check's answer the way S7-5 does: the entry's onSuccess.
       await entry.onSuccess('{"safe": false, "reason": "hate speech"}');
       check("a re-check's failed hide is filed exactly once, naming the verdict",
         esc.calls.length === 1 && esc.calls[0]!.includes("judged unsafe (hate speech)"), JSON.stringify(esc.calls));
+    } catch (err) {
+      // A failed precondition stops THIS section, loudly, and the run goes on.
+      fail++;
+      console.log(`  [FAIL] S7-11 aborted — ${(err as Error).message}`);
     } finally {
       ai.moderateForDelivery = realModerate;
       ai.logger = realLogger;

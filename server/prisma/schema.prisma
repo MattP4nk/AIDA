@@ -710,6 +710,9 @@ model KeyFragment {
 
   // Status: "active" or "bricked" (destroyed from failed fragment.crack attempt)
   status String @default("active")
+  // When it was bricked. A bricked fragment RESPAWNS after a cooldown at a
+  // different high-security server (maintainer decision Q1, 2026-10-08).
+  brickedAt DateTime? @map("bricked_at")
 
   @@unique([keyType, fragmentNum])
   @@index([heldByUserId])

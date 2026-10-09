@@ -820,7 +820,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
     if (action === "complete") {
       const r = await bountiesSvc().complete(found.bounty.id, context.userId);
       if (!r.ok) return errorResult(r.error);
-      const { bounty, filesDeleted, decoysHit, keysRevoked } = r;
+      const { bounty, filesDeleted, decoysHit, keysRevoked, filesShielded } = r;
 
       const W = context.terminalWidth;
       const lines: string[] = [];
@@ -833,7 +833,7 @@ export class PlayerInfoCommandsModule implements CommandModule {
         lines.push(boxRow(` Stolen files purged: ${filesDeleted}`, W));
       }
       if (decoysHit > 0) {
-        lines.push(boxRow(` Honeypot decoys found: ${decoysHit}`, W));
+        lines.push(boxRow(` Honeypot decoys hit: ${decoysHit} (${filesShielded} file(s) survived)`, W));
       }
       if (keysRevoked > 0) {
         lines.push(boxRow(` Access keys revoked: ${keysRevoked}`, W));
@@ -841,9 +841,12 @@ export class PlayerInfoCommandsModule implements CommandModule {
       lines.push(boxDivider(W));
       lines.push(boxRow(` + ${bounty.rewardCredits} credits`, W));
       lines.push(boxRow(` + ${bounty.rewardReputation} faction reputation`, W));
-      if (decoysHit > 0 && decoysHit === filesDeleted) {
+      // The honeypot absorbed the whole purge (Q2). This compared decoys to
+      // files DELETED, both counting the same decoys — and could never be
+      // true, because decoys were never among the stolen files.
+      if (decoysHit > 0 && filesDeleted === 0) {
         lines.push(boxDivider(W));
-        lines.push(boxRow(" Target used honeypot. All files were decoys.", W));
+        lines.push(boxRow(" Target used a honeypot. Every hit struck a decoy.", W));
         lines.push(boxRow(" No real intel was destroyed.", W));
       }
       lines.push(boxDivider(W));

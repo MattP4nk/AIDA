@@ -3969,6 +3969,19 @@ Write them per-refactor, immediately before touching the code:
           shows the 16-char prefix (the column was too narrow and cut it to 14) and the right
           command — it said `mission accept`, the DETAIL command. Harnesses:
           verify-faction-missions (new), verify-a4-contacts (rewritten). All negative-controlled.
+      - **BATCH 3 DONE (2026-10-09): Q1, Q2. ALL EIGHT DECISIONS IMPLEMENTED.**
+          Q1: `KeyFragment.brickedAt` (via `npm run db:push`, additive); a brick emits
+          `fragment:bricked` (story ledger) and refreshes the holder's counters (it left them
+          counting a fragment they no longer held); `keyFragmentService.respawnDueFragments`
+          (boot + hourly, FRAGMENT_RESPAWN_MS = 72h) / `respawnFragment` move it to a random
+          non-home server of security 7+ that no other fragment uses, never its origin
+          (`fragment:respawned`). FOUND ON THE WAY: a bricked fragment was RE-CLAIMABLE — no holder,
+          so a claim's CAS matched it, and reading its source server's files re-claimed a destroyed
+          fragment that then counted toward the endgame. The ownership CAS now requires
+          `status: "active"`. Q2: with a honeypot, each decoy in the target's ~/downloads absorbs
+          one hit (decoy consumed, one real stolen file survives); both sides are told.
+          Harnesses: verify-fragment-respawn (new; placement control run 6x since it is random —
+          red 5/6), bounty B-8. Also fixed my own flaky S7-11 wait (tick-counted → time-bounded).
         - **NEW — Q9 (raise): `protect`'s usage text also promised "Protected dirs require
           memory_trace minigame to access".** Nothing implements that gate. The text now states what
           protection does; whether to BUILD an entry minigame for protected directories is open.

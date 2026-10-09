@@ -426,6 +426,16 @@ export const DUNGEON_REGEN_DELAY_MS = 30_000;
 /** Dungeon expiration check interval (ms). */
 export const DUNGEON_EXPIRATION_INTERVAL_MS = 60 * 60 * 1000;
 
+/**
+ * A bricked AIDA fragment respawns after this cooldown, at a different
+ * non-home server of at least FRAGMENT_RESPAWN_MIN_SECURITY (maintainer
+ * decision Q1, 2026-10-08; keyFragmentService.respawnDueFragments).
+ */
+export const FRAGMENT_RESPAWN_MS = 72 * 60 * 60 * 1000;
+export const FRAGMENT_RESPAWN_MIN_SECURITY = 7;
+/** How often the respawn check runs (it also runs once on boot). */
+export const FRAGMENT_RESPAWN_CHECK_INTERVAL_MS = 60 * 60 * 1000;
+
 // ═══════════════════════════════════════════════════════════════════
 // Bounties
 // ═══════════════════════════════════════════════════════════════════

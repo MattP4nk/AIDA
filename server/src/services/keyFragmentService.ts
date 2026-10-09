@@ -31,6 +31,7 @@ import { Server as SocketIOServer } from "socket.io";
 import { EventEmitter } from "events";
 import { LOGGER, PRISMA_CLIENT, SOCKET_IO } from "../di/tokens";
 import { safeExecute } from "../utils/safeExecute";
+import { FRAGMENT_RESPAWN_MS, FRAGMENT_RESPAWN_MIN_SECURITY } from "../config/gameBalance";
 
 // ═══════════════════════════════════════════════════════════════════
 // Types
@@ -208,6 +209,11 @@ export class KeyFragmentService extends EventEmitter {
                 "Attempted to claim non-existent key fragment",
               );
               return { ok: false, result: { claimed: false } };
+            }
+
+            // Destroyed — until it respawns somewhere else (Q1).
+            if (fragment.status !== "active") {
+              return { ok: false, result: { claimed: false, destroyed: true } };
             }
 
             // Already held by this player
@@ -537,9 +543,85 @@ export class KeyFragmentService extends EventEmitter {
     // in the WHERE; false means it was no longer yours to lose.
     const r = await this.prisma.keyFragment.updateMany({
       where: { id: fragmentId, heldByUserId: holderId, status: "active" },
-      data: { status: "bricked", heldByUserId: null, heldSince: null },
+      data: { status: "bricked", heldByUserId: null, heldSince: null, brickedAt: new Date() },
     });
-    return r.count === 1;
+    if (r.count !== 1) return false;
+    await this.updatePlayerCounters(holderId);
+    // A brick emitted nothing, so the story ledger never learned a fragment
+    // was destroyed (Q1).
+    const f = await this.prisma.keyFragment.findUniqueOrThrow({ where: { id: fragmentId } });
+    this.emit("fragment:bricked", {
+      userId: holderId, fragmentId, keyType: f.keyType, fragmentNum: f.fragmentNum, name: f.name,
+    });
+    return true;
+  }
+
+  /**
+   * Bring back every bricked fragment whose cooldown has passed — unheld, at a
+   * DIFFERENT high-security server (maintainer decision Q1, 2026-10-08): a
+   * non-home server of security FRAGMENT_RESPAWN_MIN_SECURITY+ that no other
+   * fragment is sourced at, never the one it was lost from. The cracker still
+   * loses it for good; the world stays winnable (the world holds exactly the
+   * TOTAL_FRAGMENTS_REQUIRED fragments, so before this ANY brick locked the
+   * endgame for every player). Run on boot and hourly.
+   */
+  async respawnDueFragments(
+    now: Date = new Date(),
+    /** Harness scoping: only these fragments, onto only these servers. */
+    opts: { fragmentIds?: string[]; serverIds?: string[] } = {},
+  ): Promise<number> {
+    const scope = opts.fragmentIds ? { id: { in: opts.fragmentIds } } : {};
+    // A fragment bricked before `brickedAt` existed has none, so its cooldown
+    // would never start: stamp it now.
+    await this.prisma.keyFragment.updateMany({ where: { ...scope, status: "bricked", brickedAt: null }, data: { brickedAt: now } });
+    const due = await this.prisma.keyFragment.findMany({
+      where: { ...scope, status: "bricked", brickedAt: { lte: new Date(now.getTime() - FRAGMENT_RESPAWN_MS) } },
+      select: { id: true },
+    });
+    let respawned = 0;
+    for (const f of due) if (await this.respawnFragment(f.id, opts.serverIds ? { serverIds: opts.serverIds } : {})) respawned++;
+    return respawned;
+  }
+
+  /**
+   * Respawn ONE bricked fragment now (no cooldown check — respawnDueFragments
+   * applies it). `serverIds` restricts the candidate servers; harnesses use it
+   * so a fixture fragment never lands on a real server.
+   */
+  async respawnFragment(fragmentId: string, opts: { serverIds?: string[] } = {}): Promise<{ serverId: string } | null> {
+    const f = await this.prisma.keyFragment.findUnique({ where: { id: fragmentId } });
+    if (!f || f.status !== "bricked") return null;
+    const taken = await this.prisma.keyFragment.findMany({
+      where: { sourceType: "server", id: { not: f.id } },
+      select: { sourceId: true },
+    });
+    const exclude = new Set([...taken.map((t) => t.sourceId), f.sourceId]);
+    const candidates = (await this.prisma.gameServer.findMany({
+      where: {
+        isPlayerHome: false,
+        securityLevel: { gte: FRAGMENT_RESPAWN_MIN_SECURITY },
+        ...(opts.serverIds ? { id: { in: opts.serverIds } } : {}),
+      },
+      select: { id: true, name: true },
+    })).filter((c) => !exclude.has(c.id));
+    if (candidates.length === 0) {
+      this.logger.warn({ fragmentId: f.id }, "Fragment respawn: no eligible server — it stays bricked until one exists");
+      return null;
+    }
+    const target = candidates[Math.floor(Math.random() * candidates.length)]!;
+    // Conditional on still being bricked: two instances running this at once
+    // respawn it once.
+    const moved = await this.prisma.keyFragment.updateMany({
+      where: { id: f.id, status: "bricked" },
+      data: { status: "active", sourceType: "server", sourceId: target.id, brickedAt: null, heldByUserId: null, heldSince: null },
+    });
+    if (moved.count !== 1) return null;
+    this.emit("fragment:respawned", {
+      fragmentId: f.id, keyType: f.keyType, fragmentNum: f.fragmentNum, name: f.name,
+      fromServerId: f.sourceId, toServerId: target.id,
+    });
+    this.logger.info({ fragmentId: f.id, server: target.name }, "Fragment respawned at a new server");
+    return { serverId: target.id };
   }
 
   // ── SERVER CHECK — Auto-claim fragments from server files ────────
@@ -1081,8 +1163,12 @@ export class KeyFragmentService extends EventEmitter {
       // compare-and-set: the row is matched and written in one statement, so
       // the loser matches 0 rows instead of overwriting the winner.
       const now = new Date();
+      // `status: "active"`: a BRICKED fragment never changes hands. It has no
+      // holder, so a claim's `expectedHolderId: null` matched it — reading the
+      // files of its source server re-claimed a destroyed fragment, which then
+      // counted toward the endgame (Q1 review, 2026-10-09).
       const written = await tx.keyFragment.updateMany({
-        where: { id: fragmentId, heldByUserId: expectedHolderId },
+        where: { id: fragmentId, heldByUserId: expectedHolderId, status: "active" },
         data: {
           heldByUserId: newOwnerId,
           heldSince: now,

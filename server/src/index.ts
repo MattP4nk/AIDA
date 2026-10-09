@@ -40,6 +40,8 @@ import type {
   FactionReputationChangedEvent,
   FragmentClaimedEvent,
   FragmentStolenEvent,
+  FragmentBrickedEvent,
+  FragmentRespawnedEvent,
   FragmentTransferredEvent,
   HackAttemptEvent,
   HackDetectedEvent,
@@ -68,6 +70,7 @@ import { notifyUser } from "./utils/notify";
 import {
   ARCHITECT_EVAL_INTERVAL_MS,
   DUNGEON_EXPIRATION_INTERVAL_MS,
+  FRAGMENT_RESPAWN_CHECK_INTERVAL_MS,
   NOTIFICATION_PURGE_INTERVAL_MS,
 } from "./config/gameBalance";
 
@@ -634,6 +637,25 @@ function wireServiceEvents(storyProgression: StoryProgressionService): void {
     defer(() => dynamicContent.processEvent("endgame:completed", data), "Dynamic content error on endgame:completed");
   });
 
+  // Q1: a brick, and the respawn that follows, are story events.
+  keyFragmentService.on("fragment:bricked", (data: FragmentBrickedEvent) => {
+    defer(() => storyProgression.recordEvent({
+      type: "fragment_bricked", category: "conflict", actorId: data.userId, actorType: "player",
+      summary: `A failed crack destroyed AIDA fragment: ${data.name} (${data.keyType} ${data.fragmentNum}/3)`,
+      data: { fragmentId: data.fragmentId, keyType: data.keyType, fragmentNum: data.fragmentNum },
+      impact: { discoveryWeight: 2, tension: 4 }, weight: 6,
+    }), "Story ledger error on fragment:bricked");
+  });
+  keyFragmentService.on("fragment:respawned", (data: FragmentRespawnedEvent) => {
+    defer(() => storyProgression.recordEvent({
+      // System events are the Architect's, as epoch changes are.
+      type: "fragment_respawned", category: "discovery", actorId: "architect", actorType: "persona",
+      summary: `AIDA fragment ${data.name} has re-formed somewhere in the network`,
+      data: { fragmentId: data.fragmentId, keyType: data.keyType, fragmentNum: data.fragmentNum, serverId: data.toServerId },
+      impact: { discoveryWeight: 3, tension: 2 }, weight: 5,
+    }), "Story ledger error on fragment:respawned");
+  });
+
   // Level up → dynamic content (home server log)
   // BOTH emitters, because they are separate EventEmitters.
   //
@@ -885,6 +907,16 @@ function scheduleBackgroundJobs(
     NOTIFICATION_PURGE_INTERVAL_MS,
   ));
   logger.info("✅ Notification retention sweep scheduled (every 6h)");
+
+  // Q1: bricked fragments respawn after their cooldown — on boot (a server
+  // that was down past a cooldown catches up) and hourly. Registered for
+  // shutdown like the sweeps above: the callback touches the database.
+  const fragmentRespawner = getService<import("./services/keyFragmentService").KeyFragmentService>(KEY_FRAGMENT_SERVICE);
+  const respawnFragments = () =>
+    fragmentRespawner.respawnDueFragments().catch((err: unknown) => logger.error({ err }, "Fragment respawn check failed"));
+  void respawnFragments();
+  registerShutdownTimer(setInterval(respawnFragments, FRAGMENT_RESPAWN_CHECK_INTERVAL_MS));
+  logger.info("✅ Fragment respawn check scheduled (every 1h)");
 }
 
 // ── Start ─────────────────────────────────────────────────────────

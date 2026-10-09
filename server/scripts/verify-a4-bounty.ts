@@ -68,6 +68,7 @@ async function main() {
   const faction = await prisma.faction.create({ data: { name: `fx-${tag}`, description: "harness fixture" } });
   const bountyIds: string[] = [];
   const connIds: string[] = [];
+  const nodeIds: string[] = [];
   let socket: ReturnType<typeof ioClient> | null = null;
   const mk = async (extra: Record<string, unknown> = {}) => {
     const b = await prisma.bounty.create({
@@ -221,6 +222,48 @@ async function main() {
       check("and nothing is paid", (await credits(hunterB.id)) === before);
     }
 
+    console.log("\nB-8 — a target's honeypot absorbs the purge (Q2)");
+    {
+      // The target owns a honeypot: 2 decoys in ~/downloads, 3 stolen files.
+      await prisma.playerProgress.update({ where: { userId: target.id }, data: { homeHoneypot: true } });
+      let downloads = await prisma.fileSystemNode.findFirst({ where: { serverId: home!, parentId: homeDir.id, name: "downloads" } });
+      if (!downloads) {
+        downloads = await prisma.fileSystemNode.create({ data: { serverId: home!, parentId: homeDir.id, name: "downloads", type: "directory" } });
+        nodeIds.push(downloads.id);
+      }
+      const mkNode = async (name: string, metadata: Record<string, unknown>) => {
+        const n = await prisma.fileSystemNode.create({ data: { serverId: home!, parentId: downloads!.id, name, type: "file", content: "x", size: 1, metadata } });
+        nodeIds.push(n.id);
+        return n;
+      };
+      const decoys = [await mkNode("decoy1.db", { isDecoy: true }), await mkNode("decoy2.db", { isDecoy: true })];
+      const loot = [] as Array<{ id: string }>;
+      for (const n of ["l1", "l2", "l3"]) loot.push(await mkNode(`${n}.dat`, { isDownloaded: true, sourceServerId: keyServer.id }));
+      const b = await mk({ stolenFileIds: loot.map((l) => l.id) });
+      await bounties.claim(b.id, hunterB.id);
+      await access(hunterB.id, new Date(), true);
+      const r = await bounties.complete(b.id, hunterB.id);
+      const decoysLeft = await prisma.fileSystemNode.count({ where: { id: { in: decoys.map((d) => d.id) } } });
+      const lootLeft = await prisma.fileSystemNode.count({ where: { id: { in: loot.map((l) => l.id) } } });
+      check("both decoys are consumed", r.ok === true && decoysLeft === 0, `${decoysLeft} left`);
+      check("and each shields one real file: 2 of 3 survive (was: honeypots did nothing here)",
+        lootLeft === 2 && r.filesDeleted === 1 && r.decoysHit === 2 && r.filesShielded === 2,
+        `${lootLeft} survived; deleted ${r.filesDeleted}, decoys ${r.decoysHit}, shielded ${r.filesShielded}`);
+      const note = await prisma.notification.findFirst({ where: { userId: target.id, type: "security_alert", message: { contains: "honeypot" } } });
+      check("the target is told their honeypot absorbed hits", !!note, note?.message?.slice(0, 80) ?? "none");
+
+      // POSITIVE: with no honeypot, the same purge destroys everything.
+      await prisma.playerProgress.update({ where: { userId: target.id }, data: { homeHoneypot: false } });
+      await mkNode("decoy3.db", { isDecoy: true });
+      const loot2 = [] as Array<{ id: string }>;
+      for (const n of ["m1", "m2"]) loot2.push(await mkNode(`${n}.dat`, { isDownloaded: true, sourceServerId: keyServer.id }));
+      const b2 = await mk({ stolenFileIds: loot2.map((l) => l.id) });
+      await bounties.claim(b2.id, hunterB.id);
+      const r2 = await bounties.complete(b2.id, hunterB.id);
+      check("POSITIVE: without a honeypot, decoys protect nothing", r2.ok === true && r2.filesDeleted === 2 && r2.decoysHit === 0,
+        `deleted ${r2.filesDeleted}, decoys ${r2.decoysHit}`);
+    }
+
     console.log("\nB-6 — a lapsed bounty does not block the faction from posting again");
     {
       // Clear the board for this (target, faction) pair, then leave ONE lapsed
@@ -241,6 +284,8 @@ async function main() {
     socket?.disconnect();
     try {
       await prisma.bounty.deleteMany({ where: { id: { in: bountyIds } } });
+      await prisma.fileSystemNode.deleteMany({ where: { id: { in: nodeIds.reverse() } } });
+      await prisma.playerProgress.update({ where: { userId: target.id }, data: { homeHoneypot: false } });
       await prisma.serverConnection.deleteMany({ where: { id: { in: connIds } } });
       await prisma.factionStanding.deleteMany({ where: { factionId: faction.id } });
       await prisma.faction.delete({ where: { id: faction.id } });

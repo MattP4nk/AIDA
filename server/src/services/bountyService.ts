@@ -34,6 +34,7 @@ import {
   MISSION_INTEGRATION_SERVICE,
   PLAYER_PROGRESS_REPOSITORY,
   SOCKET_IO,
+  USER_REPOSITORY,
 } from "../di/tokens";
 import { getService } from "../di/resolve";
 import { notifyUser } from "../utils/notify";
@@ -42,6 +43,7 @@ import type PlayerProgressRepository from "../repositories/playerProgressReposit
 import type { FactionService } from "./factionService";
 import type FileService from "./fileService";
 import type { MissionIntegrationService } from "./missionIntegration";
+import type { UserRepository } from "../repositories/userRepository";
 
 
 export type Resolved = { ok: true; bounty: Bounty } | { ok: false; error: string };
@@ -50,6 +52,8 @@ export interface Completion {
   ok: true;
   bounty: Bounty;
   filesDeleted: number;
+  /** Real stolen files that survived because a decoy absorbed the hit. */
+  filesShielded: number;
   decoysHit: number;
   keysRevoked: number;
 }
@@ -181,15 +185,16 @@ export class BountyService {
       userId, bounty.issuedByFactionId, bounty.rewardReputation, "Bounty claimed",
     );
     const purge = await this.purgeStolenFiles(bounty, target.homeServerId);
-    if (purge.filesDeleted > 0) {
+    if (purge.filesDeleted > 0 || purge.decoysHit > 0) {
       // Persisted, so a target who is offline learns of it on login — the
       // socket-only emit this replaces was simply lost for them.
       await notifyUser(this.io, bounty.targetUserId, {
         type: "security_alert",
         category: "security",
         title: "Bounty Hunter",
-        message: `SECURITY BREACH: ${purge.filesDeleted} file(s) deleted from your home server by a bounty hunter.` +
-          (purge.keysRevoked > 0 ? ` ${purge.keysRevoked} access key(s) revoked.` : ""),
+        message: `SECURITY BREACH: a bounty hunter purged your home server — ${purge.filesDeleted} file(s) deleted.` +
+          (purge.keysRevoked > 0 ? ` ${purge.keysRevoked} access key(s) revoked.` : "") +
+          (purge.decoysHit > 0 ? ` Your honeypot absorbed ${purge.decoysHit} hit(s); those files survived.` : ""),
         severity: "high",
       });
     }
@@ -204,30 +209,61 @@ export class BountyService {
    * Delete the files the target stole, and the access keys they granted.
    * Best effort — the bounty is already paid — but every failure is logged;
    * the code this replaces discarded them with `.catch(() => {})`.
+   *
+   * HONEYPOT (maintainer decision Q2, 2026-10-08): if the target owns one,
+   * each decoy in their downloads absorbs one hit — the decoy is destroyed
+   * and one real stolen file survives. The old code counted a decoy only if
+   * it was itself among the stolen files, which never happens (stolen files
+   * are matched by the breached server's id; decoys carry "decoy"), so the
+   * honeypot branch could not run.
    */
   private async purgeStolenFiles(bounty: Bounty, homeServerId: string) {
     const ids = Array.isArray(bounty.stolenFileIds)
       ? bounty.stolenFileIds.filter((x): x is string => typeof x === "string")
       : [];
-    const out = { filesDeleted: 0, decoysHit: 0, keysRevoked: 0 };
+    const out = { filesDeleted: 0, decoysHit: 0, keysRevoked: 0, filesShielded: 0 };
     if (ids.length === 0) return out;
     const files = await prisma.fileSystemNode.findMany({
       where: { id: { in: ids }, serverId: homeServerId },
-      select: { id: true, metadata: true },
+      select: { id: true },
+      orderBy: { createdAt: "asc" },
     });
+    if (files.length === 0) return out;
     const fileService = getService<FileService>(FILE_SERVICE);
-    for (const file of files) {
+
+    // Decoys first: each one consumed shields one real file.
+    const decoys = await this.honeypotDecoys(bounty.targetUserId, homeServerId);
+    for (const decoy of decoys.slice(0, files.length)) {
+      try {
+        if ((await fileService.purgeNode(decoy.id)).deleted) out.decoysHit++;
+      } catch (err) {
+        this.logger.warn({ err, bountyId: bounty.id, decoyId: decoy.id }, "Bounty: decoy could not be consumed");
+      }
+    }
+    out.filesShielded = out.decoysHit;
+
+    for (const file of files.slice(out.filesShielded)) {
       try {
         const r = await fileService.purgeNode(file.id);
         if (!r.deleted) continue; // the target already deleted it themselves
         out.filesDeleted++;
         out.keysRevoked += r.keysRevoked;
-        if ((file.metadata as { isDecoy?: unknown } | null)?.isDecoy === true) out.decoysHit++;
       } catch (err) {
         this.logger.warn({ err, bountyId: bounty.id, fileId: file.id }, "Bounty: stolen file could not be purged");
       }
     }
     return out;
+  }
+
+  /** The decoys in the target's ~/downloads — none unless they own a honeypot. */
+  private async honeypotDecoys(targetUserId: string, homeServerId: string) {
+    const progress = await this.progress.get(targetUserId);
+    if (!progress?.homeHoneypot) return [];
+    const fileService = getService<FileService>(FILE_SERVICE);
+    const home = await getService<UserRepository>(USER_REPOSITORY).homeDirectory(targetUserId);
+    const dir = await fileService.resolvePath(homeServerId, `${home}/downloads`);
+    if (!dir.exists || !dir.nodeId) return [];
+    return fileService.listDecoys(dir.nodeId);
   }
 }
 

@@ -167,6 +167,24 @@ export interface FragmentClaimedEvent {
   name: string;
 }
 
+export interface FragmentBrickedEvent {
+  /** The player whose failed fragment.crack destroyed it. */
+  userId: string;
+  fragmentId: string;
+  keyType: string;
+  fragmentNum: number;
+  name: string;
+}
+
+export interface FragmentRespawnedEvent {
+  fragmentId: string;
+  keyType: string;
+  fragmentNum: number;
+  name: string;
+  fromServerId: string;
+  toServerId: string;
+}
+
 export interface FragmentStolenEvent {
   attackerUserId: string;
   victimUserId: string;

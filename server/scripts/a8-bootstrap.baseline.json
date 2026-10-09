@@ -14,7 +14,9 @@
     "hackService.on(player:levelup)",
     "keyFragmentService.on(endgame:completed)",
     "keyFragmentService.on(endgame:unlocked)",
+    "keyFragmentService.on(fragment:bricked)",
     "keyFragmentService.on(fragment:claimed)",
+    "keyFragmentService.on(fragment:respawned)",
     "keyFragmentService.on(fragment:stolen)",
     "keyFragmentService.on(fragment:transferred)",
     "missionService.on(mission:completed)",
@@ -39,6 +41,7 @@
     "HACK_SERVICE",
     "IP_SERVICE",
     "IP_SERVICE",
+    "KEY_FRAGMENT_SERVICE",
     "MESSAGE_SERVICE",
     "MISSION_SERVICE",
     "MISSION_SERVICE",
@@ -56,7 +59,8 @@
   "intervals": [
     "ARCHITECT_EVAL_INTERVAL_MS",
     "DUNGEON_EXPIRATION_INTERVAL_MS",
+    "FRAGMENT_RESPAWN_CHECK_INTERVAL_MS",
     "NOTIFICATION_PURGE_INTERVAL_MS"
   ],
-  "deferCount": 42
+  "deferCount": 44
 }
