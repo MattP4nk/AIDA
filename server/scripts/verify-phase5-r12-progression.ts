@@ -23,6 +23,7 @@
  *
  * Run: npx tsx scripts/verify-phase5-r12-progression.ts
  */
+import { deleteFixtureUsers } from "./lib/delete-fixture-user";
 import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
 import { readFileSync } from "node:fs";
@@ -135,7 +136,7 @@ async function main() {
     await prisma.playerMission.deleteMany({ where: { userId: user.id } });
     await prisma.mission.delete({ where: { id: mission.id } });
     await prisma.playerProgress.deleteMany({ where: { userId: user.id } });
-    await prisma.user.delete({ where: { id: user.id } });
+    await deleteFixtureUsers(prisma, [user.id]);
   }
 
   // ── R12-c: concurrent startTutorial creates one tutorial ──────────────
@@ -166,7 +167,7 @@ async function main() {
     await prisma.mission.deleteMany({ where: { assignedTo: user.id } });
     await prisma.playerMission.deleteMany({ where: { userId: user.id } });
     await prisma.playerProgress.deleteMany({ where: { userId: user.id } });
-    await prisma.user.delete({ where: { id: user.id } });
+    await deleteFixtureUsers(prisma, [user.id]);
   }
 
   // ── R12-d: the per-tab cwd fix is WITHDRAWN, and these say why ─────────
@@ -377,7 +378,7 @@ async function main() {
     await prisma.playerMission.deleteMany({ where: { userId: user.id } });
     await prisma.mission.delete({ where: { id: tut.id } });
     await prisma.playerProgress.deleteMany({ where: { userId: user.id } });
-    await prisma.user.delete({ where: { id: user.id } });
+    await deleteFixtureUsers(prisma, [user.id]);
   }
 
   // ── R12-g: download reports its failures ─────────────────────────────

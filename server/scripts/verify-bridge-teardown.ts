@@ -17,6 +17,7 @@
  *
  * Run: npx tsx scripts/verify-bridge-teardown.ts
  */
+import { deleteFixtureUsers } from "./lib/delete-fixture-user";
 import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
 import { stripComments } from "./lib/strip-comments";
@@ -316,7 +317,7 @@ async function main() {
         });
       }
       if (userId) {
-        await prisma.user.delete({ where: { id: userId } }).catch((e) => {
+        await deleteFixtureUsers(prisma, [userId]).catch((e) => {
           console.error("CLEANUP FAILED (user):", e.message);
         });
       }

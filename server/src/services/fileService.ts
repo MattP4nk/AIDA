@@ -230,6 +230,17 @@ export class FileService {
       // Get user's access level on this server
       const accessLevel = await this.getUserAccessLevel(userId, serverId);
 
+      // The directory itself, and every directory above it — what `cd` and
+      // `cat` already demand. Only the CHILDREN were checked, so `ls <path>`
+      // listed a directory `cd <path>` refused (found 2026-10-09).
+      if (!(await this.canOpen(userId, resolution.nodeId!, accessLevel))) {
+        return {
+          success: false,
+          message: `Permission denied: ${path}`,
+          error: "PERMISSION_DENIED",
+        };
+      }
+
       // Fetch children (include user-revealed hidden files from sweep)
       const hiddenFilter = showHidden
         ? {}
@@ -357,7 +368,12 @@ export class FileService {
       }
 
       const accessLevel = await this.getUserAccessLevel(userId, serverId);
-      if (!(await this.canRead(userId, node, accessLevel))) {
+      // R11's ancestor walk too: checking the target alone let `cd A/B` into
+      // an open B through a restricted A (found 2026-10-09).
+      if (
+        !(await this.canRead(userId, node, accessLevel)) ||
+        !(await this.canReadAncestors(userId, node.id, accessLevel))
+      ) {
         return {
           success: false,
           message: `Permission denied: ${path}`,
@@ -2170,6 +2186,12 @@ export class FileService {
       currentId = dir.parentId;
     }
     return true;
+  }
+
+  /** May this user read the node AND every directory above it (R11)? */
+  private async canOpen(userId: string, nodeId: string, accessLevel: number): Promise<boolean> {
+    return (await this.canRead(userId, nodeId, accessLevel)) &&
+      (await this.canReadAncestors(userId, nodeId, accessLevel));
   }
 
   /**

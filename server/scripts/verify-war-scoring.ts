@@ -24,6 +24,7 @@
  *
  * Run: npx tsx scripts/verify-war-scoring.ts
  */
+import { deleteFixtureUsers } from "./lib/delete-fixture-user";
 import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
 import { freeIp } from "./lib/free-ip";
@@ -166,7 +167,7 @@ async function main() {
         );
       } finally {
         await prisma.factionMember.deleteMany({ where: { userId: other.id } });
-        await prisma.user.delete({ where: { id: other.id } });
+        await deleteFixtureUsers(prisma, [other.id]);
       }
 
       const neutral = await prisma.gameServer.create({
@@ -227,7 +228,7 @@ async function main() {
         );
       } finally {
         await prisma.factionMember.deleteMany({ where: { userId: racer.id } });
-        await prisma.user.delete({ where: { id: racer.id } }).catch((e) => {
+        await deleteFixtureUsers(prisma, [racer.id]).catch((e) => {
           console.error("CLEANUP FAILED (racer):", e.message);
         });
       }
@@ -294,7 +295,7 @@ async function main() {
       await fn().catch((e) => console.error(`CLEANUP FAILED (${what}):`, e.message));
     };
     if (warId) await drop("war", () => prisma.factionWar.delete({ where: { id: warId! } }));
-    if (userId) await drop("user", () => prisma.user.delete({ where: { id: userId! } }));
+    if (userId) await drop("user", () => deleteFixtureUsers(prisma, [userId!]));
     if (aId) await drop("faction A", () => prisma.faction.delete({ where: { id: aId! } }));
     if (bId) await drop("faction B", () => prisma.faction.delete({ where: { id: bId! } }));
   }

@@ -22,6 +22,7 @@
 import "reflect-metadata";
 import { io as ioClient } from "../../client/node_modules/socket.io-client/build/esm/index.js";
 import { PrismaClient } from "@prisma/client";
+import { freeIp } from "./lib/free-ip";
 import jwt from "jsonwebtoken";
 import { config } from "../src/config/environment";
 
@@ -141,19 +142,26 @@ async function main() {
       `pwd=${before.trim().slice(0, 40)}`,
     );
 
-    // Now emit a connect for a server they are NOT authorized on.
-    const target = await prisma.gameServer.findFirst({
-      where: { ownerId: null, id: { not: home.homeServerId } },
+    // Now emit a connect for a server they are NOT authorized on. A private
+    // fixture: this used to borrow any ownerless server from the dev DB — which
+    // were all orphaned harness homes, purged 2026-10-09. Encryption 100 needs a
+    // player level no fresh account has.
+    const target = await prisma.gameServer.create({
+      data: { name: `r1_refused_${Date.now().toString(36)}`, ipAddress: await freeIp(prisma), type: "corporate", encryptionLevel: 100 },
       select: { id: true, name: true },
     });
-    if (!target) throw new Error("no unowned server to use as the refused target");
 
     let refusal: any = null;
     s.socket.on("server:connect_error", (d: any) => { refusal = d; });
-    await new Promise<void>((r) => {
-      s.socket.emit("server:connect", { serverId: target.id });
-      setTimeout(r, 2500);
-    });
+    try {
+      await new Promise<void>((r) => {
+        s.socket.emit("server:connect", { serverId: target.id });
+        setTimeout(r, 2500);
+      });
+    } finally {
+      await prisma.gameServer.deleteMany({ where: { id: target.id } })
+        .catch((e) => { fail++; console.log(`  [FAIL] cleanup — ${(e as Error).message}`); });
+    }
 
     check(
       "the unauthorized connect is refused and the client is TOLD",

@@ -192,9 +192,9 @@ async function main() {
             `${names.length} hit(s) — this is the injection ingest`,
           );
         } finally {
-          await prisma.fileSystemNode.delete({ where: { id: node.id } }).catch(() => {});
+          await prisma.fileSystemNode.deleteMany({ where: { id: node.id } }).catch((e) => { fail++; console.log(`  [FAIL] cleanup — ${(e as Error).message}`); });
           if (worldNode) {
-            await prisma.fileSystemNode.delete({ where: { id: worldNode.id } }).catch(() => {});
+            await prisma.fileSystemNode.deleteMany({ where: { id: worldNode.id } }).catch((e) => { fail++; console.log(`  [FAIL] cleanup — ${(e as Error).message}`); });
           }
         }
       }

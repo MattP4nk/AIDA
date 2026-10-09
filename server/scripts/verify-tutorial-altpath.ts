@@ -324,8 +324,8 @@ async function main() {
   console.log("breach_server after hack attempt:", JSON.stringify(breachViaHack));
   console.log("hack route reached a minigame:", /LAYER|minigame|solve|crack|sequence/i.test(hackOut));
 
-  await prisma.mission.delete({ where: { id: mission.id } }).catch(() => {});
-  await prisma.mission.delete({ where: { id: mission2.id } }).catch(() => {});
+  await prisma.mission.deleteMany({ where: { id: mission.id } }).catch((e) => { process.exitCode = 1; console.log(`FAIL  cleanup — ${(e as Error).message}`); });
+  await prisma.mission.deleteMany({ where: { id: mission2.id } }).catch((e) => { process.exitCode = 1; console.log(`FAIL  cleanup — ${(e as Error).message}`); });
   socket.close();
 }
 

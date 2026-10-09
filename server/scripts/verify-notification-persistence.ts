@@ -20,6 +20,7 @@
  *
  * Run: npx tsx scripts/verify-notification-persistence.ts
  */
+import { deleteFixtureUsers } from "./lib/delete-fixture-user";
 import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
 import { readFileSync } from "node:fs";
@@ -543,7 +544,7 @@ async function main() {
         );
       } finally {
         await prisma.notification.deleteMany({ where: { userId: probe.id } });
-        await prisma.user.delete({ where: { id: probe.id } });
+        await deleteFixtureUsers(prisma, [probe.id]);
       }
     }
 
@@ -610,8 +611,8 @@ async function main() {
   } finally {
     for (const id of [userId, otherId]) {
       if (!id) continue;
-      await prisma.notification.deleteMany({ where: { userId: id } }).catch(() => {});
-      await prisma.user.delete({ where: { id } }).catch(() => {});
+      await prisma.notification.deleteMany({ where: { userId: id } }).catch((e) => { fail++; console.log(`  [FAIL] cleanup — ${(e as Error).message}`); });
+      await deleteFixtureUsers(prisma, [id]).catch((e) => { fail++; console.log(`  [FAIL] cleanup — ${(e as Error).message}`); });
     }
   }
 

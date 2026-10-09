@@ -16,6 +16,7 @@
  * Run with the server STOPPED or RUNNING — it talks to the DB directly.
  *   npx tsx scripts/verify-phase3-d6-fragment-race.ts
  */
+import { deleteFixtureUsers } from "./lib/delete-fixture-user";
 import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
 import pino from "pino";
@@ -130,7 +131,7 @@ async function main() {
       where: { id: fragment.id },
       data: { heldByUserId: originalHolder, heldSince: originalHolder ? new Date() : null },
     });
-    await prisma.user.deleteMany({ where: { id: { in: [a, b] } } });
+    await deleteFixtureUsers(prisma, [a, b]);
   }
 
   console.log(`\n=== ${pass} PASS / ${fail} FAIL ===\n`);

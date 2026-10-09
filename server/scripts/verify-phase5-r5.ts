@@ -21,6 +21,7 @@
  *
  * Run: npx tsx scripts/verify-phase5-r5.ts
  */
+import { deleteFixtureUsers } from "./lib/delete-fixture-user";
 import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
 import { readFileSync, readdirSync, statSync } from "node:fs";
@@ -111,7 +112,7 @@ async function main() {
 
     await prisma.activeTrace.deleteMany({ where: { targetId: attacker.id } });
     await prisma.gameServer.delete({ where: { id: server.id } });
-    await prisma.user.deleteMany({ where: { id: { in: [victim.id, attacker.id] } } });
+    await deleteFixtureUsers(prisma, [victim.id, attacker.id]);
   }
 
   // ── R5-b: the Architect executor method exists and runs ────────────────
@@ -175,7 +176,7 @@ async function main() {
 
     await prisma.factionMember.deleteMany({ where: { factionId: faction.id } });
     await prisma.playerProgress.deleteMany({ where: { userId: { in: members } } });
-    await prisma.user.deleteMany({ where: { id: { in: members } } });
+    await deleteFixtureUsers(prisma, members);
     await prisma.faction.delete({ where: { id: faction.id } });
   }
 

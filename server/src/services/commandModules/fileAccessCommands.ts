@@ -19,6 +19,7 @@ import {
 import { generateMemoryTraceChallenge, validateAnswer } from "../hackMinigameGenerator";
 
 import logger from "../../logger";
+import { publicChallenge } from "../../utils/publicChallenge";
 import { servers } from "./deps";
 
 // ═══════════════════════════════════════════════════════════════════
@@ -219,7 +220,7 @@ export class FileAccessCommandsModule implements CommandModule {
         data: {
           fileAccessSessionId: sessionId,
           fileAccessType: "sweep",
-          challenge,
+          challenge: publicChallenge(challenge),
           targetDir: directoryPath,
         },
         timestamp: new Date(),
@@ -359,14 +360,13 @@ export class FileAccessCommandsModule implements CommandModule {
       attemptsLeft: challenge.maxAttempts,
     });
 
-    const { solution: _solution, ...visible } = challenge;
     return {
       success: true,
       output: challenge.displayText.join("\n"),
       data: {
         fileAccessSessionId: `breach_${Date.now().toString(36)}`,
         fileAccessType: "breach",
-        challenge: visible,
+        challenge: publicChallenge(challenge),
         targetDir: lock.path,
       },
       timestamp: new Date(),

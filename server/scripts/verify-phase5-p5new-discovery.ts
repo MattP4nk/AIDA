@@ -24,6 +24,7 @@
  *
  * Run: npx tsx scripts/verify-phase5-p5new-discovery.ts   (server must be up)
  */
+import { deleteFixtureUsers } from "./lib/delete-fixture-user";
 import "reflect-metadata";
 import { io as ioClient } from "../../client/node_modules/socket.io-client/build/esm/index.js";
 import { PrismaClient } from "@prisma/client";
@@ -81,7 +82,7 @@ async function cleanupProbeAccount(userId: string): Promise<void> {
       where: { ownerId: userId, isPlayerHome: true },
       select: { id: true },
     });
-    await prisma.user.deleteMany({ where: { id: userId } });
+    await deleteFixtureUsers(prisma, [userId]);
     if (home) await prisma.gameServer.delete({ where: { id: home.id } });
   } catch (err) {
     // Loud: a swallowed cleanup leaves a fixture the NEXT run reads as real.

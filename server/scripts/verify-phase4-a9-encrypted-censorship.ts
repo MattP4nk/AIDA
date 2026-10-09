@@ -13,6 +13,7 @@
  *
  * Run: npx tsx scripts/verify-phase4-a9-encrypted-censorship.ts
  */
+import { deleteFixtureUsers } from "./lib/delete-fixture-user";
 import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
 
@@ -173,7 +174,7 @@ async function main() {
   // Cleanup
   await prisma.message.deleteMany({ where: { senderId: sender.id } });
   await prisma.playerProgress.deleteMany({ where: { userId: { in: [sender.id, recipient.id] } } });
-  await prisma.user.deleteMany({ where: { id: { in: [sender.id, recipient.id] } } });
+  await deleteFixtureUsers(prisma, [sender.id, recipient.id]);
 
   console.log(`\n=== ${pass} PASS / ${fail} FAIL ===\n`);
   await prisma.$disconnect();

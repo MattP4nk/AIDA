@@ -30,6 +30,7 @@
  *
  * Run: npx tsx scripts/verify-event-subscriptions.ts
  */
+import { deleteFixtureUsers } from "./lib/delete-fixture-user";
 import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
 import { readFileSync } from "node:fs";
@@ -725,7 +726,7 @@ async function main() {
         select: { id: true },
       });
       if (raised) created.events.push(raised.id);
-      await prisma.fileSystemNode.delete({ where: { id: decoy.id } }).catch(() => {});
+      await prisma.fileSystemNode.deleteMany({ where: { id: decoy.id } }).catch((e) => { fail++; console.log(`  [FAIL] cleanup — ${(e as Error).message}`); });
     }
 
     // ── The structural repairs, asserted as properties ───────────────
@@ -835,7 +836,7 @@ async function main() {
       await prisma.gameServer.delete({ where: { id } });
     }
     for (const id of created.users) {
-      await prisma.user.delete({ where: { id } });
+      await deleteFixtureUsers(prisma, [id]);
     }
     // BY ID. A title+timestamp filter would have deleted whatever the running
     // dev server happened to write in the same window.

@@ -16,6 +16,7 @@
  *
  * Run: npx tsx scripts/verify-phase3-d3-mission-lock.ts
  */
+import { deleteFixtureUsers } from "./lib/delete-fixture-user";
 import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
 import pino from "pino";
@@ -349,7 +350,7 @@ async function main() {
 main()
   .catch((e) => { console.error(e); process.exitCode = 1; })
   .finally(async () => {
-    if (createdUsers.length) await prisma.user.deleteMany({ where: { id: { in: createdUsers } } });
+    if (createdUsers.length) await deleteFixtureUsers(prisma, createdUsers);
     if (createdMissions.length) await prisma.mission.deleteMany({ where: { id: { in: createdMissions } } });
     await prisma.$disconnect();
   });

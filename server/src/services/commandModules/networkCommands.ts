@@ -1,6 +1,7 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
 import logger from "../../logger";
+import { publicChallenge } from "../../utils/publicChallenge";
 import { spawnBackgroundProcess, successResult, errorResult, refreshComputerSpec } from "./helpers";
 import { redactSensitiveContent } from "../../utils/contentRedaction";
 import { TAP_ALL_EVENTS, TAP_ITEMS, MAX_ACTIVE_TAPS } from "../../config/gameBalance";
@@ -1032,7 +1033,7 @@ export class NetworkCommandsModule implements CommandModule {
         data: {
           connectionSessionId: challenge.type,
           targetIp: targetServer.ipAddress,
-          connectionChallenge: challenge,
+          connectionChallenge: publicChallenge(challenge),
         },
         suggestedCommand: submitCmd,
         soundEvent: "alert" as const,

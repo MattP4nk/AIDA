@@ -205,7 +205,7 @@ async function main() {
   if (succeeded === 0) {
     console.log("  [FAIL] NO command succeeded — the run is vacuous (session? permissions?)");
     console.log("\n=== 0 PASS / 1 FAIL ===");
-    await gsm.destroySession(user.id).catch(() => {});
+    await gsm.destroySession(user.id).catch((e: unknown) => console.log(`  [FAIL] cleanup — ${(e as Error).message}`));
     await prisma.$disconnect();
     process.stdout.write("", () => process.exit(1));
     return;
@@ -218,7 +218,7 @@ async function main() {
   } else if (!existsSync(BASELINE)) {
     console.log("  [FAIL] no baseline. Run with --record BEFORE refactoring.");
     console.log("\n=== 0 PASS / 1 FAIL ===");
-    await gsm.destroySession(user.id).catch(() => {});
+    await gsm.destroySession(user.id).catch((e: unknown) => console.log(`  [FAIL] cleanup — ${(e as Error).message}`));
     await prisma.$disconnect();
     process.stdout.write("", () => process.exit(1));
     return;
@@ -250,17 +250,20 @@ async function main() {
         }
       }
     }
+    await gsm.destroySession(user.id).catch((e: unknown) => { fail++; console.log(`  [FAIL] cleanup — ${(e as Error).message}`); });
     if (fail === 0) console.log(`  all ${pass} command behaviours unchanged`);
     console.log(`\n=== ${pass} PASS / ${fail} FAIL ===`);
-    await gsm.destroySession(user.id).catch(() => {});
     await prisma.$disconnect();
     process.stdout.write("", () => process.exit(fail > 0 ? 1 : 0));
     return;
   }
 
-  await gsm.destroySession(user.id).catch(() => {});
+  const cleaned = await gsm.destroySession(user.id).then(() => true, (e: unknown) => {
+    console.log(`  [FAIL] cleanup — ${(e as Error).message}`);
+    return false;
+  });
   await prisma.$disconnect();
-  process.stdout.write("", () => process.exit(0));
+  process.stdout.write("", () => process.exit(cleaned ? 0 : 1));
 }
 
 main().catch((e) => {

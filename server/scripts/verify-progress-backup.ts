@@ -18,6 +18,7 @@
  *
  * Run: npx tsx scripts/verify-progress-backup.ts
  */
+import { deleteFixtureUsers } from "./lib/delete-fixture-user";
 import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
 import { readFileSync } from "node:fs";
@@ -155,8 +156,8 @@ async function main() {
     }
   } finally {
     if (userId) {
-      await prisma.progressBackup.deleteMany({ where: { userId } }).catch(() => {});
-      await prisma.user.delete({ where: { id: userId } }).catch(() => {});
+      await prisma.progressBackup.deleteMany({ where: { userId } }).catch((e) => { fail++; console.log(`  [FAIL] cleanup — ${(e as Error).message}`); });
+      await deleteFixtureUsers(prisma, [userId]).catch((e) => { fail++; console.log(`  [FAIL] cleanup — ${(e as Error).message}`); });
     }
   }
 

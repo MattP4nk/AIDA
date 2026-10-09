@@ -10,6 +10,7 @@
  *
  * Run: npx tsx scripts/verify-mission-cap.ts
  */
+import { deleteFixtureUsers } from "./lib/delete-fixture-user";
 import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
 import { MAX_ACTIVE_MISSIONS } from "../src/config/gameBalance";
@@ -115,10 +116,10 @@ async function main() {
     }
   } finally {
     if (userId) {
-      await prisma.playerMissionObjective.deleteMany({ where: { playerMission: { userId } } }).catch(() => {});
-      await prisma.playerMission.deleteMany({ where: { userId } }).catch(() => {});
-      await prisma.mission.deleteMany({ where: { id: { in: missionIds } } }).catch(() => {});
-      await prisma.user.delete({ where: { id: userId } }).catch(() => {});
+      await prisma.playerMissionObjective.deleteMany({ where: { playerMission: { userId } } }).catch((e) => { fail++; console.log(`  [FAIL] cleanup — ${(e as Error).message}`); });
+      await prisma.playerMission.deleteMany({ where: { userId } }).catch((e) => { fail++; console.log(`  [FAIL] cleanup — ${(e as Error).message}`); });
+      await prisma.mission.deleteMany({ where: { id: { in: missionIds } } }).catch((e) => { fail++; console.log(`  [FAIL] cleanup — ${(e as Error).message}`); });
+      await deleteFixtureUsers(prisma, [userId]).catch((e) => { fail++; console.log(`  [FAIL] cleanup — ${(e as Error).message}`); });
     }
   }
 

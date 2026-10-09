@@ -30,6 +30,7 @@
  *
  * Run: npx tsx scripts/verify-phase5-r9-encryption.ts
  */
+import { deleteFixtureUsers } from "./lib/delete-fixture-user";
 import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
 import { isAuthenticatedPayload } from "../src/utils/contentCrypto";
@@ -271,7 +272,7 @@ async function main() {
   } finally {
     await prisma.fileSystemNode.deleteMany({ where: { serverId: server.id } });
     await prisma.gameServer.deleteMany({ where: { id: server.id } });
-    await prisma.user.deleteMany({ where: { id: owner.id } });
+    await deleteFixtureUsers(prisma, [owner.id]);
     await prisma.$disconnect();
   }
   process.exit(fail === 0 ? 0 : 1);

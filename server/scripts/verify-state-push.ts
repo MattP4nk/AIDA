@@ -21,6 +21,7 @@
  *
  * Run: npx tsx scripts/verify-state-push.ts
  */
+import { deleteFixtureUsers } from "./lib/delete-fixture-user";
 import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
 import { readFileSync } from "node:fs";
@@ -70,7 +71,6 @@ async function main() {
 
   const tag = `__state_probe_${process.pid}`;
   let userId: string | null = null;
-  let homeServerId: string | null = null;
 
   try {
     // ── The applier's semantics, before anything touches a socket ────
@@ -151,7 +151,7 @@ async function main() {
         isPlayerHome: true,
       },
     });
-    homeServerId = home.id;
+    void home; // owned by the user: deleteFixtureUsers removes it with them
     await gsm.createSession(user.id, `socket_${process.pid}`, "127.0.0.1");
     {
       io.sent.length = 0;
@@ -500,11 +500,8 @@ async function main() {
     }
   } finally {
     if (userId) {
-      await gsm.destroySession(userId).catch(() => {});
-      await prisma.user.delete({ where: { id: userId } });
-    }
-    if (homeServerId) {
-      await prisma.gameServer.delete({ where: { id: homeServerId } });
+      await gsm.destroySession(userId).catch((e: unknown) => { fail++; console.log(`  [FAIL] cleanup — ${(e as Error).message}`); });
+      await deleteFixtureUsers(prisma, [userId]);
     }
   }
 

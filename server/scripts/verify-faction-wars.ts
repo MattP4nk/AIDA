@@ -216,12 +216,12 @@ async function main() {
       }
     }
   } finally {
-    if (warId) await prisma.factionWar.delete({ where: { id: warId } }).catch(() => {});
+    if (warId) await prisma.factionWar.deleteMany({ where: { id: warId } }).catch((e) => { fail++; console.log(`  [FAIL] cleanup — ${(e as Error).message}`); });
     await prisma.factionWar.deleteMany({
       where: { OR: [{ attackerFactionId: aId ?? "" }, { defenderFactionId: bId ?? "" }] },
-    }).catch(() => {});
-    if (aId) await prisma.faction.delete({ where: { id: aId } }).catch(() => {});
-    if (bId) await prisma.faction.delete({ where: { id: bId } }).catch(() => {});
+    }).catch((e) => { fail++; console.log(`  [FAIL] cleanup — ${(e as Error).message}`); });
+    if (aId) await prisma.faction.deleteMany({ where: { id: aId } }).catch((e) => { fail++; console.log(`  [FAIL] cleanup — ${(e as Error).message}`); });
+    if (bId) await prisma.faction.deleteMany({ where: { id: bId } }).catch((e) => { fail++; console.log(`  [FAIL] cleanup — ${(e as Error).message}`); });
   }
 
   console.log(`\n=== ${pass} PASS / ${fail} FAIL ===`);

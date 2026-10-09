@@ -26,6 +26,7 @@
  *
  * Run: npx tsx scripts/verify-discovery-rules.ts
  */
+import { deleteFixtureUsers } from "./lib/delete-fixture-user";
 import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
 import { stripComments } from "./lib/strip-comments";
@@ -181,12 +182,12 @@ async function main() {
   } finally {
     if (userId) {
       await prisma.discoveredLink.deleteMany({ where: { userId } });
-      await prisma.user.delete({ where: { id: userId } }).catch((e) => {
+      await deleteFixtureUsers(prisma, [userId]).catch((e) => {
         console.error("CLEANUP FAILED (user):", e.message);
       });
     }
     for (const id of madeLinks) {
-      await prisma.serverLink.delete({ where: { id } }).catch(() => {});
+      await prisma.serverLink.deleteMany({ where: { id } }).catch((e) => { fail++; console.log(`  [FAIL] cleanup — ${(e as Error).message}`); });
     }
     for (const id of madeServers) {
       await prisma.gameServer.delete({ where: { id } }).catch((e) => {

@@ -29,6 +29,7 @@
  *
  * Run: npx tsx scripts/verify-phase5-r6-session.ts   (server must be up)
  */
+import { deleteFixtureUsers } from "./lib/delete-fixture-user";
 import "reflect-metadata";
 import { io as ioClient } from "../../client/node_modules/socket.io-client/build/esm/index.js";
 import { PrismaClient } from "@prisma/client";
@@ -192,13 +193,13 @@ async function main() {
           : "0 — room ops were still aimed at the closed socket; this is R6 claim 2",
       );
 
-      await prisma.user.deleteMany({ where: { id: acct2.userId } });
+      await deleteFixtureUsers(prisma, [acct2.userId]);
     }
 
     console.log(`\n=== ${pass} PASS / ${fail} FAIL ===\n`);
   } finally {
     opened.forEach((s) => { try { s.close(); } catch { /* ignore */ } });
-    await prisma.user.deleteMany({ where: { id: acct.userId } });
+    await deleteFixtureUsers(prisma, [acct.userId]);
     await prisma.$disconnect();
   }
   process.exit(fail === 0 ? 0 : 1);

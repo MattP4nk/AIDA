@@ -8,6 +8,7 @@
  *
  * Run: npx tsx scripts/verify-phase3-progress-repo.ts
  */
+import { deleteFixtureUsers } from "./lib/delete-fixture-user";
 import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
 import pino from "pino";
@@ -273,6 +274,6 @@ async function main() {
 main()
   .catch((e) => { console.error(e); process.exitCode = 1; })
   .finally(async () => {
-    if (created.length) await prisma.user.deleteMany({ where: { id: { in: created } } });
+    if (created.length) await deleteFixtureUsers(prisma, created);
     await prisma.$disconnect();
   });

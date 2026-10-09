@@ -26,6 +26,7 @@ import {
 } from "./asciiBox";
 import { successResult, errorResult, refreshComputerSpec } from "./helpers";
 import logger from "../../logger";
+import { publicChallenge } from "../../utils/publicChallenge";
 import { backdoors as backdoorsSvc, hacks, memory, messageEncryption, missionIntegration, servers, shop, traces } from "./deps";
 
 /**
@@ -460,7 +461,7 @@ export class HackCommandsModule implements CommandModule {
                 data: {
                   sessionId: result.session?.id,
                   targetIp,
-                  challenge: result.challenge,
+                  challenge: result.challenge && publicChallenge(result.challenge),
                   totalLayers: result.session?.totalLayers,
                 },
                 suggestedCommand: cbSubmitCmds[cbChallengeType] || "crack.submit",
@@ -566,7 +567,7 @@ export class HackCommandsModule implements CommandModule {
         result.feedback || result.error || "Unknown error",
       ],
       data: {
-        ...(result.nextChallenge ? { nextChallenge: result.nextChallenge } : {}),
+        ...(result.nextChallenge ? { nextChallenge: publicChallenge(result.nextChallenge) } : {}),
         ...(result.finalResult ? { ...result.finalResult, hackResolved: true } : {}),
       },
       timestamp: new Date(),
@@ -598,7 +599,7 @@ export class HackCommandsModule implements CommandModule {
         result.feedback || result.error || "Unknown error",
       ],
       data: {
-        ...(result.nextChallenge ? { nextChallenge: result.nextChallenge } : {}),
+        ...(result.nextChallenge ? { nextChallenge: publicChallenge(result.nextChallenge) } : {}),
         ...(result.finalResult ? { ...result.finalResult, hackResolved: true } : {}),
       },
       timestamp: new Date(),
@@ -630,7 +631,7 @@ export class HackCommandsModule implements CommandModule {
         result.feedback || result.error || "Unknown error",
       ],
       data: {
-        ...(result.nextChallenge ? { nextChallenge: result.nextChallenge } : {}),
+        ...(result.nextChallenge ? { nextChallenge: publicChallenge(result.nextChallenge) } : {}),
         ...(result.finalResult ? { ...result.finalResult, hackResolved: true } : {}),
       },
       timestamp: new Date(),
@@ -940,7 +941,7 @@ export class HackCommandsModule implements CommandModule {
         data: {
           fileAccessSessionId: sessionId,
           fileAccessType: "crack",
-          challenge,
+          challenge: publicChallenge(challenge),
           targetFile: fileName,
         },
         timestamp: new Date(),
@@ -1216,7 +1217,7 @@ export class HackCommandsModule implements CommandModule {
         data: {
           fileAccessSessionId: sessionId,
           fileAccessType: "storm",
-          challenge,
+          challenge: publicChallenge(challenge),
           targetFile: fileName,
         },
         timestamp: new Date(),

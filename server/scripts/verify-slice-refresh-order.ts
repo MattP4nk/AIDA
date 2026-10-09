@@ -21,6 +21,7 @@
  *
  * Run: npx tsx scripts/verify-slice-refresh-order.ts
  */
+import { deleteFixtureUsers } from "./lib/delete-fixture-user";
 import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
 import { freeIp } from "./lib/free-ip";
@@ -233,8 +234,8 @@ async function main() {
   } finally {
     shop.getPlayerInventory = realGetInventory;
     if (userId) {
-      await gsm.destroySession(userId).catch(() => {});
-      await prisma.user.delete({ where: { id: userId } }).catch((e) => {
+      await gsm.destroySession(userId).catch((e: unknown) => { fail++; console.log(`  [FAIL] cleanup — ${(e as Error).message}`); });
+      await deleteFixtureUsers(prisma, [userId]).catch((e) => {
         console.error("CLEANUP FAILED (user):", e.message);
       });
     }

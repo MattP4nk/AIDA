@@ -4010,19 +4010,35 @@ Write them per-refactor, immediately before touching the code:
           Harnesses: verify-home-isolation (new), verify-breach (new; random puzzle, run 6x),
           verify-inherited-protection (+ skeleton). All negative-controlled. Golden re-recorded
           (help: file_access 1/2 -> 3/4).
-        - **FOLLOW-UPS found during Q9/Q10 (not yet done, next):**
-          1. **Every minigame sends its SOLUTION to the client.** sweep, crack, crack.storm
-             (`data.challenge`) and hack layers (`result.challenge`, `nextChallenge`) emit the whole
-             `MinigameChallenge`, `solution` included — the answer is in the network tab. The
-             client never reads it, so stripping at each emit is safe. (breach already strips.)
-          2. **Harness cleanup orphans home servers.** ~15 harnesses delete their users; the home
-             GameServer survives with ownerId null (GameServer.owner has no onDelete) — 247 such
-             homes in dev, more each run. The game never deletes users. Fix in a scripts/lib
-             helper; the 247 existing orphans need the maintainer's OK to purge.
-          3. **`ls <dir>` ignores the directory's OWN read permission and its ancestors'.**
-             `statPath` (cd) checks the node, `readFile` checks node + ancestors (R11),
-             `listDirectory` checks neither — only each child. Matters only for directories with
-             requiredAccessLevel > 1 (others are always readable): `cd` refuses, `ls <path>` lists.
+        - **FOLLOW-UPS found during Q9/Q10 — ALL DONE (2026-10-09):**
+          1. **Minigame answers stayed on the client.** sweep, crack, crack.storm, hack layers
+             (start + every `nextChallenge`) and connect sent the whole challenge: `solution`, plus
+             crack's `metadata.bestStrategy` (the answer) and sweep's hidden file ids.
+             `utils/publicChallenge.ts` is a WHITELIST (type, difficulty, displayText, hints,
+             timeLimit, maxAttempts) applied at all 9 send sites. verify-challenge-privacy drives
+             sweep/crack/storm/hack-next-layer in-process; hack start and connect are pinned in source.
+          2. **Harnesses orphaned home servers.** 24 harnesses deleted users, leaving their homes
+             ownerless (GameServer.owner has no onDelete). All now use
+             `scripts/lib/delete-fixture-user.ts` (homes first, then users); pinned by
+             verify-fixture-user-cleanup (AST match — strings/comments cannot match). The 251
+             existing orphans were PURGED with the maintainer's OK (2,894 -> 2,643 servers; 0
+             ownerless after a full suite run). Same pass: every swallowed cleanup `.catch(() => {})`
+             in a harness now reports (the 3 left are deliberate expected-throw probes).
+             verify-phase4-review-fixes R1 had been borrowing an orphaned home as "a server nobody
+             owns" — now a private fixture.
+          3. **`ls`/`cd` and directory permissions.** `listDirectory` checked no permission on the
+             directory itself, `statPath` none on its ancestors — so `ls /vault` listed what `cd`
+             refused, and `cd /vault/open` walked through a restricted /vault. Both now require the
+             node AND its ancestors (`fileService.canOpen`), as `cat` (R11) already did.
+             verify-dir-permissions.
+          All negative-controlled. Suite 87/87 (1,332 checks), golden 23/23.
+        - **NEW (found while fixing 2): nothing typechecks `server/scripts/`.** `tsc -p tsconfig.json`
+          covers src only; scripts carry 31 type errors (benchmark, pentest, verify-draft-errors,
+          ...). Worse, the dead `@types/jest` devDependency declares a GLOBAL `fail`, so a harness
+          that uses `fail++` where no local `fail` is in scope compiles cleanly and throws at runtime
+          — I wrote exactly that in characterize-commands and found it only by typechecking scripts
+          with a throwaway tsconfig. Next: a scripts tsconfig in `npm run verify`, the 31 errors
+          fixed, and the jest devDependencies removed.
       - **OPEN QUESTIONS (need the maintainer):**
         1. **Endgame lockout.** 9 fragments exist, 9 are required, nothing restores a bricked one:
            the first failed `fragment.crack` makes the endgame unreachable for everyone.

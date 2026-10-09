@@ -22,6 +22,7 @@
  *
  * Run: npx tsx scripts/verify-forum-feed-access.ts
  */
+import { deleteFixtureUsers } from "./lib/delete-fixture-user";
 import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
 import { stripComments } from "./lib/strip-comments";
@@ -212,7 +213,7 @@ async function main() {
       } finally {
         (forums as any).access.io = realIo;
         await prisma.forumMember.deleteMany({ where: { userId: victim.id } });
-        await prisma.user.delete({ where: { id: victim.id } }).catch((e) => {
+        await deleteFixtureUsers(prisma, [victim.id]).catch((e) => {
           console.error("CLEANUP FAILED (victim):", e.message);
         });
       }
@@ -237,7 +238,7 @@ async function main() {
           `${allowed.length}`,
         );
       } finally {
-        await prisma.user.delete({ where: { id: stranger.id } });
+        await deleteFixtureUsers(prisma, [stranger.id]);
       }
     }
 
@@ -345,7 +346,7 @@ async function main() {
       } finally {
         (forums as any).access.io = realIo;
         await prisma.forumMember.deleteMany({ where: { userId: joiner.id } });
-        await prisma.user.delete({ where: { id: joiner.id } }).catch((e) => {
+        await deleteFixtureUsers(prisma, [joiner.id]).catch((e) => {
           console.error("CLEANUP FAILED (joiner):", e.message);
         });
       }
@@ -373,7 +374,7 @@ async function main() {
   } finally {
     if (userId) {
       await prisma.forumMember.deleteMany({ where: { userId } });
-      await prisma.user.delete({ where: { id: userId } }).catch((e) => {
+      await deleteFixtureUsers(prisma, [userId]).catch((e) => {
         console.error("CLEANUP FAILED (user):", e.message);
       });
     }

@@ -26,6 +26,7 @@
  *
  * Run: npx tsx scripts/verify-phase5-r7-timelimit.ts
  */
+import { deleteFixtureUsers } from "./lib/delete-fixture-user";
 import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
 import { missionExpiresAt, missionTimeLimitMs } from "../src/utils/missionTime";
@@ -181,7 +182,7 @@ async function main() {
     await prisma.playerMission.deleteMany({ where: { userId: user.id } });
     await prisma.mission.delete({ where: { id: mission.id } });
     await prisma.playerProgress.deleteMany({ where: { userId: user.id } });
-    await prisma.user.delete({ where: { id: user.id } });
+    await deleteFixtureUsers(prisma, [user.id]);
   }
 
   // ── R7-d: bonus objectives are optional, and finally countable ───────
@@ -300,7 +301,7 @@ async function main() {
 
       await prisma.playerMission.deleteMany({ where: { userId: u2.id } });
       await prisma.mission.delete({ where: { id: m2.id } });
-      await prisma.user.delete({ where: { id: u2.id } });
+      await deleteFixtureUsers(prisma, [u2.id]);
     }
 
     // BOTH auto-complete paths must agree. The review found they did not:
@@ -359,7 +360,7 @@ async function main() {
 
       await prisma.playerMission.deleteMany({ where: { userId: u3.id } });
       await prisma.mission.delete({ where: { id: m3.id } });
-      await prisma.user.delete({ where: { id: u3.id } });
+      await deleteFixtureUsers(prisma, [u3.id]);
     }
 
     // EFFICIENCY MUST MEASURE REQUIRED WORK ONLY. The review found that

@@ -19,6 +19,7 @@
  *
  * Run: npx tsx scripts/verify-phase7-s7-moderation-queue.ts
  */
+import { deleteFixtureUsers } from "./lib/delete-fixture-user";
 import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
 import { stripComments } from "./lib/strip-comments";
@@ -321,7 +322,7 @@ async function main() {
         ["post", () => (ids.post ? prisma.post.delete({ where: { id: ids.post } }) : Promise.resolve())],
         ["forum", () => (ids.forum ? prisma.forum.delete({ where: { id: ids.forum } }) : Promise.resolve())],
         ["message", () => (ids.message ? prisma.message.delete({ where: { id: ids.message } }) : Promise.resolve())],
-        ["users", () => prisma.user.deleteMany({ where: { id: { in: ids.users } } })],
+        ["users", () => deleteFixtureUsers(prisma, ids.users)],
       ];
       for (const [what, run] of cleanup) {
         try { await run(); } catch (err) { fail++; console.log(`  [FAIL] cleanup of ${what} — ${(err as Error).message}`); }

@@ -26,6 +26,7 @@
  *
  * Run: npx tsx scripts/verify-phase5-r11-filesystem.ts
  */
+import { deleteFixtureUsers } from "./lib/delete-fixture-user";
 import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
 
@@ -265,14 +266,14 @@ async function main() {
         ok.success ? "readable" : `blocked: ${ok.error}`,
       );
 
-      await prisma.user.delete({ where: { id: stranger.id } });
+      await deleteFixtureUsers(prisma, [stranger.id]);
     }
 
     console.log(`\n=== ${pass} PASS / ${fail} FAIL ===\n`);
   } finally {
     await prisma.fileSystemNode.deleteMany({ where: { serverId: server.id } });
     await prisma.gameServer.deleteMany({ where: { id: server.id } });
-    await prisma.user.deleteMany({ where: { id: owner.id } });
+    await deleteFixtureUsers(prisma, [owner.id]);
     await prisma.$disconnect();
   }
   // FLUSH, THEN EXIT. Two failure modes to dodge at once:

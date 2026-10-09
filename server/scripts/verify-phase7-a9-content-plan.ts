@@ -18,6 +18,7 @@
  *
  * Run: npx tsx scripts/verify-phase7-a9-content-plan.ts
  */
+import { deleteFixtureUsers } from "./lib/delete-fixture-user";
 import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
 import { readFileSync } from "node:fs";
@@ -151,7 +152,7 @@ async function main() {
       } catch (err) { fail++; console.log(`  [FAIL] cleanup of server ${sid} — ${(err as Error).message}`); }
     }
     if (ids.user) {
-      try { await prisma.user.delete({ where: { id: ids.user } }); }
+      try { await deleteFixtureUsers(prisma, [ids.user]); }
       catch (err) { fail++; console.log(`  [FAIL] cleanup of user — ${(err as Error).message}`); }
     }
   }

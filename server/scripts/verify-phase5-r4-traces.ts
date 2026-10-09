@@ -24,6 +24,7 @@
  *
  * Run: npx tsx scripts/verify-phase5-r4-traces.ts
  */
+import { deleteFixtureUsers } from "./lib/delete-fixture-user";
 import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
 
@@ -82,7 +83,7 @@ async function main() {
     await prisma.activeTrace.deleteMany({ where: { targetId: { in: ids } } });
     await prisma.gameServer.deleteMany({ where: { id: server.id } });
     await prisma.playerProgress.deleteMany({ where: { userId: { in: ids } } });
-    await prisma.user.deleteMany({ where: { id: { in: ids } } });
+    await deleteFixtureUsers(prisma, ids);
   };
 
   try {
