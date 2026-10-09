@@ -244,7 +244,7 @@ async function main() {
     check("mission has objectives", objs.length > 0, `${objs.length} objectives`);
 
     if (objs.length > 0) {
-      const missionService = getService<import("../src/services/missionService").MissionService>(
+      const missionService = getService<import("../src/services/missionService").default>(
         TOKENS.MISSION_SERVICE,
       );
       const obj = objs[0];

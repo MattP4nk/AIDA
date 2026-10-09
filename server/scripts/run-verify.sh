@@ -32,6 +32,19 @@ ok=0
 fail=0
 failed_names=()
 
+# Typecheck the harnesses first. tsx strips types without checking them, and
+# `tsc -p tsconfig.json` covers src only — so until 2026-10-09 nothing checked
+# these files, and they carried 40 errors. A failure here counts like a failing
+# harness; the harnesses still run, so one bad annotation hides nothing.
+if npx tsc -p tsconfig.scripts.json >"$OUT/typecheck-scripts.log" 2>&1; then
+  ok=$((ok + 1))
+  printf '  ok   %s\n' "typecheck-scripts"
+else
+  fail=$((fail + 1))
+  failed_names+=("typecheck-scripts")
+  printf '  FAIL %s\n' "typecheck-scripts"
+fi
+
 for f in scripts/verify-*.ts; do
   name=$(basename "$f" .ts)
   if timeout "$TIMEOUT" npx tsx "$f" >"$OUT/$name.log" 2>&1; then

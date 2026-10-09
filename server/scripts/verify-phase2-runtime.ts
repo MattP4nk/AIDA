@@ -42,11 +42,9 @@ const rows: Array<[string, boolean, string]> = [];
   // ── 5.1 reward bridge: complete a mission, expect BOTH socket events ──
   const mOut = await run("missions", [], 12000);
   const id = mOut.match(/\b([a-z0-9]{20,})\b/)?.[1];
-  let completed = false;
   if (id) { await run("accept",[id],8000); }
   // Drive the reward path directly through the service the bridge listens to,
   // so this tests the BRIDGE rather than the mission content pipeline.
-  const { getService } = await import("../src/di/container");
   const container = await import("../src/di/container");
   const pino = (await import("pino")).default;
   const { Server: SocketIOServer } = await import("socket.io");

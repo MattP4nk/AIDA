@@ -65,7 +65,7 @@ async function main() {
         err instanceof GameError,
         `${err?.constructor?.name} — formatServerError only keeps a status for GameError`,
       );
-      const formatted = formatServerError(err);
+      const formatted = formatServerError(err, "HTTP Request");
       check(
         "formatServerError maps it to 404",
         formatted.statusCode === 404,
@@ -94,7 +94,7 @@ async function main() {
       made.push(d.id);
 
       const err = await caught(() => drafts.rejectDraft(d.id, "admin", "again"));
-      const formatted = formatServerError(err);
+      const formatted = formatServerError(err, "HTTP Request");
       check(
         "rejecting a non-draft maps to 400",
         formatted.statusCode === 400,
@@ -111,7 +111,7 @@ async function main() {
     console.log("\nDE-3 — approveDraft is fixed too, not just the delegated one");
     {
       const err = await caught(() => drafts.approveDraft("no-such-draft-id", "admin"));
-      const formatted = formatServerError(err);
+      const formatted = formatServerError(err, "HTTP Request");
       check(
         "approveDraft on a missing draft is also 404",
         formatted.statusCode === 404,
@@ -126,8 +126,8 @@ async function main() {
       const err2 = await caught(() => drafts.approveDraft(d.id, "admin"));
       check(
         "and an already-approved draft is 400",
-        formatServerError(err2).statusCode === 400,
-        `${formatServerError(err2).statusCode}`,
+        formatServerError(err2, "HTTP Request").statusCode === 400,
+        `${formatServerError(err2, "HTTP Request").statusCode}`,
       );
     }
 

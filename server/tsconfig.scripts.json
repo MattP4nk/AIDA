@@ -1,0 +1,19 @@
+{
+  // Typechecks the harnesses (scripts/, and the repo-root scripts/) — nothing
+  // did until 2026-10-09, and they had 40 errors, among them a check computed
+  // and never asserted. Run by scripts/run-verify.sh before any harness.
+  // ESNext + bundler because tsx runs them as ES modules (top-level await,
+  // import.meta). src and shared are included so imports resolve as in src.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    // Every harness is its own program under tsx. Without this, a file with no
+    // static import/export is a global SCRIPT, and its top-level `let fail`
+    // became a global for all the others — verify-read-receipts' did, so an
+    // out-of-scope `fail++` anywhere still typechecked (2026-10-09).
+    "moduleDetection": "force"
+  },
+  "include": ["scripts/**/*.ts", "../scripts/**/*.ts", "src/**/*", "../shared/**/*"]
+}

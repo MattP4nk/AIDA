@@ -62,7 +62,7 @@ const RealDate = Date;
 const FIXED = RealDate.UTC(2026, 0, 15, 12);
 class FrozenDate extends RealDate {
   constructor(...a: any[]) { if (a.length === 0) super(FIXED); else super(...(a as [any])); }
-  static now() { return FIXED; }
+  static override now() { return FIXED; }
 }
 /**
  * Run `fn` deterministically: seeded randomness, frozen clock.

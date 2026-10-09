@@ -22,7 +22,7 @@ async function benchmark() {
       body: JSON.stringify(TEST_USER)
     });
     
-    const registerData = await registerRes.json();
+    const registerData = (await registerRes.json()) as { token: string };
     
     if (!registerRes.ok) {
         // If user exists, try login
@@ -32,7 +32,7 @@ async function benchmark() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ username: TEST_USER.username, password: TEST_USER.password })
         });
-        const loginData = await loginRes.json();
+        const loginData = (await loginRes.json()) as { token: string };
         if (!loginRes.ok) throw new Error(`Login failed: ${JSON.stringify(loginData)}`);
         token = loginData.token;
     } else {
@@ -98,9 +98,9 @@ async function benchmark() {
     
     const sorted = times.sort((a, b) => a - b);
     const avg = times.reduce((a, b) => a + b, 0) / times.length;
-    const min = sorted[0];
-    const max = sorted[sorted.length - 1];
-    const p95 = sorted[Math.floor(times.length * 0.95)];
+    const min = sorted[0] ?? NaN;
+    const max = sorted[sorted.length - 1] ?? NaN;
+    const p95 = sorted[Math.floor(times.length * 0.95)] ?? NaN;
 
     console.log(
       `| ${name.padEnd(7)} | ${avg.toFixed(1).padStart(5)} | ${min.toFixed(1).padStart(5)} | ${max.toFixed(1).padStart(5)} | ${p95.toFixed(1).padStart(5)} |`

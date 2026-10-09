@@ -188,7 +188,7 @@ async function main() {
     // An event can be emitted and orphaned at the same time.
     const socketEmits = serverSrc.replace(/this\.emit\(/g, "__internalEmit(");
     const stillOrphaned = KNOWN_ORPHANED_EVENTS.clientListenersWithoutEmitter.filter(
-      (e) => !new RegExp(`emit\\(\\s*["'\`]${e.replace(/[:]/g, "\\:")}["'\`]`).test(socketEmits),
+      (e: string) => !new RegExp(`emit\\(\\s*["'\`]${e.replace(/[:]/g, "\\:")}["'\`]`).test(socketEmits),
     );
     check(
       "recorded client-listener orphans are unchanged",

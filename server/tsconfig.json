@@ -31,6 +31,10 @@
     "experimentalDecorators": true,
     "emitDecoratorMetadata": true,
     "moduleResolution": "node",
+    // Only Node's globals. An auto-included @types package can declare globals
+    // the code never imports: the dead @types/jest declared `fail`, so an
+    // out-of-scope `fail++` compiled and threw at runtime (2026-10-09).
+    "types": ["node"],
     "baseUrl": "./src",
     "paths": {
       "@/*": ["*"],

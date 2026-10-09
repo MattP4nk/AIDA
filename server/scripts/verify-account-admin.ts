@@ -55,7 +55,8 @@ async function api(method: string, path: string, token: string, body?: unknown) 
     },
     ...(body ? { body: JSON.stringify(body) } : {}),
   });
-  return { status: r.status, json: await r.json().catch(() => null) };
+  // `any`: each check reads the fields of the endpoint it called.
+  return { status: r.status, json: (await r.json().catch(() => null)) as any };
 }
 async function register(tag: string) {
   const r = await fetch(`${BASE}/api/auth/register`, {

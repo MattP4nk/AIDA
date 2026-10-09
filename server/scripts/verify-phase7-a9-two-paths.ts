@@ -91,7 +91,7 @@ async function main() {
       const ctx: any = baseCtx(userId);
       ctx.io = { to: () => ({ emit: (_e: string, p: any) => emitted.push(p) }) };
       await mod.handleProbe(cmd, ctx);
-      await onComplete?.();
+      await (onComplete as (() => Promise<void>) | undefined)?.(); // set by the spawnGameProcess stub; TS narrows it to undefined after the reset
 
       outputs[`${userId}|${ip}`] = { builder: String(builder ?? ""), background: String(emitted[0]?.output ?? "") };
     }
@@ -130,7 +130,7 @@ async function main() {
     const ctx: any = baseCtx(caller);
     ctx.io = { to: () => ({ emit: (_e: string, p: any) => emitted.push(p) }) };
     await info.handleWhois(cmd, ctx);
-    await onComplete?.();
+    await (onComplete as (() => Promise<void>) | undefined)?.(); // set by the spawnGameProcess stub; TS narrows it to undefined after the reset
     outputs[`whois|${who}`] = { builder: String(builder ?? ""), background: String(emitted[0]?.output ?? "") };
   }
   const whoisKeys = Object.keys(outputs).filter((k) => k.startsWith("whois|"));

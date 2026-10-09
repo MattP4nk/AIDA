@@ -1,7 +1,6 @@
 import "reflect-metadata";
 import dotenv from "dotenv";
 import pino from "pino";
-import { PrismaClient } from "@prisma/client";
 import { Server as SocketIOServer } from "socket.io";
 import { createServer } from "http";
 

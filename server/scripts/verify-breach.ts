@@ -97,7 +97,7 @@ async function main() {
     const inner = await mk(home, vault.id, "inner", "directory", { isProtected: true });
     await mk(home, inner.id, "deep.txt", "file");
     const pub = await mk(home, ownerDir.id, "pub", "directory", { permissions: { owner: 15, faction: 0, others: 15 } });
-    const loose = await mk(home, pub.id, "loose.txt", "file");
+    await mk(home, pub.id, "loose.txt", "file");
     const shut = await mk(home, ownerDir.id, "shut", "directory");
     await mk(home, shut.id, "private.txt", "file", { permissions: { owner: 15, faction: 0, others: 0 } });
     await prisma.playerProgress.update({ where: { userId: owner }, data: { homeVault: 1 } }); // d=5: XOR hint

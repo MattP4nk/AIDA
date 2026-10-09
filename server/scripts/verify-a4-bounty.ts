@@ -28,7 +28,7 @@
  * Needs the dev server (B-1, and registration). Run: npx tsx scripts/verify-a4-bounty.ts
  */
 import "reflect-metadata";
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient, Prisma } from "@prisma/client";
 import { randomUUID } from "node:crypto";
 // The server has no socket.io-client dependency; harnesses borrow the client's.
 import { io as ioClient } from "../../client/node_modules/socket.io-client/build/esm/index.js";
@@ -231,7 +231,7 @@ async function main() {
         downloads = await prisma.fileSystemNode.create({ data: { serverId: home!, parentId: homeDir.id, name: "downloads", type: "directory" } });
         nodeIds.push(downloads.id);
       }
-      const mkNode = async (name: string, metadata: Record<string, unknown>) => {
+      const mkNode = async (name: string, metadata: Prisma.InputJsonObject) => {
         const n = await prisma.fileSystemNode.create({ data: { serverId: home!, parentId: downloads!.id, name, type: "file", content: "x", size: 1, metadata } });
         nodeIds.push(n.id);
         return n;

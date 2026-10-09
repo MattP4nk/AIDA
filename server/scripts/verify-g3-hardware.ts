@@ -28,7 +28,7 @@ function asText(o: unknown): string {
 }
 
 /** Pull "RAM  x / y" style totals out of the `specs` box. */
-function parseSpecs(out: string): { cpu?: number; ram?: number; bw?: number } {
+function parseSpecs(out: string): { cpu: number | undefined; ram: number | undefined; bw: number | undefined } {
   const grab = (label: string) => {
     const m = out.match(new RegExp(`${label}\\s+(\\d+)\\s*/\\s*(\\d+)`));
     return m ? Number(m[2]) : undefined;

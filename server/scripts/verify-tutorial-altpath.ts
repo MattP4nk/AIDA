@@ -270,6 +270,7 @@ async function main() {
   console.log("\n\n================== U1 RESULTS ==================");
   const rows: Array<[string, boolean, string]> = [
     ["direct home->Gateway blocked", directBlocked, "adjacency rule the new hint teaches"],
+    ["reached the Internet Exchange", ix.ok, "first hop — the Gateway row claims this path"],
     ["reached Training Gateway", reachedGateway, "via Internet Exchange hop"],
     ["ls -a reveals hidden key", lsShowsKey, "the alt-path is discoverable"],
     ["bare ls hides it", lsHidesKey, "hidden semantics correct"],

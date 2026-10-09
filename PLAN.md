@@ -4032,13 +4032,18 @@ Write them per-refactor, immediately before touching the code:
              node AND its ancestors (`fileService.canOpen`), as `cat` (R11) already did.
              verify-dir-permissions.
           All negative-controlled. Suite 87/87 (1,332 checks), golden 23/23.
-        - **NEW (found while fixing 2): nothing typechecks `server/scripts/`.** `tsc -p tsconfig.json`
-          covers src only; scripts carry 31 type errors (benchmark, pentest, verify-draft-errors,
-          ...). Worse, the dead `@types/jest` devDependency declares a GLOBAL `fail`, so a harness
-          that uses `fail++` where no local `fail` is in scope compiles cleanly and throws at runtime
-          — I wrote exactly that in characterize-commands and found it only by typechecking scripts
-          with a throwaway tsconfig. Next: a scripts tsconfig in `npm run verify`, the 31 errors
-          fixed, and the jest devDependencies removed.
+        - **DONE (2026-10-09): harnesses are typechecked.** `server/tsconfig.scripts.json` (scripts/,
+          repo-root scripts/; ESNext/bundler as tsx runs them) is the first entry of `npm run verify`
+          ("typecheck-scripts") and `npm run typecheck:scripts`. Fixed all 40 errors; the ones that
+          were real: tutorial-altpath computed the Internet Exchange hop and never asserted it (the
+          Gateway row claimed "via Internet Exchange hop") — now its own row; verify-draft-errors
+          called `formatServerError` without its context; phase2-runtime and seed-fs-uniques carried
+          dead variables. jest/ts-jest/@types/jest REMOVED (236 packages); `types: ["node"]` in
+          tsconfig.json so no @types package can inject globals again.
+          FOUND: removing jest was NOT enough — the negative control (an out-of-scope `fail++`)
+          still typechecked, because verify-read-receipts has no static import, making it a global
+          SCRIPT whose top-level `let fail` was visible to every harness. `moduleDetection: "force"`
+          fixes it; control re-run red (TS2304), and the suite exits non-zero on a type error.
       - **OPEN QUESTIONS (need the maintainer):**
         1. **Endgame lockout.** 9 fragments exist, 9 are required, nothing restores a bricked one:
            the first failed `fragment.crack` makes the endgame unreachable for everyone.

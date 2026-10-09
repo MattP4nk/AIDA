@@ -11,15 +11,19 @@ cd server && npm run dev                          # tsx watch, port 3001
 cd client && npm run dev                          # vite, port 8080
 ```
 
-There is **no unit-test runner** (no jest config; `jest`/`ts-jest`/`@types/jest` linger
-as dead devDependencies). Verification is done with hand-written harnesses in
-`server/scripts/`:
+There is **no unit-test runner** (the dead jest devDependencies were removed 2026-10-09).
+Verification is done with hand-written harnesses in `server/scripts/`:
 
 ```
-cd server && npm run verify            # the whole suite, exits non-zero on failure
+cd server && npm run verify            # typechecks the harnesses, then runs the suite; non-zero on failure
 cd server && npm run verify:golden     # the command characterization master
+cd server && npm run typecheck:scripts # just the harness typecheck (tsconfig.scripts.json)
 cd server && npx tsx scripts/<name>.ts # one harness
 ```
+
+tsx strips types without checking them, so harnesses are typechecked only through
+`tsconfig.scripts.json`. It forces every file to be a module: a harness with no static import
+was a global script whose `let fail` leaked into all the others, hiding out-of-scope uses.
 
 **`server/scripts/` is tracked as of 2026-10-06** (decision 17 closed), baselines
 included. Before that the directory was blanket-ignored with five files tracked by

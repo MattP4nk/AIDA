@@ -20,7 +20,7 @@ function check(n: string, ok: boolean, d = "") {
 
 async function main() {
   console.log("\n=== Read receipts ===");
-  const R = await import("../../client/src/services/readReceipts.ts");
+  const R = await import("../../client/src/services/readReceipts");
 
   console.log("\nRR-1 — the store is bounded while nothing consumes it");
   {
