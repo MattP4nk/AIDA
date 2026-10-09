@@ -4088,13 +4088,29 @@ Write them per-refactor, immediately before touching the code:
           (917) and `@p5.test` (118) user, with their homes, by id through deleteFixtureUsers
           (users 2,300 -> 1,265, servers 2,911 -> 1,876; 0 failures; the 9 world fragments, 618 world
           servers and 6 NPCs untouched).
-        - **OPEN: ~1,258 more harness accounts under other test domains** — `s9.test` (468,
-          verify-phase4-s3-s9-sockets), `rev.test` (315, verify-phase4-review-fixes), `example.test`
-          (238, gate-phase1 / g3-hardware / tutorial-altpath), `e.test` (158, phase2-runtime /
-          p0-fixes), `s1.test` (79, s1-socket-authz). Nothing but those harnesses uses those domains,
-          and they no longer leak. **156 of them hold the ADMIN role** (e.test 79, s9.test 77:
-          those harnesses promote their fixture) — against the "never leave a test account
-          elevated" rule. Purge (or at least demote) needs the maintainer's OK.
+        - **PURGED (2026-10-09, maintainer's OK): the remaining 1,258 harness accounts** —
+          `s9.test`, `rev.test`, `example.test`, `e.test`, `s1.test`, including all 156 admin test
+          accounts. The dev DB now holds the 6 NPCs and SYSTEM; 618 world servers, 9 fragments
+          intact. 55 tutorial probes first failed on RESTRICT foreign keys (hack_logs.attacker_id,
+          and hack_logs.target_server_id on their homes): deleteFixtureUsers now removes a
+          fixture's hack logs (either side, and on its home), posts, message reports, contacts
+          pointing at it, and its private mission offers — before the home, then the user.
+          FU-1b pins it (negative-controlled twice: missing deletes, and wrong ORDER).
+        - **FOUND by the purge — the golden master was 13/23 vacuous since it was committed.** It
+          borrowed the oldest player (a harness account) as its subject; after the purge it picked
+          SYSTEM and could not run. Fixing that showed the real problem: its 23 commands ran back
+          to back and the processor's 10-per-second limit refused 13 — the baseline pinned "Rate
+          limit exceeded" for missions, shop, inbox, faction list, defenses, fragments, alias, calc,
+          hack, download, sweep and two error paths. It now runs on a private fixture subject (fixed
+          home-IP length, username masked), paces the cases, and FAILS if any case is throttled.
+          Negative control: a change to `calc` output went red (it stayed green before). Re-recorded;
+          those 13 are characterized for the first time (5 runs on 5 fresh accounts identical).
+          `status` listed faction standings in no defined order — now by name.
+        - **OPEN: harness runs still grow the WORLD.** A fresh player's first `missions` makes the
+          content system generate world content: one NPC-owned corporate server + ~10 files per
+          golden run, ~6 servers per suite run (618 -> ~627 today). Not attributable to the fixture
+          afterwards, so not cleaned. Options: suppress content generation for fixture accounts,
+          or have generation record what it made for whom. Needs a decision.
       - **OPEN QUESTIONS (need the maintainer):**
         1. **Endgame lockout.** 9 fragments exist, 9 are required, nothing restores a bricked one:
            the first failed `fragment.crack` makes the endgame unreachable for everyone.

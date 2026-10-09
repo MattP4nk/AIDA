@@ -34,7 +34,7 @@
       "progress",
       "user"
     ],
-    "output": "╔══════════════════════════════════════════════╗\n║ [◉_◉] PLAYER STATUS                          ║\n╠══════════════════════════════════════════════╣\n║   Username:           p54814957              ║\n║   Home IP:            <ip>           ║\n║   Level:              1                      ║\n║   Experience:         0                      ║\n║   Credits:            $1000                  ║\n║   Faction:            None                   ║\n╠══════════════════════════════════════════════╣\n║ FACTION STANDINGS                            ║\n╠══════════════════════════════════════════════╣\n║   The Garrison:       0                      ║\n║   CyberCorp:          0                      ║\n║   dotHackers:         0                      ║\n╠══════════════════════════════════════════════╣\n║ STORY PROGRESS                               ║\n╠══════════════════════════════════════════════╣\n║   Explore the network. The truth is out ther ║\n╚══════════════════════════════════════════════╝",
+    "output": "╔══════════════════════════════════════════════╗\n║ [◉_◉] PLAYER STATUS                          ║\n╠══════════════════════════════════════════════╣\n║   Username:           <subject>             ║\n║   Home IP:            <ip>                   ║\n║   Level:              1                      ║\n║   Experience:         0                      ║\n║   Credits:            $1000                  ║\n║   Faction:            None                   ║\n╠══════════════════════════════════════════════╣\n║ FACTION STANDINGS                            ║\n╠══════════════════════════════════════════════╣\n║   CyberCorp:          0                      ║\n║   dotHackers:         0                      ║\n║   The Garrison:       0                      ║\n╠══════════════════════════════════════════════╣\n║ STORY PROGRESS                               ║\n╠══════════════════════════════════════════════╣\n║   Explore the network. The truth is out ther ║\n╚══════════════════════════════════════════════╝",
     "outputType": "string",
     "success": true
   },
@@ -54,7 +54,7 @@
   },
   "07:processCommands:ps": {
     "dataKeys": null,
-    "output": "╔════════════════════════════════════════════════════════════════╗\n║                           PROCESSES                            ║\n╠════════════════════════════════════════════════════════════════╣\n║  PASSIVE CONSUMERS                                             ║\n╠════════════════════════════════════════════════════════════════╣\n║  [connection] p54814957's Terminal     RAM 8MB  BW 15          ║\n╠════════════════════════════════════════════════════════════════╣\n║  [system] OS overhead                     CPU 10  RAM 24MB     ║\n╠════════════════════════════════════════════════════════════════╣\n║  Total: CPU 10/200  RAM 32/256MB  BW 15/100Mbps                ║\n╚════════════════════════════════════════════════════════════════╝",
+    "output": "╔════════════════════════════════════════════════════════════════╗\n║                           PROCESSES                            ║\n╠════════════════════════════════════════════════════════════════╣\n║  PASSIVE CONSUMERS                                             ║\n╠════════════════════════════════════════════════════════════════╣\n║  [connection] <subject>'s Terminal    RAM 8MB  BW 15          ║\n╠════════════════════════════════════════════════════════════════╣\n║  [system] OS overhead                     CPU 10  RAM 24MB     ║\n╠════════════════════════════════════════════════════════════════╣\n║  Total: CPU 10/200  RAM 32/256MB  BW 15/100Mbps                ║\n╚════════════════════════════════════════════════════════════════╝",
     "outputType": "string",
     "success": true
   },
@@ -71,98 +71,95 @@
   },
   "09:networkCommands:servers": {
     "dataKeys": null,
-    "output": "╔════════════════════════════════════════════════════════════╗\n║                       KNOWN SERVERS                        ║\n╠════════════════════════════════════════════════════════════╣\n║   HOME SERVER << CONNECTED                                 ║\n║     <ip>  p54814957's Terminal                     ║\n╠════════════════════════════════════════════════════════════╣\n║   'scan' to discover adjacent servers                      ║\n║   'connect <ip>' to traverse a link                        ║\n║   'netmap' to see network topology                         ║\n╚════════════════════════════════════════════════════════════╝",
+    "output": "╔════════════════════════════════════════════════════════════╗\n║                       KNOWN SERVERS                        ║\n╠════════════════════════════════════════════════════════════╣\n║   HOME SERVER << CONNECTED                                 ║\n║     <ip>            <subject>'s Terminal                  ║\n╠════════════════════════════════════════════════════════════╣\n║   'scan' to discover adjacent servers                      ║\n║   'connect <ip>' to traverse a link                        ║\n║   'netmap' to see network topology                         ║\n╚════════════════════════════════════════════════════════════╝",
     "outputType": "string",
     "success": true
   },
   "10:missionCommands:missions": {
     "dataKeys": null,
-    "error": "Rate limit exceeded. Max 10 commands per second.",
-    "output": "Rate limit exceeded. Max 10 commands per second.",
+    "output": "╔══════════════════════════════════════════════════════════╗\n║                         MISSIONS                         ║\n╠══════════════════════════════════════════════════════════╣\n║   No missions found.                                     ║\n║   Check back later or explore the network.               ║\n╚══════════════════════════════════════════════════════════╝",
     "outputType": "string",
-    "success": false
+    "success": true
   },
   "11:shopCommands:shop": {
-    "dataKeys": null,
-    "error": "Rate limit exceeded. Max 10 commands per second.",
-    "output": "Rate limit exceeded. Max 10 commands per second.",
+    "dataKeys": [
+      "credits",
+      "items"
+    ],
+    "output": "╔════════════════════════════════════════════════════════════════════════════════╗\n║                              DARKNET MARKETPLACE                               ║\n╠════════════════════════════════════════════════════════════════════════════════╣\n║   Credits:1000                                                                 ║\n║   Level:1                                                                      ║\n╠════════════════════════════════════════════════════════════════════════════════╣\n║ TOOL                                                                           ║\n╠════════════════════════════════════════════════════════════════════════════════╣\n║ [basic_scanner] Port Scanner - 100¢                                            ║\n║   Basic network port scanning tool. Reveals open ports on target systems.      ║\n║   Rarity: COMMON | Level: 1                                                    ║\n║   Effects: hackingBonus: +5                                                    ║\n╠════════════════════════════════════════════════════════════════════════════════╣\n║ HARDWARE                                                                       ║\n╠════════════════════════════════════════════════════════════════════════════════╣\n║ [ram_module_mk1] RAM Module Mk1 - 500¢                                         ║\n║   Basic memory expansion. +64MB RAM.                                           ║\n║   Rarity: COMMON | Level: 1                                                    ║\n║ [cpu_fan_upgrade] CPU Fan Upgrade - 750¢                                       ║\n║   Better cooling allows +50 CPU units.                                         ║\n║   Rarity: COMMON | Level: 1                                                    ║\n║ [network_card_mk1] Network Card Mk1 - 600¢                                     ║\n║   Basic network adapter. +25 Mbps bandwidth.                                   ║\n║   Rarity: COMMON | Level: 1                                                    ║\n╠════════════════════════════════════════════════════════════════════════════════╣\n║ buy <item_id> [qty]  Purchase item                                             ║\n║ shop <category>      Filter by category                                        ║\n╚════════════════════════════════════════════════════════════════════════════════╝",
     "outputType": "string",
-    "success": false
+    "success": true
   },
   "12:socialCommands:inbox": {
     "dataKeys": null,
-    "error": "Rate limit exceeded. Max 10 commands per second.",
-    "output": "Rate limit exceeded. Max 10 commands per second.",
+    "output": "Inbox is empty",
     "outputType": "string",
-    "success": false
+    "success": true
   },
   "13:factionCommands:faction list": {
     "dataKeys": null,
-    "error": "Rate limit exceeded. Max 10 commands per second.",
-    "output": "Rate limit exceeded. Max 10 commands per second.",
+    "output": "┌─────────────────────────┬──────────┬─────────────────────────────────────┐\n│ NAME                    │ MEMBERS  │ IDEOLOGY                            │\n├─────────────────────────┼──────────┼─────────────────────────────────────┤\n│ CyberCorp Industries    │        0 │ Innovation through acquisition.     │\n│ dotHackers Collective   │        0 │ Information wants to be free.       │\n│ The Garrison Military C │        0 │ Order. Security. Control.           │\n└─────────────────────────┴──────────┴─────────────────────────────────────┘\n Use 'faction join <name>' or 'faction neutral' to choose.",
     "outputType": "string",
-    "success": false
+    "success": true
   },
   "14:defenseCommands:defenses": {
     "dataKeys": null,
-    "error": "Rate limit exceeded. Max 10 commands per second.",
-    "output": "Rate limit exceeded. Max 10 commands per second.",
+    "output": "╔════════════════════════════════════════════════════════╗\n║                  HOME SERVER DEFENSES                  ║\n╠════════════════════════════════════════════════════════╣\n║  Firewall: NONE                                        ║\n║    No firewall — attackers connect freely              ║\n╠════════════════════════════════════════════════════════╣\n║  Safe Vault: NONE                                      ║\n║    No vault — files in ~/downloads/ exposed            ║\n╠════════════════════════════════════════════════════════╣\n║  IDS: NONE                                             ║\n║    No alerts — you won't know you're hacked            ║\n╠════════════════════════════════════════════════════════╣\n║  Honeypot: INACTIVE                                    ║\n║    No decoys — attackers find real files               ║\n╠════════════════════════════════════════════════════════╣\n║  Protected Folders: 1                                  ║\n╠════════════════════════════════════════════════════════╣\n║  'upgrade <defense> <level>' to purchase               ║\n║  'protect <dir>' to toggle folder protection           ║\n║  'safevault move <file>' to secure a file              ║\n╚════════════════════════════════════════════════════════╝",
     "outputType": "string",
-    "success": false
+    "success": true
   },
   "15:fragmentCommands:fragments": {
     "dataKeys": null,
-    "error": "Rate limit exceeded. Max 10 commands per second.",
-    "output": "Rate limit exceeded. Max 10 commands per second.",
+    "error": "Command not found. Type 'help' for available commands.",
+    "output": "Command not found. Type 'help' for available commands.",
     "outputType": "string",
     "success": false
   },
   "16:aliasCommands:alias info": {
     "dataKeys": null,
-    "error": "Rate limit exceeded. Max 10 commands per second.",
-    "output": "Rate limit exceeded. Max 10 commands per second.",
+    "output": "You don't have an active alias. Use 'alias create <name>' to create one.",
     "outputType": "string",
-    "success": false
+    "success": true
   },
   "17:mathCommands:calc 2+2": {
     "dataKeys": null,
-    "error": "Rate limit exceeded. Max 10 commands per second.",
-    "output": "Rate limit exceeded. Max 10 commands per second.",
+    "error": "output.split is not a function",
+    "output": "Command execution failed",
     "outputType": "string",
     "success": false
   },
   "18:hackCommands:hack": {
     "dataKeys": null,
-    "error": "Rate limit exceeded. Max 10 commands per second.",
-    "output": "Rate limit exceeded. Max 10 commands per second.",
+    "error": "Usage: hack <target_ip> [--method <method>] [--tools <tool1,tool2,...>]",
+    "output": "Usage: hack <target_ip> [--method <method>] [--tools <tool1,tool2,...>]",
     "outputType": "string",
     "success": false
   },
   "19:fileCommands:download": {
     "dataKeys": null,
-    "error": "Rate limit exceeded. Max 10 commands per second.",
-    "output": "Rate limit exceeded. Max 10 commands per second.",
+    "error": "Usage: download <filename>\nCopies file to your home server's /home/{user}/downloads/",
+    "output": "Usage: download <filename>\nCopies file to your home server's /home/{user}/downloads/",
     "outputType": "string",
     "success": false
   },
   "20:fileAccessCommands:sweep": {
     "dataKeys": null,
-    "error": "Rate limit exceeded. Max 10 commands per second.",
-    "output": "Rate limit exceeded. Max 10 commands per second.",
+    "error": "Insufficient Forensics skill. Required: 15, Current: 5",
+    "output": "Insufficient Forensics skill. Required: 15, Current: 5",
     "outputType": "string",
     "success": false
   },
   "21:unknown:definitely_not_a_command": {
     "dataKeys": null,
-    "error": "Rate limit exceeded. Max 10 commands per second.",
-    "output": "Rate limit exceeded. Max 10 commands per second.",
+    "error": "Unknown command",
+    "output": "Command not found: definitely_not_a_command\nType 'help' for available commands.",
     "outputType": "string",
     "success": false
   },
   "22:systemCommands:cd /nonexistent-dir-xyz": {
     "dataKeys": null,
-    "error": "Rate limit exceeded. Max 10 commands per second.",
-    "output": "Rate limit exceeded. Max 10 commands per second.",
+    "error": "cd: Directory not found: /nonexistent-dir-xyz",
+    "output": "cd: Directory not found: /nonexistent-dir-xyz",
     "outputType": "string",
     "success": false
   }

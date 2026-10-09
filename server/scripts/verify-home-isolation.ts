@@ -114,16 +114,45 @@ async function main() {
     check("POSITIVE: a plain server resolves by name", (await servers.resolveByIpOrName(plain.name))?.server?.id === plain.id);
 
     console.log("\nHI-5 — never a home in the Training Network");
-    // The dev world has used every /16, so allocation takes the fallback; make
-    // its first pick land in 10.10.10.0/24.
+    // Both allocator paths, independent of how many /16s the database has
+    // used: its "which /16s are taken" read is stubbed (this used to depend on
+    // the dev world having exhausted them — true until its harness accounts
+    // were purged, 2026-10-09).
+    const dbmod = await import("../src/database/client");
+    const homesDelegate: any = dbmod.db.client.gameServer;
+    const realHomes = homesDelegate.findMany;
+    const homesTaking = (octets: number[]) => (args: any) => args?.where?.isPlayerHome === true
+      ? Promise.resolve(octets.map((o) => ({ ipAddress: `10.${o}.1.1` })))
+      : realHomes.call(homesDelegate, args);
+    const allBut = (keep: number) => Array.from({ length: 254 }, (_, i) => i + 1).filter((o) => o !== keep);
+
+    // (a) The /16 path, with only 10 free, and a first pick of 10.10.10.x.
+    // Math.random order in that path: the /16 pick, then third and fourth
+    // octet per candidate. (A first version of this queue forgot the /16 pick,
+    // so the "training" candidate was never generated and the check passed
+    // with the guard removed.)
+    const realRandom = Math.random;
+    const queue = [0, 10.5 / 256, 0.5]; // the one free /16, third octet 10, any fourth
+    let draws = 0;
+    homesDelegate.findMany = homesTaking(allBut(10));
+    Math.random = () => { draws++; return queue.length ? queue.shift()! : realRandom(); };
+    let viaSlash16 = "";
+    try { viaSlash16 = await ips.generatePlayerHomeIP(); } finally { Math.random = realRandom; homesDelegate.findMany = realHomes; }
+    // With the steering consumed, the FIRST candidate was 10.10.10.<x>; a
+    // result needs more draws than those three only if that one was refused.
+    check("PRECONDITION: the /16 path drew 10.10.10.x as its first candidate", queue.length === 0 && draws >= 3, `${draws} draws`);
+    check("/16 path: a training-network pick is rejected, another one taken",
+      viaSlash16.startsWith("10.10.") && !viaSlash16.startsWith("10.10.10."), viaSlash16);
+
+    // (b) The fallback, with every /16 taken, and a first pick in the training net.
     const real = ips.generateUniqueIP.bind(ips);
     let calls = 0;
     ips.generateUniqueIP = async (zone: any) => (++calls === 1 ? "10.10.10.77" : real(zone));
-    let got = "";
-    try { got = await ips.generatePlayerHomeIP(); } finally { ips.generateUniqueIP = real; }
-    check("PRECONDITION: allocation took the fallback (every /16 used)", calls >= 1,
-      `${calls} fallback call(s) — if 0, the dev world has a free /16 and this check cannot reach the fallback`);
-    check("a training-network pick is rejected, another one taken", calls >= 2 && !got.startsWith("10.10.10."), got);
+    homesDelegate.findMany = homesTaking(allBut(0));
+    let viaFallback = "";
+    try { viaFallback = await ips.generatePlayerHomeIP(); } finally { ips.generateUniqueIP = real; homesDelegate.findMany = realHomes; }
+    check("PRECONDITION: with every /16 taken, allocation took the fallback", calls >= 1, `${calls} fallback call(s)`);
+    check("fallback: a training-network pick is rejected, another one taken", calls >= 2 && !viaFallback.startsWith("10.10.10."), viaFallback);
   } finally {
     try { await prisma.gameServer.deleteMany({ where: { id: { in: serverIds } } }); }
     catch (err) { fail++; console.log(`  [FAIL] cleanup — ${(err as Error).message}`); }

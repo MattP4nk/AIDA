@@ -337,6 +337,9 @@ export class FactionService extends EventEmitter {
     const standings = await this.prisma.factionStanding.findMany({
       where: { userId },
       include: { faction: true },
+      // A stable order: with none, `status` listed the factions in whatever
+      // order Postgres returned them (seen 2026-10-09 as two rows swapping).
+      orderBy: { faction: { name: "asc" } },
     });
 
     return standings.map((s) => ({

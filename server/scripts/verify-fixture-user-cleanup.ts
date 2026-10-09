@@ -65,6 +65,40 @@ async function main() {
     check("and so is their home (was: left ownerless)", (await prisma.gameServer.findUnique({ where: { id: doomedHome } })) === null);
     check("and its filesystem", (await prisma.fileSystemNode.count({ where: { serverId: doomedHome } })) === 0);
     check("another player's home is untouched", (await prisma.gameServer.findUnique({ where: { id: keptHome } }))?.ownerId === kept);
+
+    console.log("\nFU-1b — a fixture that hacked, was added as a contact, or posted");
+    // Required relations with no onDelete RESTRICT a user delete: hack logs
+    // (either side), posts, message reports, and contacts pointing at the user.
+    // A message report needs a message, so it is covered by the code, not here.
+    const busy = await register(`${tag}b`);
+    const busyHome = await homeOf(busy);
+    // Both directions: busy hacked kept's home, and was hacked (its home is a
+    // target — that row blocks deleting the HOME, not just the user).
+    await prisma.hackLog.create({ data: { attackerId: busy, targetId: kept, targetServerId: keptHome, method: "bruteforce", stealthLevel: 0, success: false, detected: false, accessLevel: 0, evidenceLeft: 0 } });
+    await prisma.hackLog.create({ data: { attackerId: kept, targetId: busy, targetServerId: busyHome, method: "bruteforce", stealthLevel: 0, success: false, detected: false, accessLevel: 0, evidenceLeft: 0 } });
+    await prisma.contact.create({ data: { userId: kept, contactUserId: busy, handle: `${tag}b`, status: "accepted" } });
+    const forum = await prisma.forum.findFirst({ select: { id: true } });
+    check("PRECONDITION: a forum exists to post in", !!forum);
+    if (forum) await prisma.post.create({ data: { forumId: forum.id, authorId: busy, authorHandle: `${tag}b`, title: "fixture", content: "fixture" } });
+    // Its private mission offer, and a world mission (with a faction) it holds
+    // a copy of: the offer goes, the world mission stays.
+    const offer = await prisma.mission.create({ data: { title: `${tag} offer`, description: "fixture", type: "recon" } });
+    await prisma.playerMission.create({ data: { userId: busy, missionId: offer.id } });
+    const anyFaction = await prisma.faction.findFirst({ select: { id: true } });
+    const world = anyFaction ? await prisma.mission.create({ data: { title: `${tag} world`, description: "fixture", type: "recon", factionId: anyFaction.id } }) : null;
+    if (world) await prisma.playerMission.create({ data: { userId: busy, missionId: world.id } });
+    check("PRECONDITION: a faction exists for the world-mission control", !!world);
+    let deleted = true;
+    try { await deleteFixtureUsers(prisma, [busy]); } catch { deleted = false; }
+    check("its private mission offer goes with it (was: left behind, two per fresh account)",
+      (await prisma.mission.findUnique({ where: { id: offer.id } })) === null);
+    check("POSITIVE: a world mission it held a copy of stays",
+      !!world && (await prisma.mission.findUnique({ where: { id: world.id } })) !== null);
+    if (world) await prisma.mission.delete({ where: { id: world.id } });
+    check("it can be deleted (was: RESTRICT on hack_logs — 55 tutorial probes could not be)",
+      deleted && (await prisma.user.findUnique({ where: { id: busy } })) === null && (await prisma.gameServer.findUnique({ where: { id: busyHome } })) === null);
+    check("and the other player's contact row pointing at it went with it",
+      (await prisma.contact.count({ where: { userId: kept, contactUserId: busy } })) === 0);
     await deleteFixtureUsers(prisma, [kept]);
 
     console.log("\nFU-3 — every harness uses it");

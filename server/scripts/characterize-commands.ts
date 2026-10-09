@@ -20,16 +20,28 @@
  * Record BEFORE a refactor, compare AFTER. A diff is either a regression or a
  * deliberate change you must re-record on purpose — never a surprise.
  *
- * READ-ONLY BY CONSTRUCTION. Every command below only reads. That is not
- * fastidiousness: R12-e in Phase 5 called a state-mutating service method
- * against ambient data and completed the world's only epoch. A harness that
- * corrupts the state it measures is worse than no harness.
+ * ON A PRIVATE SUBJECT. The commands run as a fresh fixture account made for
+ * the run and deleted by id after it — not on ambient data: R12-e in Phase 5
+ * called a state-mutating service method against ambient data and completed
+ * the world's only epoch. A harness that corrupts the state it measures is
+ * worse than no harness.
+ *
+ * NOT quite read-only, and it used to claim it was: a fresh player's first
+ * `missions` makes the content system generate world content (one NPC-owned
+ * server and its files per run). That only showed once the cases stopped
+ * being rate-limited (2026-10-09) — `missions` had never actually run. The
+ * account and its mission offers are cleaned up; the generated world content
+ * cannot be told apart from real world content, so it stays (PLAN.md).
  */
 import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { deleteRegisteredUsers, trackFixtureUser } from "./lib/fixture-users";
 
 const prisma = new PrismaClient();
+/** The fixture subject's username, masked in every output (it differs per run). */
+let SUBJECT = "";
 const BASELINE = new URL("./characterize-commands.baseline.json", import.meta.url).pathname;
 const RECORD = process.argv.includes("--record");
 
@@ -81,9 +93,12 @@ const CASES: Array<{ module: string; input: string; shapeOnly?: boolean }> = [
  */
 function normalize(value: unknown): unknown {
   if (typeof value === "string") {
-    return value
+    return (SUBJECT ? value.split(SUBJECT).join("<subject>") : value)
       .replace(/\b[0-9a-f]{25,}\b/gi, "<id>") // cuid
-      .replace(/\b\d{1,3}(\.\d{1,3}){3}\b/g, "<ip>")
+      // Padded to the address's own length: box cells pad AFTER the value, so a
+      // bare "<ip>" left the trailing spaces varying with the address length
+      // (seen once the subject became a fresh account with a random home IP).
+      .replace(/\b\d{1,3}(\.\d{1,3}){3}\b/g, (ip) => "<ip>".padEnd(ip.length, " "))
       .replace(/\d{4}-\d{2}-\d{2}T[\d:.]+Z?/g, "<ts>")
       // Bare calendar dates too. `stats` prints "Recent Activity" as
       // `YYYY-MM-DD  N commands`, which the ISO rule above does not match
@@ -121,20 +136,40 @@ async function main() {
   const processor = getService<any>(TOKENS.COMMAND_PROCESSOR);
   if (!processor) throw new Error("COMMAND_PROCESSOR did not resolve");
 
-  // Use an EXISTING player rather than creating one: creating a user seeds a
-  // home server, filesystem and tutorial mission, which is a mutation.
-  const user = await prisma.user.findFirst({
-    where: { role: "player" },
-    orderBy: { createdAt: "asc" },
+  // A PRIVATE subject, made through the same AuthService the register route
+  // uses and deleted by id at the end. This used to borrow the OLDEST player
+  // in the database — ambient state — which was a harness account; when those
+  // were purged (2026-10-09) it picked SYSTEM, which has no home, and the
+  // master could not run at all. A fresh account is also the same state on
+  // every run, which a borrowed one only was by luck.
+  const auth = getService<any>(TOKENS.AUTH_SERVICE);
+  SUBJECT = `gm${Date.now().toString(36)}`;
+  const registered = await auth.register(
+    { username: SUBJECT, email: `${SUBJECT}@fixture.invalid`, password: randomUUID() + "Aa1!" },
+    { ip: null, userAgent: "characterize-commands", lockoutIp: "203.0.113.10" },
+  );
+  trackFixtureUser(registered.user.id);
+  // A home address of FIXED length (10.xxx.xxx.xxx). Listings like `servers`
+  // do not pad the address column — the name simply follows it — so a random
+  // home IP of varying length moved the text, run to run.
+  const r3 = () => 100 + Math.floor(Math.random() * 155);
+  let homeIp = "";
+  for (let i = 0; i < 50 && !homeIp; i++) {
+    const ip = `10.${r3()}.${r3()}.${r3()}`;
+    const taken = (await prisma.gameServer.findUnique({ where: { ipAddress: ip }, select: { id: true } })) ||
+      (await prisma.user.findFirst({ where: { homeIp: ip }, select: { id: true } }));
+    if (!taken) homeIp = ip;
+  }
+  if (!homeIp) throw new Error("no free fixed-length address for the subject's home");
+  const fresh = await prisma.user.findUniqueOrThrow({ where: { id: registered.user.id }, select: { homeServerId: true } });
+  if (!fresh.homeServerId) throw new Error("registration made no home server");
+  await prisma.user.update({ where: { id: registered.user.id }, data: { homeIp } });
+  await prisma.gameServer.update({ where: { id: fresh.homeServerId }, data: { ipAddress: homeIp } });
+  const user = await prisma.user.findUniqueOrThrow({
+    where: { id: registered.user.id },
     select: { id: true, username: true, homeServerId: true },
   });
-  if (!user) {
-    console.log("  [SKIP] no player in this database — seed one first");
-    await prisma.$disconnect();
-    process.stdout.write("", () => process.exit(0));
-    return;
-  }
-  console.log(`  subject: ${user.username} (home=${user.homeServerId ?? "none"})`);
+  console.log(`  subject: a fresh fixture account (home=${user.homeServerId ? "yes" : "none"})`);
 
   // A SESSION IS REQUIRED, and discovering that is the whole reason this
   // harness has a negative control.
@@ -147,6 +182,13 @@ async function main() {
   // that characterizes nothing. Only patching a real handler and seeing the
   // suite stay green exposed it.
   const gsm = getService<any>(TOKENS.GAME_STATE_MANAGER);
+  /** End the session and delete the subject (and its home). False if either failed. */
+  const teardown = async (): Promise<boolean> => {
+    let ok = true;
+    await gsm.destroySession(user.id).catch((e: unknown) => { ok = false; console.log(`  [FAIL] cleanup — session: ${(e as Error).message}`); });
+    await deleteRegisteredUsers(prisma).catch((e: unknown) => { ok = false; console.log(`  [FAIL] cleanup — fixture subject: ${(e as Error).message}`); });
+    return ok;
+  };
   await gsm.createSession(user.id, `characterize_${process.pid}`, "127.0.0.1");
   const session = gsm.getSession(user.id);
   if (!session) throw new Error("session creation failed — cases would all be vacuous again");
@@ -167,8 +209,16 @@ async function main() {
     `  session established (cwd=${ready?.currentDirectory ?? "?"}, server=${ready?.currentServerId ? "connected" : "NONE"})\n`,
   );
 
+  // PACED under the processor's per-user rate limit. Fired back to back,
+  // every case after the COMMAND_RATE_LIMIT-th was refused "Rate limit
+  // exceeded" — 13 of 23 from the day this baseline was committed, so the
+  // master characterized 10 commands and pinned a refusal for the rest
+  // (found 2026-10-09, when a deliberate change to `calc` went unnoticed).
+  const { COMMAND_RATE_LIMIT, COMMAND_RATE_WINDOW_MS } = await import("../src/config/gameBalance");
+  const gap = Math.ceil(COMMAND_RATE_WINDOW_MS / COMMAND_RATE_LIMIT) + 20;
   const results: Record<string, unknown> = {};
   for (const [i, c] of CASES.entries()) {
+    if (i > 0) await new Promise((r) => setTimeout(r, gap));
     const key = `${String(i).padStart(2, "0")}:${c.module}:${c.input}`;
     try {
       const parsed = processor.parseCommand(user.id, c.input, user.homeServerId ?? undefined);
@@ -202,10 +252,23 @@ async function main() {
     (r: any) => r && typeof r === "object" && r.success === true,
   ).length;
   console.log(`  ${succeeded}/${CASES.length} commands executed successfully`);
+  // And no case may be a rate-limit refusal: that characterizes the limiter,
+  // not the command, and passes against itself forever.
+  const throttled = Object.entries(results)
+    .filter(([, r]) => /Rate limit exceeded/.test(JSON.stringify(r)))
+    .map(([k]) => k);
+  if (throttled.length > 0) {
+    console.log(`  [FAIL] ${throttled.length} case(s) were refused by the command rate limiter: ${throttled.join(", ")}`);
+    console.log("\n=== 0 PASS / 1 FAIL ===");
+    await teardown();
+    await prisma.$disconnect();
+    process.stdout.write("", () => process.exit(1));
+    return;
+  }
   if (succeeded === 0) {
     console.log("  [FAIL] NO command succeeded — the run is vacuous (session? permissions?)");
     console.log("\n=== 0 PASS / 1 FAIL ===");
-    await gsm.destroySession(user.id).catch((e: unknown) => console.log(`  [FAIL] cleanup — ${(e as Error).message}`));
+    await teardown();
     await prisma.$disconnect();
     process.stdout.write("", () => process.exit(1));
     return;
@@ -218,7 +281,7 @@ async function main() {
   } else if (!existsSync(BASELINE)) {
     console.log("  [FAIL] no baseline. Run with --record BEFORE refactoring.");
     console.log("\n=== 0 PASS / 1 FAIL ===");
-    await gsm.destroySession(user.id).catch((e: unknown) => console.log(`  [FAIL] cleanup — ${(e as Error).message}`));
+    await teardown();
     await prisma.$disconnect();
     process.stdout.write("", () => process.exit(1));
     return;
@@ -250,7 +313,7 @@ async function main() {
         }
       }
     }
-    await gsm.destroySession(user.id).catch((e: unknown) => { fail++; console.log(`  [FAIL] cleanup — ${(e as Error).message}`); });
+    if (!(await teardown())) fail++;
     if (fail === 0) console.log(`  all ${pass} command behaviours unchanged`);
     console.log(`\n=== ${pass} PASS / ${fail} FAIL ===`);
     await prisma.$disconnect();
@@ -258,15 +321,13 @@ async function main() {
     return;
   }
 
-  const cleaned = await gsm.destroySession(user.id).then(() => true, (e: unknown) => {
-    console.log(`  [FAIL] cleanup — ${(e as Error).message}`);
-    return false;
-  });
+  const cleaned = await teardown();
   await prisma.$disconnect();
   process.stdout.write("", () => process.exit(cleaned ? 0 : 1));
 }
 
-main().catch((e) => {
+main().catch(async (e) => {
   console.error("HARNESS ERROR:", e);
+  await deleteRegisteredUsers(prisma).catch((err: unknown) => console.error("cleanup — fixture subject:", err));
   process.exit(1);
 });
