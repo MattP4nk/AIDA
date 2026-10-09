@@ -1457,7 +1457,7 @@ class HackService extends EventEmitter {
         // Filter by protection level vs access level. Protection is inherited
         // (a file inside a protected directory is protected).
         const protectedIds = await getService<import("./fileService").FileService>(FILE_SERVICE)
-          .effectivelyProtectedIds(serverId);
+          .protectedAmong(files.map((f: { id: string }) => f.id));
         const discoveredFiles = files
           .filter((file: any) => {
             if (protectedIds.has(file.id) && accessLevel < 7) return false;

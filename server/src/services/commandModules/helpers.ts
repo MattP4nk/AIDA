@@ -133,6 +133,21 @@ export function errorResult(
 }
 
 /**
+ * Refuse a path inside a protected directory the player has not breached
+ * (decision Q9) — decided BEFORE looking the path up, so the refusal is the
+ * same whether the file exists or not. A command that resolves a player-given
+ * path on the current server calls this first.
+ */
+export async function lockedPathRefusal(
+  context: CommandContext,
+  serverId: string,
+  path: string,
+): Promise<CommandResult | null> {
+  const lock = await context.fileService.lockOnPath(context.userId, serverId, path);
+  return lock ? errorResult(`${lock.path} is PROTECTED. Breach it first: 'breach ${lock.path}'`) : null;
+}
+
+/**
  * Create a "no session" error result — used by many commands.
  */
 export function noSessionError(): CommandResult {

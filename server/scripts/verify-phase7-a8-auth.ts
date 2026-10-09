@@ -27,6 +27,7 @@
  */
 import { PrismaClient } from "@prisma/client";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { deleteRegisteredUsers } from "./lib/fixture-users";
 
 const prisma = new PrismaClient();
 const BASE = "http://localhost:3001/api/auth";
@@ -123,7 +124,11 @@ async function main() {
   rec("logout", await call("POST", "/logout", { token: t2 }));
   rec("verify-after-logout", await call("GET", "/verify", { token: t2 }));
   rec("verify-no-token", await call("GET", "/verify"));
-  rec("verify-garbage", await call("GET", "/verify", { token: "not.a.jwt" }));
+  const garbage = await call("GET", "/verify", { token: "not.a.jwt" });
+  rec("verify-garbage", garbage);
+  // A malformed token is the CLIENT's error. It was a 500 "unexpected error"
+  // — and this baseline recorded that as the expected answer (2026-10-09).
+  check("a malformed token is refused 401, not a 500", garbage.status === 401, `${garbage.status}`);
 
   // ── what the database was left holding ─────────────────────────────
   const user = await prisma.user.findUnique({ where: { username: u2.username },
@@ -249,9 +254,14 @@ async function main() {
     }
   }
 
+  await deleteRegisteredUsers(prisma).catch((e: unknown) => { fail++; console.log(`  [FAIL] cleanup — fixture users: ${(e as Error).message}`); });
   console.log(`\n=== ${pass} PASS / ${fail} FAIL ===`);
   await prisma.$disconnect();
   process.stdout.write("", () => process.exit(fail > 0 ? 1 : 0));
 }
 
-main().catch((e) => { console.error(e); process.exit(1); });
+main().catch(async (e) => {
+  console.error(e);
+  await deleteRegisteredUsers(prisma).catch((err: unknown) => console.error("cleanup — fixture users:", err));
+  process.exit(1);
+});

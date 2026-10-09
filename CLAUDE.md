@@ -34,11 +34,19 @@ silently untracks the next harness written.
 
 **~10 harnesses need the dev server already running** and fail with `ECONNREFUSED`
 without it — environmental, not a regression. They also share the dev server's global
-`/api` rate limit (`RATE_LIMIT_MAX_REQUESTS` per 15 min per IP, in memory): about two
-full runs fit in one window, and a third fails every HTTP harness with 429. `npm run
-verify` names both causes from the logs; restart the dev server to clear the limiter. `npm run verify` says so when it reports
-failures. Editing `src/` mid-run also restarts `tsx watch` under them; that has produced
-a phantom failure before.
+`/api` rate limit (`RATE_LIMIT_MAX_REQUESTS` per 15 min per IP, in memory). One full run
+makes ~100 `/api` requests (measured 2026-10-09: 102, 62 of them registrations), so at a
+limit of 100 **not even one run fits** — the last harnesses fail with 429. For suite runs
+start the dev server with the limit raised in its environment (dotenv does not override
+it): `RATE_LIMIT_MAX_REQUESTS=1000 npm run dev`. `npm run verify` names 429s and
+ECONNREFUSED from the logs. Editing `src/` mid-run also restarts `tsx watch` under them;
+that has produced a phantom failure before.
+
+**Harness accounts are deleted.** Register fixture players through the API and import
+`scripts/lib/fixture-users.ts` (it records every registration; an in-process
+`AuthService.register` needs `trackFixtureUser`), then call `deleteRegisteredUsers(prisma)`
+in the cleanup — it removes the home too. `npm run verify` ends with
+`check-fixture-leaks`, which fails if any account created during the run still exists.
 
 ---
 

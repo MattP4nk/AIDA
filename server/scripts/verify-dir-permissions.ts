@@ -22,6 +22,7 @@ import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
 import { randomUUID } from "node:crypto";
 import { freeIp } from "./lib/free-ip";
+import { deleteRegisteredUsers } from "./lib/fixture-users";
 
 const prisma = new PrismaClient();
 const BASE = "http://localhost:3001";
@@ -88,6 +89,7 @@ async function main() {
   } finally {
     try { if (worldId) await prisma.gameServer.delete({ where: { id: worldId } }); }
     catch (err) { fail++; console.log(`  [FAIL] cleanup — ${(err as Error).message}`); }
+    await deleteRegisteredUsers(prisma).catch((e: unknown) => { fail++; console.log(`  [FAIL] cleanup — fixture users: ${(e as Error).message}`); });
   }
   console.log(`\n=== ${pass} PASS / ${fail} FAIL ===`);
   await prisma.$disconnect();

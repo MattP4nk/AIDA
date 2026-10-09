@@ -11,6 +11,7 @@
     "typecheck:scripts": "tsc -p tsconfig.scripts.json",
     "admin:grant": "tsx src/scripts/adminRole.ts grant",
     "admin:revoke": "tsx src/scripts/adminRole.ts revoke",
+    "migrate:contacts": "tsx src/scripts/migrateLegacyContacts.ts",
     "start": "node dist/server/src/index.js",
     "db:migrate": "npx prisma migrate dev",
     "db:generate": "npx prisma generate",

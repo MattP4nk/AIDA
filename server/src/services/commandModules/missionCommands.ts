@@ -522,17 +522,19 @@ export class MissionCommandsModule implements CommandModule {
 
       // Not one of your offers: a FACTION mission is claimed for you on
       // accept (maintainer decision Q8). Before, nothing could offer one, so
-      // every faction mission was listed and unacceptable.
+      // every faction mission was listed and unacceptable. Claim and accept
+      // are one step: a refused accept releases the claim.
+      let acceptedAsClaim = false;
       if (!resolved) {
         const membership = await factionsSvc().getUserFaction(context.userId);
         if (membership) {
-          const claim = await missionService.claimFactionMission(context.userId, membership.factionId, missionId);
-          if (claim.ok) fullMissionId = claim.missionId;
+          const claim = await missionService.acceptFactionMission(context.userId, membership.factionId, missionId);
+          if (claim.ok) { fullMissionId = claim.missionId; acceptedAsClaim = true; }
           else if (!/not found/i.test(claim.error)) return errorResult(claim.error);
         }
       }
 
-      await missionService.acceptMission(context.userId, fullMissionId);
+      if (!acceptedAsClaim) await missionService.acceptMission(context.userId, fullMissionId);
 
       const missions = await missionService.getPlayerMissions(
         context.userId,

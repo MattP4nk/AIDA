@@ -149,15 +149,15 @@ export class FileAccessCommandsModule implements CommandModule {
     directoryPath: string,
     forensics: number,
   ): Promise<void> {
+    const lock = await context.fileService.lockOnPath(context.userId, serverId, directoryPath);
+    if (lock) {
+      this.emitResult(context, false, `${lock.path} is PROTECTED. Breach it first: 'breach ${lock.path}'`);
+      return;
+    }
     // Resolve directory to get its node ID
     const dirResult = await context.fileService.resolvePath(serverId, directoryPath);
     if (!dirResult.exists || !dirResult.nodeId) {
       this.emitResult(context, false, `Directory not found: ${directoryPath}`);
-      return;
-    }
-    const lock = await context.fileService.lockedProtection(context.userId, serverId, dirResult.nodeId, true);
-    if (lock) {
-      this.emitResult(context, false, `${lock.path} is PROTECTED. Breach it first: 'breach ${lock.path}'`);
       return;
     }
 
@@ -325,16 +325,18 @@ export class FileAccessCommandsModule implements CommandModule {
 
     const serverId = session.currentServerId;
     const path = resolvePath(target, session.currentDirectory || "/");
+    // The lock first: inside an unbreached directory, say so whether or not
+    // the path exists (lockOnPath).
+    const lock = await context.fileService.lockOnPath(context.userId, serverId, path);
     const resolution = await context.fileService.resolvePath(serverId, path);
+    const isTarget = !!lock && resolution.exists && resolution.nodeId === lock.id;
+    if (lock && !isTarget) {
+      return errorResult(`${path} is inside ${lock.path}, which is protected. Breach that first: 'breach ${lock.path}'`);
+    }
     if (!resolution.exists || !resolution.nodeId || !resolution.isDirectory) {
       return errorResult(`Directory not found: ${path}`);
     }
-
-    const lock = await context.fileService.lockedProtection(context.userId, serverId, resolution.nodeId, true);
     if (!lock) return successResult(`${path} is open to you — nothing to breach.`);
-    if (lock.id !== resolution.nodeId) {
-      return errorResult(`${path} is inside ${lock.path}, which is protected too. Breach that first: 'breach ${lock.path}'`);
-    }
 
     // The defender's vault makes the dump harder; the attacker's skills add hints.
     const server = await servers().findById(serverId);

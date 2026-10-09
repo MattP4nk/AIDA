@@ -28,6 +28,7 @@ import { PrismaClient } from "@prisma/client";
 import { io as ioClient } from "../../client/node_modules/socket.io-client/build/esm/index.js";
 type Socket = ReturnType<typeof ioClient>;
 import { randomUUID } from "node:crypto";
+import { deleteRegisteredUsers } from "./lib/fixture-users";
 
 const prisma = new PrismaClient();
 const BASE = "http://localhost:3001";
@@ -96,7 +97,8 @@ async function main() {
   const httpTarget = await register(`${tag}h`);
   const sockTarget = await register(`${tag}s`);
   const resetTarget = await register(`${tag}r`);
-  const fixtures = [actor, httpTarget, sockTarget, resetTarget];
+  const npcFixture = await register(`${tag}n`);
+  const fixtures = [actor, httpTarget, sockTarget, resetTarget, npcFixture];
   const sockets: Socket[] = [];
   try {
     // Fixture setup: elevated roles, written directly before any of them has
@@ -151,6 +153,33 @@ async function main() {
       const mod = await api("PUT", `/api/admin/players/${resetTarget.id}/role`, actor.token, { role: "player" });
       const row = await prisma.user.findUniqueOrThrow({ where: { id: resetTarget.id }, select: { role: true } });
       check("POSITIVE: an admin can still demote a moderator", mod.status === 200 && row.role === "player", `${mod.status} ${row.role}`);
+    }
+
+    console.log("\nAA-6 — `npc` is not a role anyone can give or take (review 2026-10-09)");
+    {
+      const toNpc = await api("PUT", `/api/admin/players/${resetTarget.id}/role`, actor.token, { role: "npc" });
+      check("the panel refuses to make a player an NPC (was: allowed)", toNpc.status === 400, `${toNpc.status} ${toNpc.json?.error ?? ""}`);
+      await prisma.user.update({ where: { id: npcFixture.id }, data: { role: "npc" } });
+      const promote = await api("PUT", `/api/admin/players/${npcFixture.id}/role`, actor.token, { role: "moderator" });
+      const npcRow = await prisma.user.findUniqueOrThrow({ where: { id: npcFixture.id }, select: { role: true } });
+      check("the panel refuses to change an NPC account's role (was: made it a moderator)", promote.status === 403 && npcRow.role === "npc", `${promote.status} ${npcRow.role}`);
+      const { roleChangeRefusal } = await import("../src/utils/roles");
+      const admin = { id: "a", role: "admin" };
+      check("the shared rule (the terminal uses it too) refuses both",
+        roleChangeRefusal(admin, { id: "b", role: "player" }, "npc") !== null && roleChangeRefusal(admin, { id: "b", role: "npc" }, "player") !== null);
+      check("POSITIVE: and still allows making a player a moderator", roleChangeRefusal(admin, { id: "b", role: "player" }, "moderator") === null);
+      // One hierarchy. handlers.ts kept a third copy (plus a zero-caller
+      // hasSocketRole reading the stale socket-cached role) after utils/roles.ts
+      // became the rule (review 2026-10-09).
+      const { readdirSync, readFileSync, statSync } = await import("node:fs");
+      const { stripComments } = await import("./lib/strip-comments");
+      const walk = (d: string): string[] => readdirSync(d).flatMap((n) => {
+        const f = `${d}/${n}`;
+        return statSync(f).isDirectory() ? walk(f) : f.endsWith(".ts") ? [f] : [];
+      });
+      const hierarchy = /\bplayer\s*:\s*0\s*,\s*moderator\s*:\s*1\b/;
+      const copies = walk("src").filter((f) => hierarchy.test(stripComments(readFileSync(f, "utf8"))));
+      check("exactly one role hierarchy in src — utils/roles.ts", copies.length === 1 && copies[0] === "src/utils/roles.ts", copies.join(", "));
     }
 
     console.log("\nAA-3 — `admin resetpw` signs the account out everywhere");
@@ -210,6 +239,7 @@ async function main() {
     try {
       await prisma.user.updateMany({ where: { id: { in: fixtures.map((f) => f.id) } }, data: { role: "player", mutedUntil: null } });
     } catch (err) { fail++; console.log(`  [FAIL] fixture demotion — ${(err as Error).message}`); }
+    await deleteRegisteredUsers(prisma).catch((e: unknown) => { fail++; console.log(`  [FAIL] cleanup — fixture users: ${(e as Error).message}`); });
   }
 
   console.log(`\n=== ${pass} PASS / ${fail} FAIL ===`);

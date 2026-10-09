@@ -18,6 +18,7 @@ import { PrismaClient } from "@prisma/client";
 import { randomUUID } from "node:crypto";
 // The server has no socket.io-client dependency; harnesses borrow the client's.
 import { io as ioClient } from "../../client/node_modules/socket.io-client/build/esm/index.js";
+import { deleteRegisteredUsers } from "./lib/fixture-users";
 
 const prisma = new PrismaClient();
 const BASE = "http://localhost:3001";
@@ -114,6 +115,7 @@ async function main() {
       await prisma.fileSystemNode.deleteMany({ where: { id: file.id } });
       await prisma.inventoryItem.deleteMany({ where: { id: item.id } });
     } catch (err) { fail++; console.log(`  [FAIL] cleanup — ${(err as Error).message}`); }
+    await deleteRegisteredUsers(prisma).catch((e: unknown) => { fail++; console.log(`  [FAIL] cleanup — fixture users: ${(e as Error).message}`); });
   }
 
   console.log(`\n=== ${pass} PASS / ${fail} FAIL ===`);

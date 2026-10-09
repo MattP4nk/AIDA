@@ -16,7 +16,6 @@ import { prisma, Prisma } from "../database/client";
 import { Server as SocketIOServer } from "socket.io";
 import crypto from "crypto";
 import { sanitizePath } from "../utils/pathSanitizer";
-import { isSkeletonNode } from "../utils/fsSkeleton";
 import { injectable, inject } from "tsyringe";
 import {
   LOGGER,
@@ -60,6 +59,7 @@ export interface FileNode {
   encryptionKey: string | null;
   isHidden: boolean;
   isProtected: boolean;
+  protectsContents: boolean;
   metadata: Record<string, unknown> | null;
 }
 
@@ -206,6 +206,9 @@ export class FileService {
           error: "INVALID_PATH",
         };
       }
+      const lock = await this.lockOnPath(userId, serverId, path);
+      if (lock) return this.lockedResult(lock);
+
       const resolution = await this.resolvePath(serverId, path);
 
       if (!resolution.exists) {
@@ -223,9 +226,6 @@ export class FileService {
           error: "NOT_DIRECTORY",
         };
       }
-
-      const lock = await this.lockedProtection(userId, serverId, resolution.nodeId!, true);
-      if (lock) return this.lockedResult(lock);
 
       // Get user's access level on this server
       const accessLevel = await this.getUserAccessLevel(userId, serverId);
@@ -341,6 +341,9 @@ export class FileService {
         };
       }
 
+      const lock = await this.lockOnPath(userId, serverId, path);
+      if (lock) return this.lockedResult(lock);
+
       const resolution = await this.resolvePath(serverId, path);
       if (!resolution.exists || !resolution.nodeId) {
         return {
@@ -381,9 +384,6 @@ export class FileService {
         };
       }
 
-      const lock = await this.lockedProtection(userId, serverId, resolution.nodeId, resolution.isDirectory);
-      if (lock) return this.lockedResult(lock);
-
       return {
         success: true,
         message: "OK",
@@ -421,6 +421,9 @@ export class FileService {
           error: "INVALID_PATH",
         };
       }
+      const lock = await this.lockOnPath(userId, serverId, path);
+      if (lock) return this.lockedResult(lock);
+
       const resolution = await this.resolvePath(serverId, path);
 
       if (!resolution.exists || !resolution.node) {
@@ -455,9 +458,6 @@ export class FileService {
           error: "PERMISSION_DENIED",
         };
       }
-
-      const lock = await this.lockedProtection(userId, serverId, file.id, false);
-      if (lock) return this.lockedResult(lock);
 
       let content = file.content || "";
 
@@ -1156,6 +1156,9 @@ export class FileService {
           error: "INVALID_PATH",
         };
       }
+      const lock = await this.lockOnPath(userId, serverId, sourcePath);
+      if (lock) return this.lockedResult(lock);
+
       const sourceResolution = await this.resolvePath(serverId, sourcePath);
 
       if (!sourceResolution.exists || !sourceResolution.node) {
@@ -1184,9 +1187,6 @@ export class FileService {
       }
 
       const source = sourceResolution.node;
-      const lock = await this.lockedProtection(userId, serverId, source.id, source.type === "directory");
-      if (lock) return this.lockedResult(lock);
-
       // A directory copy duplicates its whole subtree, so the subtree must be
       // readable too. Only the top was checked: `cp -r` of a readable parent
       // copied files the player could not `cat` — and a locked protected
@@ -1817,7 +1817,7 @@ export class FileService {
    */
   public async setNodeFlags(
     nodeId: string,
-    flags: { isProtected?: boolean; isHidden?: boolean },
+    flags: { isProtected?: boolean; isHidden?: boolean; protectsContents?: boolean },
   ): Promise<void> {
     await prisma.fileSystemNode.update({ where: { id: nodeId }, data: flags });
   }
@@ -1827,31 +1827,29 @@ export class FileService {
    * ANCESTOR, else null. Protection is inherited (maintainer decision
    * 2026-10-08): `protect <dir>` told the player that files inside could not
    * be deleted, moved or modified, while every check read the target's own
-   * flag only. A protected SKELETON directory (the root, /bin, /etc) protects
-   * only itself — see utils/fsSkeleton.ts.
+   * flag only. An ancestor counts only if its protection covers contents
+   * (`protectsContents`): the provisioned skeleton (/, /bin, /etc) protects
+   * only itself.
    */
   public async protectingNode(nodeId: string): Promise<{ id: string; name: string } | null> {
     const chain = await this.ancestry(nodeId);
     for (let i = 0; i < chain.length; i++) {
       const n = chain[i]!;
-      if (!n.isProtected) continue;
-      if (i === 0) return { id: n.id, name: n.name };
-      const parentIsRoot = chain[i + 1]?.parentId === null;
-      if (!isSkeletonNode(n, parentIsRoot)) return { id: n.id, name: n.name };
+      if (n.isProtected && (i === 0 || n.protectsContents)) return { id: n.id, name: n.name };
     }
     return null;
   }
 
   /** `nodeId` and its ancestors, nearest first, up to the root. */
   private async ancestry(nodeId: string) {
-    const chain: Array<{ id: string; name: string; type: string; isProtected: boolean; parentId: string | null }> = [];
+    const chain: Array<{ id: string; name: string; type: string; isProtected: boolean; protectsContents: boolean; parentId: string | null }> = [];
     const seen = new Set<string>();
     let currentId: string | null = nodeId;
     while (currentId && !seen.has(currentId)) {
       seen.add(currentId);
       const n: (typeof chain)[number] | null = await prisma.fileSystemNode.findUnique({
         where: { id: currentId },
-        select: { id: true, name: true, type: true, isProtected: true, parentId: true },
+        select: { id: true, name: true, type: true, isProtected: true, protectsContents: true, parentId: true },
       });
       if (!n) break;
       chain.push(n);
@@ -1861,33 +1859,38 @@ export class FileService {
   }
 
   /**
-   * Every node on a server that is protected, directly or by inheritance —
-   * one query, for callers that filter many nodes at once.
+   * Which of `nodeIds` are protected — by their own flag, or by an ancestor
+   * whose protection covers contents (the same rule as protectingNode).
+   *
+   * Walks up a LEVEL at a time for all of them together: one query per
+   * directory level, never the whole server. Its predecessor,
+   * effectivelyProtectedIds(serverId), loaded every node on the server — and
+   * hack discovery called it on every successful hack to filter at most 30
+   * files (review 2026-10-09).
    */
-  public async effectivelyProtectedIds(serverId: string): Promise<Set<string>> {
-    const nodes = await prisma.fileSystemNode.findMany({
-      where: { serverId },
-      select: { id: true, name: true, parentId: true, isProtected: true },
-    });
-    const roots = new Set(nodes.filter((n) => n.parentId === null).map((n) => n.id));
-    const children = new Map<string, string[]>();
-    for (const n of nodes) {
-      if (!n.parentId) continue;
-      (children.get(n.parentId) ?? children.set(n.parentId, []).get(n.parentId)!).push(n.id);
+  public async protectedAmong(nodeIds: string[]): Promise<Set<string>> {
+    type Row = { id: string; parentId: string | null; isProtected: boolean; protectsContents: boolean };
+    const rows = new Map<string, Row>();
+    let frontier = [...new Set(nodeIds)];
+    for (let depth = 0; frontier.length > 0 && depth < 64; depth++) {
+      const fetched = await prisma.fileSystemNode.findMany({
+        where: { id: { in: frontier } },
+        select: { id: true, parentId: true, isProtected: true, protectsContents: true },
+      });
+      for (const r of fetched) rows.set(r.id, r);
+      frontier = [...new Set(fetched.map((r) => r.parentId).filter((id): id is string => !!id && !rows.has(id)))];
     }
     const out = new Set<string>();
-    const stack: string[] = [];
-    for (const n of nodes) {
-      if (!n.isProtected) continue;
-      out.add(n.id); // its own protection, always
-      // ...and its contents' — unless it is skeleton (fsSkeleton.ts).
-      if (!isSkeletonNode(n, n.parentId !== null && roots.has(n.parentId))) stack.push(...(children.get(n.id) ?? []));
-    }
-    while (stack.length) {
-      const id = stack.pop()!;
-      if (out.has(id)) continue;
-      out.add(id);
-      stack.push(...(children.get(id) ?? []));
+    for (const id of nodeIds) {
+      const self = rows.get(id);
+      if (!self) continue;
+      if (self.isProtected) { out.add(id); continue; }
+      const seen = new Set<string>();
+      for (let p = self.parentId; p && !seen.has(p); p = rows.get(p)?.parentId ?? null) {
+        seen.add(p);
+        const a = rows.get(p);
+        if (a?.isProtected && a.protectsContents) { out.add(id); break; }
+      }
     }
     return out;
   }
@@ -1920,22 +1923,57 @@ export class FileService {
     nodeId: string,
     includeSelf: boolean,
   ): Promise<{ id: string; name: string; path: string } | null> {
+    if (!(await this.isIntruderOnHome(userId, serverId))) return null;
+    return this.lockFrom(userId, serverId, nodeId, includeSelf);
+  }
+
+  /**
+   * lockedProtection for a PATH, decided BEFORE saying whether the path exists:
+   * from the deepest node on it that does. Checking after resolving answered
+   * "not found" for a missing file and "PROTECTED" for a real one — telling an
+   * intruder what is inside a locked directory without a breach (review
+   * 2026-10-09). Every intruder-facing path lookup goes through this first.
+   */
+  public async lockOnPath(
+    userId: string,
+    serverId: string,
+    path: string,
+  ): Promise<{ id: string; name: string; path: string } | null> {
+    if (!(await this.isIntruderOnHome(userId, serverId))) return null;
+    let p = this.normalizePath(path);
+    for (let depth = 0; depth < 64; depth++) {
+      const r = await this.resolvePath(serverId, p);
+      if (r.exists && r.nodeId) return this.lockFrom(userId, serverId, r.nodeId, true);
+      if (p === "/") return null;
+      p = this.splitPath(p).directory;
+    }
+    return null;
+  }
+
+  /** Breach locks apply only to someone else's home. */
+  private async isIntruderOnHome(userId: string, serverId: string): Promise<boolean> {
     const server = await prisma.gameServer.findUnique({
       where: { id: serverId },
       select: { isPlayerHome: true, ownerId: true },
     });
-    if (!server?.isPlayerHome || server.ownerId === userId) return null;
+    return !!server?.isPlayerHome && server.ownerId !== userId;
+  }
 
+  private async lockFrom(
+    userId: string,
+    serverId: string,
+    nodeId: string,
+    includeSelf: boolean,
+  ): Promise<{ id: string; name: string; path: string } | null> {
     const outermostFirst = (await this.ancestry(nodeId)).reverse();
     const pathOf = (i: number) =>
       "/" + outermostFirst.slice(0, i + 1).filter((n) => n.parentId !== null).map((n) => n.name).join("/");
 
-    // A skeleton directory (the root, /bin, /etc) is never a lock: its
-    // protection is about the node, not access to it (utils/fsSkeleton.ts).
+    // Only protection that covers CONTENTS locks: the skeleton (/, /bin, /etc)
+    // protects just the node, not access to it.
     const locks = outermostFirst
       .map((n, i) => ({ n, i }))
-      .filter(({ n, i }) => n.type === "directory" && n.isProtected && (includeSelf || n.id !== nodeId) &&
-        !isSkeletonNode(n, i > 0 && outermostFirst[i - 1]!.parentId === null));
+      .filter(({ n }) => n.type === "directory" && n.isProtected && n.protectsContents && (includeSelf || n.id !== nodeId));
     if (locks.length === 0) return null;
 
     const connectionId = await this.activeConnectionId(userId, serverId);
@@ -2447,6 +2485,7 @@ export class FileService {
             encryptionKey: null,
             isHidden: false,
             isProtected: true,
+            protectsContents: false, // the root cannot be removed; that is all
             permissions: {
               owner: PermissionLevel.FULL,
               faction: PermissionLevel.READ | PermissionLevel.EXECUTE,
@@ -2459,7 +2498,6 @@ export class FileService {
       }
 
       // Check which common directories already exist
-      // Skeleton directories — keep utils/fsSkeleton.ts SKELETON_DIRS their union.
       const commonDirs = ["home", "bin", "etc", "var", "tmp", "logs"];
       const existingDirs = await prisma.fileSystemNode.findMany({
         where: {
@@ -2503,6 +2541,7 @@ export class FileService {
             encryptionKey: null,
             isHidden: false,
             isProtected: dirName === "bin" || dirName === "etc",
+            protectsContents: false, // skeleton: the node only
             permissions:
               this.getDefaultPermissions() as unknown as Prisma.JsonObject,
           },

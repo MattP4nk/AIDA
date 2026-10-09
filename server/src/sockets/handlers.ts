@@ -55,20 +55,6 @@ function getUserId(socket: Socket, errorEvent?: string): string | null {
   return userId ?? null;
 }
 
-const ROLE_HIERARCHY: Record<string, number> = {
-  player: 0,
-  moderator: 1,
-  admin: 2,
-};
-
-/**
- * Check if a socket's user has at least the given role.
- */
-export function hasSocketRole(socket: Socket, minimumRole: string): boolean {
-  const userRole = socket.data.user?.role ?? "player";
-  return (ROLE_HIERARCHY[userRole] ?? 0) >= (ROLE_HIERARCHY[minimumRole] ?? 0);
-}
-
 /**
  * Sliding-window rate limiter.
  * Returns true if the event should be allowed, false if rate-limited.

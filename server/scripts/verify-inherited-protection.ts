@@ -18,6 +18,7 @@ import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
 import { randomUUID } from "node:crypto";
 import { freeIp } from "./lib/free-ip";
+import { deleteRegisteredUsers } from "./lib/fixture-users";
 
 const prisma = new PrismaClient();
 const BASE = "http://localhost:3001";
@@ -66,8 +67,20 @@ async function main() {
     const guard = await fs.protectingNode(file.id);
     check("a file two levels inside a protected directory is protected by it", guard?.id === vault.id, guard?.name ?? "none");
     check("POSITIVE: a file outside is not", (await fs.protectingNode(loose.id)) === null);
-    const set = await fs.effectivelyProtectedIds(serverId);
-    check("the bulk set agrees (intruder file listing)", set.has(file.id) && set.has(sub.id) && !set.has(loose.id));
+    // The bulk form, used by hack discovery. Recorded: it must never load a
+    // server's whole filesystem — its predecessor did, on every hack (review
+    // 2026-10-09).
+    const dbmod = await import("../src/database/client");
+    const delegate: any = dbmod.prisma.fileSystemNode;
+    const realFindMany = delegate.findMany;
+    const queries: any[] = [];
+    delegate.findMany = (args: any) => { queries.push(args); return realFindMany.call(delegate, args); };
+    let set: Set<string>;
+    try { set = await fs.protectedAmong([file.id, sub.id, loose.id]); } finally { delegate.findMany = realFindMany; }
+    check("the bulk form agrees (hack discovery)", set.has(file.id) && set.has(sub.id) && !set.has(loose.id));
+    check("PRECONDITION: its queries were recorded", queries.length > 0, `${queries.length}`);
+    check("and it never loads the whole server (was: every node on it, every hack)",
+      queries.every((q) => q?.where?.id?.in !== undefined && q?.where?.serverId === undefined), `${queries.length} queries, by id`);
 
     // Move FIRST: tested after a delete, a broken delete would make move look
     // refused for the wrong reason ("source not found").
@@ -99,8 +112,8 @@ async function main() {
     check("a file under a protected ROOT is not protected by it (was: every file on the server)", (await fs.protectingNode(inTmp.id)) === null);
     check("nor one under a protected /etc", (await fs.protectingNode(inEtc.id)) === null);
     check("POSITIVE: the skeleton directory itself still is", (await fs.protectingNode(etc.id))?.id === etc.id);
-    const wset = await fs.effectivelyProtectedIds(world.id);
-    check("the bulk set agrees", wset.has(wroot.id) && wset.has(etc.id) && !wset.has(inTmp.id) && !wset.has(inEtc.id));
+    const wset = await fs.protectedAmong([wroot.id, etc.id, inTmp.id, inEtc.id]);
+    check("the bulk form agrees", wset.has(wroot.id) && wset.has(etc.id) && !wset.has(inTmp.id) && !wset.has(inEtc.id));
     const delTmp = await fs.deleteNode(world.id, userId, "/tmp/note.txt");
     check("so it can be deleted (was: 'protected by /')", delTmp.success === true, delTmp.message);
   } finally {
@@ -109,6 +122,7 @@ async function main() {
       // The world fixture's nodes go with it: fileSystemNode.server cascades.
       if (worldId) await prisma.gameServer.delete({ where: { id: worldId } });
     } catch (err) { fail++; console.log(`  [FAIL] cleanup — ${(err as Error).message}`); }
+    await deleteRegisteredUsers(prisma).catch((e: unknown) => { fail++; console.log(`  [FAIL] cleanup — fixture users: ${(e as Error).message}`); });
   }
   console.log(`\n=== ${pass} PASS / ${fail} FAIL ===`);
   await prisma.$disconnect();

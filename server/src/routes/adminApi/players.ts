@@ -5,11 +5,10 @@ import type { AccountAdminService } from "../../services/accountAdminService";
 import { prisma } from "../../database/client";
 import { asyncHandler } from "../../middleware/setup";
 import { AuthorizationError, NotFoundError, ValidationError } from "../../../../shared/types";
-import { roleChangeRefusal } from "../../utils/roles";
+import { ASSIGNABLE_ROLES, roleChangeRefusal } from "../../utils/roles";
 
 const router = Router();
 
-const VALID_ROLES = ["player", "moderator", "admin", "npc"];
 
 // GET / — List players with search and pagination
 router.get("/", asyncHandler(async (req: any, res: any) => {
@@ -161,8 +160,8 @@ router.put("/:id/progress", asyncHandler(async (req: any, res: any) => {
 router.put("/:id/role", asyncHandler(async (req: any, res: any) => {
   const { role } = req.body;
 
-  if (!role || !VALID_ROLES.includes(role)) {
-    throw new ValidationError(`role must be one of: ${VALID_ROLES.join(", ")}`);
+  if (!role || !ASSIGNABLE_ROLES.includes(role)) {
+    throw new ValidationError(`role must be one of: ${ASSIGNABLE_ROLES.join(", ")}`);
   }
 
   const player = await prisma.user.findUnique({

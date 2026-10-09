@@ -1,6 +1,6 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
-import { successResult, errorResult, spawnBackgroundProcess } from "./helpers";
+import { successResult, errorResult, lockedPathRefusal, spawnBackgroundProcess } from "./helpers";
 import logger from "../../logger";
 import type { FactionService } from "../factionService";
 import {
@@ -1172,6 +1172,8 @@ export class PlayerInfoCommandsModule implements CommandModule {
       // naming the requested path in the success line.
       // Resolved through fileService from the root of the absolute path —
       // the scoping S10 needed (a bare name used to match ANYWHERE).
+      const refused = await lockedPathRefusal(context, serverId, filePath);
+      if (refused) return refused;
       const resolved = await context.fileService.resolvePath(serverId, filePath);
       const file = resolved.exists && resolved.node?.type === "file" && resolved.node.name === targetName
         ? resolved.node

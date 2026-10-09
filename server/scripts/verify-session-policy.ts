@@ -19,6 +19,7 @@ import { randomUUID } from "node:crypto";
 import jwt from "jsonwebtoken";
 // The server has no socket.io-client dependency; harnesses borrow the client's.
 import { io as ioClient } from "../../client/node_modules/socket.io-client/build/esm/index.js";
+import { deleteRegisteredUsers, trackFixtureUser } from "./lib/fixture-users";
 
 const prisma = new PrismaClient();
 const BASE = "http://localhost:3001";
@@ -60,6 +61,7 @@ async function main() {
     const auth = getService<any>(TOKENS.AUTH_SERVICE);
     const meta = { ip: null, userAgent: "harness", lockoutIp: "127.0.0.1" };
     const out = await auth.register({ username: `${tag}x`, email: `${tag}x@fixture.invalid`, password: randomUUID() + "Aa1!" }, meta);
+    trackFixtureUser(out.user.id); // in-process: the fetch recorder never sees it
     const exp = (jwt.decode(out.token) as { exp: number }).exp * 1000;
     const session = await prisma.userSession.findFirstOrThrow({ where: { token: out.token }, select: { expiresAt: true } });
     const hours = (session.expiresAt.getTime() - Date.now()) / 3_600_000;
@@ -91,9 +93,14 @@ async function main() {
     check("POSITIVE: logout with no live socket marks offline", (await online(b.id)) === false);
   }
 
+  await deleteRegisteredUsers(prisma).catch((e: unknown) => { fail++; console.log(`  [FAIL] cleanup — fixture users: ${(e as Error).message}`); });
   console.log(`\n=== ${pass} PASS / ${fail} FAIL ===`);
   await prisma.$disconnect();
   process.stdout.write("", () => process.exit(fail > 0 ? 1 : 0));
 }
 
-main().catch((e) => { console.error(e); process.exit(1); });
+main().catch(async (e) => {
+  console.error(e);
+  await deleteRegisteredUsers(prisma).catch((err: unknown) => console.error("cleanup — fixture users:", err));
+  process.exit(1);
+});

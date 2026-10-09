@@ -17,6 +17,7 @@
 import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
 import { randomUUID } from "node:crypto";
+import { deleteRegisteredUsers, trackFixtureUser } from "./lib/fixture-users";
 
 const prisma = new PrismaClient();
 let pass = 0, fail = 0;
@@ -43,6 +44,7 @@ async function main() {
     { ip: null, userAgent: "verify-session-create-join", lockoutIp: "203.0.113.9" },
   );
   check("PRECONDITION: fixture account registered", !!user?.id, user?.username);
+  if (user?.id) trackFixtureUser(user.id);
 
   try {
     const [a, b] = await Promise.allSettled([
@@ -60,6 +62,7 @@ async function main() {
     check("a later sequential call still creates a session", !!c && c.userId === user.id);
   } finally {
     await gsm.destroySession(user.id).catch((err: Error) => { fail++; console.log(`  [FAIL] cleanup — ${err.message}`); });
+    await deleteRegisteredUsers(prisma).catch((e: unknown) => { fail++; console.log(`  [FAIL] cleanup — fixture users: ${(e as Error).message}`); });
   }
 
   console.log(`\n=== ${pass} PASS / ${fail} FAIL ===`);
@@ -67,4 +70,8 @@ async function main() {
   process.stdout.write("", () => process.exit(fail > 0 ? 1 : 0));
 }
 
-main().catch((e) => { console.error(e); process.exit(1); });
+main().catch(async (e) => {
+  console.error(e);
+  await deleteRegisteredUsers(prisma).catch((err: unknown) => console.error("cleanup — fixture users:", err));
+  process.exit(1);
+});

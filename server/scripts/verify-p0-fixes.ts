@@ -1,4 +1,5 @@
 import { io as ioClient } from "/home/mattp4nk/CODE/AIDA/AIDA/client/node_modules/socket.io-client/build/esm/index.js";
+import { deleteRegisteredUsers } from "./lib/fixture-users";
 const BASE = "http://localhost:3001";
 const u = `p0${String(process.hrtime.bigint()).slice(-7)}`;
 (async () => {
@@ -34,8 +35,15 @@ const u = `p0${String(process.hrtime.bigint()).slice(-7)}`;
   const sub = await run("subnet",["10.0.0.0/24"]);
   rows.push(["control: ungated cmd still works", !/requires|skill/i.test(sub) && sub.length>0, one(sub)]);
 
+  await deleteRegisteredUsers(pc).catch((e: unknown) => { rows.push(["cleanup: fixture users", false, (e as Error).message]); });
   console.log("\n===== P0 VERIFICATION =====");
   for (const [n,ok,w] of rows) console.log(`${ok?"PASS":"FAIL"}  ${n.padEnd(38)} ${w}`);
   console.log(`${rows.filter(r=>r[1]).length}/${rows.length} passed`);
-  s.close(); process.exit(0);
-})().catch(e=>{ console.error("ERR",e); process.exit(1); });
+  // The exit code IS the result: this exited 0 whatever the rows said (review 2026-10-09).
+  s.close(); await pc.$disconnect(); process.exit(rows.every(([, ok]) => ok) ? 0 : 1);
+})().catch(async e=>{
+  console.error("ERR",e);
+  const { PrismaClient } = await import("@prisma/client");
+  await deleteRegisteredUsers(new PrismaClient()).catch((err: unknown) => console.error("cleanup — fixture users:", err));
+  process.exit(1);
+});

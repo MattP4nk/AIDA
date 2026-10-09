@@ -151,9 +151,13 @@ export class DefenseCommandsModule implements CommandModule {
       return errorResult(`Directory not found: ${path}`);
     }
 
-    // Toggle protection
-    const newProtected = !dir.isProtected;
-    await context.fileService.setNodeFlags(dir.id, { isProtected: newProtected });
+    // Toggle protection. A skeleton directory (/bin, /etc) comes protected
+    // node-only by provisioning; `protect` on it means the player's protection
+    // — contents too — so it switches ON rather than off.
+    const newProtected = !(dir.isProtected && dir.protectsContents);
+    await context.fileService.setNodeFlags(dir.id, newProtected
+      ? { isProtected: true, protectsContents: true }
+      : { isProtected: false });
 
     if (newProtected) {
       return successResult(`Directory '${path}' is now PROTECTED.\nFiles inside cannot be deleted, moved, or modified by attackers.\nIntruders must win a memory trace ('breach') to open it.\nUse 'protect ${dirName}' again to remove protection.`);
@@ -543,13 +547,16 @@ export class DefenseCommandsModule implements CommandModule {
     serverId: string,
     path: string,
     type: "file" | "directory",
-  ): Promise<{ id: string; name: string; isProtected: boolean; isHidden: boolean } | null> {
+  ): Promise<{ id: string; name: string; isProtected: boolean; protectsContents: boolean; isHidden: boolean } | null> {
     // The root is never a target here (findNode always returned null for it).
     if (path.split("/").filter(Boolean).length === 0) return null;
     // A4: was a hand-written root-to-leaf walk — fileService.resolvePath.
+    // Callers are on their own home, where no lock applies; checked anyway so
+    // every command lookup follows one rule (lockOnPath).
+    if (await context.fileService.lockOnPath(context.userId, serverId, path)) return null;
     const r = await context.fileService.resolvePath(serverId, path);
     if (!r.exists || !r.node || r.node.type !== type) return null;
-    return { id: r.node.id, name: r.node.name, isProtected: r.node.isProtected, isHidden: r.node.isHidden };
+    return { id: r.node.id, name: r.node.name, isProtected: r.node.isProtected, protectsContents: r.node.protectsContents, isHidden: r.node.isHidden };
   }
 
   public getCommandInfo(): CommandInfo[] {

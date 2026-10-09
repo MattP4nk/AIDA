@@ -12,6 +12,13 @@
  *   FU-3  no harness deletes users any other way — matched as CALLS in the
  *         parsed file, so a comment or a string (verify-a4-command-writes
  *         keeps probe source in strings) cannot match; shown to match first
+ *   FU-4  every suite harness that REGISTERS accounts deletes them: 28 never
+ *         did (review 2026-10-09). scripts/lib/fixture-users.ts records every
+ *         registration through the route; an in-process AuthService.register
+ *         is recorded with trackFixtureUser. The harness calls
+ *         deleteRegisteredUsers in its cleanup.
+ *   FU-5  the recorder itself: a registration through `fetch` is recorded,
+ *         and deleteRegisteredUsers removes the account and its home
  *
  * Needs the dev server (registration). Run: npx tsx scripts/verify-fixture-user-cleanup.ts
  */
@@ -19,7 +26,9 @@ import { PrismaClient } from "@prisma/client";
 import { randomUUID } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import ts from "typescript";
+import { stripComments } from "./lib/strip-comments";
 import { deleteFixtureUsers } from "./lib/delete-fixture-user";
+import { deleteRegisteredUsers, registeredUserIds } from "./lib/fixture-users";
 
 const prisma = new PrismaClient();
 const BASE = "http://localhost:3001";
@@ -41,43 +50,84 @@ async function register(username: string) {
 async function main() {
   console.log("\n=== Fixture users go with their homes ===");
   const tag = `fu${Date.now().toString(36)}`;
-  const doomed = await register(`${tag}d`);
-  const kept = await register(`${tag}k`);
-  const homeOf = async (id: string) => (await prisma.user.findUniqueOrThrow({ where: { id }, select: { homeServerId: true } })).homeServerId!;
-  const doomedHome = await homeOf(doomed);
-  const keptHome = await homeOf(kept);
+  try {
+    const doomed = await register(`${tag}d`);
+    const kept = await register(`${tag}k`);
+    const homeOf = async (id: string) => (await prisma.user.findUniqueOrThrow({ where: { id }, select: { homeServerId: true } })).homeServerId!;
+    const doomedHome = await homeOf(doomed);
+    const keptHome = await homeOf(kept);
 
-  console.log("\nFU-1 / FU-2 — the helper");
-  const nodes = await prisma.fileSystemNode.count({ where: { serverId: doomedHome } });
-  check("PRECONDITION: the home exists with a filesystem", nodes > 0, `${nodes} nodes`);
-  await deleteFixtureUsers(prisma, [doomed]);
-  check("the user is gone", (await prisma.user.findUnique({ where: { id: doomed } })) === null);
-  check("and so is their home (was: left ownerless)", (await prisma.gameServer.findUnique({ where: { id: doomedHome } })) === null);
-  check("and its filesystem", (await prisma.fileSystemNode.count({ where: { serverId: doomedHome } })) === 0);
-  check("another player's home is untouched", (await prisma.gameServer.findUnique({ where: { id: keptHome } }))?.ownerId === kept);
-  await deleteFixtureUsers(prisma, [kept]);
+    console.log("\nFU-1 / FU-2 — the helper");
+    const nodes = await prisma.fileSystemNode.count({ where: { serverId: doomedHome } });
+    check("PRECONDITION: the home exists with a filesystem", nodes > 0, `${nodes} nodes`);
+    await deleteFixtureUsers(prisma, [doomed]);
+    check("the user is gone", (await prisma.user.findUnique({ where: { id: doomed } })) === null);
+    check("and so is their home (was: left ownerless)", (await prisma.gameServer.findUnique({ where: { id: doomedHome } })) === null);
+    check("and its filesystem", (await prisma.fileSystemNode.count({ where: { serverId: doomedHome } })) === 0);
+    check("another player's home is untouched", (await prisma.gameServer.findUnique({ where: { id: keptHome } }))?.ownerId === kept);
+    await deleteFixtureUsers(prisma, [kept]);
 
-  console.log("\nFU-3 — every harness uses it");
-  /** Calls of the form `<anything>.user.delete(…)` / `.deleteMany(…)`. */
-  const userDeletes = (source: string): number => {
-    const sf = ts.createSourceFile("x.ts", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-    let n = 0;
-    const visit = (node: ts.Node) => {
-      if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) &&
-        /^delete(Many)?$/.test(node.expression.name.text) &&
-        ts.isPropertyAccessExpression(node.expression.expression) && node.expression.expression.name.text === "user") n++;
-      ts.forEachChild(node, visit);
+    console.log("\nFU-3 — every harness uses it");
+    /** Calls of the form `<anything>.user.delete(…)` / `.deleteMany(…)`. */
+    const userDeletes = (source: string): number => {
+      const sf = ts.createSourceFile("x.ts", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+      let n = 0;
+      const visit = (node: ts.Node) => {
+        if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) &&
+          /^delete(Many)?$/.test(node.expression.name.text) &&
+          ts.isPropertyAccessExpression(node.expression.expression) && node.expression.expression.name.text === "user") n++;
+        ts.forEachChild(node, visit);
+      };
+      visit(sf);
+      return n;
     };
-    visit(sf);
-    return n;
-  };
-  check("PRECONDITION: the matcher finds a direct delete, split across lines",
-    userDeletes("await prisma.user\n  .deleteMany({ where: {} });") === 1);
-  check("PRECONDITION: and ignores one in a comment or a string",
-    userDeletes("// prisma.user.delete()\nconst s = 'db.user.delete()';") === 0);
-  const offenders = readdirSync("scripts").filter((f) => f.endsWith(".ts"))
-    .filter((f) => userDeletes(readFileSync(`scripts/${f}`, "utf8")) > 0);
-  check("no harness deletes users directly", offenders.length === 0, offenders.join(", "));
+    check("PRECONDITION: the matcher finds a direct delete, split across lines",
+      userDeletes("await prisma.user\n  .deleteMany({ where: {} });") === 1);
+    check("PRECONDITION: and ignores one in a comment or a string",
+      userDeletes("// prisma.user.delete()\nconst s = 'db.user.delete()';") === 0);
+    const offenders = readdirSync("scripts").filter((f) => f.endsWith(".ts"))
+      .filter((f) => userDeletes(readFileSync(`scripts/${f}`, "utf8")) > 0);
+    check("no harness deletes users directly", offenders.length === 0, offenders.join(", "));
+
+    console.log("\nFU-4 — every harness that registers accounts deletes them");
+    /** Code (not comments) that registers through the API, and code that deletes what it registered. */
+    // Both ways a harness makes an account: the HTTP route (any spelling of
+    // its URL — a8-auth posts "/register" to an auth base URL) and
+    // AuthService.register in-process. The first pass matched only
+    // "/api/auth/register" and missed both of those (review 2026-10-09).
+    const viaHttp = (src: string) => /auth\/register|["'`]\/register["'`]/.test(src);
+    const inProcess = (src: string) => /\bauth\w*\s*\.\s*register\s*\(/i.test(src);
+    const registers = (src: string) => viaHttp(src) || inProcess(src);
+    const deletes = (src: string) => /\b(deleteRegisteredUsers|deleteFixtureUsers)\(/.test(src);
+    check("PRECONDITION: the matchers see every form, and not in a comment",
+      registers("fetch(`${BASE}/api/auth/register`)") && registers('call("POST", "/register")') &&
+      inProcess("await auth.register({ username })") && deletes("await deleteRegisteredUsers(prisma)") &&
+      !deletes(stripComments("// await deleteRegisteredUsers(prisma)\n")));
+    const leakers = readdirSync("scripts").filter((f) => /^verify-.*\.ts$/.test(f)).filter((f) => {
+      const src = stripComments(readFileSync(`scripts/${f}`, "utf8"));
+      return registers(src) && !deletes(src);
+    });
+    check("no suite harness leaves its registered accounts behind (was: 28 did)", leakers.length === 0, leakers.join(", "));
+    // The fetch recorder cannot see an in-process registration: it must be
+    // tracked by hand (trackFixtureUser) or it survives the run.
+    const untracked = readdirSync("scripts").filter((f) => /^verify-.*\.ts$/.test(f)).filter((f) => {
+      const src = stripComments(readFileSync(`scripts/${f}`, "utf8"));
+      return inProcess(src) && !/\btrackFixtureUser\(|\bdeleteFixtureUsers\(/.test(src);
+    });
+    check("every in-process registration is tracked for cleanup", untracked.length === 0, untracked.join(", "));
+
+    console.log("\nFU-5 — the recorder");
+    const before = registeredUserIds().length;
+    const recorded = await register(`${tag}r`);
+    check("a registration through fetch is recorded", registeredUserIds().length === before + 1 && registeredUserIds().includes(recorded));
+    const recordedHome = await homeOf(recorded);
+    await deleteRegisteredUsers(prisma);
+    check("deleteRegisteredUsers removes the account and its home",
+      (await prisma.user.findUnique({ where: { id: recorded } })) === null && (await prisma.gameServer.findUnique({ where: { id: recordedHome } })) === null);
+  } finally {
+    // Whatever failed above, nothing registered here survives the run.
+    await deleteRegisteredUsers(prisma).catch((e: unknown) => { fail++; console.log(`  [FAIL] cleanup — fixture users: ${(e as Error).message}`); });
+  }
 
   console.log(`\n=== ${pass} PASS / ${fail} FAIL ===`);
   await prisma.$disconnect();

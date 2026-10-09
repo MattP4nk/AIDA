@@ -242,7 +242,13 @@ export function formatServerError(error: Error, context: string): FormattedError
   }
 
   // ── JWT errors ──
-  if (msg.includes("JsonWebTokenError") || msg.includes("TokenExpiredError") || msg.includes("jwt expired") || msg.includes("invalid signature")) {
+  // By NAME: jsonwebtoken's errors are JsonWebTokenError / TokenExpiredError /
+  // NotBeforeError, and their MESSAGES vary ("jwt malformed", "invalid
+  // token", ...). Matching message text only, a malformed token fell through
+  // to a 500 "unexpected error" — `/api/auth/verify` with garbage answered
+  // 500, pinned as expected in the a8-auth baseline (2026-10-09).
+  const jwtNames = ["JsonWebTokenError", "TokenExpiredError", "NotBeforeError"];
+  if (jwtNames.includes(error.name) || msg.includes("JsonWebTokenError") || msg.includes("TokenExpiredError") || msg.includes("jwt expired") || msg.includes("invalid signature")) {
     return {
       message: "Session expired. Please log in again.",
       code: "AUTH_EXPIRED",

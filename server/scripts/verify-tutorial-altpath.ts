@@ -16,6 +16,7 @@
 import "reflect-metadata";
 import { io as ioClient } from "../../client/node_modules/socket.io-client/build/esm/index.js";
 import { PrismaClient } from "@prisma/client";
+import { deleteRegisteredUsers } from "./lib/fixture-users";
 
 let _missionRepo: any = null;
 function missionRepo() {
@@ -283,6 +284,10 @@ async function main() {
     ["hack objective NOT credited", hackNotCredited, "keys must not count as hacking"],
   ];
   for (const [name, ok, why] of rows) console.log(`${ok ? "PASS" : "FAIL"}  ${name.padEnd(34)} ${why}`);
+  // The rows ARE the result: nothing turned a FAIL row into a failing exit (review 2026-10-09).
+  const failedRows = rows.filter(([, ok]) => !ok).length;
+  console.log(`${rows.length - failedRows}/${rows.length} passed`);
+  if (failedRows > 0) process.exitCode = 1;
   console.log("\ngain_access final:", JSON.stringify(gainObj));
   console.log("hack final:       ", JSON.stringify(hackObj));
   console.log("================================================");
@@ -327,13 +332,15 @@ async function main() {
 
   await prisma.mission.deleteMany({ where: { id: mission.id } }).catch((e) => { process.exitCode = 1; console.log(`FAIL  cleanup — ${(e as Error).message}`); });
   await prisma.mission.deleteMany({ where: { id: mission2.id } }).catch((e) => { process.exitCode = 1; console.log(`FAIL  cleanup — ${(e as Error).message}`); });
+  await deleteRegisteredUsers(prisma).catch((e) => { process.exitCode = 1; console.log(`FAIL  cleanup — fixture users: ${(e as Error).message}`); });
   socket.close();
 }
 
 main()
-  .catch((e) => {
+  .catch(async (e) => {
     console.error("\nHARNESS ERROR:", e?.stack ?? e?.message ?? e);
     process.exitCode = 1;
+    await deleteRegisteredUsers(prisma).catch((err: unknown) => console.error("cleanup — fixture users:", err));
   })
   .finally(async () => {
     await prisma.$disconnect();

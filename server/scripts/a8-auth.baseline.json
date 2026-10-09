@@ -238,10 +238,10 @@
   "cookies": []
  },
  "verify-garbage": {
-  "status": 500,
+  "status": 401,
   "body": {
-   "code": "INTERNAL_ERROR",
-   "error": "An unexpected error occurred",
+   "code": "AUTH_EXPIRED",
+   "error": "Session expired. Please log in again.",
    "success": false,
    "timestamp": "<string>"
   },

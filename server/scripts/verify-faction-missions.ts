@@ -12,6 +12,11 @@
  *   FM-2  `accept <shown id>` claims and starts it (end to end, over a socket)
  *   FM-3  two members claiming one mission at once: exactly one gets it
  *         (`assignMission` was a check-then-act)
+ *   FM-4  an accept REFUSED (the active-mission cap) releases the claim
+ *         (was: claimed first, so the mission stayed assigned, unaccepted,
+ *         and vanished from every member's list — review 2026-10-09)
+ *   FM-5  a claim whose follow-up write fails is released too (was: assigned
+ *         to a player with no copy of it, for good)
  *
  * Fixtures: a private faction with fixture members and missions, deleted by
  * id in `finally` (missions cascade to player-mission rows).
@@ -23,6 +28,7 @@ import { PrismaClient } from "@prisma/client";
 import { randomUUID } from "node:crypto";
 // The server has no socket.io-client dependency; harnesses borrow the client's.
 import { io as ioClient } from "../../client/node_modules/socket.io-client/build/esm/index.js";
+import { deleteRegisteredUsers } from "./lib/fixture-users";
 
 const prisma = new PrismaClient();
 const BASE = "http://localhost:3001";
@@ -135,6 +141,34 @@ async function main() {
     check("one claim succeeds, one is refused", [ra, rb].filter((r: any) => r.ok).length === 1,
       [ra, rb].map((r: any) => r.ok ? "ok" : r.error).join(" | "));
     check("and only the winner holds it", racedRow.assignedTo === winner && holders === 1, `${holders} holder(s)`);
+
+    const { MAX_ACTIVE_MISSIONS } = await import("../src/config/gameBalance");
+    const isFree = async (id: string) => {
+      const row = await prisma.mission.findUniqueOrThrow({ where: { id }, select: { status: true, assignedTo: true } });
+      return row.status === "available" && row.assignedTo === null &&
+        (await missions.listClaimableFactionMissions(faction.id)).some((m: any) => m.id === id);
+    };
+
+    console.log("\nFM-4 — a refused accept releases the claim");
+    for (let i = 0; i < MAX_ACTIVE_MISSIONS; i++) {
+      const busy = await mkMission(`BUSY ${i} ${tag}`);
+      await repo.put(b.id, busy.id, { missionId: busy.id, userId: b.id, status: "active", objectives: [], startedAt: new Date(), completedAt: null, expiresAt: null });
+    }
+    const capped = await mkMission(`CAPPED ${tag}`);
+    const refused = await missions.acceptFactionMission(b.id, faction.id, capped.id);
+    check("PRECONDITION: the accept is refused by the cap", refused.ok === false && /limit/i.test(refused.error), refused.ok ? "accepted" : refused.error);
+    check("the mission is free again — available, unassigned, listed (was: stuck assigned to them)", await isFree(capped.id));
+    check("and they hold no copy of it", !(await repo.has(b.id, capped.id)));
+
+    console.log("\nFM-5 — a failed write releases the claim");
+    const broken = await mkMission(`BROKEN ${tag}`);
+    const store = (missions as any).playerMissions;
+    const realPut = store.put.bind(store);
+    store.put = async () => { throw new Error("injected write failure"); };
+    let threw = false;
+    try { await missions.assignMission(a.id, broken.id); } catch { threw = true; } finally { store.put = realPut; }
+    check("PRECONDITION: the claim's write failed", threw);
+    check("the mission is free again (was: assigned to a player with no copy)", await isFree(broken.id));
   } finally {
     s?.disconnect();
     try {
@@ -142,6 +176,7 @@ async function main() {
       await prisma.factionMember.deleteMany({ where: { factionId: faction.id } });
       await prisma.faction.delete({ where: { id: faction.id } });
     } catch (err) { fail++; console.log(`  [FAIL] cleanup — ${(err as Error).message}`); }
+    await deleteRegisteredUsers(prisma).catch((e: unknown) => { fail++; console.log(`  [FAIL] cleanup — fixture users: ${(e as Error).message}`); });
   }
   console.log(`\n=== ${pass} PASS / ${fail} FAIL ===`);
   await prisma.$disconnect();

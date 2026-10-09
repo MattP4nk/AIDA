@@ -232,7 +232,6 @@ export class AuthService {
       });
 
       // Create standard directories under root
-      // Skeleton directories — keep utils/fsSkeleton.ts SKELETON_DIRS their union.
       const baseDirs = ["home", "etc", "var", "tmp", "logs", "data"];
       const dirMap: Record<string, string> = {};
       for (const dirName of baseDirs) {

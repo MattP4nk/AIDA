@@ -24,7 +24,7 @@ import {
   progressBar,
   render,
 } from "./asciiBox";
-import { successResult, errorResult, refreshComputerSpec } from "./helpers";
+import { successResult, errorResult, lockedPathRefusal, refreshComputerSpec } from "./helpers";
 import logger from "../../logger";
 import { publicChallenge } from "../../utils/publicChallenge";
 import { backdoors as backdoorsSvc, hacks, memory, messageEncryption, missionIntegration, servers, shop, traces } from "./deps";
@@ -866,6 +866,8 @@ export class HackCommandsModule implements CommandModule {
     fileName: string,
   ): Promise<CommandResult> {
     // Find the file node
+    const refused = await lockedPathRefusal(context, serverId, filePath);
+    if (refused) return refused;
     const resolution = await context.fileService.resolvePath(serverId, filePath);
     if (!resolution.exists || !resolution.node) {
       return errorResult(`File not found: ${fileName}`);
@@ -1108,6 +1110,8 @@ export class HackCommandsModule implements CommandModule {
     const currentDir = session.currentDirectory || "/"; // not terminals[0]: `cd` never updates it (helpers.ts getSessionContext)
     const filePath = fileName.startsWith("/") ? fileName : `${currentDir === "/" ? "" : currentDir}/${fileName}`;
 
+    const refused = await lockedPathRefusal(context, session.currentServerId, filePath);
+    if (refused) return refused;
     const resolution = await context.fileService.resolvePath(session.currentServerId, filePath);
     if (!resolution.exists || !resolution.node) return errorResult(`File not found: ${fileName}`);
 
@@ -1177,6 +1181,8 @@ export class HackCommandsModule implements CommandModule {
     const currentDir = session.currentDirectory || "/"; // not terminals[0]: `cd` never updates it (helpers.ts getSessionContext)
     const filePath = fileName.startsWith("/") ? fileName : `${currentDir === "/" ? "" : currentDir}/${fileName}`;
 
+    const refused = await lockedPathRefusal(context, session.currentServerId, filePath);
+    if (refused) return refused;
     const resolution = await context.fileService.resolvePath(session.currentServerId, filePath);
     if (!resolution.exists || !resolution.node) return errorResult(`File not found: ${fileName}`);
 

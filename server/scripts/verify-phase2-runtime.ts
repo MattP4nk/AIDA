@@ -6,6 +6,7 @@
  */
 import { io as ioClient } from "/home/mattp4nk/CODE/AIDA/AIDA/client/node_modules/socket.io-client/build/esm/index.js";
 import { PrismaClient } from "@prisma/client";
+import { deleteRegisteredUsers } from "./lib/fixture-users";
 const BASE = "http://localhost:3001";
 const prisma = new PrismaClient();
 const u = `v2r${String(process.hrtime.bigint()).slice(-7)}`;
@@ -109,8 +110,10 @@ const rows: Array<[string, boolean, string]> = [];
     disc.length ? `count=${disc[0]?.count} subnet=${disc[0]?.subnet}` : "none received (scan may have found nothing)"]);
 
   s.close();
+  await deleteRegisteredUsers(prisma).catch((e: unknown) => { rows.push(["cleanup: fixture users", false, (e as Error).message]); });
   console.log("\n===== PHASE 2 RUNTIME (VERIFY.md §5) =====");
   for (const [n,ok,w] of rows) console.log(`${ok?"PASS":"FAIL"}  ${n.padEnd(40)} ${w}`);
   console.log(`${rows.filter(r=>r[1]).length}/${rows.length} passed`);
-  await prisma.$disconnect(); process.exit(0);
-})().catch(async e=>{ console.error("HARNESS ERROR:", e?.message ?? e); await prisma.$disconnect(); process.exit(1); });
+  // The exit code IS the result: this exited 0 whatever the rows said (review 2026-10-09).
+  await prisma.$disconnect(); process.exit(rows.every(([, ok]) => ok) ? 0 : 1);
+})().catch(async e=>{ console.error("HARNESS ERROR:", e?.message ?? e); await deleteRegisteredUsers(prisma).catch((err: unknown) => console.error("cleanup — fixture users:", err)); await prisma.$disconnect(); process.exit(1); });

@@ -295,6 +295,13 @@ model FileSystemNode {
   encryptionKey  String?   @map("encryption_key")
   isHidden       Boolean   @default(false) @map("is_hidden")
   isProtected    Boolean   @default(false) @map("is_protected")
+  // What the protection covers. Provisioning protects the skeleton (/, /bin,
+  // /etc) so it cannot be removed — the NODE only (false). Any other protection
+  // (`protect`, vault, collar.shield, story content) covers what is INSIDE:
+  // inherited (decision Q4) and, on a player's home, a breach lock (Q9).
+  // Review 2026-10-09: this replaced a by-NAME rule that made `protect /data`
+  // on a home silently protect nothing.
+  protectsContents Boolean  @default(true) @map("protects_contents")
   metadata       Json? // { sourceServerId, sourcePath, downloadedAt, isDownloaded }
 
   // Relations

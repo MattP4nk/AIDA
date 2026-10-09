@@ -21,6 +21,7 @@
 import "reflect-metadata";
 import { io as ioClient } from "../../client/node_modules/socket.io-client/build/esm/index.js";
 import { PrismaClient } from "@prisma/client";
+import { deleteRegisteredUsers } from "./lib/fixture-users";
 
 const BASE = "http://localhost:3001";
 const prisma = new PrismaClient();
@@ -217,6 +218,7 @@ async function main() {
     );
   }
 
+  await deleteRegisteredUsers(prisma).catch((e: unknown) => { fail++; console.log(`  [FAIL] cleanup — fixture users: ${(e as Error).message}`); });
   console.log(`\n=== ${pass} PASS / ${fail} FAIL ===\n`);
   opened.forEach((s) => { try { s.close(); } catch { /* ignore */ } });
   await prisma.$disconnect();
@@ -225,6 +227,7 @@ async function main() {
 
 main().catch(async (e) => {
   console.error("HARNESS ERROR:", e);
+  await deleteRegisteredUsers(prisma).catch((err: unknown) => console.error("cleanup — fixture users:", err));
   await prisma.$disconnect();
   process.exit(1);
 });

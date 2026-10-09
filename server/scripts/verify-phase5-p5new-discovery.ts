@@ -25,6 +25,7 @@
  * Run: npx tsx scripts/verify-phase5-p5new-discovery.ts   (server must be up)
  */
 import { deleteFixtureUsers } from "./lib/delete-fixture-user";
+import { deleteRegisteredUsers } from "./lib/fixture-users";
 import "reflect-metadata";
 import { io as ioClient } from "../../client/node_modules/socket.io-client/build/esm/index.js";
 import { PrismaClient } from "@prisma/client";
@@ -78,15 +79,14 @@ function open(token: string): Promise<any> {
  */
 async function cleanupProbeAccount(userId: string): Promise<void> {
   try {
-    const home = await prisma.gameServer.findFirst({
-      where: { ownerId: userId, isPlayerHome: true },
-      select: { id: true },
-    });
+    // deleteFixtureUsers takes the home too. A second delete of the home by
+    // id, left here when that helper arrived, threw on every run — printed,
+    // never counted (2026-10-09).
     await deleteFixtureUsers(prisma, [userId]);
-    if (home) await prisma.gameServer.delete({ where: { id: home.id } });
   } catch (err) {
-    // Loud: a swallowed cleanup leaves a fixture the NEXT run reads as real.
-    console.error("CLEANUP FAILED (probe account):", (err as Error).message);
+    // A swallowed cleanup leaves a fixture the NEXT run reads as real.
+    fail++;
+    console.log(`  [FAIL] cleanup — probe account: ${(err as Error).message}`);
   }
 }
 
@@ -288,6 +288,8 @@ async function main() {
     // database a little on every run until it failed because of it.
     await cleanupProbeAccount(acct2.userId);
   }
+  // The first probe account was never deleted: one account and home per run.
+  await deleteRegisteredUsers(prisma).catch((e: unknown) => { fail++; console.log(`  [FAIL] cleanup — fixture users: ${(e as Error).message}`); });
 
   console.log(`\n=== ${pass} PASS / ${fail} FAIL ===\n`);
   await prisma.$disconnect();
@@ -296,6 +298,7 @@ async function main() {
 
 main().catch(async (e) => {
   console.error("HARNESS ERROR:", e);
+  await deleteRegisteredUsers(prisma).catch((err: unknown) => console.error("cleanup — fixture users:", err));
   await prisma.$disconnect();
   process.exit(1);
 });

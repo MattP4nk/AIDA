@@ -4044,6 +4044,49 @@ Write them per-refactor, immediately before touching the code:
           still typechecked, because verify-read-receipts has no static import, making it a global
           SCRIPT whose top-level `let fail` was visible to every harness. `moduleDetection: "force"`
           fixes it; control re-run red (TS2304), and the suite exits non-zero on a type error.
+      - **REVIEW de8d478..HEAD — ALL 10 FIXED (2026-10-09).**
+          1. Fragments respawned onto dungeon / offline / AIDA-home / tutorial servers; a dungeon
+             expiring then stranded them (active, unheld, source deleted — nothing moved them).
+             Candidates are permanent servers only; the hourly pass also recovers STRANDED
+             fragments (admin deletes too). FR-6, FR-7.
+          2. Break tools (crack.protected, crack.storm, fragment.crack, crack, collar.shield,
+             report file) skipped the breach lock — and every path read leaked existence ("not
+             found" vs "PROTECTED"). `fileService.lockOnPath` decides the lock from the deepest
+             existing node BEFORE existence is revealed; ls/cd/cat/cp/sweep and every command path
+             lookup use it (`lockedPathRefusal`; source check BR-7). Breaking a home's protected
+             dir now needs a breach first.
+          3. The skeleton was recognised by NAME, so `protect /data` protected nothing.
+             `FileSystemNode.protectsContents` (db:push, additive): provisioning sets false on
+             /, /bin, /etc (backfilled: 2,909 rows, the only protected dirs in dev); everything
+             else defaults true. `protect` on a node-only dir switches it ON. fsSkeleton.ts deleted.
+          4/5. A faction claim survived a refused accept (cap) or a failed write — the mission
+             stayed assigned, unplayable, gone from the list. `acceptFactionMission` claims+accepts
+             as one step; `releaseMissionClaim` undoes both cases. FM-4, FM-5.
+          6. The panel accepted role `npc` both ways. `utils/roles.ts` ASSIGNABLE_ROLES; the
+             shared rule refuses npc targets. AA-6.
+          7. Legacy contacts (all "pending", never acceptable) would vanish from chat on deploy.
+             **DEPLOY STEP: `npm run migrate:contacts` before the new code serves requests**
+             (utils/legacyContacts.ts; one-sided accepted; `--before` for a DB where requests are
+             already live; dev has 0 contacts). C-7.
+          8. 28 suite harnesses registered accounts and never deleted them. scripts/lib/
+             fixture-users.ts records registrations (fetch wrapper; trackFixtureUser for
+             in-process); every harness deletes them; FU-4 pins it structurally and
+             `check-fixture-leaks` (run-verify) pins the OUTCOME — it caught p5new-discovery leaking
+             under `@p5.test`, which a fixture-domain count never saw. Same pass: p0-fixes,
+             phase2-runtime and tutorial-altpath exited 0 whatever their rows said — fixed.
+          9. A third role hierarchy + zero-caller hasSocketRole in sockets/handlers.ts: deleted;
+             AA-6 asserts one hierarchy.
+          10. Hack discovery loaded every node on the target server per hack:
+             `fileService.protectedAmong(ids)` walks ancestors a level at a time; the harness
+             records its queries and fails on a whole-server read.
+          FOUND ON THE WAY: `GET /api/auth/verify` with a malformed token answered 500 — and the
+          a8-auth baseline pinned the 500. formatServerError matched JWT errors by message text
+          ("jwt malformed" matched nothing); it now matches by error NAME. The suite no longer
+          fits the default dev rate limit (102 requests/run vs 100) — see CLAUDE.md.
+          Suite 89/89 (1,374 checks; typecheck + leak check), golden 23/23.
+        - **OPEN: ~917 old `@fixture.invalid` accounts (+ a few `@p5.test`) from past runs** still
+          sit in the dev DB with their homes — harmless, but they hold IPs and inflate counts.
+          Purge needs the maintainer's OK.
       - **OPEN QUESTIONS (need the maintainer):**
         1. **Endgame lockout.** 9 fragments exist, 9 are required, nothing restores a bricked one:
            the first failed `fragment.crack` makes the endgame unreachable for everyone.

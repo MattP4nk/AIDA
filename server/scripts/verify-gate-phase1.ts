@@ -12,6 +12,7 @@
 import "reflect-metadata";
 import { io as ioClient } from "../../client/node_modules/socket.io-client/build/esm/index.js";
 import { PrismaClient } from "@prisma/client";
+import { deleteRegisteredUsers } from "./lib/fixture-users";
 
 const BASE = "http://localhost:3001";
 const prisma = new PrismaClient();
@@ -323,6 +324,7 @@ async function main() {
     );
   }
 
+  await deleteRegisteredUsers(prisma).catch((e: unknown) => { rows.push(["cleanup: fixture users", false, (e as Error).message]); });
   // ── results ──
   console.log("\n\n================ PHASE 1 GATE RESULTS ================");
   for (const [n, ok, why] of rows) console.log(`${ok ? "PASS" : "FAIL"}  ${n.padEnd(42)} ${why}`);
@@ -335,9 +337,10 @@ async function main() {
 }
 
 main()
-  .catch((e) => {
+  .catch(async (e) => {
     console.error("\nHARNESS ERROR:", e?.stack ?? e?.message ?? e);
     process.exitCode = 1;
+    await deleteRegisteredUsers(prisma).catch((err: unknown) => console.error("cleanup — fixture users:", err));
   })
   .finally(async () => {
     await prisma.$disconnect();

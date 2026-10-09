@@ -578,28 +578,55 @@ export class KeyFragmentService extends EventEmitter {
       where: { ...scope, status: "bricked", brickedAt: { lte: new Date(now.getTime() - FRAGMENT_RESPAWN_MS) } },
       select: { id: true },
     });
+    // STRANDED: an active, unheld fragment whose source server is gone — a
+    // dungeon that expired, a server an admin deleted. Nothing can ever claim
+    // it there, and it is not bricked, so before this nothing moved it either
+    // (review 2026-10-09). No cooldown: nobody lost it.
+    const unheld = await this.prisma.keyFragment.findMany({
+      where: { ...scope, status: "active", heldByUserId: null, sourceType: "server" },
+      select: { id: true, sourceId: true },
+    });
+    const existing = new Set((await this.prisma.gameServer.findMany({
+      where: { id: { in: unheld.map((f) => f.sourceId) } },
+      select: { id: true },
+    })).map((s) => s.id));
+    const stranded = unheld.filter((f) => !existing.has(f.sourceId));
     let respawned = 0;
-    for (const f of due) if (await this.respawnFragment(f.id, opts.serverIds ? { serverIds: opts.serverIds } : {})) respawned++;
+    for (const f of [...due, ...stranded]) if (await this.respawnFragment(f.id, opts.serverIds ? { serverIds: opts.serverIds } : {})) respawned++;
     return respawned;
   }
 
   /**
-   * Respawn ONE bricked fragment now (no cooldown check — respawnDueFragments
-   * applies it). `serverIds` restricts the candidate servers; harnesses use it
-   * so a fixture fragment never lands on a real server.
+   * Respawn ONE fragment now: a bricked one (no cooldown check —
+   * respawnDueFragments applies it), or an unheld active one whose source
+   * server no longer exists. `serverIds` restricts the candidate servers;
+   * harnesses use it so a fixture fragment never lands on a real server.
+   *
+   * Candidates are PERMANENT servers only: not a home, not the hidden AIDA
+   * server, online, not tutorial, and not in a darknet dungeon — dungeon
+   * servers are deleted when the dungeon expires, which would strand it.
    */
   async respawnFragment(fragmentId: string, opts: { serverIds?: string[] } = {}): Promise<{ serverId: string } | null> {
     const f = await this.prisma.keyFragment.findUnique({ where: { id: fragmentId } });
-    if (!f || f.status !== "bricked") return null;
+    if (!f) return null;
+    const stranded = f.status === "active" && f.heldByUserId === null && f.sourceType === "server" &&
+      !(await this.prisma.gameServer.findUnique({ where: { id: f.sourceId }, select: { id: true } }));
+    if (f.status !== "bricked" && !stranded) return null;
     const taken = await this.prisma.keyFragment.findMany({
       where: { sourceType: "server", id: { not: f.id } },
       select: { sourceId: true },
     });
     const exclude = new Set([...taken.map((t) => t.sourceId), f.sourceId]);
+    const dungeonNetworks = (await this.prisma.darkNetInstance.findMany({ select: { networkId: true } }))
+      .map((d) => d.networkId);
     const candidates = (await this.prisma.gameServer.findMany({
       where: {
         isPlayerHome: false,
+        isAidaHomeServer: false,
+        isOnline: true,
+        type: { not: "tutorial" },
         securityLevel: { gte: FRAGMENT_RESPAWN_MIN_SECURITY },
+        OR: [{ networkId: null }, { networkId: { notIn: dungeonNetworks } }],
         ...(opts.serverIds ? { id: { in: opts.serverIds } } : {}),
       },
       select: { id: true, name: true },
@@ -609,10 +636,10 @@ export class KeyFragmentService extends EventEmitter {
       return null;
     }
     const target = candidates[Math.floor(Math.random() * candidates.length)]!;
-    // Conditional on still being bricked: two instances running this at once
-    // respawn it once.
+    // Conditional on the state read above (bricked, or still stranded at the
+    // same missing source, unheld): two instances running this respawn it once.
     const moved = await this.prisma.keyFragment.updateMany({
-      where: { id: f.id, status: "bricked" },
+      where: { id: f.id, status: f.status, sourceId: f.sourceId, heldByUserId: null },
       data: { status: "active", sourceType: "server", sourceId: target.id, brickedAt: null, heldByUserId: null, heldSince: null },
     });
     if (moved.count !== 1) return null;

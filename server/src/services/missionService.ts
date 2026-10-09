@@ -378,6 +378,47 @@ class MissionService extends EventEmitter {
   }
 
   /**
+   * Claim a faction mission AND accept it, as one step: if the accept is
+   * refused (the active-mission cap, say), the claim is released. `accept`
+   * used to claim first and accept second, so a refused accept left the
+   * mission assigned to the player, unaccepted, and gone from every member's
+   * list (review 2026-10-09).
+   */
+  public async acceptFactionMission(
+    userId: string,
+    factionId: string,
+    idOrPrefix: string,
+  ): Promise<{ ok: true; missionId: string } | { ok: false; error: string }> {
+    const claim = await this.claimFactionMission(userId, factionId, idOrPrefix);
+    if (!claim.ok) return claim;
+    try {
+      await this.acceptMission(userId, claim.missionId);
+      return claim;
+    } catch (err) {
+      await this.releaseMissionClaim(userId, claim.missionId);
+      return { ok: false, error: err instanceof Error ? err.message : "Could not accept the mission" };
+    }
+  }
+
+  /**
+   * Undo a claim: the player's copy removed if it was never accepted, then the
+   * mission back to available and unassigned — only if it is still THIS
+   * player's claim.
+   */
+  private async releaseMissionClaim(userId: string, missionId: string): Promise<void> {
+    await this.playerMissions.mutateAll(userId, (blob) => {
+      if (blob[missionId]?.status !== "assigned") return false;
+      delete blob[missionId];
+      return true;
+    });
+    await this.prisma.mission.updateMany({
+      where: { id: missionId, assignedTo: userId, status: "assigned" },
+      data: { status: "available", assignedTo: null },
+    });
+    this.cacheService.del(`mission:${missionId}`);
+  }
+
+  /**
    * Assign a mission to a player
    * @param userId - User ID
    * @param missionId - Mission ID
@@ -452,20 +493,29 @@ class MissionService extends EventEmitter {
       // put it in a column nothing reads any more — the mission would be
       // invisible to `getPlayerMissions` and `accept` would report "Mission not
       // assigned to player" forever.
-      if (!progress) {
-        await this.prisma.playerProgress.create({
-          data: {
-            userId,
-            experience: 0,
-            level: 1,
-            credits: 0,
-            skills: {},
-            inventory: [],
-            equipment: {},
-          },
-        });
+      // The claim above already took the mission; if these writes fail, give
+      // it back — else it stays assigned to a player with no copy of it, and
+      // gone from the faction's list for good (review 2026-10-09).
+      try {
+        if (!progress) {
+          await this.prisma.playerProgress.create({
+            data: {
+              userId,
+              experience: 0,
+              level: 1,
+              credits: 0,
+              skills: {},
+              inventory: [],
+              equipment: {},
+            },
+          });
+        }
+        await this.playerMissions.put(userId, missionId, playerMission as never);
+      } catch (err) {
+        await this.releaseMissionClaim(userId, missionId).catch((releaseErr) =>
+          this.logger.error({ err: releaseErr, userId, missionId }, "Could not release a failed mission claim"));
+        throw err;
       }
-      await this.playerMissions.put(userId, missionId, playerMission as never);
 
       // Audit log
       await this.auditLog(userId, "MISSION_ASSIGNED", {

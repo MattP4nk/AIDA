@@ -12,12 +12,19 @@
  * failed"; by-name lookups are case-insensitive; remove says when there was
  * nothing to remove.
  *
+ * C-7 (review 2026-10-09): contacts made BEFORE requests existed were all
+ * "pending" with no way to accept them; the new chat list shows accepted only,
+ * so every existing contact would vanish on deploy. `npm run migrate:contacts`
+ * (utils/legacyContacts.ts) makes them accepted — and leaves a real new
+ * request pending. Run here scoped to fixture rows.
+ *
  * In-process: the database is the arbiter of the races.
  * Needs the dev server (registration). Run: npx tsx scripts/verify-a4-contacts.ts
  */
 import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
 import { randomUUID } from "node:crypto";
+import { deleteRegisteredUsers } from "./lib/fixture-users";
 
 const prisma = new PrismaClient();
 const BASE = "http://localhost:3001";
@@ -108,11 +115,34 @@ async function main() {
     check("both rows are gone", removed.ok === true && rows === 0, `${removed.message} / ${rows} rows`);
     const again = await chat.removeContact(me.id, them.username);
     check("removing a non-contact says so", again.ok === false && /not in your contacts/.test(again.message), again.message);
+
+    console.log("\nC-7 — legacy contacts survive the deploy");
+    const old = new Date("2026-01-01T00:00:00Z");
+    const legacyPending = await prisma.contact.create({ data: { userId: third.id, contactUserId: fourth.id, handle: fourth.username, status: "pending", createdAt: old } });
+    const legacyUnknown = await prisma.contact.create({ data: { userId: third.id, contactUserId: them.id, handle: them.username, status: "unknown", createdAt: old } });
+    const newRequest = await prisma.contact.create({ data: { userId: fourth.id, contactUserId: them.id, handle: them.username, status: "pending" } });
+    check("PRECONDITION: before migrating, the legacy contacts are NOT in the owner's chat list",
+      !(await chatNames(third.id)).includes(fourth.username) && !(await chatNames(third.id)).includes(them.username));
+    const { migrateLegacyContacts } = await import("../src/utils/legacyContacts");
+    const cutoff = new Date(Date.now() - 60_000);
+    const dry = await migrateLegacyContacts(prisma as any, { before: cutoff, dryRun: true, ids: [legacyPending.id, legacyUnknown.id, newRequest.id] });
+    check("a dry run counts the two legacy rows and changes nothing", dry.legacy === 2 &&
+      (await prisma.contact.count({ where: { id: { in: [legacyPending.id, legacyUnknown.id] }, status: "accepted" } })) === 0, JSON.stringify(dry));
+    const mig = await migrateLegacyContacts(prisma as any, { before: cutoff, ids: [legacyPending.id, legacyUnknown.id, newRequest.id] });
+    check("both legacy contacts become accepted", mig.updated === 2 &&
+      (await prisma.contact.count({ where: { id: { in: [legacyPending.id, legacyUnknown.id] }, status: "accepted" } })) === 2, JSON.stringify(mig));
+    const back = await chatNames(third.id);
+    check("and are back in the owner's chat list (was: vanished on deploy)", back.includes(fourth.username) && back.includes(them.username), back.join(", "));
+    check("a real request made after the cutoff stays PENDING",
+      (await prisma.contact.findUniqueOrThrow({ where: { id: newRequest.id } })).status === "pending");
+    check("one-sided: the other player gains no contact they did not choose",
+      !(await chat.listContacts(fourth.id)).accepted.includes(third.username));
   } finally {
     try {
       await prisma.contact.deleteMany({ where: { OR: [{ userId: { in: everyone } }, { contactUserId: { in: everyone } }] } });
       await prisma.notification.deleteMany({ where: { userId: { in: everyone }, type: { in: ["contact_request", "contact_accepted"] } } });
     } catch (err) { fail++; console.log(`  [FAIL] cleanup — ${(err as Error).message}`); }
+    await deleteRegisteredUsers(prisma).catch((e: unknown) => { fail++; console.log(`  [FAIL] cleanup — fixture users: ${(e as Error).message}`); });
   }
   console.log(`\n=== ${pass} PASS / ${fail} FAIL ===`);
   await prisma.$disconnect();

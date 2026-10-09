@@ -31,6 +31,9 @@ TIMEOUT="${VERIFY_TIMEOUT:-300}"
 ok=0
 fail=0
 failed_names=()
+# For check-fixture-leaks: every account created after this moment must be
+# gone when the run ends.
+started=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
 
 # Typecheck the harnesses first. tsx strips types without checking them, and
 # `tsc -p tsconfig.json` covers src only — so until 2026-10-09 nothing checked
@@ -56,6 +59,16 @@ for f in scripts/verify-*.ts; do
     printf '  FAIL %s\n' "$name"
   fi
 done
+
+# Outcome check: no harness left an account behind (any email domain).
+if npx tsx scripts/check-fixture-leaks.ts "$started" >"$OUT/check-fixture-leaks.log" 2>&1; then
+  ok=$((ok + 1))
+  printf '  ok   %s\n' "check-fixture-leaks"
+else
+  fail=$((fail + 1))
+  failed_names+=("check-fixture-leaks")
+  printf '  FAIL %s\n' "check-fixture-leaks"
+fi
 
 # Aggregate the per-check totals, not just the per-harness ones. A harness can
 # exit 0 having run far fewer checks than it used to — a drop in this number is
@@ -86,7 +99,9 @@ if [ "$fail" -gt 0 ]; then
   # (RATE_LIMIT_MAX_REQUESTS per RATE_LIMIT_WINDOW_MS, per IP, in memory) is
   # shared by every HTTP harness, so a third run inside one window fails all
   # of them with 429 although nothing is wrong with the code.
-  limited=$(grep -l "Too many requests from this IP" "$OUT"/*.log 2>/dev/null | wc -l)
+  # Two spellings: the limiter's JSON message, and a harness that reports only
+  # the status ("register x: 429") — that one went unnamed (2026-10-09).
+  limited=$(grep -lE "Too many requests from this IP|: 429$" "$OUT"/*.log 2>/dev/null | wc -l)
   refused=$(grep -l "ECONNREFUSED" "$OUT"/*.log 2>/dev/null | wc -l)
   if [ "$limited" -gt 0 ]; then
     echo "RATE-LIMITED: $limited log(s) hit the dev server's /api rate limit (429)."

@@ -3,7 +3,7 @@ import { CommandModule, CommandContext, CommandInfo } from "./interface";
 import { successResult, errorResult } from "./helpers";
 import { accounts, factions, messages, servers as serversSvc, users } from "./deps";
 
-import { roleLevel, roleChangeRefusal } from "../../utils/roles";
+import { ASSIGNABLE_ROLES, roleLevel, roleChangeRefusal } from "../../utils/roles";
 
 function formatDuration(ms: number): string {
   const s = Math.floor(ms / 1000);
@@ -471,8 +471,8 @@ export class AdminCommandsModule implements CommandModule {
       return errorResult("Usage: admin setrole <username> <player|moderator|admin>");
     }
 
-    if (!["player", "moderator", "admin"].includes(newRole)) {
-      return errorResult("Invalid role. Must be: player, moderator, or admin");
+    if (!ASSIGNABLE_ROLES.includes(newRole)) {
+      return errorResult(`Invalid role. Must be one of: ${ASSIGNABLE_ROLES.join(", ")}.`);
     }
 
     const user = await users().findByUsername(target);

@@ -1,6 +1,6 @@
 import { Command, CommandResult } from "../../../../shared/types";
 import { CommandModule, CommandContext } from "./interface";
-import { successResult, errorResult } from "./helpers";
+import { successResult, errorResult, lockedPathRefusal } from "./helpers";
 import {
   boxTop,
   boxBottom,
@@ -598,6 +598,8 @@ export class FragmentCommandsModule implements CommandModule {
     const filePath = fileName.startsWith("/") ? fileName : `${currentDir === "/" ? "" : currentDir}/${fileName}`;
 
     // Check file exists and is protected
+    const refused = await lockedPathRefusal(context, session.currentServerId, filePath);
+    if (refused) return refused;
     const resolution = await context.fileService.resolvePath(session.currentServerId, filePath);
     if (!resolution.exists || !resolution.node) return errorResult(`File not found: ${fileName}`);
 
@@ -726,6 +728,8 @@ export class FragmentCommandsModule implements CommandModule {
     const currentDir = session.currentDirectory || "/"; // not terminals[0]: `cd` never updates it (helpers.ts getSessionContext)
     const filePath = target.startsWith("/") ? target : `${currentDir === "/" ? "" : currentDir}/${target}`;
 
+    const refused = await lockedPathRefusal(context, session.currentServerId, filePath);
+    if (refused) return refused;
     const resolution = await context.fileService.resolvePath(session.currentServerId, filePath);
     if (!resolution.exists || !resolution.node) return errorResult(`Not found: ${target}`);
 

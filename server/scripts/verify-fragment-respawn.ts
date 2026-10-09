@@ -14,6 +14,11 @@
  *   FR-3  respawn: never the old server, never a server another fragment uses
  *   FR-4  the cooldown: not before FRAGMENT_RESPAWN_MS, yes after
  *   FR-5  a respawned fragment is claimable again, at its new server
+ *   FR-6  only PERMANENT servers are candidates: never a darknet dungeon
+ *         server (deleted when the dungeon expires), an offline server, the
+ *         hidden AIDA server or a tutorial server (review 2026-10-09)
+ *   FR-7  a STRANDED fragment — active, unheld, its source server deleted —
+ *         is moved by the hourly pass (was: claimable by no one, forever)
  *
  * PRIVATE fixtures only: fragments of a type no game listing recognises, on
  * fixture servers, and every respawn call is scoped to them — the real 9 are
@@ -25,6 +30,7 @@ import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
 import { randomUUID } from "node:crypto";
 import { freeIp } from "./lib/free-ip";
+import { deleteRegisteredUsers } from "./lib/fixture-users";
 
 const prisma = new PrismaClient();
 const BASE = "http://localhost:3001";
@@ -53,8 +59,9 @@ async function main() {
 
   const serverIds: string[] = [];
   const fragIds: string[] = [];
-  const mkServer = async (name: string, securityLevel: number) => {
-    const s = await prisma.gameServer.create({ data: { name: `${tag}_${name}`, ipAddress: await freeIp(prisma), type: "corporate", securityLevel } });
+  let networkId: string | null = null;
+  const mkServer = async (name: string, securityLevel: number, extra: Record<string, unknown> = {}) => {
+    const s = await prisma.gameServer.create({ data: { name: `${tag}_${name}`, ipAddress: await freeIp(prisma), type: "corporate", securityLevel, ...extra } });
     serverIds.push(s.id);
     return s;
   };
@@ -118,13 +125,51 @@ async function main() {
     check("POSITIVE: claimed at the new one", fresh.claimed === true &&
       (await prisma.keyFragment.findUniqueOrThrow({ where: { id: frag.id } })).heldByUserId === finder);
 
+    console.log("\nFR-6 — only permanent servers");
+    // A fixture dungeon: its own network and a `conquered` instance, a status
+    // no scheduled dungeon query selects, so the dev server leaves it alone.
+    const net = await prisma.network.create({ data: { name: `${tag}_dungeon`, zone: "darknet", isHidden: true } });
+    networkId = net.id;
+    await prisma.darkNetInstance.create({ data: { name: `${tag}_dungeon`, networkId: net.id, gatewayIp: "0.0.0.0", passkey: "x", rewardType: "credits_cache", status: "conquered" } });
+    const excluded = [
+      await mkServer("dungeon", 9, { networkId: net.id }),
+      await mkServer("offline", 9, { isOnline: false }),
+      await mkServer("aida", 9, { isAidaHomeServer: true }),
+      await mkServer("tutorial", 9, { type: "tutorial" }),
+    ];
+    const keep = await mkServer("permanent", 9);
+    const pool2 = [...excluded.map((x) => x.id), keep.id];
+    const landed = new Set<string>();
+    for (let i = 0; i < 6; i++) { // random choice: give each excluded server several chances
+      const g = await mkFrag(10 + i, origin.id, null);
+      await prisma.keyFragment.update({ where: { id: g.id }, data: { status: "bricked", brickedAt: new Date(0) } });
+      await frags.respawnDueFragments(new Date(), { fragmentIds: [g.id], serverIds: pool2 });
+      landed.add((await prisma.keyFragment.findUniqueOrThrow({ where: { id: g.id } })).sourceId);
+      await prisma.keyFragment.update({ where: { id: g.id }, data: { sourceId: origin.id } }); // free `keep` for the next one
+    }
+    check("6 respawns all landed on the one permanent server (never dungeon/offline/AIDA/tutorial)",
+      landed.size === 1 && landed.has(keep.id), [...landed].map((id) => excluded.find((x) => x.id === id)?.name ?? (id === keep.id ? "permanent" : id)).join(", "));
+
+    console.log("\nFR-7 — a stranded fragment is recovered");
+    const doomed = await mkServer("doomed", 9);
+    const strandedFrag = await mkFrag(20, doomed.id, null);
+    const safeFrag = await mkFrag(21, lowSec.id, null); // POSITIVE: its server exists
+    await prisma.gameServer.delete({ where: { id: doomed.id } });
+    const moved = await frags.respawnDueFragments(new Date(), { fragmentIds: [strandedFrag.id, safeFrag.id], serverIds: [keep.id] });
+    const sf = await prisma.keyFragment.findUniqueOrThrow({ where: { id: strandedFrag.id } });
+    check("the stranded fragment moves to a live server (was: left pointing at a deleted one)", moved === 1 && sf.sourceId === keep.id && sf.status === "active", `${moved} moved -> ${sf.sourceId === keep.id ? "permanent" : sf.sourceId}`);
+    check("POSITIVE: an unheld fragment whose server exists stays put", (await prisma.keyFragment.findUniqueOrThrow({ where: { id: safeFrag.id } })).sourceId === lowSec.id);
+
     check("the world's real fragments are byte-identical", JSON.stringify(await world()) === worldBefore);
   } finally {
     try {
       await prisma.keyFragmentDiscovery.deleteMany({ where: { fragmentId: { in: fragIds } } });
       await prisma.keyFragment.deleteMany({ where: { id: { in: fragIds } } });
       await prisma.gameServer.deleteMany({ where: { id: { in: serverIds } } });
+      // The instance cascades with its network.
+      if (networkId) await prisma.network.delete({ where: { id: networkId } });
     } catch (err) { fail++; console.log(`  [FAIL] cleanup — ${(err as Error).message}`); }
+    await deleteRegisteredUsers(prisma).catch((e: unknown) => { fail++; console.log(`  [FAIL] cleanup — fixture users: ${(e as Error).message}`); });
   }
   console.log(`\n=== ${pass} PASS / ${fail} FAIL ===`);
   await prisma.$disconnect();

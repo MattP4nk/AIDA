@@ -21,6 +21,7 @@ import { PrismaClient } from "@prisma/client";
 import { randomUUID } from "node:crypto";
 // The server has no socket.io-client dependency; harnesses borrow the client's.
 import { io as ioClient } from "../../client/node_modules/socket.io-client/build/esm/index.js";
+import { deleteRegisteredUsers } from "./lib/fixture-users";
 
 const prisma = new PrismaClient();
 const BASE = "http://localhost:3001";
@@ -121,10 +122,11 @@ async function main() {
       await prisma.factionMember.deleteMany({ where: { factionId: faction.id } });
       await prisma.faction.delete({ where: { id: faction.id } });
     } catch (err) { fail++; console.log(`  [FAIL] cleanup — ${(err as Error).message}`); }
+    await deleteRegisteredUsers(prisma).catch((e: unknown) => { fail++; console.log(`  [FAIL] cleanup — fixture users: ${(e as Error).message}`); });
   }
 
   console.log("\nI-4 — registration is case-insensitively unique");
-  {
+  try {
     const a = await register(`${tag}Case`);
     check("PRECONDITION: the first spelling registers", a.status === 201, `${a.status}`);
     const b = await register(`${tag}case`, `${tag}other@fixture.invalid`);
@@ -142,6 +144,9 @@ async function main() {
     // would pass with or without A4; it pins the boundary that makes it so.
     const c = await register(`${tag}x2`, `${tag}Case@fixture.invalid`.toUpperCase());
     check("(characterization) an email differing only by case is refused at the route", c.status === 409, `${c.status}`);
+  } finally {
+    // I-4 registers AFTER the main cleanup above ran.
+    await deleteRegisteredUsers(prisma).catch((e: unknown) => { fail++; console.log(`  [FAIL] cleanup — fixture users: ${(e as Error).message}`); });
   }
 
   console.log(`\n=== ${pass} PASS / ${fail} FAIL ===`);
@@ -149,4 +154,8 @@ async function main() {
   process.stdout.write("", () => process.exit(fail > 0 ? 1 : 0));
 }
 
-main().catch((e) => { console.error(e); process.exit(1); });
+main().catch(async (e) => {
+  console.error(e);
+  await deleteRegisteredUsers(prisma).catch((err: unknown) => console.error("cleanup — fixture users:", err));
+  process.exit(1);
+});

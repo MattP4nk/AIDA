@@ -15,6 +15,16 @@
  *         the client WITHOUT its solution and is solvable from what is shown
  *   BR-4  a win opens it; leaving the server closes it again
  *   BR-5  not gated: the owner, world servers, sweep only when locked
+ *   BR-6  no existence oracle: a missing path inside a locked directory is
+ *         refused exactly like a real one (was: "not found" vs "PROTECTED")
+ *   BR-7  the break tools — crack.protected, crack.storm, fragment.crack,
+ *         crack — refuse before a breach (was: crack.protected on the vault
+ *         stripped its protection with no breach); past the lock after one.
+ *         collar.shield and `report file` use the same lockedPathRefusal and
+ *         are covered by the source check in BR-7 rather than driven here
+ *   BR-8  `protect` on a skeleton directory protects its contents (was: by
+ *         a NAME rule, `protect /data` protected nothing inside), and on a
+ *         provisioned node-only /etc it switches ON instead of off
  *
  * Fixtures: a fixture owner's home gets fixture directories (deleted by id in
  * `finally`, deepest first); the intruder's connection rows and a fixture
@@ -26,6 +36,9 @@ import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
 import { randomUUID } from "node:crypto";
 import { freeIp } from "./lib/free-ip";
+import { readdirSync, readFileSync } from "node:fs";
+import { stripComments } from "./lib/strip-comments";
+import { deleteRegisteredUsers } from "./lib/fixture-users";
 
 const prisma = new PrismaClient();
 const BASE = "http://localhost:3001";
@@ -75,6 +88,7 @@ async function main() {
   const connIds: string[] = [];
   let worldId: string | null = null;
   let etcWas: { id: string; isProtected: boolean } | null = null;
+  let dataWas: { id: string; isProtected: boolean; protectsContents: boolean } | null = null;
   const readable = { owner: 15, faction: 0, others: 5 };
   const mk = async (serverId: string, parentId: string, name: string, type: "file" | "directory", extra: Record<string, unknown> = {}) => {
     const n = await prisma.fileSystemNode.create({
@@ -134,6 +148,53 @@ async function main() {
       parent.success && parent.data.entries.some((e: any) => e.name === "vault" && e.isProtected), parent.message);
     check("POSITIVE: a file outside reads fine", (await fs.readFile(home, intruder, `${base}/pub/loose.txt`)).success === true);
 
+    console.log("\nBR-6 — no existence oracle");
+    const realCat = await fs.readFile(home, intruder, `${base}/box/vault/plan.txt`);
+    const ghostCat = await fs.readFile(home, intruder, `${base}/box/vault/nope.txt`);
+    check("a MISSING file inside reads exactly like a real one (was: 'File not found' vs 'PROTECTED')",
+      locked(ghostCat) && ghostCat.message === realCat.message, ghostCat.message);
+    const ghostLs = await fs.listDirectory(home, intruder, `${base}/box/vault/nodir/deeper`);
+    check("and a missing directory two levels in", locked(ghostLs), ghostLs.message);
+
+    console.log("\nBR-7 — the break tools need a breach first");
+    const hc = await import("../src/services/commandModules/hackCommands");
+    const fc = await import("../src/services/commandModules/fragmentCommands");
+    const hack: any = new hc.HackCommandsModule();
+    const fragCmds: any = new fc.FragmentCommandsModule();
+    // fragment.crack is hidden from players holding no fragment (execute
+    // answers "Command not found"), so its handler is called directly.
+    const toolOut = async (m: any, command: string, args: string[]) => String((await (command === "fragment.crack"
+      ? m.handleFragmentCrack({ command, args }, ctx(intruder))
+      : m.execute({ command, args }, ctx(intruder)))).output);
+    const breachFirst = /Breach it first: 'breach \/home\/[^/]+\/box\/vault'/;
+    for (const [m, command, args] of [
+      [hack, "crack.protected", ["vault"]],
+      [hack, "crack.storm", ["vault"]],
+      [fragCmds, "fragment.crack", ["vault", "--confirm"]],
+      [hack, "crack.protected", ["vault/plan.txt"]],
+    ] as Array<[any, string, string[]]>) {
+      const out = await toolOut(m, command, args);
+      check(`\`${command} ${args[0]}\` is refused before a breach`, breachFirst.test(out), out.split("\n")[0]);
+    }
+    const crackOut = await hack.handleCrackFile({ command: "crack", args: ["vault/plan.txt"] }, ctx(intruder), home, `${base}/box/vault/plan.txt`, "plan.txt");
+    check("`crack` on a file inside is refused", breachFirst.test(String(crackOut.output)), String(crackOut.output));
+    check("and the protection is still there", (await prisma.fileSystemNode.findUniqueOrThrow({ where: { id: vault.id } })).isProtected === true);
+    // Every command that looks a path up on the current server checks the lock
+    // FIRST, in the same function. Calls, not words (comments stripped).
+    const lookupsWithoutLock: string[] = [];
+    for (const f of readdirSync("src/services/commandModules").filter((f) => f.endsWith(".ts"))) {
+      const src = stripComments(readFileSync(`src/services/commandModules/${f}`, "utf8"));
+      const fns = src.split(/\n  (?:private |public )?async \w+\(/);
+      for (const fn of fns) {
+        const at = fn.indexOf("context.fileService.resolvePath(");
+        if (at < 0) continue;
+        const before = fn.slice(0, at);
+        if (!/lockedPathRefusal\(|lockOnPath\(/.test(before)) lookupsWithoutLock.push(f);
+      }
+    }
+    check("PRECONDITION: the source check sees the lookups", readFileSync("src/services/commandModules/hackCommands.ts", "utf8").includes("context.fileService.resolvePath("));
+    check("every command path lookup checks the lock first", lookupsWithoutLock.length === 0, lookupsWithoutLock.join(", "));
+
     console.log("\nBR-2 — no copying around it");
     const cpBox = await fs.copyNode(home, intruder, `${base}/box`, `${base}/pub/boxcopy`);
     check("cp of an unprotected parent is refused (was: copied the vault out, unprotected, owned by the copier)",
@@ -166,6 +227,8 @@ async function main() {
     check("and cat", (await fs.readFile(home, intruder, `${base}/box/vault/plan.txt`)).success === true);
     const innerLs = await fs.listDirectory(home, intruder, `${base}/box/vault/inner`);
     check("a protected directory INSIDE still needs its own breach", locked(innerLs) && /inner/.test(innerLs.message), innerLs.message);
+    const afterBreach = await toolOut(hack, "crack.protected", ["vault"]);
+    check("POSITIVE: after the breach the break tool gets past the lock", !/Breach it first/.test(afterBreach), afterBreach.split("\n")[0]);
     await connect(); // left and came back
     check("leaving the server closes it again", locked(await fs.listDirectory(home, intruder, `${base}/box/vault`)));
 
@@ -174,13 +237,30 @@ async function main() {
     const ownerBreach = await run(owner, "breach", "vault");
     check("and `breach` tells the owner there is nothing to do", ownerBreach.success === true && /nothing to breach/.test(String(ownerBreach.output)));
     // The skeleton: provisioning protects /etc so it cannot be removed — that
-    // must not make every home's /etc a breach (utils/fsSkeleton.ts).
+    // must not make every home's /etc a breach (FileSystemNode.protectsContents).
     const etc = await prisma.fileSystemNode.findFirstOrThrow({ where: { serverId: home, name: "etc", parent: { parentId: null } } });
     etcWas = { id: etc.id, isProtected: etc.isProtected };
-    await prisma.fileSystemNode.update({ where: { id: etc.id }, data: { isProtected: true } });
+    // As provisioning does it: node-only protection.
+    await prisma.fileSystemNode.update({ where: { id: etc.id }, data: { isProtected: true, protectsContents: false } });
     await mk(home, etc.id, "motd", "file");
     check("a protected skeleton directory (/etc) is not a lock", (await fs.listDirectory(home, intruder, "/etc")).success === true &&
       (await fs.readFile(home, intruder, "/etc/motd")).success === true);
+
+    console.log("\nBR-8 — `protect` on a skeleton directory");
+    const dc = await import("../src/services/commandModules/defenseCommands");
+    const defense: any = new dc.DefenseCommandsModule();
+    const ownerCtx = { ...ctx(owner), gameStateManager: { getSession: () => ({ homeServerId: home, currentServerId: home, currentDirectory: "/" }) } };
+    const data = await prisma.fileSystemNode.findFirstOrThrow({ where: { serverId: home, name: "data", parent: { parentId: null } } });
+    dataWas = { id: data.id, isProtected: data.isProtected, protectsContents: data.protectsContents };
+    await mk(home, data.id, "ledger.txt", "file");
+    await defense.execute({ command: "protect", args: ["/data"] }, ownerCtx);
+    const dataLs = await fs.listDirectory(home, intruder, "/data");
+    check("`protect /data` locks its contents (was: a name rule exempted /data — nothing protected)", locked(dataLs), dataLs.message);
+    check("and protects what is inside", (await fs.protectingNode((await prisma.fileSystemNode.findFirstOrThrow({ where: { parentId: data.id, name: "ledger.txt" } })).id))?.id === data.id);
+    await defense.execute({ command: "protect", args: ["/etc"] }, ownerCtx);
+    const etcAfter = await prisma.fileSystemNode.findUniqueOrThrow({ where: { id: etc.id } });
+    check("`protect /etc` on provisioned node-only protection switches it ON (not off)", etcAfter.isProtected && etcAfter.protectsContents);
+
     const world = await prisma.gameServer.create({ data: { name: `${tag}_world`, ipAddress: await freeIp(prisma), type: "corporate" } });
     worldId = world.id;
     const wroot = await mk(world.id, null as any, "/", "directory");
@@ -195,8 +275,10 @@ async function main() {
       for (const id of [...nodeIds].reverse()) await prisma.fileSystemNode.delete({ where: { id } });
       await prisma.serverConnection.deleteMany({ where: { id: { in: connIds } } });
       if (worldId) await prisma.gameServer.delete({ where: { id: worldId } });
-      if (etcWas) await prisma.fileSystemNode.update({ where: { id: etcWas.id }, data: { isProtected: etcWas.isProtected } });
+      if (etcWas) await prisma.fileSystemNode.update({ where: { id: etcWas.id }, data: { isProtected: etcWas.isProtected, protectsContents: true } });
+      if (dataWas) await prisma.fileSystemNode.update({ where: { id: dataWas.id }, data: { isProtected: dataWas.isProtected, protectsContents: dataWas.protectsContents } });
     } catch (err) { fail++; console.log(`  [FAIL] cleanup — ${(err as Error).message}`); }
+    await deleteRegisteredUsers(prisma).catch((e: unknown) => { fail++; console.log(`  [FAIL] cleanup — fixture users: ${(e as Error).message}`); });
   }
   console.log(`\n=== ${pass} PASS / ${fail} FAIL ===`);
   await prisma.$disconnect();
