@@ -21,6 +21,7 @@ import type { AvatarInfo } from "../../../shared/types";
 import type { MessageOperationResult, ChatContact } from "./messageService";
 import { getService } from "../di/resolve";
 import type { UserRepository } from "../repositories/userRepository";
+import { notifyUser } from "../utils/notify";
 
 // ==================== CHAT SERVICE CLASS ====================
 
@@ -103,49 +104,126 @@ export class ChatService {
 
   // ==================== CHAT CONTACTS ====================
 
-  /**
-   * The caller's contact list. Selects only the contact's username: the
-   * command module did `include: { contact: true }`, loading every field of
-   * every contact's User row — password hash included — to print a name.
-   */
-  async listContacts(userId: string) {
-    return prisma.contact.findMany({
-      where: { userId },
-      select: { handle: true, status: true, contact: { select: { username: true } } },
-    });
+  // ── Contacts: a MUTUAL relationship (maintainer decision Q5, 2026-10-08) ──
+  //
+  // Rows are directional (owner → contact). `contact add bob` writes
+  // me→bob "pending" and notifies bob; `contact accept me` (by bob) turns it
+  // "accepted" and writes bob→me "accepted"; `decline` deletes the request;
+  // `remove` ends it from both sides. Before this there was no accept flow at
+  // all: every contact read "(pending)" forever.
+
+  private users() {
+    return getService<UserRepository>(USER_REPOSITORY);
   }
 
   /**
-   * Add a user to the caller's contacts. A4: was a find-then-create in
-   * socialCommands — two concurrent adds hit `@@unique([userId,
-   * contactUserId])` and the loser surfaced as "Command execution failed";
-   * and nothing stopped a player adding themselves.
+   * The caller's contacts, split by state. Selects usernames only — the
+   * command module once loaded whole User rows, password hash included.
+   */
+  async listContacts(userId: string): Promise<{ accepted: string[]; outgoing: string[]; incoming: string[] }> {
+    const [mine, toMe] = await Promise.all([
+      prisma.contact.findMany({ where: { userId }, select: { status: true, contact: { select: { username: true } } } }),
+      prisma.contact.findMany({ where: { contactUserId: userId, status: "pending" }, select: { owner: { select: { username: true } } } }),
+    ]);
+    return {
+      accepted: mine.filter((c) => c.status === "accepted").map((c) => c.contact.username),
+      outgoing: mine.filter((c) => c.status === "pending").map((c) => c.contact.username),
+      incoming: toMe.map((c) => c.owner.username),
+    };
+  }
+
+  /**
+   * Ask to add someone. If they already asked YOU, this accepts instead —
+   * two people adding each other end up mutual, not two dangling requests.
+   * A4 fixes kept: no self-add; a concurrent duplicate is "already sent",
+   * not a P2002 thrown as "Command execution failed".
    */
   async addContact(userId: string, username: string): Promise<{ ok: boolean; message: string }> {
-    // The one by-name rule (case-insensitive) — this stayed exact when msg,
-    // mail and admin moved to it, so `contact add bob` missed user "Bob".
-    const target = await getService<UserRepository>(USER_REPOSITORY).findByUsername(username);
+    const target = await this.users().findByUsername(username);
     if (!target) return { ok: false, message: "User not found" };
     if (target.id === userId) return { ok: false, message: "You can't add yourself as a contact." };
+
+    const existing = await prisma.contact.findUnique({
+      where: { userId_contactUserId: { userId, contactUserId: target.id } },
+      select: { status: true },
+    });
+    if (existing?.status === "accepted") return { ok: false, message: `${target.username} is already a contact.` };
+    if (existing) return { ok: false, message: `Request to ${target.username} already sent.` };
+
+    const theirs = await prisma.contact.findUnique({
+      where: { userId_contactUserId: { userId: target.id, contactUserId: userId } },
+      select: { status: true },
+    });
+    if (theirs?.status === "pending") return this.acceptContact(userId, target.username);
+
+    const me = await this.users().findById(userId);
     try {
       await prisma.contact.create({
         data: { userId, contactUserId: target.id, handle: target.username, status: "pending" },
       });
     } catch (err) {
-      if ((err as { code?: string }).code === "P2002") return { ok: false, message: "Contact already exists" };
+      if ((err as { code?: string }).code === "P2002") return { ok: false, message: `Request to ${target.username} already sent.` };
       throw err;
     }
-    return { ok: true, message: `Added ${target.username} to contacts` };
+    await notifyUser(this.io, target.id, {
+      type: "contact_request",
+      category: "social",
+      title: "Contact request",
+      message: `${me?.username ?? "Someone"} wants to add you as a contact. 'contact accept ${me?.username}' or 'contact decline ${me?.username}'.`,
+    });
+    return { ok: true, message: `Contact request sent to ${target.username}.` };
   }
 
-  /** Remove a contact. Says so when there was nothing to remove. */
+  /** Accept `requesterName`'s pending request. Makes the contact mutual. */
+  async acceptContact(userId: string, requesterName: string): Promise<{ ok: boolean; message: string }> {
+    const requester = await this.users().findByUsername(requesterName);
+    if (!requester) return { ok: false, message: "User not found" };
+    const me = await this.users().findById(userId);
+    const accepted = await prisma.$transaction(async (tx) => {
+      // The transition is the authorization: only a PENDING request moves.
+      const moved = await tx.contact.updateMany({
+        where: { userId: requester.id, contactUserId: userId, status: "pending" },
+        data: { status: "accepted" },
+      });
+      if (moved.count !== 1) return false;
+      await tx.contact.upsert({
+        where: { userId_contactUserId: { userId, contactUserId: requester.id } },
+        update: { status: "accepted" },
+        create: { userId, contactUserId: requester.id, handle: requester.username, status: "accepted" },
+      });
+      return true;
+    });
+    if (!accepted) return { ok: false, message: `No pending request from ${requester.username}.` };
+    await notifyUser(this.io, requester.id, {
+      type: "contact_accepted",
+      category: "social",
+      title: "Contact accepted",
+      message: `${me?.username ?? "Someone"} accepted your contact request.`,
+    });
+    return { ok: true, message: `${requester.username} is now a contact.` };
+  }
+
+  /** Decline `requesterName`'s pending request (deletes it). */
+  async declineContact(userId: string, requesterName: string): Promise<{ ok: boolean; message: string }> {
+    const requester = await this.users().findByUsername(requesterName);
+    if (!requester) return { ok: false, message: "User not found" };
+    const gone = await prisma.contact.deleteMany({
+      where: { userId: requester.id, contactUserId: userId, status: "pending" },
+    });
+    if (gone.count === 0) return { ok: false, message: `No pending request from ${requester.username}.` };
+    return { ok: true, message: `Declined ${requester.username}'s request.` };
+  }
+
+  /**
+   * End a contact from BOTH sides (it is mutual), or withdraw your own
+   * pending request. Says so when there was nothing to remove.
+   */
   async removeContact(userId: string, username: string): Promise<{ ok: boolean; message: string }> {
-    // The one by-name rule (case-insensitive) — this stayed exact when msg,
-    // mail and admin moved to it, so `contact add bob` missed user "Bob".
-    const target = await getService<UserRepository>(USER_REPOSITORY).findByUsername(username);
+    const target = await this.users().findByUsername(username);
     if (!target) return { ok: false, message: "User not found" };
-    const gone = await prisma.contact.deleteMany({ where: { userId, contactUserId: target.id } });
-    if (gone.count === 0) return { ok: false, message: `${target.username} is not in your contacts.` };
+    const mine = await prisma.contact.deleteMany({ where: { userId, contactUserId: target.id } });
+    if (mine.count === 0) return { ok: false, message: `${target.username} is not in your contacts.` };
+    await prisma.contact.deleteMany({ where: { userId: target.id, contactUserId: userId, status: "accepted" } });
     return { ok: true, message: `Removed ${target.username} from contacts` };
   }
 
@@ -155,8 +233,10 @@ export class ChatService {
   async getChatContacts(userId: string): Promise<MessageOperationResult> {
     try {
       // Get DB contacts
+      // ACCEPTED contacts only: a request the other side never answered is
+      // not a contact (Q5). Messaging anyone stays allowed regardless.
       const dbContacts = await prisma.contact.findMany({
-        where: { userId },
+        where: { userId, status: "accepted" },
         include: {
           contact: {
             select: {

@@ -3958,6 +3958,17 @@ Write them per-refactor, immediately before touching the code:
           live socket. Q7: `help` gates the whole fragment module on `hasFragmentAccess`.
           Harnesses: verify-session-policy, verify-fragment-reveal, verify-inherited-protection,
           account-admin AA-1/2/5 reworked, bounty B-5b. All negative-controlled.
+      - **BATCH 2 DONE (2026-10-09): Q5, Q8.** Q5 contacts: request → accept/decline, mutual on
+          accept, crossing requests auto-accept, remove ends both sides, chat lists ACCEPTED only;
+          requests and acceptances notify (`contact_request` / `contact_accepted`). Q8 faction
+          missions: `missionService.listClaimableFactionMissions` (excludes any mission in someone's
+          offers — the old `factionService.getFactionMissions` listed private offers to the whole
+          faction; deleted) and `claimFactionMission`; `accept <id>` falls back to a claim;
+          `assignMission`'s claim is now an atomic `updateMany` (it was check-then-act — proven with
+          a two-party barrier, since a plain Promise.all race passed WITHOUT the guard). Listing
+          shows the 16-char prefix (the column was too narrow and cut it to 14) and the right
+          command — it said `mission accept`, the DETAIL command. Harnesses:
+          verify-faction-missions (new), verify-a4-contacts (rewritten). All negative-controlled.
         - **NEW — Q9 (raise): `protect`'s usage text also promised "Protected dirs require
           memory_trace minigame to access".** Nothing implements that gate. The text now states what
           protection does; whether to BUILD an entry minigame for protected directories is open.

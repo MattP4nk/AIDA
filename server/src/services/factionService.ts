@@ -4,7 +4,6 @@ import {
   PrismaClient,
   Faction,
   FactionMember,
-  Mission,
   GameServer,
 } from "@prisma/client";
 import { Logger } from "pino";
@@ -650,12 +649,9 @@ export class FactionService extends EventEmitter {
 
   // ==================== MISSIONS & SERVERS ====================
 
-  public async getFactionMissions(factionId: string): Promise<Mission[]> {
-    return this.prisma.mission.findMany({
-      where: { factionId, status: "available" },
-      orderBy: { createdAt: "desc" },
-    });
-  }
+  // getFactionMissions was here — removed 2026-10-08: it listed every
+  // `available` mission with the faction's id, including players' private
+  // generated offers. missionService.listClaimableFactionMissions replaces it.
 
   public async getFactionServers(factionId: string): Promise<GameServer[]> {
     return this.prisma.gameServer.findMany({

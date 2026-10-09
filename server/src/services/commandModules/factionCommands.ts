@@ -11,7 +11,7 @@ import {
   Column,
   HelpEntry,
 } from "./asciiBox";
-import { contests as contestsSvc, factions as factionsSvc, missionIntegration as missionIntegrationSvc, resources as resourcesSvc, servers as serversSvc, warfare } from "./deps";
+import { contests as contestsSvc, factions as factionsSvc, missionIntegration as missionIntegrationSvc, missions as missionsSvc, resources as resourcesSvc, servers as serversSvc, warfare } from "./deps";
 import logger from "../../logger";
 
 export class FactionCommandsModule implements CommandModule {
@@ -282,7 +282,9 @@ export class FactionCommandsModule implements CommandModule {
       return errorResult("You must be in a faction to view faction missions.");
     }
 
-    const missions = await factionsSvc().getFactionMissions(
+    // Only missions a member can actually claim — not one player's private
+    // generated offer that happens to carry this faction's id.
+    const missions = await missionsSvc().listClaimableFactionMissions(
       membership.factionId,
     );
 
@@ -291,14 +293,16 @@ export class FactionCommandsModule implements CommandModule {
     }
 
     const columns: Column[] = [
-      { header: "ID", width: 6 },
+      { header: "ID", width: 18 }, // 16 chars + the table's 2 of padding
       { header: "TITLE", width: 24 },
       { header: "DIFFICULTY", width: 10 },
       { header: "REWARD", width: 12 },
     ];
 
     const rows = missions.map((mission) => {
-      const displayId = mission.id.substring(mission.id.length - 4);
+      // The PREFIX, which `accept` resolves (utils/idPrefix). This printed the
+      // LAST four characters, which no resolver matched.
+      const displayId = mission.id.substring(0, 16);
       const reward =
         (mission.reward as { credits?: number } | null)?.credits || 0;
       return [
@@ -312,7 +316,9 @@ export class FactionCommandsModule implements CommandModule {
     const lines = table(
       columns,
       rows,
-      "Use 'mission accept <id>' to start a mission.",
+      // `accept <id>` — `mission accept` is the DETAIL command and answered
+      // "Mission not found: accept".
+      "Use 'accept <id>' to claim and start a mission.",
       context.terminalWidth,
     );
 

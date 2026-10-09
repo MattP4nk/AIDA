@@ -335,6 +335,49 @@ class MissionService extends EventEmitter {
   }
 
   /**
+   * Faction missions a member can claim: the faction's `available`,
+   * unassigned missions that are in NOBODY's offers. Generated per-player
+   * offers are also `available` Mission rows, some with a `factionId`; listing
+   * those to the whole faction would show one player's private offer to all.
+   */
+  public async listClaimableFactionMissions(factionId: string): Promise<Mission[]> {
+    const rows = await this.prisma.mission.findMany({
+      where: { factionId, status: "available", assignedTo: null },
+      orderBy: { createdAt: "desc" },
+    });
+    const held = await this.playerMissions.heldByAnyone(rows.map((m) => m.id));
+    return rows.filter((m) => !held.has(m.id));
+  }
+
+  /**
+   * Claim a faction mission for a member (maintainer decision Q8,
+   * 2026-10-08): `accept <id>` on a faction mission assigns it to that one
+   * player, so two players can never hold the same one. `idOrPrefix` is the
+   * id as `faction missions` shows it.
+   */
+  public async claimFactionMission(
+    userId: string,
+    factionId: string,
+    idOrPrefix: string,
+  ): Promise<{ ok: true; missionId: string } | { ok: false; error: string }> {
+    const claimable = await this.listClaimableFactionMissions(factionId);
+    const found = await resolveIdOrPrefix(
+      idOrPrefix,
+      async (id) => claimable.find((m) => m.id === id) ?? null,
+      async (prefix) => claimable.filter((m) => m.id.startsWith(prefix)).slice(0, 2),
+    );
+    if (!found.ok) {
+      return { ok: false, error: found.reason === "ambiguous" ? `Ambiguous mission id: ${idOrPrefix}. Use more characters.` : `Mission not found: ${idOrPrefix}` };
+    }
+    try {
+      await this.assignMission(userId, found.row.id);
+      return { ok: true, missionId: found.row.id };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : "Mission is not available" };
+    }
+  }
+
+  /**
    * Assign a mission to a player
    * @param userId - User ID
    * @param missionId - Mission ID
@@ -363,6 +406,19 @@ class MissionService extends EventEmitter {
         throw new Error("Mission is not available");
       }
 
+      // CLAIM ATOMICALLY. This read the (cached) status above and then wrote
+      // `status: "assigned"` below — a check-then-act: two players claiming
+      // the same faction mission at once both passed and both got it. It had
+      // no callers then; Q8 (2026-10-08) made it the faction-mission claim.
+      const claimed = await this.prisma.mission.updateMany({
+        where: { id: missionId, status: "available", assignedTo: null },
+        data: { status: "assigned", assignedTo: userId },
+      });
+      if (claimed.count !== 1) {
+        this.cacheService.del(`mission:${missionId}`);
+        throw new Error("Mission is not available");
+      }
+
       // Parse objectives
       const objectives =
         (mission.objectives as unknown as MissionObjective[]) || [];
@@ -382,14 +438,7 @@ class MissionService extends EventEmitter {
         expiresAt: missionExpiresAt(mission.timeLimit),
       };
 
-      // Update mission status and assign to user
-      await this.prisma.mission.update({
-        where: { id: missionId },
-        data: {
-          status: "assigned",
-          assignedTo: userId,
-        },
-      });
+      // (Claimed above, atomically.)
       this.cacheService.del(`mission:${missionId}`);
 
       // Store player mission in progress (create progress record if missing).
@@ -1862,6 +1911,7 @@ import { missionExpiresAt, missionTimeLimitMs } from "../utils/missionTime";
 import { requiredObjectivesComplete } from "../utils/missionCompletion";
 import { BASELINE_COMPLETION_BONUS, MAX_ACTIVE_MISSIONS, MISSION_EXPIRATION_INTERVAL_MS } from "../config/gameBalance";
 import { boundMissionRewards, boundMissionDifficulty } from "../utils/missionRewards";
+import { resolveIdOrPrefix } from "../utils/idPrefix";
 export const missionService = new Proxy({} as MissionService, {
   get(_target, prop) {
     const instance = container.resolve(MISSION_SERVICE as any);

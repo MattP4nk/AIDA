@@ -16,7 +16,7 @@ import {
   render,
 } from "./asciiBox";
 import { getObjectiveHint } from "../missionObjectiveTypes";
-import { missionGenerator as missionGeneratorSvc, missions as missionsSvc, storyMissions } from "./deps";
+import { factions as factionsSvc, missionGenerator as missionGeneratorSvc, missions as missionsSvc, storyMissions } from "./deps";
 
 export class MissionCommandsModule implements CommandModule {
   // Per-player mission index: maps numeric shortcut (1-based) to full mission ID
@@ -518,7 +518,19 @@ export class MissionCommandsModule implements CommandModule {
         missionId,
         context.userId,
       );
-      const fullMissionId = resolved?.missionId || missionId;
+      let fullMissionId = resolved?.missionId || missionId;
+
+      // Not one of your offers: a FACTION mission is claimed for you on
+      // accept (maintainer decision Q8). Before, nothing could offer one, so
+      // every faction mission was listed and unacceptable.
+      if (!resolved) {
+        const membership = await factionsSvc().getUserFaction(context.userId);
+        if (membership) {
+          const claim = await missionService.claimFactionMission(context.userId, membership.factionId, missionId);
+          if (claim.ok) fullMissionId = claim.missionId;
+          else if (!/not found/i.test(claim.error)) return errorResult(claim.error);
+        }
+      }
 
       await missionService.acceptMission(context.userId, fullMissionId);
 

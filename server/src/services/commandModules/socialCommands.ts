@@ -92,8 +92,8 @@ export class SocialCommandsModule implements CommandModule {
         command: "contact",
         category: "social",
         description: "Manage your contact list",
-        usage: "contact [list|add|remove] [username]",
-        examples: ["contact list", "contact add alice", "contact remove bob"],
+        usage: "contact [list|add|accept|decline|remove] [username]",
+        examples: ["contact list", "contact add alice", "contact accept bob", "contact decline carol", "contact remove bob"],
       },
       {
         command: "chat",
@@ -450,15 +450,17 @@ export class SocialCommandsModule implements CommandModule {
     const targetUsername = command.args[1];
 
     if (action === "list") {
-      const contacts = await chat().listContacts(userId);
+      const { accepted, outgoing, incoming } = await chat().listContacts(userId);
 
-      if (contacts.length === 0) {
+      if (accepted.length + outgoing.length + incoming.length === 0) {
         return successResult("No contacts found.");
       }
 
-      const items = contacts.map(
-        (c) => `${c.contact?.username || c.handle} (${c.status})`,
-      );
+      const items = [
+        ...accepted,
+        ...outgoing.map((u) => `${u} (pending)`),
+        ...incoming.map((u) => `${u} (wants to add you — 'contact accept ${u}')`),
+      ];
       return {
         success: true,
         output: render(list("CONTACTS", items, 44)).split("\n"),
@@ -485,7 +487,17 @@ export class SocialCommandsModule implements CommandModule {
       return r.ok ? successResult(r.message) : errorResult(r.message);
     }
 
-    return errorResult("Usage: contact [list|add|remove] [username]");
+    if (action === "accept" || action === "decline") {
+      if (!targetUsername) {
+        return errorResult(`Usage: contact ${action} <username>`);
+      }
+      const r = action === "accept"
+        ? await chat().acceptContact(userId, targetUsername)
+        : await chat().declineContact(userId, targetUsername);
+      return r.ok ? successResult(r.message) : errorResult(r.message);
+    }
+
+    return errorResult("Usage: contact [list|add|accept|decline|remove] [username]");
   }
 
   private async handleForum(

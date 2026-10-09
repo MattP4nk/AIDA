@@ -273,6 +273,17 @@ export class PlayerMissionRepository extends EventEmitter {
     return n > 0;
   }
 
+  /** Which of these missions does ANY player hold (in any status)? */
+  public async heldByAnyone(missionIds: string[]): Promise<Set<string>> {
+    if (missionIds.length === 0) return new Set();
+    const rows = await this.prisma.playerMission.findMany({
+      where: { missionId: { in: missionIds } },
+      select: { missionId: true },
+      distinct: ["missionId"],
+    });
+    return new Set(rows.map((r) => r.missionId));
+  }
+
   // ── WRITES ────────────────────────────────────────────────────────────
 
   /** Insert or replace the player's copy of one mission. */
