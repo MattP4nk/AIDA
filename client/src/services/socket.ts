@@ -90,10 +90,10 @@ export const activeConnectionSession = writable<{
   sessionId?: string;
 } | null>(null);
 
-// Active file access challenge store (sweep/crack/storm panels)
+// Active file access challenge store (sweep/crack/storm/breach panels)
 export const activeFileChallenge = writable<{
   active: boolean;
-  type: "sweep" | "crack" | "storm";
+  type: "sweep" | "crack" | "storm" | "breach";
   targetFile?: string;
   targetDir?: string;
   challenge?: any;
@@ -895,7 +895,7 @@ class SocketService {
         ]);
       }
 
-      // Check if this is a file access challenge (sweep/crack/storm)
+      // Check if this is a file access challenge (sweep/crack/storm/breach)
       if (data.data?.fileAccessSessionId && data.data?.fileAccessType) {
         activeFileChallenge.set({
           active: true,

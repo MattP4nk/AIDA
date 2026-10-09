@@ -1583,11 +1583,11 @@
         </div>
     {/if}
 
-    <!-- Sticky File Access Challenge Panel (sweep/crack/storm) -->
+    <!-- Sticky File Access Challenge Panel (sweep/crack/storm/breach) -->
     {#if $activeFileChallenge?.active && $activeFileChallenge.challenge}
         <div class="file-challenge-panel">
             <div class="challenge-header file-access">
-                <span>{$activeFileChallenge.type === "sweep" ? "SWEEP" : $activeFileChallenge.type === "storm" ? "STORM" : "CRACK"} —
+                <span>{$activeFileChallenge.type.toUpperCase()} —
                 {$activeFileChallenge.targetDir || $activeFileChallenge.targetFile || "unknown"}</span>
                 {#if (challengeCountdowns.get("file") ?? 0) > 0}
                     <span class="challenge-timer" class:warning={(challengeCountdowns.get("file") ?? 0) <= ($activeFileChallenge.challenge.timeLimit || 60) * 0.25} class:urgent={(challengeCountdowns.get("file") ?? 0) <= 5}>

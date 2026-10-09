@@ -746,6 +746,7 @@ export class ServerContentService {
       update: {},
     });
 
+    // Skeleton directories — keep utils/fsSkeleton.ts SKELETON_DIRS their union.
     const baseDirs = ["etc", "home", "var", "tmp", "logs", "data"];
     for (const dir of baseDirs) {
       // CHILDREN are covered by the unique, so this is a real upsert.

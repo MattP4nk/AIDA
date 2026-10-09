@@ -137,9 +137,9 @@ export class DefenseCommandsModule implements CommandModule {
 
     if (command.args.length === 0) {
       // The usage text promised "Protected dirs require memory_trace minigame
-      // to access" — nothing implements that gate (raised with the maintainer,
-      // 2026-10-08). It now states what protection does.
-      return errorResult("Usage: protect <directory>\nToggles protection on a directory. Everything inside it cannot be deleted, moved or modified by intruders, and is hidden from low-access ones.");
+      // to access" — nothing implemented it until decision Q9 (2026-10-09):
+      // intruders now need a won `breach` to open one.
+      return errorResult("Usage: protect <directory>\nToggles protection on a directory. Intruders cannot delete, move or modify anything inside it, and must win a memory trace ('breach') to open it.");
     }
 
     const dirName = command.args[0]!;
@@ -156,7 +156,7 @@ export class DefenseCommandsModule implements CommandModule {
     await context.fileService.setNodeFlags(dir.id, { isProtected: newProtected });
 
     if (newProtected) {
-      return successResult(`Directory '${path}' is now PROTECTED.\nFiles inside cannot be deleted, moved, or modified by attackers.\nProtected files are hidden from low-access intruders.\nUse 'protect ${dirName}' again to remove protection.`);
+      return successResult(`Directory '${path}' is now PROTECTED.\nFiles inside cannot be deleted, moved, or modified by attackers.\nIntruders must win a memory trace ('breach') to open it.\nUse 'protect ${dirName}' again to remove protection.`);
     } else {
       return successResult(`Protection removed from '${path}'.`);
     }

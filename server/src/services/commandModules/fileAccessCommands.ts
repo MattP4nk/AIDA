@@ -4,16 +4,19 @@
  * Commands:
  *   sweep           — Scan current directory for hidden files (forensics minigame)
  *   sweep.reveal    — Submit answer to sweep challenge
+ *   breach          — Open a protected directory on another player's home (memory_trace)
+ *   breach.extract  — Submit the breach answer
  */
 
 import type { Command, CommandResult, MinigameChallenge } from "../../../../shared/types";
 import type { CommandContext, CommandInfo, CommandModule } from "./interface";
-import { errorResult, spawnBackgroundProcess } from "./helpers";
+import { errorResult, getSession, resolvePath, spawnBackgroundProcess, successResult } from "./helpers";
 import {
   generateAnomalyScanChallenge,
   generateDiskSectorChallenge,
   validateSweepAnswer,
 } from "../fileAccessMinigameGenerator";
+import { generateMemoryTraceChallenge, validateAnswer } from "../hackMinigameGenerator";
 
 import logger from "../../logger";
 import { servers } from "./deps";
@@ -34,6 +37,17 @@ interface SweepSession {
 
 const activeSweepSessions = new Map<string, SweepSession>();
 
+interface BreachSession {
+  challenge: MinigameChallenge;
+  serverId: string;
+  dirId: string;
+  path: string;
+  expiresAt: number;
+  attemptsLeft: number;
+}
+
+const activeBreachSessions = new Map<string, BreachSession>();
+
 // Cleanup expired sessions periodically
 // O9: unref'd. This prunes an in-memory Map only — it touches no
 // database and has no service to own a stop() — so keeping the
@@ -44,6 +58,9 @@ setInterval(() => {
     if (now > session.expiresAt) {
       activeSweepSessions.delete(userId);
     }
+  }
+  for (const [userId, session] of activeBreachSessions) {
+    if (now > session.expiresAt) activeBreachSessions.delete(userId);
   }
 }, 30_000).unref?.();
 
@@ -56,6 +73,8 @@ export class FileAccessCommandsModule implements CommandModule {
   public commands = new Set([
     "sweep",
     "sweep.reveal",
+    "breach",
+    "breach.extract",
   ]);
 
   async execute(command: Command, context: CommandContext): Promise<CommandResult> {
@@ -64,6 +83,10 @@ export class FileAccessCommandsModule implements CommandModule {
         return this.handleSweep(command, context);
       case "sweep.reveal":
         return this.handleSweepReveal(command, context);
+      case "breach":
+        return this.handleBreach(command, context);
+      case "breach.extract":
+        return this.handleBreachExtract(command, context);
       default:
         return errorResult(`Unknown command: ${command.command}`);
     }
@@ -129,6 +152,11 @@ export class FileAccessCommandsModule implements CommandModule {
     const dirResult = await context.fileService.resolvePath(serverId, directoryPath);
     if (!dirResult.exists || !dirResult.nodeId) {
       this.emitResult(context, false, `Directory not found: ${directoryPath}`);
+      return;
+    }
+    const lock = await context.fileService.lockedProtection(context.userId, serverId, dirResult.nodeId, true);
+    if (lock) {
+      this.emitResult(context, false, `${lock.path} is PROTECTED. Breach it first: 'breach ${lock.path}'`);
       return;
     }
 
@@ -276,6 +304,116 @@ export class FileAccessCommandsModule implements CommandModule {
   }
 
   // ═══════════════════════════════════════════════════════════════
+  // BREACH — open a protected directory (maintainer decision Q9, 2026-10-09)
+  //
+  // `protect` promised that protected directories "require memory_trace
+  // minigame to access"; nothing implemented it, and intruders could ls, cd
+  // and cat inside freely. fileService.lockedProtection is the gate; this is
+  // the way through it. A win opens the directory until the player leaves
+  // the server.
+  // ═══════════════════════════════════════════════════════════════
+
+  private async handleBreach(command: Command, context: CommandContext): Promise<CommandResult> {
+    const session = getSession(context);
+    if (!session?.currentServerId) return errorResult("Not connected to any server.");
+    const target = command.args[0];
+    if (!target) return errorResult("Usage: breach <directory>");
+    if (activeBreachSessions.has(context.userId)) {
+      return errorResult("Breach already in progress. Submit with 'breach.extract <address> <hex_token>'.");
+    }
+
+    const serverId = session.currentServerId;
+    const path = resolvePath(target, session.currentDirectory || "/");
+    const resolution = await context.fileService.resolvePath(serverId, path);
+    if (!resolution.exists || !resolution.nodeId || !resolution.isDirectory) {
+      return errorResult(`Directory not found: ${path}`);
+    }
+
+    const lock = await context.fileService.lockedProtection(context.userId, serverId, resolution.nodeId, true);
+    if (!lock) return successResult(`${path} is open to you — nothing to breach.`);
+    if (lock.id !== resolution.nodeId) {
+      return errorResult(`${path} is inside ${lock.path}, which is protected too. Breach that first: 'breach ${lock.path}'`);
+    }
+
+    // The defender's vault makes the dump harder; the attacker's skills add hints.
+    const server = await servers().findById(serverId);
+    const ownerVault = server?.ownerId ? (await context.playerProgress.get(server.ownerId))?.homeVault ?? 0 : 0;
+    const progress = await context.playerProgress.get(context.userId);
+    const raw = generateMemoryTraceChallenge(4 + ownerVault, {
+      hacking: progress?.hacking ?? 0,
+      forensics: progress?.forensics ?? 0,
+    });
+    // The generator is shared with hack sessions, whose submit command differs.
+    const challenge: MinigameChallenge = {
+      ...raw,
+      displayText: raw.displayText.map((l) =>
+        l.startsWith("Submit with:") ? "Submit with: breach.extract <address> <hex_token>" : l),
+    };
+
+    activeBreachSessions.set(context.userId, {
+      challenge,
+      serverId,
+      dirId: lock.id,
+      path: lock.path,
+      expiresAt: Date.now() + challenge.timeLimit * 1000 + 5000, // +5s grace
+      attemptsLeft: challenge.maxAttempts,
+    });
+
+    const { solution: _solution, ...visible } = challenge;
+    return {
+      success: true,
+      output: challenge.displayText.join("\n"),
+      data: {
+        fileAccessSessionId: `breach_${Date.now().toString(36)}`,
+        fileAccessType: "breach",
+        challenge: visible,
+        targetDir: lock.path,
+      },
+      timestamp: new Date(),
+    };
+  }
+
+  private async handleBreachExtract(command: Command, context: CommandContext): Promise<CommandResult> {
+    const breach = activeBreachSessions.get(context.userId);
+    if (!breach) return errorResult("No breach in progress. Run 'breach <directory>' first.");
+
+    const resolved = (output: string, success: boolean): CommandResult =>
+      ({ success, output, data: { fileAccessResolved: true }, timestamp: new Date() });
+
+    if (Date.now() > breach.expiresAt) {
+      activeBreachSessions.delete(context.userId);
+      return resolved("The trace window closed. Run 'breach' again.", false);
+    }
+    // The breach is held against the server it was started on.
+    if (getSession(context)?.currentServerId !== breach.serverId) {
+      activeBreachSessions.delete(context.userId);
+      return resolved("You left the server. Breach aborted.", false);
+    }
+
+    const answer = command.args.join(" ").trim();
+    if (!answer) return errorResult("Usage: breach.extract <address> <hex_token>");
+
+    const { correct, feedback } = validateAnswer(breach.challenge, answer);
+    if (correct) {
+      activeBreachSessions.delete(context.userId);
+      if (!(await context.fileService.grantBreach(context.userId, breach.serverId, breach.dirId))) {
+        return resolved("You are no longer connected to that server. Breach lost.", false);
+      }
+      try {
+        await context.playerProgress.addSkill(context.userId, "hacking", 5 + breach.challenge.difficulty);
+      } catch (err) { logger.warn({ err }, "fileAccessCommands.handleBreachExtract: non-critical step failed"); }
+      return resolved(`${feedback}\n${breach.path} is open until you leave this server.`, true);
+    }
+
+    breach.attemptsLeft--;
+    if (breach.attemptsLeft <= 0) {
+      activeBreachSessions.delete(context.userId);
+      return resolved(`${feedback}\nAll attempts exhausted. Breach failed.`, false);
+    }
+    return errorResult(`${feedback} ${breach.attemptsLeft} attempt(s) remaining.`);
+  }
+
+  // ═══════════════════════════════════════════════════════════════
   // Helpers
   // ═══════════════════════════════════════════════════════════════
 
@@ -304,6 +442,20 @@ export class FileAccessCommandsModule implements CommandModule {
         description: "Submit hidden file names discovered during a sweep",
         usage: "sweep.reveal <name1> <name2> ...",
         examples: ["sweep.reveal .secret.key .backdoor_cfg"],
+      },
+      {
+        command: "breach",
+        category: "file_access",
+        description: "Break into a protected directory on another player's home (memory trace)",
+        usage: "breach <directory>",
+        examples: ["breach /home/target/vault"],
+      },
+      {
+        command: "breach.extract",
+        category: "file_access",
+        description: "Submit the address and token found in a breach memory dump",
+        usage: "breach.extract <address> <hex_token>",
+        examples: ["breach.extract 0x7F0120 BEEFCAFE"],
       },
     ];
   }

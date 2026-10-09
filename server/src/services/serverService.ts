@@ -270,19 +270,23 @@ class ServerService {
    * Names are not unique — the dev world has "Pinnacle Financial" 41 times,
    * and a player's home is named after them — so a name picked one of many
    * at random. An ambiguous name is now refused with a pointer to the IP.
+   * A player home never resolves by name, only by IP (decision Q10).
    */
   public async resolveByIpOrName(
     identifier: string,
   ): Promise<{ server: { id: string; name: string; ownerId: string | null; ipAddress: string } } | { ambiguous: number } | null> {
     const byIp = await this.findBasicByIp(identifier);
     if (byIp) return { server: byIp };
+    // A home is named after its owner, so by name it would be reachable from
+    // a username alone — homes are reached by IP only (decision Q10).
+    const nameWhere = { name: identifier, isPlayerHome: false };
     const byName = await this.prisma.gameServer.findMany({
-      where: { name: identifier },
+      where: nameWhere,
       select: { id: true, name: true, ownerId: true, ipAddress: true },
       take: 2,
     });
     if (byName.length === 1 && byName[0]) return { server: byName[0] };
-    if (byName.length > 1) return { ambiguous: await this.prisma.gameServer.count({ where: { name: identifier } }) };
+    if (byName.length > 1) return { ambiguous: await this.prisma.gameServer.count({ where: nameWhere }) };
     return null;
   }
 
@@ -642,6 +646,7 @@ class ServerService {
           isOnline: true,
           encryptionLevel: { lte: maxEncryption },
           id: { notIn: Array.from(knownIds) },
+          isPlayerHome: false, // never another player's home (decision Q10)
         };
 
         // If we have a source IP, scope the scan to the same /16 subnet
@@ -730,11 +735,15 @@ class ServerService {
         const maxEncryption = Math.min(100, playerLevel * 10 + scanLevel * 5);
 
         // Query servers whose IP starts with the given prefix
+        // Other players' homes are never scan results (decision Q10,
+        // 2026-10-09). They are reached through a known IP — a bounty, an
+        // intrusion alert — not by sweeping a prefix.
         const servers = await this.prisma.gameServer.findMany({
           where: {
             ipAddress: { startsWith: ipPrefix },
             isOnline: true,
             encryptionLevel: { lte: maxEncryption },
+            OR: [{ isPlayerHome: false }, { ownerId: userId }],
           },
           orderBy: [{ role: "asc" }, { encryptionLevel: "asc" }],
           take: 5 + scanLevel * 3,

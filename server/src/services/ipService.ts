@@ -28,6 +28,11 @@ import type { Logger } from "pino";
  * of this service is IP *generation* and allocation bookkeeping, which is what
  * it is actually for.
  */
+
+/** The AIDA Training Network's /24 — never a player home. */
+function isTrainingNetIp(ip: string): boolean {
+  return ip.startsWith("10.10.10.");
+}
 @injectable()
 class IPService {
   private allocatedIPs: Set<string>;
@@ -155,12 +160,17 @@ class IPService {
    * Generate a home IP for a new player on an isolated /16 subnet.
    *
    * Picks a random second octet (1–254) that no other player is using,
-   * producing an IP like 10.{unique}.{rand}.{rand}.  This ensures that
-   * scanning from home (which matches on the first two octets) will never
-   * reveal another player's home server.
+   * producing an IP like 10.{unique}.{rand}.{rand}.
    *
-   * Falls back to generateUniqueIP(PLAYER) if all /16 subnets are taken
-   * (extremely unlikely — 254 subnets).
+   * The /16 is tidiness, not isolation. Isolation is that scans never return
+   * another player's home (serverService, decision Q10, 2026-10-09) — which
+   * matters, because only 254 /16s exist: past that many players this falls
+   * back to generateUniqueIP(PLAYER) and homes share /16s. The dev world
+   * passed 254 long ago.
+   *
+   * Never inside 10.10.10.0/24: that is the AIDA Training Network
+   * (referenceValidationService.resolveTopologyFromIP), and both the /16 pick
+   * (second octet 10) and the fallback range could land there.
    */
   public async generatePlayerHomeIP(): Promise<string> {
     // Collect second octets already in use by player home servers
@@ -202,7 +212,12 @@ class IPService {
       this.logger.warn(
         "All player /16 subnets exhausted, falling back to shared range",
       );
-      return this.generateUniqueIP(IPZone.PLAYER);
+      for (let i = 0; i < 20; i++) {
+        const ip = await this.generateUniqueIP(IPZone.PLAYER);
+        if (!isTrainingNetIp(ip)) return ip;
+        this.allocatedIPs.delete(ip);
+      }
+      throw new Error("Could not allocate a player home IP outside the training network");
     }
 
     // Pick a random available second octet
@@ -218,7 +233,7 @@ class IPService {
       const fourthOctet = Math.floor(Math.random() * 254) + 1; // 1–254
       const ip = `10.${secondOctet}.${thirdOctet}.${fourthOctet}`;
 
-      if (this.allocatedIPs.has(ip)) {
+      if (isTrainingNetIp(ip) || this.allocatedIPs.has(ip)) {
         attempts++;
         continue;
       }

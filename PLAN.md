@@ -3982,14 +3982,47 @@ Write them per-refactor, immediately before touching the code:
           one hit (decoy consumed, one real stolen file survives); both sides are told.
           Harnesses: verify-fragment-respawn (new; placement control run 6x since it is random —
           red 5/6), bounty B-8. Also fixed my own flaky S7-11 wait (tick-counted → time-bounded).
-        - **NEW — Q9 (raise): `protect`'s usage text also promised "Protected dirs require
-          memory_trace minigame to access".** Nothing implements that gate. The text now states what
-          protection does; whether to BUILD an entry minigame for protected directories is open.
-        - **NEW — Q10 (raise): the player-home allocator gives each player an isolated /16 — only
-          254 exist** (`ipService.generatePlayerHomeIP`). Past 254 players every home falls back to a
-          random address in a shared range (the dev DB, full of harness accounts, is long past it).
-          That broke 11 harnesses' pid-derived fixture IPs (war-scoring hit P2002); they now use
-          `scripts/lib/free-ip.ts`. The design limit itself is open.
+      - **Q9 + Q10 DONE (2026-10-09).** Decisions: Q9 "build the memory_trace gate", Q10 "hide
+          homes from scans".
+          Q10: other players' homes are never scan results — `serverService.scanByPartialIp`
+          (OR isPlayerHome false / owner = you), `discoverServers` (isPlayerHome false),
+          `networkTopologyService.discoverNeighbors` (FOUND: every home has a WAN link to the
+          Internet Exchange 10.0.0.1, so one `scan` there listed all ~2,140), and
+          `resolveByIpOrName` no longer resolves a HOME BY NAME (`hack "<user>'s Terminal"` reached
+          anyone's home from a username). Homes stay reachable by IP (bounty, intrusion alert).
+          The /16 allocator stays as tidiness; its fallback is now harmless. FOUND: both allocator
+          paths could land in the Training Network's 10.10.10.0/24 — now refused.
+          Q9: `fileService.lockedProtection` — on another player's HOME, a protected directory's
+          contents need a won `breach <dir>` / `breach.extract <addr> <token>` (memory_trace,
+          difficulty 4 + owner's homeVault) to ls, cd, cat, cp, sweep or `report file`. A win is
+          held against the ServerConnection it was won on (`grantBreach`): leaving the server ends
+          it. Nested protected dirs breach outermost first. World servers unchanged. The breach
+          challenge is sent WITHOUT its solution. Client panel: type "breach".
+          FOUND ON THE WAY:
+          (a) **My batch-1 regression:** provisioning flags `/`, /bin and /etc `isProtected`
+              (node can't be removed); batch 1's inheritance made EVERY file on the 492 world
+              servers with a protected root protected — nothing writable for anyone, untested.
+              Fix: `utils/fsSkeleton.ts` — skeleton dirs (root + top-level home/bin/etc/var/tmp/
+              logs/data) protect only themselves; inheritance and the breach gate skip them.
+          (b) Recursive `cp` checked only the top node: a readable parent copied out files the
+              player could not `cat` (and locked contents) as copies the player OWNED, protection
+              stripped. `copyNode` now refuses an unreadable or locked descendant.
+          Harnesses: verify-home-isolation (new), verify-breach (new; random puzzle, run 6x),
+          verify-inherited-protection (+ skeleton). All negative-controlled. Golden re-recorded
+          (help: file_access 1/2 -> 3/4).
+        - **FOLLOW-UPS found during Q9/Q10 (not yet done, next):**
+          1. **Every minigame sends its SOLUTION to the client.** sweep, crack, crack.storm
+             (`data.challenge`) and hack layers (`result.challenge`, `nextChallenge`) emit the whole
+             `MinigameChallenge`, `solution` included — the answer is in the network tab. The
+             client never reads it, so stripping at each emit is safe. (breach already strips.)
+          2. **Harness cleanup orphans home servers.** ~15 harnesses delete their users; the home
+             GameServer survives with ownerId null (GameServer.owner has no onDelete) — 247 such
+             homes in dev, more each run. The game never deletes users. Fix in a scripts/lib
+             helper; the 247 existing orphans need the maintainer's OK to purge.
+          3. **`ls <dir>` ignores the directory's OWN read permission and its ancestors'.**
+             `statPath` (cd) checks the node, `readFile` checks node + ancestors (R11),
+             `listDirectory` checks neither — only each child. Matters only for directories with
+             requiredAccessLevel > 1 (others are always readable): `cd` refuses, `ls <path>` lists.
       - **OPEN QUESTIONS (need the maintainer):**
         1. **Endgame lockout.** 9 fragments exist, 9 are required, nothing restores a bricked one:
            the first failed `fragment.crack` makes the endgame unreachable for everyone.

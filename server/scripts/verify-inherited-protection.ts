@@ -7,7 +7,8 @@
  * protected directory was fully exposed.
  *
  * In-process, against a fixture directory and file in a fixture player's own
- * home (deleted by id in `finally`). The owner is used as the actor because
+ * home, and a fixture world server built by the real provisioner (both
+ * deleted by id in `finally`). The owner is used as the actor because
  * delete and move refuse protected nodes for EVERYONE — so an owner refusal
  * isolates the protection check from permission and access-level checks.
  *
@@ -16,6 +17,7 @@
 import "reflect-metadata";
 import { PrismaClient } from "@prisma/client";
 import { randomUUID } from "node:crypto";
+import { freeIp } from "./lib/free-ip";
 
 const prisma = new PrismaClient();
 const BASE = "http://localhost:3001";
@@ -38,6 +40,7 @@ async function main() {
   const home = await prisma.fileSystemNode.findFirstOrThrow({ where: { serverId, name: tag, type: "directory" } });
 
   const ids: string[] = [];
+  let worldId: string | null = null;
   const mk = async (parentId: string, name: string, type: "file" | "directory", isProtected = false) => {
     const n = await prisma.fileSystemNode.create({
       data: { serverId, parentId, name, type, content: type === "file" ? "x" : null, size: 1, isProtected,
@@ -79,9 +82,33 @@ async function main() {
     await prisma.fileSystemNode.update({ where: { id: vault.id }, data: { isProtected: false } });
     const del2 = await fs.deleteNode(serverId, userId, p);
     check("POSITIVE: with the directory unprotected, the delete goes through", del2.success === true, del2.message);
+
+    // The skeleton (2026-10-09). Provisioning protects `/`, /bin and /etc so
+    // they cannot be removed; inheriting THAT made every file on 492 world
+    // servers protected — nothing writable for anyone. A fixture server built
+    // by the real provisioner, so the flags are the ones the world has.
+    const world = await prisma.gameServer.create({ data: { name: `${tag}_world`, ipAddress: await freeIp(prisma), type: "corporate", ownerId: userId } });
+    worldId = world.id;
+    await fs.initializeFileSystem(world.id, userId);
+    const wroot = await prisma.fileSystemNode.findFirstOrThrow({ where: { serverId: world.id, parentId: null } });
+    const etc = await prisma.fileSystemNode.findFirstOrThrow({ where: { serverId: world.id, parentId: wroot.id, name: "etc" } });
+    const tmp = await prisma.fileSystemNode.findFirstOrThrow({ where: { serverId: world.id, parentId: wroot.id, name: "tmp" } });
+    check("PRECONDITION: the provisioner protects the root and /etc", wroot.isProtected && etc.isProtected);
+    const inTmp = await prisma.fileSystemNode.create({ data: { serverId: world.id, parentId: tmp.id, name: "note.txt", type: "file", content: "x", size: 1, permissions: home.permissions ?? {}, createdBy: userId } });
+    const inEtc = await prisma.fileSystemNode.create({ data: { serverId: world.id, parentId: etc.id, name: "app.conf", type: "file", content: "x", size: 1, permissions: home.permissions ?? {}, createdBy: userId } });
+    check("a file under a protected ROOT is not protected by it (was: every file on the server)", (await fs.protectingNode(inTmp.id)) === null);
+    check("nor one under a protected /etc", (await fs.protectingNode(inEtc.id)) === null);
+    check("POSITIVE: the skeleton directory itself still is", (await fs.protectingNode(etc.id))?.id === etc.id);
+    const wset = await fs.effectivelyProtectedIds(world.id);
+    check("the bulk set agrees", wset.has(wroot.id) && wset.has(etc.id) && !wset.has(inTmp.id) && !wset.has(inEtc.id));
+    const delTmp = await fs.deleteNode(world.id, userId, "/tmp/note.txt");
+    check("so it can be deleted (was: 'protected by /')", delTmp.success === true, delTmp.message);
   } finally {
-    try { await prisma.fileSystemNode.deleteMany({ where: { id: { in: ids } } }); }
-    catch (err) { fail++; console.log(`  [FAIL] cleanup — ${(err as Error).message}`); }
+    try {
+      await prisma.fileSystemNode.deleteMany({ where: { id: { in: ids } } });
+      // The world fixture's nodes go with it: fileSystemNode.server cascades.
+      if (worldId) await prisma.gameServer.delete({ where: { id: worldId } });
+    } catch (err) { fail++; console.log(`  [FAIL] cleanup — ${(err as Error).message}`); }
   }
   console.log(`\n=== ${pass} PASS / ${fail} FAIL ===`);
   await prisma.$disconnect();

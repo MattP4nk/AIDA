@@ -23,6 +23,8 @@ export interface AdjacentServer {
   networkId: string | null;
   networkName: string | null;
   isPublic: boolean;
+  isPlayerHome: boolean;
+  ownerId: string | null;
   accessMethod: string;
   link: {
     id: string;
@@ -170,6 +172,8 @@ export class NetworkTopologyService {
         networkId: link.target.networkId,
         networkName: link.target.network?.name || null,
         isPublic: link.target.isPublic,
+        isPlayerHome: link.target.isPlayerHome,
+        ownerId: link.target.ownerId,
         accessMethod: link.target.accessMethod,
         link: {
           id: link.id,
@@ -196,6 +200,8 @@ export class NetworkTopologyService {
         networkId: link.source.networkId,
         networkName: link.source.network?.name || null,
         isPublic: link.source.isPublic,
+        isPlayerHome: link.source.isPlayerHome,
+        ownerId: link.source.ownerId,
         accessMethod: link.source.accessMethod,
         link: {
           id: link.id,
@@ -438,8 +444,14 @@ export class NetworkTopologyService {
 
     // Filter by discovery difficulty and visibility. The rule itself lives in
     // `canDiscoverLink` so that traceroute cannot enforce a different one.
+    //
+    // Never another player's home (decision Q10, 2026-10-09). Every home has
+    // a WAN link to the Internet Exchange, so a scan from there listed ALL of
+    // them. This is scan-only: traceroute to a home you already know the IP
+    // of still records the hop.
     const discoverable = adjacent.filter((a) =>
-      canDiscoverLink(a.link.linkType, a.isPublic, scanLevel),
+      canDiscoverLink(a.link.linkType, a.isPublic, scanLevel) &&
+      !(a.isPlayerHome && a.ownerId !== userId),
     );
 
     const results: DiscoveryResult[] = [];
