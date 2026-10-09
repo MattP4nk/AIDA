@@ -4084,9 +4084,17 @@ Write them per-refactor, immediately before touching the code:
           ("jwt malformed" matched nothing); it now matches by error NAME. The suite no longer
           fits the default dev rate limit (102 requests/run vs 100) — see CLAUDE.md.
           Suite 89/89 (1,374 checks; typecheck + leak check), golden 23/23.
-        - **OPEN: ~917 old `@fixture.invalid` accounts (+ a few `@p5.test`) from past runs** still
-          sit in the dev DB with their homes — harmless, but they hold IPs and inflate counts.
-          Purge needs the maintainer's OK.
+        - **PURGED (2026-10-09, maintainer's OK): 1,035 harness accounts** — every `@fixture.invalid`
+          (917) and `@p5.test` (118) user, with their homes, by id through deleteFixtureUsers
+          (users 2,300 -> 1,265, servers 2,911 -> 1,876; 0 failures; the 9 world fragments, 618 world
+          servers and 6 NPCs untouched).
+        - **OPEN: ~1,258 more harness accounts under other test domains** — `s9.test` (468,
+          verify-phase4-s3-s9-sockets), `rev.test` (315, verify-phase4-review-fixes), `example.test`
+          (238, gate-phase1 / g3-hardware / tutorial-altpath), `e.test` (158, phase2-runtime /
+          p0-fixes), `s1.test` (79, s1-socket-authz). Nothing but those harnesses uses those domains,
+          and they no longer leak. **156 of them hold the ADMIN role** (e.test 79, s9.test 77:
+          those harnesses promote their fixture) — against the "never leave a test account
+          elevated" rule. Purge (or at least demote) needs the maintainer's OK.
       - **OPEN QUESTIONS (need the maintainer):**
         1. **Endgame lockout.** 9 fragments exist, 9 are required, nothing restores a bricked one:
            the first failed `fragment.crack` makes the endgame unreachable for everyone.
