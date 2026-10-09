@@ -2066,6 +2066,67 @@ export class FileService {
   }
 
   /**
+   * Create a file as a SYSTEM action — mission planting — creating any missing
+   * directories on the way. No permission checks: these are the game's own
+   * writes onto NPC servers. Planting went through `createFile`, a PLAYER
+   * write, and failed on most world servers — PERMISSION_DENIED on /data,
+   * DIRECTORY_NOT_FOUND on /logs/security and /tmp — so missions were
+   * provisioned with no target file (found 2026-10-09). A taken name is
+   * reported (`exists`), never overwritten or adopted.
+   */
+  public async createFileSystem(
+    serverId: string,
+    path: string,
+    content: string,
+    opts: { createdBy: string | null; encrypt?: boolean; isHidden?: boolean; generatedForUserId?: string | null },
+  ): Promise<{ created: true; id: string } | { created: false; reason: "exists" | "no_root" | "invalid_path" }> {
+    if (!isPathSafe(path)) return { created: false, reason: "invalid_path" };
+    const parts = path.split("/").filter(Boolean);
+    const name = parts.pop();
+    if (!name) return { created: false, reason: "invalid_path" };
+    const root = await prisma.fileSystemNode.findFirst({ where: { serverId, parentId: null, type: "directory" }, select: { id: true } });
+    if (!root) return { created: false, reason: "no_root" };
+
+    // Directories: upsert each level — re-entrant, as content provisioning is.
+    let parentId = root.id;
+    for (const dir of parts) {
+      const node = await prisma.fileSystemNode.upsert({
+        where: { serverId_parentId_name: { serverId, parentId, name: dir } },
+        update: {},
+        create: {
+          serverId, parentId, name: dir, type: "directory", content: null, size: 0,
+          permissions: { owner: 15, faction: 5, others: 5 }, createdBy: opts.createdBy,
+        },
+        select: { id: true },
+      });
+      parentId = node.id;
+    }
+
+    let finalContent = content;
+    let encryptionKey: string | null = null;
+    if (opts.encrypt) {
+      encryptionKey = this.generateEncryptionKey();
+      finalContent = await this.encryptContent(content, encryptionKey);
+    }
+    try {
+      const file = await prisma.fileSystemNode.create({
+        data: {
+          serverId, parentId, name, type: "file", content: finalContent, size: content.length,
+          createdBy: opts.createdBy, isEncrypted: !!opts.encrypt, encryptionKey,
+          isHidden: opts.isHidden ?? name.startsWith("."), isProtected: false,
+          permissions: this.getDefaultPermissions() as unknown as Prisma.JsonObject,
+          generatedForUserId: opts.generatedForUserId ?? null,
+        },
+        select: { id: true },
+      });
+      return { created: true, id: file.id };
+    } catch (err) {
+      if ((err as { code?: string }).code === "P2002") return { created: false, reason: "exists" };
+      throw err;
+    }
+  }
+
+  /**
    * Move a node to another directory as a SYSTEM action (the vault), setting
    * its flags in the same write. A same-named node already at the destination
    * is reported, not thrown: `@@unique([serverId, parentId, name])` made the

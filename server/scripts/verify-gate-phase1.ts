@@ -187,11 +187,16 @@ async function main() {
   //    make every crediting assertion below untestable. MISSIONS_ARCHITECTURE.md
   //    §8 says to verify Tier 1 against a directly-seeded mission for exactly
   //    this reason.
-  const template = await prisma.mission.findFirst({
-    where: { type: { not: "tutorial" } },
-    orderBy: { createdAt: "desc" },
-    select: { id: true, title: true, objectives: true },
-  });
+  // Its OWN objectives. This copied them from whatever non-tutorial Mission
+  // row the database held — ambient data; with none left (2026-10-09) it could
+  // not run. Accepting and crediting needs only ids and targets of both kinds.
+  const template = {
+    title: "Relay Point",
+    objectives: [
+      { id: "g1", type: "hack_target", description: "Breach the relay", target: 1 },
+      { id: "g2", type: "explore", description: "Map the subnet", target: true },
+    ],
+  };
 
   let available: { id: string; title: string; objectives: unknown } | null = null;
   if (template) {

@@ -207,6 +207,12 @@ model GameServer {
   discoveryLevel     Int      @default(0) @map("discovery_level") // Required skill level to discover
   isPlayerHome       Boolean  @default(false) @map("is_player_home") // Flag for player home systems
   isAidaHomeServer   Boolean  @default(false) @map("is_aida_home_server") // Hidden AIDA server
+  // Who generated content was made FOR: a mission target server made for one
+  // player's mission (null once another player's mission reuses it — it is
+  // shared world content then). Plain id, no relation: deleting a test account
+  // reads it to remove what was made for that account (scripts/lib/
+  // delete-fixture-user.ts). Recorded 2026-10-09.
+  generatedForUserId String? @map("generated_for_user_id")
   accessRules        Json     @default("[]") @map("access_rules")
   isOnline           Boolean  @default(true) @map("is_online")
   maxConnections     Int      @default(10) @map("max_connections")
@@ -252,6 +258,7 @@ model GameServer {
   // event, `personaActionService`/`aiSchedulerService` on the 30-minute persona
   // timer, `resourceService` every 5 minutes, plus mission provisioning.
   @@index([factionId])
+  @@index([generatedForUserId])
   @@map("game_servers")
 }
 
@@ -302,6 +309,8 @@ model FileSystemNode {
   // Review 2026-10-09: this replaced a by-NAME rule that made `protect /data`
   // on a home silently protect nothing.
   protectsContents Boolean  @default(true) @map("protects_contents")
+  // Who a planted mission file was made for (see GameServer.generatedForUserId).
+  generatedForUserId String? @map("generated_for_user_id")
   metadata       Json? // { sourceServerId, sourcePath, downloadedAt, isDownloaded }
 
   // Relations
@@ -330,6 +339,7 @@ model FileSystemNode {
   @@index([serverId, parentId])
   @@index([serverId, name])
   @@index([createdBy])
+  @@index([generatedForUserId])
   @@map("file_system_nodes")
 }
 

@@ -53,6 +53,10 @@ function legacyEncrypt(content: string, key: string): string {
 }
 
 async function main() {
+  // Failing until the end says otherwise: Node exits 0 by itself if the event
+  // loop runs dry, and this harness ended mid-run that way once — half its
+  // checks printed, counted as a pass (2026-10-09).
+  process.exitCode = 1;
   console.log("\n=== Phase 5 R10 — crypto ===\n");
 
   // ── R10-b: round trip, and the format is the authenticated one ────────

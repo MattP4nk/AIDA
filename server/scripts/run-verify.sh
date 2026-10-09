@@ -48,9 +48,14 @@ else
   printf '  FAIL %s\n' "typecheck-scripts"
 fi
 
+# A harness passes only if it exits 0 AND prints its summary. Node exits 0 on
+# its own when the event loop runs dry, so a harness that stalled on a promise
+# nothing would resolve used to end mid-run, print half its checks, and be
+# counted "ok" (verify-phase5-r10-crypto, 2026-10-09).
+summary_re='=== [0-9]+ PASS / [0-9]+ FAIL ===|^[0-9]+/[0-9]+ passed'
 for f in scripts/verify-*.ts; do
   name=$(basename "$f" .ts)
-  if timeout "$TIMEOUT" npx tsx "$f" >"$OUT/$name.log" 2>&1; then
+  if timeout "$TIMEOUT" npx tsx "$f" >"$OUT/$name.log" 2>&1 && grep -aqE "$summary_re" "$OUT/$name.log"; then
     ok=$((ok + 1))
     printf '  ok   %s\n' "$name"
   else
@@ -70,6 +75,11 @@ else
   printf '  FAIL %s\n' "check-fixture-leaks"
 fi
 
+# `grep -a` throughout: a harness may print raw bytes (r10-crypto's tamper
+# control prints decrypted garbage), and without -a grep calls the whole log
+# "Binary file matches" and prints nothing — its checks silently dropped out
+# of the total below on some runs (1,394 printed for 1,409 run, 2026-10-09).
+#
 # Aggregate the per-check totals, not just the per-harness ones. A harness can
 # exit 0 having run far fewer checks than it used to — a drop in this number is
 # the signal that something stopped being exercised.
@@ -80,7 +90,7 @@ fi
 # the blank between "/" and the space, and the fail total was hard-wired to 0
 # for as long as this script existed. The suite's exit code stayed honest
 # (it comes from each harness's exit status); this line never could.
-checks=$(grep -h -oE '=== [0-9]+ PASS / [0-9]+ FAIL ===' "$OUT"/*.log 2>/dev/null |
+checks=$(grep -a -h -oE '=== [0-9]+ PASS / [0-9]+ FAIL ===' "$OUT"/*.log 2>/dev/null |
   sed -E 's#^=== ([0-9]+) PASS / ([0-9]+) FAIL ===$#\1 \2#' |
   awk '{p+=$1; f+=$2} END{printf "%d pass, %d fail", p, f}')
 
@@ -101,8 +111,8 @@ if [ "$fail" -gt 0 ]; then
   # of them with 429 although nothing is wrong with the code.
   # Two spellings: the limiter's JSON message, and a harness that reports only
   # the status ("register x: 429") — that one went unnamed (2026-10-09).
-  limited=$(grep -lE "Too many requests from this IP|: 429$" "$OUT"/*.log 2>/dev/null | wc -l)
-  refused=$(grep -l "ECONNREFUSED" "$OUT"/*.log 2>/dev/null | wc -l)
+  limited=$(grep -alE "Too many requests from this IP|: 429$" "$OUT"/*.log 2>/dev/null | wc -l)
+  refused=$(grep -al "ECONNREFUSED" "$OUT"/*.log 2>/dev/null | wc -l)
   if [ "$limited" -gt 0 ]; then
     echo "RATE-LIMITED: $limited log(s) hit the dev server's /api rate limit (429)."
     echo "  Restart the dev server (the limiter's store is in memory) or wait out"

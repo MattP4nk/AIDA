@@ -25,7 +25,7 @@ import {
 import type PlayerMissionRepository from "../repositories/playerMissionRepository";
 import { db } from "../database/client";
 import type { AIService } from "./aiService";
-import type { ServerContentService } from "./serverContentService";
+import type { MissionProvisionResult, ServerContentService } from "./serverContentService";
 import { validateStoryArcPlan, validateMissionOutput } from "../utils/aiOutputValidator";
 import { fallbackStoryStep } from "../utils/aiFallbacks";
 import type { Prisma } from "@prisma/client";
@@ -388,6 +388,7 @@ export class StoryMissionService {
 
     // Provision mission infrastructure (target server, objective files, etc.)
     let targetServerId: string | undefined;
+    let provisioned: MissionProvisionResult | null = null;
     if (this.serverContent) {
       await safeExecute({
         fn: async () => {
@@ -405,6 +406,7 @@ export class StoryMissionService {
             );
 
           if (provision) {
+            provisioned = provision;
             targetServerId = provision.targetServerId;
             for (const patch of provision.objectives) {
               const obj = objectives[patch.index];
@@ -430,7 +432,14 @@ export class StoryMissionService {
       })();
     }
 
-    // Create the mission
+    // Create the mission. If that fails, what was provisioned for it goes —
+    // provisioning ran first and was stranded otherwise (discardProvision).
+    const discardIfUnsaved = async () => {
+      if (provisioned && this.serverContent) {
+        await this.serverContent.discardProvision(provisioned, arc.assignedTo).catch((err: unknown) =>
+          this.logger.error({ err, arcId, stepNumber }, "Could not discard an unsaved story mission's infrastructure"));
+      }
+    };
     const mission = await db.client.mission.create({
       data: {
         title,
@@ -449,7 +458,7 @@ export class StoryMissionService {
         expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
         ...(targetServerId ? { targetServerId } : {}),
       },
-    });
+    }).catch(async (err: unknown) => { await discardIfUnsaved(); throw err; });
 
     // Register the mission in the player's missionProgress blob.
     //

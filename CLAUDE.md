@@ -46,7 +46,12 @@ that has produced a phantom failure before.
 `scripts/lib/fixture-users.ts` (it records every registration; an in-process
 `AuthService.register` needs `trackFixtureUser`), then call `deleteRegisteredUsers(prisma)`
 in the cleanup — it removes the home too. `npm run verify` ends with
-`check-fixture-leaks`, which fails if any account created during the run still exists.
+`check-fixture-leaks`, which fails if any account created during the run still exists — or
+anything generated for one (`generatedForUserId` on servers and files).
+
+**Never hand-edit a destructive query to negative-control it.** Restore the old text verbatim
+and count what it would match first: a hand-edited cleanup filter once deleted every Mission
+row in the dev DB (2026-10-09).
 
 ---
 

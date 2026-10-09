@@ -84,6 +84,8 @@ async function main() {
     // a copy of: the offer goes, the world mission stays.
     const offer = await prisma.mission.create({ data: { title: `${tag} offer`, description: "fixture", type: "recon" } });
     await prisma.playerMission.create({ data: { userId: busy, missionId: offer.id } });
+    // An offer generated for it but never registered: no copy, only its creator.
+    const unregistered = await prisma.mission.create({ data: { title: `${tag} unregistered`, description: "fixture", type: "recon", createdBy: busy } });
     const anyFaction = await prisma.faction.findFirst({ select: { id: true } });
     const world = anyFaction ? await prisma.mission.create({ data: { title: `${tag} world`, description: "fixture", type: "recon", factionId: anyFaction.id } }) : null;
     if (world) await prisma.playerMission.create({ data: { userId: busy, missionId: world.id } });
@@ -92,6 +94,8 @@ async function main() {
     try { await deleteFixtureUsers(prisma, [busy]); } catch { deleted = false; }
     check("its private mission offer goes with it (was: left behind, two per fresh account)",
       (await prisma.mission.findUnique({ where: { id: offer.id } })) === null);
+    check("and an offer made for it but never registered (no copy, only its creator)",
+      (await prisma.mission.findUnique({ where: { id: unregistered.id } })) === null);
     check("POSITIVE: a world mission it held a copy of stays",
       !!world && (await prisma.mission.findUnique({ where: { id: world.id } })) !== null);
     if (world) await prisma.mission.delete({ where: { id: world.id } });

@@ -58,6 +58,26 @@ import {
   buildAmbientPrompt,
   buildMissionFilesPrompt,
 } from "./serverContentPrompts";
+import { permanentServerWhere } from "../utils/permanentServers";
+
+/**
+ * Encryption of a mission target for a difficulty (1-10): the 0-5 band the
+ * seeded world uses (P0-4). Used to CREATE a target and to FIND one to reuse —
+ * the two drifted apart once already.
+ */
+function missionTargetEncryption(difficulty: number): number {
+  return Math.max(0, Math.min(MAX_CONTENT_ENCRYPTION_LEVEL, Math.round(difficulty / 2)));
+}
+
+/** `dir/name.ext` -> `dir/name-<4 chars>.ext`: a free name beside a taken one. */
+function uniquePath(path: string): string {
+  const slash = path.lastIndexOf("/");
+  const dir = path.slice(0, slash + 1);
+  const name = path.slice(slash + 1);
+  const dot = name.lastIndexOf(".");
+  const tag = Math.random().toString(36).slice(2, 6);
+  return dot > 0 ? `${dir}${name.slice(0, dot)}-${tag}${name.slice(dot)}` : `${dir}${name}-${tag}`;
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -79,6 +99,8 @@ export interface MissionProvisionResult {
   objectives: ProvisionedObjective[];
   /** Files that were planted for this mission. */
   plantedFiles: string[];
+  /** Their node ids — what `discardProvision` removes if the mission is never saved. */
+  plantedFileIds: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -511,6 +533,11 @@ export class ServerContentService {
     userId: string,
   ): Promise<MissionProvisionResult | null> {
     try {
+      // Nobody to provision for. Background generation outlived its player
+      // (a test account deleted while `missions` was still drafting) and
+      // planted files for an account that no longer existed (2026-10-09).
+      if (!(await this.prisma.user.findUnique({ where: { id: userId }, select: { id: true } }))) return null;
+
       // Objective types that need server/file infrastructure.
       //
       // MUST stay in sync with the `switch (obj.type)` patch block below — this
@@ -558,6 +585,7 @@ export class ServerContentService {
         targetServer.id,
         targetServer.ownerId || "system",
         mission,
+        userId,
       );
 
       // 4. Build objective metadata patches
@@ -654,6 +682,7 @@ export class ServerContentService {
         targetServerId: targetServer.id,
         objectives: objectivePatches,
         plantedFiles: plantedFiles.map((f) => f.path),
+        plantedFileIds: plantedFiles.map((f) => f.nodeId),
       };
     } catch (error) {
       this.logger.error(
@@ -1069,7 +1098,7 @@ export class ServerContentService {
       factionId?: string;
       objectives: Array<{ type: string; metadata?: Record<string, unknown> }>;
     },
-    _userId: string,
+    userId: string,
   ): Promise<{
     id: string;
     ipAddress: string;
@@ -1080,25 +1109,46 @@ export class ServerContentService {
   } | null> {
     // Determine what kind of server we need
     const targetType = this.inferTargetServerType(mission);
-    const maxEncryption = Math.min(100, mission.difficulty * 12);
-    const minEncryption = Math.max(0, (mission.difficulty - 2) * 8);
+    // The SAME band a new target is created in (P0-4 moved creation to 0-5;
+    // this lookup still used the old 0-100 scale, so from difficulty 3 up its
+    // range started above anything that exists). One level either side.
+    const created = missionTargetEncryption(mission.difficulty);
+    const maxEncryption = Math.min(MAX_CONTENT_ENCRYPTION_LEVEL, created + 1);
+    const minEncryption = Math.max(0, created - 1);
 
-    // 1. Try to find an existing NPC server that matches
-    const existingServer = await this.prisma.gameServer.findFirst({
+    // 1. REUSE an existing NPC server that matches. This looked for
+    //    `ownerId: null` — but P0-3 gave every server an NPC owner, so nothing
+    //    matched again and EVERY server-objective mission created a new
+    //    server: 559 corporate servers by 2026-10-09, for real players too.
+    //    NPC-OWNED now, and permanent (a dungeon server is deleted when the
+    //    dungeon expires, leaving the mission impossible). Random among the
+    //    matches, so missions spread over the world instead of all landing on
+    //    the lowest-encryption one.
+    const permanent = await permanentServerWhere(this.prisma);
+    const pick = <T>(rows: T[]): T | undefined => rows[Math.floor(Math.random() * rows.length)];
+    const matches = await this.prisma.gameServer.findMany({
       where: {
-        type: targetType,
-        isPlayerHome: false,
-        ownerId: null, // NPC server (no player owner)
-        encryptionLevel: {
-          gte: minEncryption,
-          lte: maxEncryption,
-        },
-        ...(mission.factionId ? { factionId: mission.factionId } : {}),
+        AND: [
+          permanent,
+          {
+            type: targetType,
+            owner: { role: "npc" },
+            encryptionLevel: { gte: minEncryption, lte: maxEncryption },
+            ...(mission.factionId ? { factionId: mission.factionId } : {}),
+          },
+        ],
       },
       orderBy: { encryptionLevel: "asc" },
+      take: 25,
     });
+    const existingServer = pick(matches);
 
     if (existingServer) {
+      // Made for someone else's mission and now shared: it is world content,
+      // no longer one player's to clean up.
+      if (existingServer.generatedForUserId && existingServer.generatedForUserId !== userId) {
+        await this.prisma.gameServer.update({ where: { id: existingServer.id }, data: { generatedForUserId: null } });
+      }
       return {
         id: existingServer.id,
         ipAddress: existingServer.ipAddress,
@@ -1109,17 +1159,17 @@ export class ServerContentService {
       };
     }
 
-    // 2. Try a faction server if applicable
+    // 2. Try a faction server if applicable (permanent ones only)
     if (mission.factionId) {
       const factionServer = await this.prisma.gameServer.findFirst({
-        where: {
-          factionId: mission.factionId,
-          isPlayerHome: false,
-        },
+        where: { AND: [permanent, { factionId: mission.factionId }] },
         orderBy: { encryptionLevel: "asc" },
       });
 
       if (factionServer) {
+        if (factionServer.generatedForUserId && factionServer.generatedForUserId !== userId) {
+          await this.prisma.gameServer.update({ where: { id: factionServer.id }, data: { generatedForUserId: null } });
+        }
         return {
           id: factionServer.id,
           ipAddress: factionServer.ipAddress,
@@ -1131,8 +1181,60 @@ export class ServerContentService {
       }
     }
 
-    // 3. Create a new server
-    return this.createMissionTargetServer(mission, targetType);
+    // 3. Create a new server — recorded as made for this player
+    return this.createMissionTargetServer(mission, targetType, userId);
+  }
+
+  /**
+   * Remove everything generated for a player who no longer exists: planted
+   * files, and target servers made for them that nothing else uses (another
+   * mission targets it, or a key fragment sits on it: kept, attribution
+   * cleared). For generation that outlived its player.
+   */
+  public async discardAllGeneratedFor(userId: string): Promise<void> {
+    await this.prisma.fileSystemNode.deleteMany({ where: { generatedForUserId: userId } });
+    const servers = await this.prisma.gameServer.findMany({
+      where: { generatedForUserId: userId, isPlayerHome: false },
+      select: { id: true },
+    });
+    for (const { id } of servers) {
+      const [targeted, fragments] = await Promise.all([
+        this.prisma.mission.count({ where: { targetServerId: id } }),
+        this.prisma.keyFragment.count({ where: { sourceId: id } }),
+      ]);
+      if (targeted > 0 || fragments > 0) {
+        await this.prisma.gameServer.update({ where: { id }, data: { generatedForUserId: null } });
+        continue;
+      }
+      await this.prisma.hackLog.deleteMany({ where: { targetServerId: id } });
+      await this.prisma.gameServer.delete({ where: { id } });
+    }
+  }
+
+  /**
+   * Undo a provisioning whose mission was never saved.
+   *
+   * Provisioning runs BEFORE the mission row is written, so a failed write
+   * stranded what it made: the planted files, and a server created for the
+   * mission. Removes only what was made for this player: a reused world
+   * server, one another mission targets, or one a key fragment sits on stays.
+   */
+  public async discardProvision(result: MissionProvisionResult, userId: string): Promise<void> {
+    await this.prisma.fileSystemNode.deleteMany({
+      where: { id: { in: result.plantedFileIds }, generatedForUserId: userId },
+    });
+    const server = await this.prisma.gameServer.findUnique({
+      where: { id: result.targetServerId },
+      select: { generatedForUserId: true },
+    });
+    if (server?.generatedForUserId !== userId) return;
+    const [targeted, fragments] = await Promise.all([
+      this.prisma.mission.count({ where: { targetServerId: result.targetServerId } }),
+      this.prisma.keyFragment.count({ where: { sourceId: result.targetServerId } }),
+    ]);
+    if (targeted > 0 || fragments > 0) return;
+    await this.prisma.hackLog.deleteMany({ where: { targetServerId: result.targetServerId } });
+    await this.prisma.gameServer.delete({ where: { id: result.targetServerId } });
   }
 
   /**
@@ -1164,6 +1266,7 @@ export class ServerContentService {
   private async createMissionTargetServer(
     mission: { type: string; difficulty: number; factionId?: string },
     serverType: string,
+    userId: string,
   ): Promise<{
     id: string;
     ipAddress: string;
@@ -1200,10 +1303,7 @@ export class ServerContentService {
       //
       // Map difficulty 1-10 onto the 0-5 band the seeded world actually uses, so
       // the hardest generated target needs level 10 rather than level 200.
-      const encryptionLevel = Math.max(
-        0,
-        Math.min(MAX_CONTENT_ENCRYPTION_LEVEL, Math.round(mission.difficulty / 2)),
-      );
+      const encryptionLevel = missionTargetEncryption(mission.difficulty);
 
       // P0-3: every server must have an owner — `hack` refuses ownerless targets
       // ("Target server has no owner"), so a mission target created without one
@@ -1224,13 +1324,12 @@ export class ServerContentService {
         ownerId: npcOwnerId,
       });
 
-      // Associate with faction if applicable
-      if (mission.factionId) {
-        await this.prisma.gameServer.update({
-          where: { id: server.id },
-          data: { factionId: mission.factionId },
-        });
-      }
+      // The faction, if any, and who it was made for (provenance: a test
+      // account's cleanup removes what was made for it).
+      await this.prisma.gameServer.update({
+        where: { id: server.id },
+        data: { generatedForUserId: userId, ...(mission.factionId ? { factionId: mission.factionId } : {}) },
+      });
 
       this.logger.info(
         {
@@ -1317,6 +1416,7 @@ export class ServerContentService {
       description: string;
       objectives: Array<{ type: string }>;
     },
+    userId: string,
   ): Promise<Array<{ path: string; nodeId: string; purpose: string }>> {
     const planted: Array<{ path: string; nodeId: string; purpose: string }> =
       [];
@@ -1362,45 +1462,29 @@ export class ServerContentService {
     const { getService } = await import("../di/container");
     const fileService = getService<FileService>(FILE_SERVICE);
 
+    // SYSTEM writes (fileService.createFileSystem): planting is the game
+    // writing onto its own NPC servers, not a player creating a file.
+    const createdBy = ownerId === "system" ? null : ownerId;
     for (const file of missionFiles) {
       try {
-        const result = await fileService.createFile(
-          serverId,
-          ownerId,
-          file.path,
-          file.content,
-          file.isEncrypted || false,
-        );
-
-        if (result.success && result.data?.id) {
-          // Set hidden flag if needed
-          if (file.isHidden) {
-            await this.prisma.fileSystemNode.update({
-              where: { id: result.data.id },
-              data: { isHidden: true },
-            });
-          }
-
-          planted.push({
-            path: file.path,
-            nodeId: result.data.id,
-            purpose: file.purpose,
-          });
-        } else {
-          // If createFile doesn't return an ID, look it up
-          const fileName = file.path.split("/").pop()!;
-          const node = await this.prisma.fileSystemNode.findFirst({
-            where: { serverId, name: fileName },
-            orderBy: { createdAt: "desc" },
-          });
-          if (node) {
-            planted.push({
-              path: file.path,
-              nodeId: node.id,
-              purpose: file.purpose,
-            });
-          }
+        // Target servers are SHARED (reused across players' missions), so a
+        // planted path can already exist — another player's target. Plant
+        // under a unique name then. This used to look the name up instead,
+        // on ANY failure, and adopt whatever file had it: two players'
+        // missions on one file, or a mission on a file nobody planted.
+        let path = file.path;
+        // isHidden only when set: unset, a dot-file is hidden by name, as before.
+        const opts = { createdBy, encrypt: file.isEncrypted || false, generatedForUserId: userId, ...(file.isHidden ? { isHidden: true } : {}) };
+        let result = await fileService.createFileSystem(serverId, path, file.content, opts);
+        for (let attempt = 0; !result.created && result.reason === "exists" && attempt < 3; attempt++) {
+          path = uniquePath(file.path);
+          result = await fileService.createFileSystem(serverId, path, file.content, opts);
         }
+        if (!result.created) {
+          this.logger.warn({ path: file.path, reason: result.reason }, "Mission file not planted");
+          continue;
+        }
+        planted.push({ path, nodeId: result.id, purpose: file.purpose });
       } catch (err) {
         this.logger.debug(
           { err, path: file.path },

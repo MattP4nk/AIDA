@@ -4106,11 +4106,42 @@ Write them per-refactor, immediately before touching the code:
           Negative control: a change to `calc` output went red (it stayed green before). Re-recorded;
           those 13 are characterized for the first time (5 runs on 5 fresh accounts identical).
           `status` listed faction standings in no defined order — now by name.
-        - **OPEN: harness runs still grow the WORLD.** A fresh player's first `missions` makes the
-          content system generate world content: one NPC-owned corporate server + ~10 files per
-          golden run, ~6 servers per suite run (618 -> ~627 today). Not attributable to the fixture
-          afterwards, so not cleaned. Options: suppress content generation for fixture accounts,
-          or have generation record what it made for whom. Needs a decision.
+        - **DONE (2026-10-09, maintainer: "record what generation made for whom") — and the world no
+          longer grows per mission.**
+          `GameServer.generatedForUserId` / `FileSystemNode.generatedForUserId` (db:push, additive):
+          a mission target server made for a player, and every planted mission file, records who it
+          was made for; reuse by ANOTHER player clears it (shared world content). The fixture
+          cleanup removes what is still attributed (keeps a server a key fragment sits on);
+          `check-fixture-leaks` fails if anything is attributed to an account that no longer exists.
+          FOUND AND FIXED on the way (maintainer: fix reuse):
+          (a) Target REUSE never worked: the lookup wanted `ownerId: null` (P0-3 gave every server
+              an NPC owner) in an encryption range on the old 0-100 scale (P0-4 moved creation to
+              0-5) — every server-objective mission made a NEW server: 559 corporate servers. Now
+              NPC-owned + permanent (`utils/permanentServers.ts`, shared with fragment respawn),
+              random among matches, one shared `missionTargetEncryption`.
+          (b) Planting went through `createFile` (a PLAYER write) and failed on most world servers
+              (PERMISSION_DENIED /data, DIRECTORY_NOT_FOUND /logs/security, /tmp) — `steal`
+              missions came with no target file; its fallback then ADOPTED any same-named file.
+              Now `fileService.createFileSystem` (system write, creates directories), and a taken
+              path gets a unique name.
+          (c) Provisioning runs BEFORE the mission row is written: a failed save stranded the
+              server and files — `serverContentService.discardProvision` (generator and story).
+          (d) Generation outliving its player (minutes, on an AI model) planted for a deleted
+              account and orphaned its offers: provisioning refuses a missing player; the
+              generator discards offers + `discardAllGeneratedFor` when registration finds the
+              player gone. Fixture cleanup also removes offers by CREATOR (never registered).
+          (e) `status` faction order: by name (unrelated, found via the golden master).
+          Also: the suite runner's `grep` treated a log with raw bytes (r10-crypto's tamper
+          control) as BINARY and dropped its checks from the total — 1,394 printed for 1,409 run,
+          and a FAIL inside such a log would vanish too. `grep -a` throughout; a harness that exits
+          0 without a summary line now FAILS. gate-phase1 and state-push borrowed ambient Mission
+          rows; they build their own now.
+          **INCIDENT:** a hand-edited negative control turned the fixture cleanup's offer filter into
+          "every mission with no player copy" and deleted all 2,641 Mission rows in the dev DB. All
+          were orphans of the purged accounts (the seed makes no missions; only NPCs + SYSTEM
+          remain; no faction mission existed) — nothing irreplaceable, but it was my error.
+          Measured after the fix: a golden run and a full suite leave servers and missions
+          unchanged; the only growth is directories planting creates once per world server.
       - **OPEN QUESTIONS (need the maintainer):**
         1. **Endgame lockout.** 9 fragments exist, 9 are required, nothing restores a bricked one:
            the first failed `fragment.crack` makes the endgame unreachable for everyone.

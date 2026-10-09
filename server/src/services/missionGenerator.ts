@@ -14,7 +14,7 @@ import MissionService from "./missionService";
 import { levelForExperience } from "../repositories/playerProgressRepository";
 import { PersonaService } from "./personaService";
 import { AIService } from "./aiService";
-import type { ServerContentService } from "./serverContentService";
+import type { MissionProvisionResult, ServerContentService } from "./serverContentService";
 import { db } from "../database/client";
 import { CronJob } from "cron";
 import {
@@ -169,61 +169,70 @@ export class MissionGeneratorService {
       // Add generated missions to the player's missionProgress as "available"
       // so they appear in getPlayerMissions() results
       if (missionIds.length > 0) {
-        await safeExecute({
-          fn: async () => {
-            const missions = await db.client.mission.findMany({
-              where: { id: { in: missionIds } },
-            });
+        try {
+          const missions = await db.client.mission.findMany({
+            where: { id: { in: missionIds } },
+          });
 
-            // ── D3: the worst stale-snapshot in the codebase ─────────────
-            // This used to merge into `progress.missionProgress` — a snapshot
-            // taken at the TOP of generateMissionsForPlayer, before the
-            // template loop and the AI-backed generation that follows it. That
-            // is minutes of wall-clock on a cloud model, and writing the
-            // snapshot back wiped every mission acceptance, objective credit
-            // and completion the player made in the meantime.
-            //
-            // `mutateAll` re-reads inside the user's lock, so the merge happens
-            // against the CURRENT blob and only adds keys.
-            await this.playerMissions.mutateAll(userId, (blob) => {
-              for (const mission of missions) {
-                const objectives = (mission.objectives as unknown as any[]) || [];
+          // ── D3: the worst stale-snapshot in the codebase ─────────────
+          // This used to merge into `progress.missionProgress` — a snapshot
+          // taken at the TOP of generateMissionsForPlayer, before the
+          // template loop and the AI-backed generation that follows it. That
+          // is minutes of wall-clock on a cloud model, and writing the
+          // snapshot back wiped every mission acceptance, objective credit
+          // and completion the player made in the meantime.
+          //
+          // `mutateAll` re-reads inside the user's lock, so the merge happens
+          // against the CURRENT blob and only adds keys.
+          await this.playerMissions.mutateAll(userId, (blob) => {
+            for (const mission of missions) {
+              const objectives = (mission.objectives as unknown as any[]) || [];
 
-                blob[mission.id] = {
-                  missionId: mission.id,
-                  userId,
-                  status: "available",
-                  objectives: objectives.map((obj: any) => ({
-                    ...obj,
-                    current:
-                      typeof obj.target === "number"
-                        ? 0
-                        : typeof obj.target === "boolean"
-                          ? false
-                          : "",
-                    completed: false,
-                  })),
-                  startedAt: null,
-                  completedAt: null,
-                  // R7 REVIEW: offers do NOT carry a run-expiry. The clock
-                  // starts at accept (see `missionService.acceptMission`), and
-                  // `findExpired` only matches `status:"active"` — so stamping
-                  // here was inert until the unit fix, at which point it began
-                  // expiring offers the moment they were accepted.
-                  expiresAt: null,
-                } as never;
-              }
-              return true;
-            });
+              blob[mission.id] = {
+                missionId: mission.id,
+                userId,
+                status: "available",
+                objectives: objectives.map((obj: any) => ({
+                  ...obj,
+                  current:
+                    typeof obj.target === "number"
+                      ? 0
+                      : typeof obj.target === "boolean"
+                        ? false
+                        : "",
+                  completed: false,
+                })),
+                startedAt: null,
+                completedAt: null,
+                // R7 REVIEW: offers do NOT carry a run-expiry. The clock
+                // starts at accept (see `missionService.acceptMission`), and
+                // `findExpired` only matches `status:"active"` — so stamping
+                // here was inert until the unit fix, at which point it began
+                // expiring offers the moment they were accepted.
+                expiresAt: null,
+              } as never;
+            }
+            return true;
+          });
 
-            this.logger.info(
-              { userId, count: missionIds.length },
-              "Generated missions added to player missionProgress",
-            );
-          },
-          context: "Update missionProgress with generated missions",
-          logger: this.logger,
-        })();
+          this.logger.info(
+            { userId, count: missionIds.length },
+            "Generated missions added to player missionProgress",
+          );
+        } catch (err) {
+          // The player was deleted while generation ran (minutes, on an AI
+          // model): the offers could not be given to anyone, and their rows —
+          // and anything provisioned for them — were orphaned for good
+          // (2026-10-09, test accounts deleted mid-`missions`).
+          const stillThere = await db.client.user.findUnique({ where: { id: userId }, select: { id: true } });
+          if (!stillThere) {
+            await db.client.mission.deleteMany({ where: { id: { in: missionIds } } });
+            await this.serverContent?.discardAllGeneratedFor(userId);
+            this.logger.info({ userId, count: missionIds.length }, "Player gone before their offers were added; discarded them");
+            return [];
+          }
+          this.logger.error({ err, userId }, "Could not add generated missions to the player");
+        }
       }
 
       return missionIds;
@@ -683,6 +692,7 @@ Format as JSON:
       fn: async () => {
       // Provision mission infrastructure (target server, objective files, etc.)
       // This patches objective metadata with real server/file IDs.
+      let provisioned: MissionProvisionResult | null = null;
       if (this.serverContent) {
         await safeExecute({
           fn: async () => {
@@ -700,6 +710,7 @@ Format as JSON:
               );
 
             if (provision) {
+              provisioned = provision;
               // Set the target server on the mission
               mission.targetServerId = provision.targetServerId;
 
@@ -752,7 +763,17 @@ Format as JSON:
         missionData.timeLimit = mission.timeLimit;
       }
 
-      const result = await this.missionService.createMission(missionData);
+      // If the mission is not saved, what was provisioned for it must go —
+      // it ran first, and was stranded otherwise (discardProvision).
+      let result: { id: string } | null = null;
+      try {
+        result = await this.missionService.createMission(missionData);
+      } finally {
+        if (!result?.id && provisioned && this.serverContent) {
+          await this.serverContent.discardProvision(provisioned, createdBy).catch((err: unknown) =>
+            this.logger.error({ err, missionTitle: mission.title }, "Could not discard an unsaved mission's infrastructure"));
+        }
+      }
 
       return result?.id ?? null;
       },

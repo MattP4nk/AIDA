@@ -386,8 +386,13 @@ async function main() {
       let clientState = io.sent.find((s) => s.event === "state:update")?.payload?.fullState;
       check("PRECONDITION: a full state is available", !!clientState, "");
 
-      const mission = await prisma.mission.findFirst({ select: { id: true } });
-      check("PRECONDITION: a mission template exists", !!mission, "seeded catalog");
+      // Its own Mission row (deleted below): this borrowed whatever row the
+      // database held, and could not run once there were none (2026-10-09).
+      const mission = await prisma.mission.create({
+        data: { title: "state-push fixture", description: "fixture", type: "recon", objectives: [], reward: {} },
+        select: { id: true },
+      });
+      check("PRECONDITION: a fixture mission exists", !!mission, "");
 
       if (mission) {
         io.sent.length = 0;
@@ -419,6 +424,8 @@ async function main() {
 
         await prisma.playerMission.deleteMany({ where: { userId: user.id, missionId: mission.id } });
       }
+      await prisma.mission.deleteMany({ where: { id: mission.id } })
+        .catch((e: unknown) => { fail++; console.log(`  [FAIL] cleanup — fixture mission: ${(e as Error).message}`); });
     }
 
     // ── The delta channel can express more than `set` ────────────────

@@ -32,6 +32,7 @@ import { EventEmitter } from "events";
 import { LOGGER, PRISMA_CLIENT, SOCKET_IO } from "../di/tokens";
 import { safeExecute } from "../utils/safeExecute";
 import { FRAGMENT_RESPAWN_MS, FRAGMENT_RESPAWN_MIN_SECURITY } from "../config/gameBalance";
+import { permanentServerWhere } from "../utils/permanentServers";
 
 // ═══════════════════════════════════════════════════════════════════
 // Types
@@ -602,9 +603,8 @@ export class KeyFragmentService extends EventEmitter {
    * server no longer exists. `serverIds` restricts the candidate servers;
    * harnesses use it so a fixture fragment never lands on a real server.
    *
-   * Candidates are PERMANENT servers only: not a home, not the hidden AIDA
-   * server, online, not tutorial, and not in a darknet dungeon — dungeon
-   * servers are deleted when the dungeon expires, which would strand it.
+   * Candidates are PERMANENT servers only (utils/permanentServers.ts) —
+   * a dungeon server is deleted when the dungeon expires, which would strand it.
    */
   async respawnFragment(fragmentId: string, opts: { serverIds?: string[] } = {}): Promise<{ serverId: string } | null> {
     const f = await this.prisma.keyFragment.findUnique({ where: { id: fragmentId } });
@@ -617,17 +617,13 @@ export class KeyFragmentService extends EventEmitter {
       select: { sourceId: true },
     });
     const exclude = new Set([...taken.map((t) => t.sourceId), f.sourceId]);
-    const dungeonNetworks = (await this.prisma.darkNetInstance.findMany({ select: { networkId: true } }))
-      .map((d) => d.networkId);
     const candidates = (await this.prisma.gameServer.findMany({
       where: {
-        isPlayerHome: false,
-        isAidaHomeServer: false,
-        isOnline: true,
-        type: { not: "tutorial" },
-        securityLevel: { gte: FRAGMENT_RESPAWN_MIN_SECURITY },
-        OR: [{ networkId: null }, { networkId: { notIn: dungeonNetworks } }],
-        ...(opts.serverIds ? { id: { in: opts.serverIds } } : {}),
+        AND: [
+          await permanentServerWhere(this.prisma),
+          { securityLevel: { gte: FRAGMENT_RESPAWN_MIN_SECURITY } },
+          opts.serverIds ? { id: { in: opts.serverIds } } : {},
+        ],
       },
       select: { id: true, name: true },
     })).filter((c) => !exclude.has(c.id));
